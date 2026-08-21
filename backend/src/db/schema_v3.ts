@@ -1,0 +1,304 @@
+import { Pool } from 'pg';
+import { initializeDatabase as initializeV2 } from './schema_v2';
+
+export async function initializeDatabase(pool: Pool) {
+  // Run v2 initialization first (creates availability tables)
+  await initializeV2(pool);
+
+  // Add idempotency_keys table
+  const q = `
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      key TEXT PRIMARY KEY,
+      request_hash VARCHAR(128) NOT NULL,
+      response_body TEXT,
+      response_headers TEXT,
+      status_code INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_transactions (
+      id SERIAL PRIMARY KEY,
+      reservation_id INTEGER REFERENCES reservations(id),
+      transaction_type VARCHAR(30) NOT NULL DEFAULT 'PAYMENT',
+      amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      payment_method VARCHAR(30) DEFAULT 'CASH',
+      reference_code VARCHAR(100),
+      status VARCHAR(30) DEFAULT 'SUCCESS',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS folio_entries (
+      id SERIAL PRIMARY KEY,
+      reservation_id INTEGER REFERENCES reservations(id),
+      entry_type VARCHAR(30) NOT NULL,
+      description VARCHAR(200),
+      amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      direction VARCHAR(10) NOT NULL DEFAULT 'DEBIT',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+      id SERIAL PRIMARY KEY,
+      room_number VARCHAR(10),
+      task_type VARCHAR(30) NOT NULL DEFAULT 'ROOM_SERVICE',
+      priority VARCHAR(20) DEFAULT 'MEDIUM',
+      status VARCHAR(20) DEFAULT 'PENDING',
+      assignee VARCHAR(100),
+      notes TEXT,
+      due_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS maintenance_tasks (
+      id SERIAL PRIMARY KEY,
+      room_number VARCHAR(10),
+      issue_type VARCHAR(30) NOT NULL DEFAULT 'GENERAL',
+      priority VARCHAR(20) DEFAULT 'MEDIUM',
+      status VARCHAR(20) DEFAULT 'OPEN',
+      assignee VARCHAR(100),
+      notes TEXT,
+      due_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_menu_categories (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_menu_items (
+      id SERIAL PRIMARY KEY,
+      category_id INTEGER REFERENCES pos_menu_categories(id),
+      item_code VARCHAR(50),
+      name VARCHAR(100) NOT NULL,
+      description TEXT,
+      price DECIMAL(12,2) NOT NULL DEFAULT 0,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_orders (
+      id SERIAL PRIMARY KEY,
+      reservation_id INTEGER REFERENCES reservations(id),
+      order_number VARCHAR(50) UNIQUE,
+      table_number VARCHAR(20),
+      guest_name VARCHAR(100),
+      status VARCHAR(30) DEFAULT 'OPEN',
+      total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_order_items (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER REFERENCES pos_orders(id),
+      menu_item_id INTEGER REFERENCES pos_menu_items(id),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      unit_price DECIMAL(12,2) NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS accounting_gl_accounts (
+      id SERIAL PRIMARY KEY,
+      code VARCHAR(50) NOT NULL UNIQUE,
+      name VARCHAR(150) NOT NULL,
+      account_type VARCHAR(40) NOT NULL,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS accounting_journal_entries (
+      id SERIAL PRIMARY KEY,
+      entry_number VARCHAR(50) UNIQUE,
+      entry_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      description VARCHAR(200),
+      source_module VARCHAR(50),
+      source_ref VARCHAR(100),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS accounting_journal_lines (
+      id SERIAL PRIMARY KEY,
+      journal_entry_id INTEGER REFERENCES accounting_journal_entries(id),
+      account_id INTEGER REFERENCES accounting_gl_accounts(id),
+      debit DECIMAL(12,2) DEFAULT 0,
+      credit DECIMAL(12,2) DEFAULT 0,
+      description VARCHAR(200),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS vendor_payables (
+      id SERIAL PRIMARY KEY,
+      vendor_name VARCHAR(150) NOT NULL,
+      invoice_number VARCHAR(100),
+      due_date TIMESTAMP,
+      amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      status VARCHAR(30) DEFAULT 'OPEN',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS guest_receivables (
+      id SERIAL PRIMARY KEY,
+      reservation_id INTEGER REFERENCES reservations(id),
+      guest_name VARCHAR(150),
+      total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      paid_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      status VARCHAR(30) DEFAULT 'OPEN',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS guest_profiles (
+      id SERIAL PRIMARY KEY,
+      full_name VARCHAR(150) NOT NULL,
+      email VARCHAR(150),
+      phone VARCHAR(50),
+      id_number VARCHAR(50),
+      nationality VARCHAR(80),
+      birth_date DATE,
+      preferences TEXT,
+      loyalty_tier VARCHAR(30) DEFAULT 'REGULAR',
+      notes TEXT,
+      is_blacklisted BOOLEAN DEFAULT FALSE,
+      privacy_flags TEXT DEFAULT '{}',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS guest_profile_history (
+      id SERIAL PRIMARY KEY,
+      guest_id INTEGER REFERENCES guest_profiles(id),
+      changed_by VARCHAR(100),
+      change_type VARCHAR(50),
+      old_value TEXT,
+      new_value TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_employees (
+      id SERIAL PRIMARY KEY,
+      employee_code VARCHAR(30) UNIQUE,
+      full_name VARCHAR(150) NOT NULL,
+      position VARCHAR(100),
+      department VARCHAR(80),
+      hire_date DATE,
+      monthly_salary DECIMAL(12,2) DEFAULT 0,
+      status VARCHAR(30) DEFAULT 'ACTIVE',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS payroll_records (
+      id SERIAL PRIMARY KEY,
+      employee_id INTEGER REFERENCES hr_employees(id),
+      period VARCHAR(30),
+      base_salary DECIMAL(12,2) DEFAULT 0,
+      bonus DECIMAL(12,2) DEFAULT 0,
+      deductions DECIMAL(12,2) DEFAULT 0,
+      net_salary DECIMAL(12,2) DEFAULT 0,
+      status VARCHAR(30) DEFAULT 'DRAFT',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `;
+
+  await pool.query(q);
+  // Ensure column exists for older deployments
+  await pool.query(`
+    ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS response_headers TEXT;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_type VARCHAR(20) DEFAULT 'WALKIN';
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'CONFIRMED';
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS checked_out_at TIMESTAMP;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS stay_status VARCHAR(30) DEFAULT 'RESERVED';
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS guest_segment VARCHAR(20) DEFAULT 'Reguler';
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS ktp_path VARCHAR(500);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS bukti_bayar_path VARCHAR(500);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
+  `);
+
+  const housekeepingCount = await pool.query('SELECT COUNT(*) AS total FROM housekeeping_tasks');
+  if (Number(housekeepingCount.rows[0].total) === 0) {
+    await pool.query(`
+      INSERT INTO housekeeping_tasks (room_number, task_type, priority, status, assignee, notes, due_at)
+      VALUES
+        ('101', 'MAKEUP', 'HIGH', 'PENDING', 'Housekeeping 1', 'Tukar linen dan bersihkan bath tub', NOW() + INTERVAL '2 hours'),
+        ('205', 'TURN_DOWN', 'MEDIUM', 'IN_PROGRESS', 'Housekeeping 2', 'Persiapan check-in guest baru', NOW() + INTERVAL '90 minutes'),
+        ('304', 'DEEP_CLEAN', 'LOW', 'PENDING', 'Housekeeping 3', 'Membersihkan area kamar mandi dan lantai', NOW() + INTERVAL '5 hours');
+    `);
+  }
+
+  const maintenanceCount = await pool.query('SELECT COUNT(*) AS total FROM maintenance_tasks');
+  if (Number(maintenanceCount.rows[0].total) === 0) {
+    await pool.query(`
+      INSERT INTO maintenance_tasks (room_number, issue_type, priority, status, assignee, notes, due_at)
+      VALUES
+        ('204', 'AC', 'HIGH', 'OPEN', 'Teknisi AC', 'AC kamar tidak dingin, perlu cek kompresor', NOW() + INTERVAL '1 day'),
+        ('118', 'PLUMBING', 'MEDIUM', 'IN_PROGRESS', 'Teknisi Plumbing', 'Keran kamar mandi bocor ringan', NOW() + INTERVAL '4 hours'),
+        ('402', 'LIGHTING', 'LOW', 'OPEN', 'Teknisi Listrik', 'Lampu tidur mengganti bohlam', NOW() + INTERVAL '6 hours');
+    `);
+  }
+
+  const categoryCount = await pool.query('SELECT COUNT(*) AS total FROM pos_menu_categories');
+  if (Number(categoryCount.rows[0].total) === 0) {
+    const categoryInsert = await pool.query(`
+      INSERT INTO pos_menu_categories (name)
+      VALUES ('Makanan'), ('Minuman'), ('Snack'), ('Room Service')
+      RETURNING id, name`);
+
+    const categories = categoryInsert.rows;
+    const categoryMap: Record<string, number> = {};
+    for (const c of categories) categoryMap[c.name] = c.id;
+
+    await pool.query(`
+      INSERT INTO pos_menu_items (category_id, item_code, name, description, price)
+      VALUES
+        ($1, 'FO-001', 'Nasi Goreng Spesial', 'Nasi goreng dengan telur, ayam, dan sayur', 35000),
+        ($1, 'FO-002', 'Ayam Bakar Rica', 'Ayam bakar bumbu rica', 45000),
+        ($2, 'DR-001', 'Es Teh Manis', 'Minuman dingin segar', 8000),
+        ($2, 'DR-002', 'Cappuccino', 'Kopi khas dengan susu foam', 25000),
+        ($3, 'SN-001', 'Kentang Goreng', 'Kentang goreng renyah', 18000),
+        ($4, 'RS-001', 'Breakfast Set', 'Paket sarapan room service', 42000)
+    `, [categoryMap['Makanan'], categoryMap['Minuman'], categoryMap['Snack'], categoryMap['Room Service']]);
+  }
+
+  const accountCount = await pool.query('SELECT COUNT(*) AS total FROM accounting_gl_accounts');
+  if (Number(accountCount.rows[0].total) === 0) {
+    await pool.query(`
+      INSERT INTO accounting_gl_accounts (code, name, account_type)
+      VALUES
+        ('101', 'Kas', 'ASSET'),
+        ('110', 'Piutang Tamu', 'ASSET'),
+        ('201', 'Hutang Usaha', 'LIABILITY'),
+        ('301', 'Pendapatan Hotel', 'REVENUE'),
+        ('401', 'Beban Operasional', 'EXPENSE'),
+        ('501', 'Modal Pemilik', 'EQUITY')
+    `);
+  }
+
+  const guestCount = await pool.query('SELECT COUNT(*) AS total FROM guest_profiles');
+  if (Number(guestCount.rows[0].total) === 0) {
+    await pool.query(`
+      INSERT INTO guest_profiles (full_name, email, phone, id_number, nationality, preferences, loyalty_tier, notes)
+      VALUES
+        ('Budi Santoso', 'budi@example.com', '081234567890', '3201010101010001', 'Indonesia', '{"room":"high_floor","smoking":false}', 'GOLD', 'Member loyal sejak 2023'),
+        ('Siti Aminah', 'siti@example.com', '081298765432', '3201010101010002', 'Indonesia', '{"room":"garden_view","smoking":false}', 'SILVER', 'Prefer room near elevator')
+    `);
+  }
+
+  const employeeCount = await pool.query('SELECT COUNT(*) AS total FROM hr_employees');
+  if (Number(employeeCount.rows[0].total) === 0) {
+    await pool.query(`
+      INSERT INTO hr_employees (employee_code, full_name, position, department, hire_date, monthly_salary, status)
+      VALUES
+        ('EMP-001', 'Rina Fitri', 'Front Office Manager', 'Front Office', '2023-01-15', 8500000, 'ACTIVE'),
+        ('EMP-002', 'Dewi Lestari', 'Housekeeping Supervisor', 'Housekeeping', '2023-03-10', 7000000, 'ACTIVE'),
+        ('EMP-003', 'Andi Pratama', 'Technician', 'Maintenance', '2022-11-20', 7500000, 'ACTIVE')
+    `);
+  }
+
+  console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
+}

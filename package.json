@@ -1,0 +1,16 @@
+{
+  "name": "oak-hotel-hims",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start:backend": "npm --prefix backend run start",
+    "start:frontend": "npm --prefix frontend run preview"
+  }
+}

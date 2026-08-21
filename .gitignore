@@ -1,0 +1,17 @@
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+backend/dist/
+frontend/dist/
+.env
+backend/.env
+.DS_Store
+*.log
+# Local database backups
+backups/
+
+# Temporary development files
+backend/src/move_handler_temp.txt
+
+# Local AI/code-review configuration (for now)
+.coderabbit.yaml

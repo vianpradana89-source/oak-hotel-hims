@@ -1,0 +1,353 @@
+OAK HOTEL HIMS - ECOSYSTEM BLUEPRINT
+
+1. VISION
+Sistem hotel terintegrasi yang mengelola seluruh aktivitas dari sales, reservation, guest CRM, PMS, front office, room, housekeeping, maintenance, POS/F&B, inventory, procurement, AP/AR, payment, accounting, HR, payroll, CRM, marketing, analytics, hingga owner reporting.
+
+Tujuan utama:
+- 1 hotel = 1 source of truth per domain
+- 1 transaction flow
+- 1 correlation ID
+- 1 audit trail
+- 1 financial ledger yang ter-reconcile
+- tidak ada double booking, double payment, duplicate event, lost event
+
+2. PRINCIPLE ARCHITECTURE
+- Domain-driven design
+- Modular monolith first, microservice ready later
+- Event-driven via transactional outbox
+- Strong transactional boundaries per domain
+- Audit-first & immutable financial ledger
+- API-first integration for web, mobile, OTA, payment gateway, channel manager
+
+3. DOMAIN OWNERSHIP
+Guest CRM: guest profile, dedupe, loyalty, communication preference, privacy
+Reservation / PMS: reservation, stay lifecycle, room assignment, no-show, check-in/out
+Availability Engine: sellable room inventory, room block, group block, OTA availability sync
+Folio & Billing: folio charges, split bill, adjustments, discount, routing
+Payment: payment state, auth/capture/refund, allocation
+Housekeeping: room task lifecycle, inspection, deep clean, DND/MUR, room readiness
+Maintenance: assets, tickets, technician assignment, SLA, downtime
+POS/F&B: order, table, menu, modifier, split bill, kitchen orders, COGS
+Inventory: stock ledger, warehouse, recipes, BOM, consumption, waste
+Procurement: PR, PO, GRN, invoice, 3-way match
+AP / AR: supplier invoice, customer invoice, aging, collections, credit hold
+Accounting / GL: journals, ledger, trial balance, financial period close
+HR / Payroll: employee master, attendance, overtime, payroll, bank transfer
+Analytics / BI: operational BI, financial BI, owner dashboard, forecasting
+
+4. DATA PERSISTENCE MODEL
+Use structured ownership:
+- each domain owns its own table set and own write authority
+- cross-domain read is allowed via events or dedicated read models
+- no domain mutates another domain table directly
+
+Recommended database layout:
+- 1 primary PostgreSQL instance for MVP
+- separate schema or logical database per domain if scaling later
+- Redis for lock TTL, cache, queue state, rate limit
+- optional Kafka/RabbitMQ for event bus
+
+5. CORE TABLE FAMILIES (MVP)
+5.1 Guest CRM
+- guests
+- guest_documents
+- guest_preferences
+- guest_merge_history
+- guest_audit_log
+
+5.2 Reservation / PMS
+- reservations
+- reservation_items
+- room_assignments
+- reservation_history
+- reservation_blocks
+- room_status_history
+
+5.3 Availability Engine
+- availability_dates
+- availability_locks
+- room_blocks
+- room_state
+
+5.4 Billing / Folio
+- folios
+- folio_lines
+- folio_routing_rules
+- folio_adjustments
+- folio_payments
+
+5.5 Payment
+- payments
+- payment_allocations
+- payment_gateways
+- payment_reconciliations
+
+5.6 Housekeeping
+- housekeeping_tasks
+- room_cleaning_history
+- maintenance_tickets
+
+5.7 POS / F&B
+- pos_orders
+- pos_order_items
+- menu_items
+- modifiers
+- stock_depletion
+
+5.8 Inventory
+- warehouses
+- stock_items
+- stock_ledger
+- recipes
+- bom_items
+
+5.9 Procurement
+- purchase_requests
+- purchase_orders
+- goods_received_notes
+- supplier_invoices
+- three_way_match_results
+
+5.10 Accounting / GL
+- chart_of_accounts
+- accounting_events
+- journal_headers
+- journal_lines
+- ledger_entries
+- financial_periods
+
+5.11 HR / Payroll
+- employees
+- attendance_logs
+- payroll_runs
+- payroll_lines
+- employee_contracts
+
+5.12 Event / Audit
+- outbox_events
+- audit_logs
+- idempotency_keys
+- correlation_map
+- exceptions
+
+6. TRANSACTIONAL RULES
+- Every write must be protected by DB transaction
+- Every domain change must append audit_log
+- Every important change must emit outbox event in same transaction
+- Every event must be idempotent on consumer side
+- Every external request must be idempotent by key
+- Retry is exponential backoff with jitter
+- Dead-letter queue for failed event processing
+
+7. EVENT MODEL
+Base event contract:
+- event_id
+- event_type
+- version
+- source_module
+- correlation_id
+- aggregate_id
+- timestamp
+- payload
+- retry_count
+
+Event groups:
+- ReservationCreated
+- ReservationConfirmed
+- ReservationCancelled
+- ReservationNoShow
+- GuestCheckedIn
+- GuestCheckedOut
+- RoomMoved
+- RoomStatusChanged
+- FolioCreated
+- FolioCharged
+- FolioClosed
+- PaymentInitiated
+- PaymentConfirmed
+- PaymentFailed
+- PaymentRefunded
+- POSOrderCompleted
+- InventoryReceived
+- InventoryIssued
+- POApproved
+- GRNCompleted
+- SupplierInvoicePosted
+- PayrollApproved
+- JournalPosted
+- NotificationQueued
+
+8. API / INTERFACE STRATEGY
+Base REST rules:
+- /api/v1/... for versioned api
+- standard response envelope: { status, data, error, correlation_id }
+- auth: JWT / OAuth2 / API key / HMAC signature for webhooks
+- rate limit on public and third-party APIs
+- OpenAPI for all APIs
+
+Core APIs (MVP)
+- GET /api/v1/availability
+- POST /api/v1/availability/lock
+- POST /api/v1/reservations
+- GET /api/v1/reservations/:id
+- PATCH /api/v1/reservations/:id
+- POST /api/v1/reservations/:id/confirm
+- POST /api/v1/reservations/:id/cancel
+- POST /api/v1/reservations/:id/check-in
+- POST /api/v1/reservations/:id/check-out
+- POST /api/v1/reservations/:id/move
+- GET /api/v1/tapechart
+- POST /api/v1/folio-lines
+- GET /api/v1/folios/:id
+- POST /api/v1/payments
+- POST /api/v1/webhooks/payments
+- GET /api/v1/events
+
+9. FRONTEND EXPERIENCE (MVP MATCHING VIDEO)
+Primary screen: front desk dashboard / tape chart
+Components:
+- sidebar nav
+- top header with property info and POS/Deposit buttons
+- KPI cards
+- search bar and filters
+- date navigator (yesterday today tomorrow)
+- room grid with days as columns and rooms as rows
+- reservation cards in cells
+- visual statuses: Ready, Maintenance, Occupied, House Use, Out of Order
+- actions: guest detail, room move, check in, check out, split stay, extend stay
+- modal detail booking / guest info / payment status
+
+Data contract for tape chart:
+{
+  "status": "OK",
+  "start": "2026-08-18",
+  "end": "2026-08-25",
+  "rooms": [
+    {
+      "id": 101,
+      "room_number": "101",
+      "name": "Deluxe King",
+      "status": "Ready",
+      "cells": [
+        { "date": "2026-08-18", "reservations": [{ "id": 1, "guest_name": "John Doe", "payment_status": "CI" }], "availability": { "sellable": 1 } }
+      ]
+    }
+  ]
+}
+
+10. SECURITY RULES
+- Secret manager for payment gateways and OTA credentials
+- Encryption for PII / KTP / passport / payroll info
+- Masking of sensitive fields in UI and logs
+- RBAC roles: owner, GM, finance, FO manager, FO staff, HK supervisor, HK staff, kitchen, restaurant, purchasing, HR, payroll, sales, engineer, auditor
+- ABAC: department, outlet, amount, time, device, transaction type
+- Maker-checker for critical operations: refund, manual journal, payroll approval, stock adjustment, period reopen
+
+11. NON-FUNCTIONAL REQUIREMENTS
+- RPO and RTO defined per critical domain
+- Backup + restore tested regularly
+- Health checks and alerts for DB, app, queue, OTA, gateway
+- Distributed tracing for all external requests
+- Rate limiting and retry strategy
+- Circuit breaker for external providers
+- Completed UAT for FO, Finance, HK, F&B, HR
+
+12. MVP IMPLEMENTATION PHASES
+Phase 1 - Hotel core (must complete first)
+- UI dashboard + tape chart
+- booking confirmation and cancellation
+- availability engine and room lock
+- room assignment and move
+- check-in/check-out
+- folio + payment mock
+- audit + idempotency + outbox
+- basic night audit
+
+Phase 2 - Operations
+- housekeeping tasks
+- maintenance tickets
+- POS order and F&B billing
+- inventory consumption
+- procurement workflow
+
+Phase 3 - Finance
+- AP/AR
+- accounting event mapping
+- trial balance, P&L, balance sheet
+- payroll and bank transfer
+
+Phase 4 - Distribution & growth
+- OTA / channel manager sync
+- revenue management engine
+- marketing automation
+- CRM loyalty & referral
+
+Phase 5 - Hardening & scale
+- multi-site
+- DR and failover
+- analytics warehouse
+- data archiving
+- owner dashboard and forecasting
+
+13. DEVELOPMENT STACK RECOMMENDATION
+Frontend:
+- React + TypeScript + Vite + Tailwind or CSS modules
+- dnd-kit or native drag/drop
+- EventSource for SSE realtime updates
+
+Backend:
+- NestJS + TypeScript or Express + TypeScript
+- PostgreSQL
+- Redis
+- RabbitMQ/Kafka
+- OpenTelemetry
+
+Infrastructure:
+- Docker Compose for local dev
+- GitHub Actions / GitLab CI for CI/CD
+- Kubernetes or ECS for production
+- Terraform/Bicep/Terragrunt for infra as code
+
+14. IMPLEMENTATION PRIORITY IN THIS PROJECT
+Priority 1:
+- UI dashboard / tape chart / room status / room move
+- reservation create + availability lock
+- check-in/check-out
+- folio and payment mock
+- outbox + idempotency + SSE
+
+Priority 2:
+- housekeeping + maintenance + inventory consumption
+- procurement + AP
+- accounting + journal posting
+- night audit
+
+Priority 3:
+- OTA, marketing, loyalty, HR payroll, BI owner dashboard
+
+15. RISKS TO WATCH
+- double booking under concurrency
+- lost events and duplicate processing
+- payment double capture
+- unbalanced GL entries
+- stale inventory due to designed use of consumption and receipts
+- mismatch between room physical state and sellable availability
+
+16. SUCCESS CRITERIA
+- no double booking in concurrency test
+- one reservation per room/date capacity when stock is full
+- idempotency prevents duplicate processing
+- accounting entries balance
+- outbox publishes events reliably
+- nightly snapshot produces correct occupancy, ADR, RevPAR
+- end-to-end check-in to folio to payment to checkout works
+
+17. NEXT EXECUTION PLAN
+- finalize core domain map and API contract
+- complete tape chart UI flow matching screenshot
+- complete availability engine & reservation lifecycle
+- add folio & payment flow
+- add check-in/out and room move actions
+- then extend to housekeeping, POS, inventory, finance, HR, BI
+
+This file is the master blueprint for the hotel ecosystem. It will be used as the canonical design for all later phases.
