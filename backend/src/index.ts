@@ -366,7 +366,6 @@ async function createReservationRecord(req: any, res: express.Response, payload:
         throw new Error(`Not enough availability for ${room_type} on ${date} (available=${available}, requested=${quantity})`);
       }
       await client.query('UPDATE availability_dates SET reserved_qty = reserved_qty + $1 WHERE room_type = $2 AND date = $3', [quantity, room_type, date]);
-      await client.query('INSERT INTO availability_locks (reservation_id, room_type, date, qty_locked, lock_expires_at) VALUES ($1, $2, $3, $4, $5)', [reservationId, room_type, date, quantity, expiresAt.toISOString()]);
     }
 
     const roomCharge = Number(newRes.rows[0].total_price || 0);
@@ -594,9 +593,67 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
     }
 
     const current = reservation.rows[0];
+    const currentStatus = String(current.status || '').toUpperCase();
+    if (currentStatus === 'CANCELLED') {
+      await client.query('COMMIT');
+      return res.json({ status: 'SUCCESS', data: current, message: 'reservation already cancelled' });
+    }
+    if (currentStatus === 'CHECKED_IN') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'checked-in reservation cannot be cancelled; use checkout flow' });
+    }
+    if (currentStatus === 'CHECKED_OUT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'checked-out reservation cannot be cancelled' });
+    }
+    if (currentStatus !== 'BOOKED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: `reservation status ${currentStatus || 'UNKNOWN'} is not cancellable in this phase` });
+    }
+
+    const releaseQuantity = 1;
+    const roomTypeResult = await client.query(
+      `SELECT COALESCE(rt.name, r.name) AS room_type
+       FROM rooms r
+       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+       WHERE r.id = $1`,
+      [current.room_id]
+    );
+    if (!hasRows(roomTypeResult)) {
+      throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservationId}`);
+    }
+    const roomType = roomTypeResult.rows[0].room_type;
+    if (!roomType) {
+      throw new Error(`INVENTORY_INTEGRITY_ERROR: room type missing for reservation ${reservationId}`);
+    }
+
+    const occupiedDates = enumerateDates(current.check_in, current.check_out);
+    for (const date of occupiedDates) {
+      const availabilityRow = await client.query(
+        `SELECT reserved_qty
+         FROM availability_dates
+         WHERE room_type = $1 AND date = $2
+         FOR UPDATE`,
+        [roomType, date]
+      );
+      if (!hasRows(availabilityRow)) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: availability row missing for ${roomType} on ${date}`);
+      }
+      const reservedQty = Number(availabilityRow.rows[0].reserved_qty || 0);
+      if (reservedQty < releaseQuantity) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${roomType} on ${date} (reserved_qty=${reservedQty}, release=${releaseQuantity})`);
+      }
+      await client.query(
+        `UPDATE availability_dates
+         SET reserved_qty = reserved_qty - $1
+         WHERE room_type = $2 AND date = $3`,
+        [releaseQuantity, roomType, date]
+      );
+    }
+
     const updated = await client.query(
       `UPDATE reservations
-       SET status = 'CANCELLED', stay_status = 'CANCELLED', updated_at = NOW()
+       SET status = 'CANCELLED', stay_status = 'CANCELLED'
        WHERE id = $1
        RETURNING *`,
       [reservationId]
@@ -1261,29 +1318,6 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       ['VACANT_DIRTY', current.room_id]
     );
 
-    const roomTypeCheck = await client.query(
-      `SELECT COALESCE(rt.name, r.name) AS room_type
-       FROM rooms r
-       LEFT JOIN room_types rt ON rt.id = r.room_type_id
-       WHERE r.id = $1`,
-      [current.room_id]
-    );
-    const roomType = roomTypeCheck.rows[0]?.room_type || null;
-    if (roomType && current.check_out) {
-      const checkoutDate = toDateKey(current.check_out);
-      if (checkoutDate) {
-       await client.query(
-         `UPDATE availability_dates
-          SET reserved_qty = GREATEST(0, reserved_qty - 1)
-          WHERE room_type = $1 AND date = $2 AND reserved_qty > 0`,
-         [roomType, checkoutDate]
-       );
-      }
-    }
-
-    // Do not force a room-wide dirty status here; dirty should be tracked per checkout date/cell
-    // so the room remains available for other dates unless explicitly marked dirty for the checkout day.
-
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -1388,6 +1422,13 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
 app.post('/api/availability/lock', async (req, res) => {
   const { reservation_id, room_type, start, end, qty, ttl_minutes } = req.body;
   if (!room_type || !start || !end || !qty) return res.status(400).json({ status: 'ERROR', message: 'missing parameters' });
+  if (reservation_id !== null && reservation_id !== undefined && String(reservation_id).trim() !== '') {
+    return res.status(400).json({ status: 'ERROR', message: 'reservation_id is not allowed for temporary hold endpoint' });
+  }
+  const holdQty = Number(qty);
+  if (!Number.isInteger(holdQty) || holdQty <= 0) {
+    return res.status(400).json({ status: 'ERROR', message: 'qty must be a positive integer' });
+  }
   const dates = enumerateDates(start, end);
   const client = await pool.connect();
   const now = new Date();
@@ -1405,12 +1446,12 @@ app.post('/api/availability/lock', async (req, res) => {
       }
       const row = sel.rows[0];
       const available = Number(row.total_rooms) - Number(row.reserved_qty);
-      if (available < qty) {
-        throw new Error(`Not enough availability for ${room_type} on ${date} (available=${available}, requested=${qty})`);
+      if (available < holdQty) {
+        throw new Error(`Not enough availability for ${room_type} on ${date} (available=${available}, requested=${holdQty})`);
       }
-      await client.query('UPDATE availability_dates SET reserved_qty = reserved_qty + $1 WHERE room_type = $2 AND date = $3', [qty, room_type, date]);
+      await client.query('UPDATE availability_dates SET reserved_qty = reserved_qty + $1 WHERE room_type = $2 AND date = $3', [holdQty, room_type, date]);
 
-      await client.query('INSERT INTO availability_locks (reservation_id, room_type, date, qty_locked, lock_expires_at) VALUES ($1, $2, $3, $4, $5)', [reservation_id || null, room_type, date, qty, expiresAt.toISOString()]);
+      await client.query('INSERT INTO availability_locks (reservation_id, room_type, date, qty_locked, lock_expires_at) VALUES ($1, $2, $3, $4, $5)', [null, room_type, date, holdQty, expiresAt.toISOString()]);
     }
 
     await client.query('COMMIT');
@@ -1584,10 +1625,56 @@ async function sweepExpiredLocks() {
     const now = new Date().toISOString();
     const expired = await client.query('SELECT * FROM availability_locks WHERE lock_expires_at <= $1 FOR UPDATE', [now]);
     for (const row of expired.rows) {
-      // decrement reserved_qty
-      await client.query('UPDATE availability_dates SET reserved_qty = GREATEST(0, reserved_qty - $1) WHERE room_type = $2 AND date = $3', [row.qty_locked, row.room_type, row.date]);
-      // remove lock
-      await client.query('DELETE FROM availability_locks WHERE id = $1', [row.id]);
+      const lockId = Number(row.id);
+      const lockQty = Number(row.qty_locked || 0);
+      if (!Number.isInteger(lockQty) || lockQty <= 0) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: invalid qty_locked on lock ${lockId} (qty_locked=${row.qty_locked})`);
+      }
+
+      if (row.reservation_id === null || row.reservation_id === undefined) {
+        const availabilityRow = await client.query(
+          `SELECT reserved_qty
+           FROM availability_dates
+           WHERE room_type = $1 AND date = $2
+           FOR UPDATE`,
+          [row.room_type, row.date]
+        );
+        if (!hasRows(availabilityRow)) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: missing availability row for lock ${lockId} (${row.room_type} ${row.date})`);
+        }
+        const reservedQty = Number(availabilityRow.rows[0].reserved_qty || 0);
+        if (reservedQty < lockQty) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: sweeper underflow for lock ${lockId} (${row.room_type} ${row.date}) reserved_qty=${reservedQty}, qty_locked=${lockQty}`);
+        }
+        await client.query(
+          `UPDATE availability_dates
+           SET reserved_qty = reserved_qty - $1
+           WHERE room_type = $2 AND date = $3`,
+          [lockQty, row.room_type, row.date]
+        );
+        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
+        continue;
+      }
+
+      const reservationId = Number(row.reservation_id);
+      const reservationResult = await client.query(
+        'SELECT status FROM reservations WHERE id = $1 FOR UPDATE',
+        [reservationId]
+      );
+      if (!hasRows(reservationResult)) {
+        console.error(`Orphan expired lock ${lockId}: reservation ${reservationId} not found. Deleting lock without inventory decrement; reconciliation may be required.`);
+        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
+        continue;
+      }
+
+      const reservationStatus = String(reservationResult.rows[0].status || '').toUpperCase();
+      if (['BOOKED', 'CHECKED_IN', 'CANCELLED', 'CHECKED_OUT'].includes(reservationStatus)) {
+        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
+        continue;
+      }
+
+      console.error(`Expired lock ${lockId} references reservation ${reservationId} with unrecognized status ${reservationStatus}. Deleting lock without inventory decrement.`);
+      await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
     }
     await client.query('COMMIT');
   } catch (err) {
