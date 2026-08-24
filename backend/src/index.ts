@@ -2216,13 +2216,25 @@ app.get('/api/rooms', async (req, res) => {
       conditions.push(`COALESCE(r.is_active, TRUE) = $${params.length}`);
     }
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    // RM-1D: additive operational detail for the Room Master UI (floor,
+    // notes, canonical type label, active reservation load). Existing
+    // columns and aliases are unchanged; legacy consumers keep working.
     const rooms = await pool.query(`
       SELECT r.id, r.room_number, COALESCE(rt.name, r.name, 'Standard Room') AS name,
              r.room_type_id, rt.code AS room_type_code,
+             rt.name AS room_type_name,
              COALESCE(r.name, rt.name) AS legacy_name, r.status,
-             COALESCE(r.is_active, TRUE) AS is_active
+             COALESCE(r.is_active, TRUE) AS is_active,
+             r.floor, r.notes,
+             COALESCE(ar.active_reservations, 0) AS active_reservation_count
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+      LEFT JOIN (
+        SELECT res.room_id, COUNT(*)::int AS active_reservations
+        FROM reservations res
+        WHERE res.status IN ('BOOKED', 'CHECKED_IN')
+        GROUP BY res.room_id
+      ) ar ON ar.room_id = r.id
       ${whereClause}
       ORDER BY r.room_number
     `, params);

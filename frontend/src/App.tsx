@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ProductInventorySection from './features/productInventory/ProductInventorySection';
 
 function buildWeekDays(anchorDate = new Date(), todayIndex = 2, windowSize = 7) {
   // Build a windowSize-day window where the anchorDate is positioned at index `todayIndex` (0-based)
@@ -2891,19 +2892,7 @@ function App() {
         )}
 
         {selectedMenu === 'Produk & Inventori' && (
-          <div className="bg-white border rounded shadow-sm p-4">
-            <h3 className="font-bold text-lg mb-3">Produk & Inventori</h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="border rounded p-3">
-                <div className="text-xs uppercase text-gray-500">Menu aktif</div>
-                <div className="text-2xl font-bold mt-2">{posMenu.length}</div>
-              </div>
-              <div className="border rounded p-3">
-                <div className="text-xs uppercase text-gray-500">Order hari ini</div>
-                <div className="text-2xl font-bold mt-2">{posOrders.length}</div>
-              </div>
-            </div>
-          </div>
+          <ProductInventorySection posMenuCount={posMenu.length} posOrderCount={posOrders.length} />
         )}
 
         {selectedMenu === 'Pelanggan' && (
