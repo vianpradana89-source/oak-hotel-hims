@@ -6,6 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { Pool } from 'pg';
+import { generateBid } from './utils/bid';
 import { initializeDatabase } from './db/schema_v3';
 
 const app: any = express();
@@ -34,6 +35,12 @@ const upload = multer({
 });
 
 const hasRows = (result: { rowCount?: number | null } | null | undefined): boolean => Number(result?.rowCount ?? 0) > 0;
+const ROOM_OVERLAP_SQLSTATE = '23P01';
+const ROOM_OVERLAP_RESPONSE = {
+  status: 'CONFLICT',
+  code: 'ROOM_OVERLAP',
+  message: 'Room is already occupied or reserved for the requested dates.'
+};
 
 const parseDecimal = (value: any, fallback = 0) => {
   const number = Number(value ?? fallback);
@@ -122,7 +129,7 @@ app.use(async (req, res, next) => {
 
 
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
+  host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'secretpassword',
@@ -190,6 +197,88 @@ async function generateBookingNumber(client: any): Promise<string> {
   return generateBookingId(client, 'WALKIN');
 }
 
+function getPropertyLocalDateSegment(dateValue: Date | string = new Date()): string {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const formatted = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const year = formatted.find((part) => part.type === 'year')?.value ?? '00';
+  const month = formatted.find((part) => part.type === 'month')?.value ?? '01';
+  const day = formatted.find((part) => part.type === 'day')?.value ?? '01';
+  return `${year}${month}${day}`;
+}
+
+async function createBookingRecordForReservation(
+  client: any,
+  reservationPayload: {
+    roomId: number;
+    guestName: string;
+    guestPhone?: string | null;
+    bookingSource: string;
+    legacyBookingNumber: string;
+    correlationId: string;
+    propertyId: number;
+    propertyCode: string;
+  }
+) {
+  const propertyCode = String(reservationPayload.propertyCode || 'LWG').trim().toUpperCase();
+  const localDateSegment = getPropertyLocalDateSegment(new Date());
+  let bid = '';
+  let attempt = 0;
+
+  while (attempt < 5) {
+    bid = generateBid(propertyCode, localDateSegment);
+    const exists = await client.query('SELECT 1 FROM bookings WHERE bid = $1', [bid]);
+    if (!hasRows(exists)) {
+      break;
+    }
+    attempt += 1;
+  }
+
+  if (!bid) {
+    throw new Error('Failed to generate unique booking BID');
+  }
+
+  const bookingInsert = await client.query(
+    `INSERT INTO bookings (
+      bid,
+      property_id,
+      guest_name_snapshot,
+      guest_phone_snapshot,
+      booking_source,
+      channel,
+      booking_status,
+      currency_code,
+      legacy_booking_number,
+      created_by,
+      correlation_id,
+      created_at,
+      updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+    RETURNING *;`,
+    [
+      bid,
+      reservationPayload.propertyId,
+      String(reservationPayload.guestName || '').trim() || 'Guest',
+      reservationPayload.guestPhone || null,
+      String(reservationPayload.bookingSource || 'WALKIN').toUpperCase(),
+      null,
+      'ACTIVE',
+      'IDR',
+      reservationPayload.legacyBookingNumber,
+      'PMS',
+      reservationPayload.correlationId || null,
+    ]
+  );
+
+  return bookingInsert.rows[0];
+}
+
 function toDateKey(value: string | Date): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -229,6 +318,230 @@ function enumerateDates(startStr: string, endStr: string): string[] {
     current.setDate(current.getDate() + 1);
   }
   return dates;
+}
+
+function isRoomOverlapViolation(err: any): boolean {
+  return String(err?.code || '') === ROOM_OVERLAP_SQLSTATE;
+}
+
+function sendRoomOverlapConflict(res: express.Response) {
+  return res.status(409).json(ROOM_OVERLAP_RESPONSE);
+}
+
+const RESERVATION_PATCH_CRITICAL_KEYS = new Set([
+  'status',
+  'stay_status',
+  'room_id',
+  'check_in',
+  'check_out',
+  'booking_id',
+  'stay_sequence'
+]);
+
+const RESERVATION_PATCH_ALLOWLIST = new Set([
+  'guest_name',
+  'guest_phone',
+  'guest_segment',
+  'subtotal_amount',
+  'total_price',
+  'discount_amount',
+  'discount_percent',
+  'amount_paid',
+  'remaining_balance',
+  'payment_status',
+  'ktp_path',
+  'bukti_bayar_path',
+  'booking_type'
+]);
+
+function normalizeReservationDateKey(value: any): string | null {
+  const raw = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return null;
+  }
+
+  const normalized = toDateKey(`${raw}T00:00:00Z`);
+  return normalized === raw ? raw : null;
+}
+
+async function resolveReservationRoomType(client: any, roomId: number): Promise<string> {
+  const roomRow = await client.query(
+    `SELECT COALESCE(rt.name, r.name) AS room_type
+     FROM rooms r
+     LEFT JOIN room_types rt ON rt.id = r.room_type_id
+     WHERE r.id = $1`,
+    [roomId]
+  );
+
+  if (!hasRows(roomRow) || !roomRow.rows[0].room_type) {
+    throw new Error(`room not found for reservation room_id ${roomId}`);
+  }
+
+  return String(roomRow.rows[0].room_type);
+}
+
+type BookingChildStatusSummary = {
+  total: number;
+  booked: number;
+  checkedIn: number;
+  checkedOut: number;
+  cancelled: number;
+  unsupported: number;
+  statuses: Array<{ reservation_id: number; status: string }>;
+  hasTerminalCheckedOut: boolean;
+  hasActiveChild: boolean;
+  allCancelled: boolean;
+};
+
+function buildBookingChildStatusSummary(children: any[]): BookingChildStatusSummary {
+  const summary: BookingChildStatusSummary = {
+    total: children.length,
+    booked: 0,
+    checkedIn: 0,
+    checkedOut: 0,
+    cancelled: 0,
+    unsupported: 0,
+    statuses: [],
+    hasTerminalCheckedOut: false,
+    hasActiveChild: false,
+    allCancelled: children.length > 0
+  };
+
+  for (const child of children) {
+    const status = String(child.status || '').toUpperCase();
+    summary.statuses.push({ reservation_id: Number(child.id), status });
+
+    if (status === 'BOOKED') {
+      summary.booked += 1;
+      summary.hasActiveChild = true;
+      summary.allCancelled = false;
+      continue;
+    }
+
+    if (status === 'CHECKED_IN') {
+      summary.checkedIn += 1;
+      summary.hasActiveChild = true;
+      summary.allCancelled = false;
+      continue;
+    }
+
+    if (status === 'CHECKED_OUT') {
+      summary.checkedOut += 1;
+      summary.hasTerminalCheckedOut = true;
+      summary.allCancelled = false;
+      continue;
+    }
+
+    if (status === 'CANCELLED') {
+      summary.cancelled += 1;
+      continue;
+    }
+
+    summary.unsupported += 1;
+    summary.hasActiveChild = true;
+    summary.allCancelled = false;
+  }
+
+  if (summary.booked > 0 || summary.checkedIn > 0 || summary.unsupported > 0) {
+    summary.hasActiveChild = true;
+  }
+
+  summary.allCancelled = summary.total > 0 && summary.cancelled === summary.total;
+  return summary;
+}
+
+function deriveBookingLifecycleStatus(currentBookingStatus: any, summary: BookingChildStatusSummary): 'ACTIVE' | 'CANCELLED' | 'COMPLETED' {
+  const normalizedCurrent = String(currentBookingStatus || '').toUpperCase();
+  if (normalizedCurrent === 'CANCELLED') {
+    return 'CANCELLED';
+  }
+
+  if (normalizedCurrent === 'COMPLETED') {
+    return 'COMPLETED';
+  }
+
+  if (summary.allCancelled) {
+    return 'CANCELLED';
+  }
+
+  if (summary.hasActiveChild) {
+    return 'ACTIVE';
+  }
+
+  if (summary.hasTerminalCheckedOut) {
+    return 'COMPLETED';
+  }
+
+  return 'ACTIVE';
+}
+
+function buildBookingCompletionAuditPayload(
+  booking: any,
+  previousStatus: string,
+  newStatus: string,
+  summary: BookingChildStatusSummary,
+  triggerReservationId: number
+) {
+  return {
+    booking_id: Number(booking.id),
+    bid: booking.bid,
+    previous_status: previousStatus,
+    new_status: newStatus,
+    child_status_summary: summary,
+    trigger_reservation_id: triggerReservationId
+  };
+}
+
+async function lockAndValidateAvailabilityDates(
+  client: any,
+  roomType: string,
+  dates: string[],
+  mode: 'EXTEND' | 'SHORTEN'
+) {
+  for (const date of dates) {
+    const availabilityResult = await client.query(
+      `SELECT reserved_qty, total_rooms
+       FROM availability_dates
+       WHERE room_type = $1 AND date = $2
+       FOR UPDATE`,
+      [roomType, date]
+    );
+
+    if (!hasRows(availabilityResult)) {
+      throw new Error(`availability row missing for ${roomType} on ${date}`);
+    }
+
+    const reservedQty = Number(availabilityResult.rows[0].reserved_qty || 0);
+    const totalRooms = Number(availabilityResult.rows[0].total_rooms || 0);
+
+    if (mode === 'EXTEND') {
+      if (reservedQty >= totalRooms) {
+        throw new Error(`capacity exhausted for ${roomType} on ${date}`);
+      }
+    } else if (reservedQty < 1) {
+      throw new Error(`reserved_qty underflow for ${roomType} on ${date}`);
+    }
+  }
+}
+
+async function findActiveRoomOverlap(
+  client: any,
+  targetRoomId: number,
+  requestedCheckIn: string | Date,
+  requestedCheckOut: string | Date,
+  excludeReservationId: number | null = null
+) {
+  return client.query(
+    `SELECT id
+     FROM reservations existing
+     WHERE existing.room_id = $1
+       AND existing.status IN ('BOOKED','CHECKED_IN')
+       AND existing.check_in < $2::date
+       AND existing.check_out > $3::date
+       AND ($4::int IS NULL OR existing.id <> $4)
+     LIMIT 1`,
+    [targetRoomId, requestedCheckOut, requestedCheckIn, excludeReservationId]
+  );
 }
 
 async function reconcileAvailabilityDates(client: any = pool) {
@@ -275,7 +588,545 @@ async function reconcileAvailabilityDates(client: any = pool) {
   }
 }
 
-async function createReservationRecord(req: any, res: express.Response, payload: any) {
+function normalizeBookingSourceValue(value: any): 'OTA' | 'WALKIN' {
+  return String(value || 'WALKIN').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
+}
+
+function normalizeGuestSegmentValue(value: any): string {
+  const normalized = String(value || 'Reguler');
+  return ['Reguler', 'Group', 'Corporate'].includes(normalized) ? normalized : 'Reguler';
+}
+
+function normalizeCurrencyCodeValue(value: any): string {
+  return String(value || 'IDR').trim().toUpperCase() || 'IDR';
+}
+
+function toPositiveInteger(value: any, fallback = 1): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function createHttpError(statusCode: number, message: string, code?: string) {
+  const error: any = new Error(message);
+  error.statusCode = statusCode;
+  if (code) {
+    error.code = code;
+  }
+  return error;
+}
+
+function isUniqueViolation(err: any): boolean {
+  return String(err?.code || '') === '23505';
+}
+
+function responseStatusTextForCode(statusCode: number): 'SUCCESS' | 'FAILED' | 'ERROR' {
+  if (statusCode >= 500 || statusCode === 400) {
+    return 'ERROR';
+  }
+  return 'FAILED';
+}
+
+async function persistIdempotencyResult(req: any, res: express.Response, statusCode: number, responseObj: any) {
+  const idKey = (req as any)._idempotency_key;
+  if (!idKey) {
+    return;
+  }
+
+  const respBody = JSON.stringify(responseObj);
+  let headersObj: any = {};
+  try {
+    headersObj = (res as any).getHeaders ? (res as any).getHeaders() : { 'content-type': 'application/json' };
+  } catch (_e) {
+    headersObj = { 'content-type': 'application/json' };
+  }
+  const respHeaders = JSON.stringify(headersObj);
+  await pool.query(
+    'UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4',
+    [respBody, respHeaders, statusCode, idKey]
+  );
+}
+
+async function createBookingParentRecord(
+  client: any,
+  bookingPayload: {
+    propertyId: number;
+    propertyCode: string;
+    guestName: string;
+    guestPhone: string | null;
+    bookingSource: string;
+    channel: string | null;
+    currencyCode: string;
+    correlationId: string | null;
+  }
+) {
+  const propertyCode = String(bookingPayload.propertyCode || 'LWG').trim().toUpperCase();
+  const localDateSegment = getPropertyLocalDateSegment(new Date());
+  const guestName = String(bookingPayload.guestName || '').trim() || 'Guest';
+  const bookingSource = normalizeBookingSourceValue(bookingPayload.bookingSource);
+  let attempt = 0;
+
+  while (attempt < 5) {
+    const bid = generateBid(propertyCode, localDateSegment);
+    try {
+      const bookingInsert = await client.query(
+        `INSERT INTO bookings (
+          bid,
+          property_id,
+          guest_name_snapshot,
+          guest_phone_snapshot,
+          booking_source,
+          channel,
+          booking_status,
+          currency_code,
+          legacy_booking_number,
+          created_by,
+          correlation_id,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+        RETURNING *;`,
+        [
+          bid,
+          bookingPayload.propertyId,
+          guestName,
+          bookingPayload.guestPhone || null,
+          bookingSource,
+          bookingPayload.channel || null,
+          'ACTIVE',
+          bookingPayload.currencyCode || 'IDR',
+          null,
+          'PMS',
+          bookingPayload.correlationId || null
+        ]
+      );
+
+      return bookingInsert.rows[0];
+    } catch (err: any) {
+      if (isUniqueViolation(err)) {
+        attempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error('Failed to generate unique booking BID');
+}
+
+async function createChildReservationRecord(
+  client: any,
+  params: {
+    bookingId: number;
+    bid: string;
+    bookingSource: string;
+    child: any;
+    staySequence: number;
+    correlationId: string | null;
+    bookingLegacyNumber?: string | null;
+  }
+) {
+  const child = params.child;
+  const billingSummary = computeBillingSummary(child.totalPrice, child.discountAmount, child.discountPercent, child.amountPaid);
+  const reservationBookingType = normalizeBookingSourceValue(child.bookingType || params.bookingSource);
+  const reservationPaymentStatus = child.paymentStatus || billingSummary.paymentStatus;
+  let attempt = 0;
+
+  while (attempt < 5) {
+    const bookingNumber = await generateBookingId(client, params.bookingSource);
+
+    try {
+      const inserted = await client.query(
+        `INSERT INTO reservations (
+          room_id, guest_name, guest_phone, guest_segment, check_in, check_out,
+          total_price, payment_status, discount_amount, discount_percent, amount_paid, remaining_balance,
+          booking_number, booking_type, booking_id, stay_sequence, status, stay_status, correlation_id, ktp_path, bukti_bayar_path
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'BOOKED', 'RESERVED', $17, $18, $19)
+        RETURNING *;`,
+        [
+          child.roomId,
+          child.guestName,
+          child.guestPhone,
+          child.guestSegment,
+          child.checkIn,
+          child.checkOut,
+          billingSummary.totalAfterDiscount,
+          reservationPaymentStatus,
+          billingSummary.discount,
+          billingSummary.discountPercent,
+          billingSummary.amountPaid,
+          billingSummary.remainingBalance,
+          bookingNumber,
+          reservationBookingType,
+          params.bookingId,
+          params.staySequence,
+          params.correlationId || null,
+          child.ktpPath || null,
+          child.buktiBayarPath || null
+        ]
+      );
+
+      return { reservation: inserted.rows[0], bookingNumber };
+    } catch (err: any) {
+      if (isUniqueViolation(err) && String(err?.constraint || '').includes('reservations_booking_number')) {
+        attempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error('Failed to generate unique reservation booking number');
+}
+
+async function createCanonicalBooking(
+  req: any,
+  bookingPayload: {
+    property_id: any;
+    guest_name: any;
+    guest_phone?: any;
+    guest_segment?: any;
+    booking_source?: any;
+    channel?: any;
+    currency_code?: any;
+  },
+  reservationPayloads: any[],
+  options: { requirePropertyId?: boolean } = {}
+) {
+  const rawReservationPayloads = Array.isArray(reservationPayloads) ? reservationPayloads : [];
+  if (rawReservationPayloads.length < 1) {
+    throw createHttpError(400, 'reservations must be a non-empty array');
+  }
+
+  const bookingPropertyId = Number(bookingPayload.property_id);
+  if (!Number.isFinite(bookingPropertyId) || bookingPropertyId <= 0) {
+    if (options.requirePropertyId === false) {
+      throw createHttpError(400, 'property_id is required');
+    }
+    throw createHttpError(400, 'property_id is required');
+  }
+
+  const guestName = String(bookingPayload.guest_name || '').trim();
+  if (!guestName) {
+    throw createHttpError(400, 'guest_name is required');
+  }
+
+  const guestPhone = Object.prototype.hasOwnProperty.call(bookingPayload, 'guest_phone')
+    ? String(bookingPayload.guest_phone || '').trim() || null
+    : null;
+  const guestSegment = normalizeGuestSegmentValue(bookingPayload.guest_segment);
+  const bookingSource = normalizeBookingSourceValue(bookingPayload.booking_source);
+  const channel = Object.prototype.hasOwnProperty.call(bookingPayload, 'channel')
+    ? String(bookingPayload.channel || '').trim() || null
+    : null;
+  const currencyCode = normalizeCurrencyCodeValue(bookingPayload.currency_code);
+  const correlationId = String((req.headers && req.headers['x-correlation-id']) || req.headers?.['X-Correlation-Id'] || `CORR-${Date.now()}`);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const propertyResult = await client.query(
+      'SELECT id, property_code FROM properties WHERE id = $1',
+      [bookingPropertyId]
+    );
+    if (!hasRows(propertyResult)) {
+      throw createHttpError(400, 'invalid property_id');
+    }
+    const propertyCode = String(propertyResult.rows[0].property_code || 'LWG');
+
+    const bookingRecord = await createBookingParentRecord(client, {
+      propertyId: bookingPropertyId,
+      propertyCode,
+      guestName,
+      guestPhone,
+      bookingSource,
+      channel,
+      currencyCode,
+      correlationId
+    });
+
+    const normalizedChildren: any[] = [];
+    for (let index = 0; index < rawReservationPayloads.length; index += 1) {
+      const child = rawReservationPayloads[index] || {};
+      const roomId = Number(child.room_id);
+      if (!Number.isFinite(roomId) || roomId <= 0) {
+        throw createHttpError(400, `reservations[${index}].room_id is required`);
+      }
+
+      const checkIn = normalizeReservationDateKey(child.check_in);
+      if (!checkIn) {
+        throw createHttpError(400, `reservations[${index}].check_in is invalid`);
+      }
+
+      const checkOut = normalizeReservationDateKey(child.check_out);
+      if (!checkOut) {
+        throw createHttpError(400, `reservations[${index}].check_out is invalid`);
+      }
+
+      if (checkOut <= checkIn) {
+        throw createHttpError(400, `reservations[${index}].check_out must be after check_in`);
+      }
+
+      normalizedChildren.push({
+        index,
+        roomId,
+        checkIn,
+        checkOut,
+        guestName: String(child.guest_name || guestName).trim() || guestName,
+        guestPhone: Object.prototype.hasOwnProperty.call(child, 'guest_phone')
+          ? String(child.guest_phone || '').trim() || guestPhone
+          : guestPhone,
+        guestSegment: normalizeGuestSegmentValue(child.guest_segment || guestSegment),
+        bookingType: normalizeBookingSourceValue(child.booking_type || child.bookingType || bookingSource),
+        totalPrice: Number(child.total_price ?? child.subtotal_amount ?? 0),
+        discountAmount: Number(child.discount_amount ?? 0),
+        discountPercent: Number(child.discount_percent ?? 0),
+        amountPaid: Number(child.amount_paid ?? 0),
+        paymentStatus: child.payment_status || null,
+        quantity: toPositiveInteger(child.qty ?? child.quantity ?? 1, 1),
+        ktpPath: child.ktp_path || null,
+        buktiBayarPath: child.bukti_bayar_path || null,
+        roomType: null,
+        roomPropertyId: null
+      });
+    }
+
+    const roomKeyMap = new Map<string, { roomType: string; date: string; delta: number }>();
+    const duplicatePairs: Array<[number, number]> = [];
+    const roomWindows = new Map<number, Array<{ start: string; end: string; index: number }>>();
+
+    for (const child of normalizedChildren) {
+      const roomRow = await client.query(
+        `SELECT r.id AS room_id, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code
+         FROM rooms r
+         LEFT JOIN room_types rt ON rt.id = r.room_type_id
+         JOIN properties p ON p.id = r.property_id
+         WHERE r.id = $1`,
+        [child.roomId]
+      );
+
+      if (!hasRows(roomRow)) {
+        throw createHttpError(409, `room ${child.roomId} not found`);
+      }
+
+      const roomInfo = roomRow.rows[0];
+      const roomPropertyId = Number(roomInfo.property_id);
+      if (bookingPropertyId !== roomPropertyId) {
+        throw createHttpError(409, `room ${child.roomId} does not belong to property ${bookingPropertyId}`);
+      }
+
+      child.roomType = String(roomInfo.room_type || '');
+      if (!child.roomType) {
+        throw createHttpError(409, `room type missing for room ${child.roomId}`);
+      }
+      child.roomPropertyId = roomPropertyId;
+
+      const windows = roomWindows.get(child.roomId) || [];
+      for (const previous of windows) {
+        if (previous.start < child.checkOut && previous.end > child.checkIn) {
+          duplicatePairs.push([previous.index, child.index]);
+        }
+      }
+      windows.push({ start: child.checkIn, end: child.checkOut, index: child.index });
+      roomWindows.set(child.roomId, windows);
+
+      const dates = enumerateDates(child.checkIn, child.checkOut);
+      for (const date of dates) {
+        const key = `${child.roomType}::${date}`;
+        const current = roomKeyMap.get(key);
+        if (current) {
+          current.delta += child.quantity;
+        } else {
+          roomKeyMap.set(key, { roomType: child.roomType, date, delta: child.quantity });
+        }
+      }
+    }
+
+    if (duplicatePairs.length > 0) {
+      const [firstA, firstB] = duplicatePairs[0];
+      throw createHttpError(
+        409,
+        `duplicate room usage inside the same request overlaps between reservations[${firstA}] and reservations[${firstB}]`
+      );
+    }
+
+    const lockKeys = Array.from(roomKeyMap.values()).sort((a, b) => {
+      if (a.roomType === b.roomType) {
+        return a.date.localeCompare(b.date);
+      }
+      return a.roomType.localeCompare(b.roomType);
+    });
+
+    const availabilityRows = new Map<string, { reservedQty: number; totalRooms: number }>();
+    for (const key of lockKeys) {
+      const row = await client.query(
+        `SELECT reserved_qty, total_rooms
+         FROM availability_dates
+         WHERE room_type = $1 AND date = $2
+         FOR UPDATE`,
+        [key.roomType, key.date]
+      );
+
+      if (!hasRows(row)) {
+        throw createHttpError(409, `availability row missing for ${key.roomType} on ${key.date}`);
+      }
+
+      availabilityRows.set(`${key.roomType}::${key.date}`, {
+        reservedQty: Number(row.rows[0].reserved_qty || 0),
+        totalRooms: Number(row.rows[0].total_rooms || 0)
+      });
+    }
+
+    for (const child of normalizedChildren) {
+      const overlap = await findActiveRoomOverlap(client, child.roomId, child.checkIn, child.checkOut);
+      if (hasRows(overlap)) {
+        throw Object.assign(new Error(ROOM_OVERLAP_RESPONSE.message), {
+          statusCode: 409,
+          code: ROOM_OVERLAP_SQLSTATE
+        });
+      }
+    }
+
+    for (const key of lockKeys) {
+      const availability = availabilityRows.get(`${key.roomType}::${key.date}`);
+      if (!availability) {
+        throw createHttpError(409, `availability row missing for ${key.roomType} on ${key.date}`);
+      }
+
+      if (availability.reservedQty + key.delta > availability.totalRooms) {
+        throw createHttpError(
+          409,
+          `Not enough availability for ${key.roomType} on ${key.date} (available=${availability.totalRooms - availability.reservedQty}, requested=${key.delta})`
+        );
+      }
+    }
+
+    const insertedChildren: any[] = [];
+    let bookingLegacyNumber: string | null = null;
+    for (const child of normalizedChildren) {
+      const inserted = await createChildReservationRecord(client, {
+        bookingId: Number(bookingRecord.id),
+        bid: String(bookingRecord.bid),
+        bookingSource,
+        child,
+        staySequence: child.index + 1,
+        correlationId,
+        bookingLegacyNumber
+      });
+
+      if (!bookingLegacyNumber) {
+        bookingLegacyNumber = inserted.bookingNumber;
+        await client.query(
+          `UPDATE bookings
+           SET legacy_booking_number = $1,
+               updated_at = NOW()
+           WHERE id = $2`,
+          [bookingLegacyNumber, Number(bookingRecord.id)]
+        );
+      }
+
+      for (const date of enumerateDates(child.checkIn, child.checkOut)) {
+        await client.query(
+          `UPDATE availability_dates
+           SET reserved_qty = reserved_qty + $1
+           WHERE room_type = $2 AND date = $3`,
+          [child.quantity, child.roomType, date]
+        );
+      }
+
+      if (Number(inserted.reservation.total_price || 0) > 0) {
+        await client.query(
+          `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
+           VALUES ($1, $2, $3, $4, 'DEBIT')`,
+          [inserted.reservation.id, 'ROOM_CHARGE', 'Reservasi kamar', Number(inserted.reservation.total_price || 0)]
+        );
+      }
+
+      insertedChildren.push({
+        ...inserted.reservation,
+        bid: String(bookingRecord.bid),
+        booking_id: Number(bookingRecord.id),
+        stay_sequence: child.index + 1
+      });
+    }
+
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        'PMS',
+        'CREATE',
+        'BOOKING',
+        Number(bookingRecord.id),
+        JSON.stringify({
+          booking_id: Number(bookingRecord.id),
+          bid: String(bookingRecord.bid),
+          property_id: bookingPropertyId,
+          booking_source: bookingSource,
+          channel,
+          booking_status: 'ACTIVE',
+          reservation_count: insertedChildren.length,
+          correlation_id: correlationId
+        }),
+        correlationId
+      ]
+    );
+
+    for (const reservation of insertedChildren) {
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          'PMS',
+          'CREATE',
+          'RESERVATION',
+          Number(reservation.id),
+          JSON.stringify({
+            booking_id: Number(bookingRecord.id),
+            bid: String(bookingRecord.bid),
+            reservation_id: Number(reservation.id),
+            stay_sequence: Number(reservation.stay_sequence),
+            room_id: Number(reservation.room_id),
+            check_in: reservation.check_in,
+            check_out: reservation.check_out,
+            status: reservation.status,
+            correlation_id: correlationId
+          }),
+          correlationId
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    return {
+      booking: {
+        id: Number(bookingRecord.id),
+        bid: String(bookingRecord.bid),
+        property_id: bookingPropertyId,
+        guest_name_snapshot: guestName,
+        guest_phone_snapshot: guestPhone,
+        booking_source: bookingSource,
+        channel,
+        booking_status: 'ACTIVE',
+        currency_code: currencyCode,
+        legacy_booking_number: bookingLegacyNumber,
+        correlation_id: correlationId
+      },
+      reservations: insertedChildren,
+      correlationId,
+      bookingLegacyNumber
+    };
+  } catch (err: any) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function createReservationRecord(req: any, payload: any) {
   const {
     room_id,
     guest_name,
@@ -297,149 +1148,431 @@ async function createReservationRecord(req: any, res: express.Response, payload:
     bukti_bayar_path
   } = payload;
 
-  const quantity = Number(qty || 1);
-  const validGuestSegment = ['Reguler', 'Group', 'Corporate'].includes(String(guest_segment || 'Reguler')) ? String(guest_segment || 'Reguler') : 'Reguler';
-  const bookingSource = String(booking_type ?? bookingType ?? source ?? 'walkin').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
-  const billingSummary = computeBillingSummary(total_price ?? subtotal_amount ?? 0, discount_amount, discount_percent, amount_paid);
-  const finalTotal = billingSummary.totalAfterDiscount;
-  const finalPaymentStatus = payment_status || billingSummary.paymentStatus;
-  const correlationId = req.headers['x-correlation-id'] || 'CORR-' + Date.now();
-  const client = await pool.connect();
+  const roomRow = await pool.query(
+    `SELECT r.id AS room_id, p.id AS property_id
+     FROM rooms r
+     JOIN properties p ON p.id = r.property_id
+     WHERE r.id = $1`,
+    [Number(room_id)]
+  );
+  if (!hasRows(roomRow)) {
+    throw createHttpError(409, 'Invalid room_id');
+  }
 
-  try {
-    await client.query('BEGIN');
-
-    const roomRow = await client.query(`
-      SELECT COALESCE(rt.name, r.name) AS room_type
-      FROM rooms r
-      LEFT JOIN room_types rt ON rt.id = r.room_type_id
-      WHERE r.id = $1
-    `, [room_id]);
-    if (!hasRows(roomRow)) throw new Error('Invalid room_id');
-    const room_type = roomRow.rows[0].room_type;
-
-    const bookingNumber = await generateBookingId(client, bookingSource);
-    const insertQuery = `
-      INSERT INTO reservations (
-        room_id, guest_name, guest_phone, guest_segment, check_in, check_out,
-        total_price, payment_status, discount_amount, discount_percent, amount_paid, remaining_balance,
-        booking_number, booking_type, correlation_id, ktp_path, bukti_bayar_path
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-      RETURNING *;
-    `;
-
-    const newRes = await client.query(insertQuery, [
-      room_id,
+  const bookingSource = normalizeBookingSourceValue(booking_type ?? bookingType ?? source ?? 'walkin');
+  const canonicalResult = await createCanonicalBooking(
+    req,
+    {
+      property_id: roomRow.rows[0].property_id,
       guest_name,
       guest_phone,
-      validGuestSegment,
-      check_in,
-      check_out,
-      finalTotal,
-      finalPaymentStatus,
-      billingSummary.discount,
-      billingSummary.discountPercent,
-      billingSummary.amountPaid,
-      billingSummary.remainingBalance,
-      bookingNumber,
-      bookingSource,
-      correlationId,
-      ktp_path || null,
-      bukti_bayar_path || null
-    ]);
-    const reservationId = newRes.rows[0].id;
-
-    const dates = enumerateDates(check_in, check_out);
-    const now = new Date();
-    const ttl = 30;
-    const expiresAt = new Date(now.getTime() + ttl * 60 * 1000);
-
-    for (const date of dates) {
-      const sel = await client.query('SELECT reserved_qty, total_rooms FROM availability_dates WHERE room_type = $1 AND date = $2 FOR UPDATE', [room_type, date]);
-      if (!hasRows(sel)) {
-        throw new Error(`No availability record for ${room_type} on ${date}`);
+      guest_segment,
+      booking_source: bookingSource,
+      channel: null,
+      currency_code: 'IDR'
+    },
+    [
+      {
+        room_id,
+        check_in,
+        check_out,
+        subtotal_amount,
+        total_price,
+        discount_amount,
+        discount_percent,
+        amount_paid,
+        payment_status,
+        booking_type: bookingSource,
+        qty,
+        ktp_path,
+        bukti_bayar_path,
+        guest_name,
+        guest_phone,
+        guest_segment
       }
-      const row = sel.rows[0];
-      const available = Number(row.total_rooms) - Number(row.reserved_qty);
-      if (available < quantity) {
-        throw new Error(`Not enough availability for ${room_type} on ${date} (available=${available}, requested=${quantity})`);
-      }
-      await client.query('UPDATE availability_dates SET reserved_qty = reserved_qty + $1 WHERE room_type = $2 AND date = $3', [quantity, room_type, date]);
-    }
+    ],
+    { requirePropertyId: true }
+  );
 
-    const roomCharge = Number(newRes.rows[0].total_price || 0);
-    if (roomCharge > 0) {
-      await client.query(
-        `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-         VALUES ($1, $2, $3, $4, 'DEBIT')`,
-        [reservationId, 'ROOM_CHARGE', 'Reservasi kamar', roomCharge]
-      );
-    }
+  const reservationResponse = canonicalResult.reservations[0];
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
 
-    await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id) VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CREATE', 'RESERVATION', reservationId, JSON.stringify(newRes.rows[0]), correlationId]
-    );
-
-    await client.query('COMMIT');
-    const idKey = (req as any)._idempotency_key;
-    if (idKey) {
-      const responseObj = { status: 'SUCCESS', data: newRes.rows[0], lock_expires_at: expiresAt.toISOString() };
-      const respBody = JSON.stringify(responseObj);
-      let headersObj: any = {};
-      try { headersObj = (res as any).getHeaders ? (res as any).getHeaders() : { 'content-type': 'application/json' }; } catch (e) { headersObj = { 'content-type': 'application/json' }; }
-      const respHeaders = JSON.stringify(headersObj);
-      await pool.query('UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4', [respBody, respHeaders, 201, idKey]);
-    }
-
-    try {
-      broadcastEvent('ReservationCreated', {
-        reservation_id: newRes.rows[0].id,
-        reservation_number: newRes.rows[0].booking_number,
-        status: newRes.rows[0].status || 'TENTATIVE',
-        guest: { name: newRes.rows[0].guest_name, phone: newRes.rows[0].guest_phone },
-        room_id: newRes.rows[0].room_id,
-        check_in: newRes.rows[0].check_in,
-        check_out: newRes.rows[0].check_out,
-        correlation_id: correlationId,
-        timestamp: new Date().toISOString()
-      });
-    } catch (e) {
-      console.error('Failed to broadcast ReservationCreated', e);
-    }
-
-    res.status(201).json({ status: 'SUCCESS', data: newRes.rows[0], lock_expires_at: expiresAt.toISOString() });
-  } catch (err: any) {
-    await client.query('ROLLBACK');
-    if (err.message && (err.message.startsWith('Not enough availability') || err.message.startsWith('No availability record'))) {
-      const idKey = (req as any)._idempotency_key;
-      if (idKey) {
-        const responseObj = { status: 'FAILED', message: err.message };
-        const respBody = JSON.stringify(responseObj);
-        let headersObj: any = {};
-        try { headersObj = (res as any).getHeaders ? (res as any).getHeaders() : { 'content-type': 'application/json' }; } catch (e) { headersObj = { 'content-type': 'application/json' }; }
-        const respHeaders = JSON.stringify(headersObj);
-        await pool.query('UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4', [respBody, respHeaders, 409, idKey]);
-      }
-      return res.status(409).json({ status: 'FAILED', message: err.message });
-    }
-    res.status(500).json({ status: 'ERROR', message: err.message });
-  } finally {
-    client.release();
-  }
+  return {
+    status: 'SUCCESS',
+    data: reservationResponse,
+    lock_expires_at: expiresAt.toISOString(),
+    canonical: canonicalResult
+  };
 }
 
 app.get('/api/reservations/:id', async (req, res) => {
   const reservationId = Number(req.params.id);
   try {
-    const result = await pool.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    const result = await pool.query(`
+      SELECT 
+        r.*,
+        r.id as reservation_id,
+        r.booking_number as legacy_booking_number,
+        b.bid,
+        b.id as booking_id_value
+      FROM reservations r
+      LEFT JOIN bookings b ON b.id = r.booking_id
+      WHERE r.id = $1
+    `, [reservationId]);
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
     res.json({ status: 'OK', data: result.rows[0] });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// GET booking by BID (new read-only endpoint)
+app.get('/api/bookings/:bid', async (req, res) => {
+  const bidParam = String(req.params.bid || '').toUpperCase().trim();
+  if (!bidParam) {
+    return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
+  }
+  
+  try {
+    const result = await pool.query(
+      `SELECT 
+        id as booking_id,
+        bid,
+        property_id,
+        guest_name_snapshot,
+        guest_phone_snapshot,
+        booking_source,
+        channel,
+        booking_status,
+        currency_code,
+        legacy_booking_number,
+        created_at,
+        updated_at
+      FROM bookings
+      WHERE UPPER(bid) = $1`,
+      [bidParam]
+    );
+    
+    if (!hasRows(result)) {
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
+    
+    res.json({ status: 'OK', data: result.rows[0] });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// GET child reservations for a booking (new read-only endpoint)
+app.get('/api/bookings/:bid/reservations', async (req, res) => {
+  const bidParam = String(req.params.bid || '').toUpperCase().trim();
+  if (!bidParam) {
+    return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
+  }
+  
+  try {
+    // First get the booking
+    const bookingResult = await pool.query(
+      `SELECT id FROM bookings WHERE UPPER(bid) = $1`,
+      [bidParam]
+    );
+    
+    if (!hasRows(bookingResult)) {
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
+    
+    const bookingId = bookingResult.rows[0].id;
+    
+    // Then get all reservations for this booking
+    const reservationsResult = await pool.query(
+      `SELECT 
+        r.*,
+        r.id as reservation_id,
+        r.booking_number as legacy_booking_number,
+        b.bid,
+        b.id as booking_id_value
+      FROM reservations r
+      JOIN bookings b ON b.id = r.booking_id
+      WHERE r.booking_id = $1
+      ORDER BY r.stay_sequence ASC`,
+      [bookingId]
+    );
+    
+    res.json({ status: 'OK', data: reservationsResult.rows });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+app.patch('/api/bookings/:bid', async (req, res) => {
+  const bidParam = String(req.params.bid || '').toUpperCase().trim();
+  if (!bidParam) {
+    return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
+  }
+
+  const payload = req.body || {};
+  const allowedStatuses = ['ACTIVE', 'CANCELLED', 'COMPLETED'];
+  const bookingStatus = typeof payload.booking_status === 'string' ? payload.booking_status.toUpperCase() : null;
+
+  if (bookingStatus && !allowedStatuses.includes(bookingStatus)) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid booking_status' });
+  }
+
+  if (bookingStatus === 'CANCELLED') {
+    return res.status(409).json({
+      status: 'ERROR',
+      message: 'booking_status=CANCELLED is not allowed through PATCH; use POST /api/bookings/:bid/cancel'
+    });
+  }
+
+  if (bookingStatus === 'COMPLETED') {
+    return res.status(409).json({
+      status: 'ERROR',
+      message: 'booking_status=COMPLETED is not allowed through PATCH; use the authoritative checkout/completion flow'
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT * FROM bookings WHERE UPPER(bid) = $1`,
+      [bidParam]
+    );
+
+    if (!hasRows(result)) {
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
+
+    const booking = result.rows[0];
+    const updatedBooking = await pool.query(
+      `UPDATE bookings
+       SET guest_name_snapshot = COALESCE($1, guest_name_snapshot),
+           guest_phone_snapshot = COALESCE($2, guest_phone_snapshot),
+           channel = COALESCE($3, channel),
+           booking_status = COALESCE($4, booking_status),
+           currency_code = COALESCE($5, currency_code),
+           legacy_booking_number = COALESCE($6, legacy_booking_number),
+           updated_at = NOW()
+       WHERE id = $7
+       RETURNING *;`,
+      [
+        payload.guest_name_snapshot ?? null,
+        payload.guest_phone_snapshot ?? null,
+        payload.channel ?? null,
+        bookingStatus,
+        payload.currency_code ?? null,
+        payload.legacy_booking_number ?? null,
+        booking.id,
+      ]
+    );
+
+    res.json({ status: 'OK', data: updatedBooking.rows[0] });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+app.post('/api/bookings/:bid/cancel', async (req, res) => {
+  const bidParam = String(req.params.bid || '').toUpperCase().trim();
+  if (!bidParam) {
+    return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
+  }
+
+  const correlationId = req.headers['x-correlation-id'] || null;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const bookingResult = await client.query(
+      `SELECT *
+       FROM bookings
+       WHERE UPPER(bid) = $1
+       FOR UPDATE`,
+      [bidParam]
+    );
+
+    if (!hasRows(bookingResult)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    const reservationsResult = await client.query(
+      `SELECT *
+       FROM reservations
+       WHERE booking_id = $1
+       ORDER BY stay_sequence, id
+       FOR UPDATE`,
+      [booking.id]
+    );
+
+    if (!hasRows(reservationsResult)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: 'booking has no linked reservations and cannot be cancelled through this flow'
+      });
+    }
+
+    const childReservations = reservationsResult.rows;
+
+    // Validate all children before any inventory or lifecycle mutation.
+    for (const reservation of childReservations) {
+      const childStatus = String(reservation.status || '').toUpperCase();
+
+      if (childStatus === 'BOOKED' || childStatus === 'CANCELLED') {
+        continue;
+      }
+
+      if (childStatus === 'CHECKED_IN') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          message: `booking cannot be cancelled because reservation ${reservation.id} is CHECKED_IN`
+        });
+      }
+
+      if (childStatus === 'CHECKED_OUT') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          message: `booking cannot be cancelled because reservation ${reservation.id} is CHECKED_OUT`
+        });
+      }
+
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: `booking cannot be cancelled because reservation ${reservation.id} has unsupported status ${childStatus || 'UNKNOWN'}`
+      });
+    }
+
+    const bookingAlreadyCancelled = String(booking.booking_status || '').toUpperCase() === 'CANCELLED';
+    const allChildrenCancelled = childReservations.every(
+      (reservation: any) => String(reservation.status || '').toUpperCase() === 'CANCELLED'
+    );
+
+    if (bookingAlreadyCancelled && allChildrenCancelled) {
+      await client.query('COMMIT');
+      return res.json({
+        status: 'SUCCESS',
+        data: booking,
+        message: 'booking already cancelled'
+      });
+    }
+
+    for (const reservation of childReservations) {
+      const childStatus = String(reservation.status || '').toUpperCase();
+      if (childStatus === 'CANCELLED') continue;
+
+      const roomTypeResult = await client.query(
+        `SELECT COALESCE(rt.name, r.name) AS room_type
+         FROM rooms r
+         LEFT JOIN room_types rt ON rt.id = r.room_type_id
+         WHERE r.id = $1`,
+        [reservation.room_id]
+      );
+
+      if (!hasRows(roomTypeResult)) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservation.id}`);
+      }
+
+      const roomType = roomTypeResult.rows[0].room_type;
+      if (!roomType) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: room type missing for reservation ${reservation.id}`);
+      }
+
+      const occupiedDates = enumerateDates(reservation.check_in, reservation.check_out).sort();
+
+      if (occupiedDates.length === 0) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: invalid stay range for reservation ${reservation.id}`);
+      }
+
+      // Lock and validate every stay night before decrementing any of them.
+      for (const date of occupiedDates) {
+        const availabilityResult = await client.query(
+          `SELECT reserved_qty, total_rooms
+           FROM availability_dates
+           WHERE room_type = $1 AND date = $2
+           FOR UPDATE`,
+          [roomType, date]
+        );
+
+        if (!hasRows(availabilityResult)) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: availability row missing for ${roomType} on ${date}`);
+        }
+
+        const reservedQty = Number(availabilityResult.rows[0].reserved_qty || 0);
+        if (reservedQty < 1) {
+          throw new Error(
+            `INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${roomType} on ${date} (reserved_qty=${reservedQty}, release=1)`
+          );
+        }
+      }
+
+      for (const date of occupiedDates) {
+        await client.query(
+          `UPDATE availability_dates
+           SET reserved_qty = reserved_qty - 1
+           WHERE room_type = $1 AND date = $2`,
+          [roomType, date]
+        );
+      }
+
+      const updatedReservation = await client.query(
+        `UPDATE reservations
+         SET status = 'CANCELLED',
+             stay_status = 'CANCELLED'
+         WHERE id = $1
+           AND status = 'BOOKED'
+         RETURNING *`,
+        [reservation.id]
+      );
+
+      if (!hasRows(updatedReservation)) {
+        throw new Error(`CANCELLATION_INTEGRITY_ERROR: reservation ${reservation.id} was not updated`);
+      }
+
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        ['PMS', 'CANCEL', 'RESERVATION', reservation.id, JSON.stringify(updatedReservation.rows[0]), correlationId]
+      );
+    }
+
+    const updatedBookingResult = await client.query(
+      `UPDATE bookings
+       SET booking_status = 'CANCELLED',
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [booking.id]
+    );
+
+    const updatedBooking = updatedBookingResult.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      ['PMS', 'CANCEL', 'BOOKING', booking.id, JSON.stringify(updatedBooking), correlationId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ status: 'SUCCESS', data: updatedBooking });
+  } catch (err: any) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      console.error('Booking cancellation rollback failed', rollbackErr);
+    }
+
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -483,6 +1616,23 @@ app.patch('/api/reservations/:id', async (req, res) => {
     return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
   }
 
+  const incomingKeys = Object.keys(payload).filter((key) => payload[key] !== undefined);
+  const criticalKeys = incomingKeys.filter((key) => RESERVATION_PATCH_CRITICAL_KEYS.has(key));
+  if (criticalKeys.length > 0) {
+    return res.status(409).json({
+      status: 'ERROR',
+      message: `reservation lifecycle fields must be changed through authoritative workflows: ${criticalKeys.join(', ')}`
+    });
+  }
+
+  const unknownKeys = incomingKeys.filter((key) => !RESERVATION_PATCH_ALLOWLIST.has(key));
+  if (unknownKeys.length > 0) {
+    return res.status(400).json({
+      status: 'ERROR',
+      message: `unsupported reservation patch fields: ${unknownKeys.join(', ')}`
+    });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -493,55 +1643,64 @@ app.patch('/api/reservations/:id', async (req, res) => {
     }
 
     const existing = current.rows[0];
-    const roomId = payload.room_id ?? existing.room_id;
-    const guestName = payload.guest_name ?? existing.guest_name;
-    const guestPhone = payload.guest_phone ?? existing.guest_phone;
-    const guestSegment = ['Reguler', 'Group', 'Corporate'].includes(String(payload.guest_segment || existing.guest_segment || 'Reguler'))
-      ? String(payload.guest_segment || existing.guest_segment || 'Reguler')
+    const guestName = Object.prototype.hasOwnProperty.call(payload, 'guest_name') ? payload.guest_name : existing.guest_name;
+    const guestPhone = Object.prototype.hasOwnProperty.call(payload, 'guest_phone') ? payload.guest_phone : existing.guest_phone;
+    const guestSegmentValue = Object.prototype.hasOwnProperty.call(payload, 'guest_segment') ? payload.guest_segment : existing.guest_segment;
+    const guestSegment = ['Reguler', 'Group', 'Corporate'].includes(String(guestSegmentValue || 'Reguler'))
+      ? String(guestSegmentValue || 'Reguler')
       : String(existing.guest_segment || 'Reguler');
-    const checkIn = payload.check_in ?? existing.check_in;
-    const checkOut = payload.check_out ?? existing.check_out;
-    const baseSubtotal = Number(payload.subtotal_amount ?? payload.total_price ?? existing.total_price ?? existing.subtotal_amount ?? 0);
-    const discountAmount = Number(payload.discount_amount ?? existing.discount_amount ?? 0);
-    const discountPercent = Number(payload.discount_percent ?? existing.discount_percent ?? 0);
-    const amountPaid = Number(payload.amount_paid ?? existing.amount_paid ?? 0);
-    const totalPrice = Number(payload.total_price ?? baseSubtotal);
+    const baseSubtotal = Number(
+      Object.prototype.hasOwnProperty.call(payload, 'subtotal_amount')
+       ? payload.subtotal_amount
+       : Object.prototype.hasOwnProperty.call(payload, 'total_price')
+         ? payload.total_price
+         : existing.total_price ?? existing.subtotal_amount ?? 0
+    );
+    const discountAmount = Number(
+      Object.prototype.hasOwnProperty.call(payload, 'discount_amount') ? payload.discount_amount : existing.discount_amount ?? 0
+    );
+    const discountPercent = Number(
+      Object.prototype.hasOwnProperty.call(payload, 'discount_percent') ? payload.discount_percent : existing.discount_percent ?? 0
+    );
+    const amountPaid = Number(
+      Object.prototype.hasOwnProperty.call(payload, 'amount_paid') ? payload.amount_paid : existing.amount_paid ?? 0
+    );
+    const totalPrice = Number(
+      Object.prototype.hasOwnProperty.call(payload, 'total_price') ? payload.total_price : baseSubtotal
+    );
     const billingSummary = computeBillingSummary(totalPrice, discountAmount, discountPercent, amountPaid);
-    const incomingStatus = payload.status ?? existing.status ?? 'CONFIRMED';
-    const paymentStatus = payload.payment_status ?? billingSummary.paymentStatus;
-    const ktpPath = payload.ktp_path ?? existing.ktp_path;
-    const buktiBayarPath = payload.bukti_bayar_path ?? existing.bukti_bayar_path;
-    const bookingSource = String(payload.booking_type ?? payload.bookingType ?? payload.source ?? existing.booking_type ?? 'walkin').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
+    const paymentStatus = Object.prototype.hasOwnProperty.call(payload, 'payment_status')
+      ? payload.payment_status
+      : billingSummary.paymentStatus;
+    const ktpPath = Object.prototype.hasOwnProperty.call(payload, 'ktp_path') ? payload.ktp_path : existing.ktp_path;
+    const buktiBayarPath = Object.prototype.hasOwnProperty.call(payload, 'bukti_bayar_path')
+      ? payload.bukti_bayar_path
+      : existing.bukti_bayar_path;
+    const bookingTypeValue = Object.prototype.hasOwnProperty.call(payload, 'booking_type')
+      ? payload.booking_type
+      : existing.booking_type;
+    const bookingSource = String(bookingTypeValue || 'walkin').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
 
     const updated = await client.query(
       `UPDATE reservations
-       SET room_id = $1,
-           guest_name = $2,
-           guest_phone = $3,
-           guest_segment = $4,
-           check_in = $5,
-           check_out = $6,
-           total_price = $7,
-           payment_status = $8,
-           discount_amount = $9,
-           discount_percent = $10,
-           amount_paid = $11,
-           remaining_balance = $12,
-           ktp_path = $13,
-           bukti_bayar_path = $14,
-           booking_type = $15,
-           status = $16,
-           stay_status = COALESCE($17, stay_status),
-           updated_at = NOW()
-       WHERE id = $18
-       RETURNING *`,
+      SET guest_name = $1,
+          guest_phone = $2,
+          guest_segment = $3,
+          total_price = $4,
+          payment_status = $5,
+          discount_amount = $6,
+          discount_percent = $7,
+          amount_paid = $8,
+          remaining_balance = $9,
+          ktp_path = $10,
+          bukti_bayar_path = $11,
+          booking_type = $12
+      WHERE id = $13
+      RETURNING *`,
       [
-       roomId,
        guestName,
        guestPhone,
        guestSegment,
-       checkIn,
-       checkOut,
        billingSummary.totalAfterDiscount,
        paymentStatus,
        billingSummary.discount,
@@ -551,8 +1710,6 @@ app.patch('/api/reservations/:id', async (req, res) => {
        ktpPath,
        buktiBayarPath,
        bookingSource,
-       incomingStatus,
-       payload.stay_status ?? existing.stay_status,
        reservationId
       ]
     );
@@ -566,7 +1723,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
     await client.query('COMMIT');
     broadcastEvent('ReservationUpdated', {
       reservation_id: reservationId,
-      room_id: roomId,
+      room_id: updated.rows[0].room_id,
       guest_name: guestName,
       timestamp: new Date().toISOString()
     });
@@ -574,7 +1731,19 @@ app.patch('/api/reservations/:id', async (req, res) => {
     res.json({ status: 'SUCCESS', data: updated.rows[0] });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
+    const message = String(err?.message || err);
+    if (
+      message.includes('availability row missing') ||
+      message.includes('capacity exhausted') ||
+      message.includes('reserved_qty underflow') ||
+      message.includes('room not found')
+    ) {
+      return res.status(409).json({ status: 'ERROR', message });
+    }
+    res.status(500).json({ status: 'ERROR', message });
   } finally {
     client.release();
   }
@@ -676,15 +1845,134 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
     res.json({ status: 'SUCCESS', data: updated.rows[0] });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const message = String(err?.message || err);
+    if (
+      message.includes('availability row missing') ||
+      message.includes('capacity exhausted') ||
+      message.includes('reserved_qty underflow') ||
+      message.includes('room not found')
+    ) {
+      return res.status(409).json({ status: 'ERROR', message });
+    }
+    res.status(500).json({ status: 'ERROR', message });
   } finally {
     client.release();
   }
 });
 
+app.post('/api/bookings', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const reservations = payload.reservations;
+    if (!Array.isArray(reservations) || reservations.length < 1) {
+      const responseObj = { status: 'ERROR', message: 'reservations must be a non-empty array' };
+      await persistIdempotencyResult(req, res, 400, responseObj);
+      return res.status(400).json(responseObj);
+    }
+
+    const result = await createCanonicalBooking(req, payload, reservations, { requirePropertyId: true });
+    const responseObj = {
+      status: 'SUCCESS',
+      data: {
+        booking_id: result.booking.id,
+        bid: result.booking.bid,
+        booking_status: result.booking.booking_status,
+        property_id: result.booking.property_id,
+        guest_name: result.booking.guest_name_snapshot,
+        guest_phone: result.booking.guest_phone_snapshot,
+        booking_source: result.booking.booking_source,
+        channel: result.booking.channel,
+        currency_code: result.booking.currency_code,
+        reservations: result.reservations
+      },
+      correlation_id: result.correlationId
+    };
+
+    try {
+      broadcastEvent('BookingCreated', {
+        booking_id: result.booking.id,
+        bid: result.booking.bid,
+        booking_status: result.booking.booking_status,
+        reservation_count: result.reservations.length,
+        correlation_id: result.correlationId,
+        timestamp: new Date().toISOString()
+      });
+      for (const reservation of result.reservations) {
+        broadcastEvent('ReservationCreated', {
+          reservation_id: reservation.id,
+          reservation_number: reservation.booking_number,
+          bid: reservation.bid,
+          booking_id: reservation.booking_id,
+          status: reservation.status || 'TENTATIVE',
+          guest: { name: reservation.guest_name, phone: reservation.guest_phone },
+          room_id: reservation.room_id,
+          check_in: reservation.check_in,
+          check_out: reservation.check_out,
+          correlation_id: result.correlationId,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (broadcastError) {
+      console.error('Failed to broadcast booking create events', broadcastError);
+    }
+
+    await persistIdempotencyResult(req, res, 201, responseObj);
+    return res.status(201).json(responseObj);
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      await persistIdempotencyResult(req, res, 409, ROOM_OVERLAP_RESPONSE);
+      return sendRoomOverlapConflict(res);
+    }
+
+    const message = String(err?.message || err);
+    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') ? 409 : 500));
+    const responseObj = { status: responseStatusTextForCode(statusCode), message };
+    await persistIdempotencyResult(req, res, statusCode, responseObj);
+    return res.status(statusCode).json(responseObj);
+  }
+});
+
 // POST Reservation (integrated with availability lock)
 app.post('/api/reservations', async (req, res) => {
-  return createReservationRecord(req, res, req.body || {});
+  try {
+    const result = await createReservationRecord(req, req.body || {});
+    const responseObj = {
+      status: result.status,
+      data: result.data,
+      lock_expires_at: result.lock_expires_at
+    };
+    try {
+      broadcastEvent('ReservationCreated', {
+        reservation_id: result.data.id,
+        reservation_number: result.data.booking_number,
+        bid: result.data.bid,
+        booking_id: result.data.booking_id,
+        status: result.data.status || 'TENTATIVE',
+        guest: { name: result.data.guest_name, phone: result.data.guest_phone },
+        room_id: result.data.room_id,
+        check_in: result.data.check_in,
+        check_out: result.data.check_out,
+        correlation_id: result.canonical.correlationId,
+        timestamp: new Date().toISOString()
+      });
+    } catch (broadcastError) {
+      console.error('Failed to broadcast ReservationCreated', broadcastError);
+    }
+
+    await persistIdempotencyResult(req, res, 201, responseObj);
+    return res.status(201).json(responseObj);
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      await persistIdempotencyResult(req, res, 409, ROOM_OVERLAP_RESPONSE);
+      return sendRoomOverlapConflict(res);
+    }
+
+    const message = String(err?.message || err);
+    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
+    const responseObj = { status: responseStatusTextForCode(statusCode), message };
+    await persistIdempotencyResult(req, res, statusCode, responseObj);
+    return res.status(statusCode).json(responseObj);
+  }
 });
 
 app.post('/api/reservations/upload', upload.fields([
@@ -699,7 +1987,45 @@ app.post('/api/reservations/upload', upload.fields([
     bukti_bayar_path: files.bukti_bayar_file?.[0]?.filename ? `/uploads/${files.bukti_bayar_file[0].filename}` : req.body?.bukti_bayar_path || null
   };
 
-  return createReservationRecord(req, res, payload);
+  try {
+    const result = await createReservationRecord(req, payload);
+    const responseObj = {
+      status: result.status,
+      data: result.data,
+      lock_expires_at: result.lock_expires_at
+    };
+    try {
+      broadcastEvent('ReservationCreated', {
+        reservation_id: result.data.id,
+        reservation_number: result.data.booking_number,
+        bid: result.data.bid,
+        booking_id: result.data.booking_id,
+        status: result.data.status || 'TENTATIVE',
+        guest: { name: result.data.guest_name, phone: result.data.guest_phone },
+        room_id: result.data.room_id,
+        check_in: result.data.check_in,
+        check_out: result.data.check_out,
+        correlation_id: result.canonical.correlationId,
+        timestamp: new Date().toISOString()
+      });
+    } catch (broadcastError) {
+      console.error('Failed to broadcast ReservationCreated', broadcastError);
+    }
+
+    await persistIdempotencyResult(req, res, 201, responseObj);
+    return res.status(201).json(responseObj);
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      await persistIdempotencyResult(req, res, 409, ROOM_OVERLAP_RESPONSE);
+      return sendRoomOverlapConflict(res);
+    }
+
+    const message = String(err?.message || err);
+    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
+    const responseObj = { status: statusCode >= 500 ? 'ERROR' : 'FAILED', message };
+    await persistIdempotencyResult(req, res, statusCode, responseObj);
+    return res.status(statusCode).json(responseObj);
+  }
 });
 
 // GET availability per room_type between date range
@@ -711,7 +2037,7 @@ app.get('/api/availability', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT date, total_rooms, reserved_qty, (total_rooms - reserved_qty) as sellable FROM availability_dates
-       WHERE room_type = $1 AND date >= $2::date AND date < $3::date
+       WHERE room_type = $1 AND (date AT TIME ZONE 'Asia/Jakarta')::date >= $2::date AND (date AT TIME ZONE 'Asia/Jakarta')::date < $3::date
        ORDER BY date`,
       [room_type, start, end]
     );
@@ -1241,6 +2567,305 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
   }
 });
 
+app.post('/api/reservations/:id/extend', async (req, res) => {
+  const reservationId = Number(req.params.id);
+  const requestedCheckOut = normalizeReservationDateKey(req.body?.new_check_out);
+
+  if (!Number.isFinite(reservationId)) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
+  }
+
+  if (!requestedCheckOut) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid new_check_out' });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const reservationResult = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
+    if (!hasRows(reservationResult)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
+
+    const reservation = reservationResult.rows[0];
+    const currentStatus = String(reservation.status || '').toUpperCase();
+    if (currentStatus !== 'BOOKED' && currentStatus !== 'CHECKED_IN') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: `reservation status ${currentStatus || 'UNKNOWN'} cannot be extended`
+      });
+    }
+
+    const oldCheckOut = toDateKey(reservation.check_out);
+    const checkIn = toDateKey(reservation.check_in);
+    if (!oldCheckOut || !checkIn) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation dates are invalid' });
+    }
+
+    if (requestedCheckOut === oldCheckOut) {
+      await client.query('COMMIT');
+      return res.json({
+        status: 'SUCCESS',
+        data: reservation,
+        meta: {
+          operation: 'EXTEND',
+          no_op: true,
+          reservation_id: reservationId,
+          old_check_out: oldCheckOut,
+          new_check_out: requestedCheckOut,
+          delta_dates: [],
+          inventory_delta: 0
+        }
+      });
+    }
+
+    if (requestedCheckOut <= checkIn) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: 'new_check_out must be after check_in'
+      });
+    }
+
+    if (requestedCheckOut < oldCheckOut) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: 'use POST /api/reservations/:id/shorten for earlier check_out'
+      });
+    }
+
+    const roomType = await resolveReservationRoomType(client, Number(reservation.room_id));
+    const deltaDates = enumerateDates(oldCheckOut, requestedCheckOut);
+
+    const overlap = await findActiveRoomOverlap(client, Number(reservation.room_id), oldCheckOut, requestedCheckOut, reservationId);
+    if (hasRows(overlap)) {
+      await client.query('ROLLBACK');
+      return sendRoomOverlapConflict(res);
+    }
+
+    await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'EXTEND');
+
+    for (const date of deltaDates) {
+      await client.query(
+        `UPDATE availability_dates
+         SET reserved_qty = reserved_qty + 1
+         WHERE room_type = $1 AND date = $2`,
+        [roomType, date]
+      );
+    }
+
+    const updatedReservation = await client.query(
+      `UPDATE reservations
+       SET check_out = $1
+       WHERE id = $2
+       RETURNING *`,
+      [requestedCheckOut, reservationId]
+    );
+
+    const bookingId = Number(reservation.booking_id || 0);
+    let bid: string | null = null;
+    if (Number.isFinite(bookingId) && bookingId > 0) {
+      const bookingResult = await client.query('SELECT bid FROM bookings WHERE id = $1', [bookingId]);
+      if (hasRows(bookingResult)) {
+        bid = String(bookingResult.rows[0].bid || null);
+      }
+    }
+
+    const auditPayload = {
+      operation: 'EXTEND',
+      reservation_id: reservationId,
+      booking_id: bookingId || null,
+      bid,
+      old_check_out: oldCheckOut,
+      new_check_out: requestedCheckOut,
+      delta_dates: deltaDates,
+      inventory_delta: deltaDates.length,
+      room_type: roomType
+    };
+
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      ['PMS', 'EXTEND', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null]
+    );
+
+    await client.query('COMMIT');
+    return res.json({
+      status: 'SUCCESS',
+      data: updatedReservation.rows[0],
+      meta: auditPayload
+    });
+  } catch (err: any) {
+    await client.query('ROLLBACK');
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
+    const message = String(err?.message || err);
+    if (
+      message.includes('availability row missing') ||
+      message.includes('capacity exhausted') ||
+      message.includes('reserved_qty underflow') ||
+      message.includes('room not found')
+    ) {
+      return res.status(409).json({ status: 'ERROR', message });
+    }
+    res.status(500).json({ status: 'ERROR', message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/reservations/:id/shorten', async (req, res) => {
+  const reservationId = Number(req.params.id);
+  const requestedCheckOut = normalizeReservationDateKey(req.body?.new_check_out);
+
+  if (!Number.isFinite(reservationId)) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
+  }
+
+  if (!requestedCheckOut) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid new_check_out' });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const reservationResult = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
+    if (!hasRows(reservationResult)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
+
+    const reservation = reservationResult.rows[0];
+    const currentStatus = String(reservation.status || '').toUpperCase();
+    if (currentStatus !== 'BOOKED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: `reservation status ${currentStatus || 'UNKNOWN'} cannot be shortened`
+      });
+    }
+
+    const oldCheckOut = toDateKey(reservation.check_out);
+    const checkIn = toDateKey(reservation.check_in);
+    if (!oldCheckOut || !checkIn) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation dates are invalid' });
+    }
+
+    if (requestedCheckOut === oldCheckOut) {
+      await client.query('COMMIT');
+      return res.json({
+        status: 'SUCCESS',
+        data: reservation,
+        meta: {
+          operation: 'SHORTEN',
+          no_op: true,
+          reservation_id: reservationId,
+          old_check_out: oldCheckOut,
+          new_check_out: requestedCheckOut,
+          delta_dates: [],
+          inventory_delta: 0
+        }
+      });
+    }
+
+    if (requestedCheckOut <= checkIn) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: 'new_check_out must be after check_in'
+      });
+    }
+
+    if (requestedCheckOut > oldCheckOut) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: 'use POST /api/reservations/:id/extend for later check_out'
+      });
+    }
+
+    const roomType = await resolveReservationRoomType(client, Number(reservation.room_id));
+    const deltaDates = enumerateDates(requestedCheckOut, oldCheckOut);
+
+    await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'SHORTEN');
+
+    for (const date of deltaDates) {
+      await client.query(
+        `UPDATE availability_dates
+         SET reserved_qty = reserved_qty - 1
+         WHERE room_type = $1 AND date = $2`,
+        [roomType, date]
+      );
+    }
+
+    const updatedReservation = await client.query(
+      `UPDATE reservations
+       SET check_out = $1
+       WHERE id = $2
+       RETURNING *`,
+      [requestedCheckOut, reservationId]
+    );
+
+    const bookingId = Number(reservation.booking_id || 0);
+    let bid: string | null = null;
+    if (Number.isFinite(bookingId) && bookingId > 0) {
+      const bookingResult = await client.query('SELECT bid FROM bookings WHERE id = $1', [bookingId]);
+      if (hasRows(bookingResult)) {
+        bid = String(bookingResult.rows[0].bid || null);
+      }
+    }
+
+    const auditPayload = {
+      operation: 'SHORTEN',
+      reservation_id: reservationId,
+      booking_id: bookingId || null,
+      bid,
+      old_check_out: oldCheckOut,
+      new_check_out: requestedCheckOut,
+      delta_dates: deltaDates,
+      inventory_delta: -deltaDates.length,
+      room_type: roomType
+    };
+
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      ['PMS', 'SHORTEN', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null]
+    );
+
+    await client.query('COMMIT');
+    return res.json({
+      status: 'SUCCESS',
+      data: updatedReservation.rows[0],
+      meta: auditPayload
+    });
+  } catch (err: any) {
+    await client.query('ROLLBACK');
+    const message = String(err?.message || err);
+    if (
+      message.includes('availability row missing') ||
+      message.includes('capacity exhausted') ||
+      message.includes('reserved_qty underflow') ||
+      message.includes('room not found')
+    ) {
+      return res.status(409).json({ status: 'ERROR', message });
+    }
+    res.status(500).json({ status: 'ERROR', message });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/reservations/:id/checkin', async (req, res) => {
   const reservationId = Number(req.params.id);
   const client = await pool.connect();
@@ -1254,6 +2879,19 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     }
 
     const current = reservation.rows[0];
+    const currentStatus = String(current.status || '').toUpperCase();
+    if (currentStatus === 'CANCELLED' || currentStatus === 'CHECKED_OUT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        message: `reservation status ${currentStatus} cannot be checked in`
+      });
+    }
+    const overlap = await findActiveRoomOverlap(client, Number(current.room_id), current.check_in, current.check_out, reservationId);
+    if (hasRows(overlap)) {
+      await client.query('ROLLBACK');
+      return sendRoomOverlapConflict(res);
+    }
     const nextStatus = current.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'CHECKED_IN';
     const updated = await client.query(
       `UPDATE reservations
@@ -1286,6 +2924,9 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     res.json({ status: 'SUCCESS', data: updated.rows[0] });
   } catch (err: any) {
     await client.query('ROLLBACK');
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   } finally {
     client.release();
@@ -1298,42 +2939,142 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
 
   try {
     await client.query('BEGIN');
-    const reservation = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
-    if (!hasRows(reservation)) {
+    const reservationLookup = await client.query('SELECT id, booking_id FROM reservations WHERE id = $1', [reservationId]);
+    if (!hasRows(reservationLookup)) {
       await client.query('ROLLBACK');
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
 
-    const current = reservation.rows[0];
-    const updated = await client.query(
-      `UPDATE reservations
-       SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
+    const targetReservationId = Number(reservationLookup.rows[0].id);
+    const bookingId = Number(reservationLookup.rows[0].booking_id || 0);
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation is not linked to a booking' });
+    }
+
+    const bookingResult = await client.query(
+      `SELECT *
+       FROM bookings
        WHERE id = $1
-       RETURNING *`,
-      [reservationId]
+       FOR UPDATE`,
+      [bookingId]
     );
+    if (!hasRows(bookingResult)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
 
-    await client.query(
-      'UPDATE rooms SET status = $1 WHERE id = $2',
-      ['VACANT_DIRTY', current.room_id]
+    const booking = bookingResult.rows[0];
+    const lockedChildrenResult = await client.query(
+      `SELECT *
+       FROM reservations
+       WHERE booking_id = $1
+       ORDER BY stay_sequence, id
+       FOR UPDATE`,
+      [bookingId]
     );
+    if (!hasRows(lockedChildrenResult)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'booking has no linked reservations' });
+    }
 
-    await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(updated.rows[0]), req.headers['x-correlation-id'] || null]
-    );
+    const lockedChildren = lockedChildrenResult.rows;
+    const targetReservation = lockedChildren.find((row: any) => Number(row.id) === targetReservationId);
+    if (!targetReservation) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'target reservation does not belong to the booking' });
+    }
+
+    const targetStatus = String(targetReservation.status || '').toUpperCase();
+    const bookingStatusBefore = String(booking.booking_status || '').toUpperCase();
+    if (targetStatus === 'CANCELLED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'cancelled reservation cannot be checked out' });
+    }
+    if (targetStatus !== 'BOOKED' && targetStatus !== 'CHECKED_IN' && targetStatus !== 'CHECKED_OUT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: `unsupported reservation status ${targetStatus || 'UNKNOWN'} for checkout` });
+    }
+
+    let checkoutReservation = targetReservation;
+    if (targetStatus !== 'CHECKED_OUT') {
+      const updated = await client.query(
+        `UPDATE reservations
+         SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
+         WHERE id = $1
+         RETURNING *`,
+        [reservationId]
+      );
+
+      checkoutReservation = updated.rows[0];
+      const currentRoomId = Number(checkoutReservation.room_id || targetReservation.room_id);
+      await client.query(
+        'UPDATE rooms SET status = $1 WHERE id = $2',
+        ['VACANT_DIRTY', currentRoomId]
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(checkoutReservation), req.headers['x-correlation-id'] || null]
+      );
+      lockedChildren[lockedChildren.findIndex((row: any) => Number(row.id) === targetReservationId)] = checkoutReservation;
+    }
+
+    const childSummary = buildBookingChildStatusSummary(lockedChildren);
+    const derivedBookingStatus = deriveBookingLifecycleStatus(bookingStatusBefore, childSummary);
+    let bookingRecord = booking;
+    let bookingCompletionAuditPayload: any = null;
+
+    if (derivedBookingStatus !== bookingStatusBefore) {
+      const updatedBooking = await client.query(
+        `UPDATE bookings
+         SET booking_status = $1,
+             updated_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [derivedBookingStatus, booking.id]
+      );
+      bookingRecord = updatedBooking.rows[0];
+
+      if (derivedBookingStatus === 'COMPLETED' && bookingStatusBefore !== 'COMPLETED') {
+        bookingCompletionAuditPayload = buildBookingCompletionAuditPayload(
+          bookingRecord,
+          bookingStatusBefore || 'ACTIVE',
+          derivedBookingStatus,
+          childSummary,
+          reservationId
+        );
+        await client.query(
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          ['PMS', 'COMPLETE', 'BOOKING', bookingRecord.id, JSON.stringify(bookingCompletionAuditPayload), req.headers['x-correlation-id'] || null]
+        );
+      }
+    }
 
     await client.query('COMMIT');
-    broadcastEvent('ReservationCheckedOut', {
-      reservation_id: reservationId,
-      room_id: current.room_id,
-      guest_name: current.guest_name,
-      checked_out_at: new Date().toISOString(),
-      timestamp: new Date().toISOString()
-    });
 
-    res.json({ status: 'SUCCESS', data: updated.rows[0] });
+    if (targetStatus !== 'CHECKED_OUT') {
+      broadcastEvent('ReservationCheckedOut', {
+        reservation_id: reservationId,
+        room_id: checkoutReservation.room_id,
+        guest_name: checkoutReservation.guest_name,
+        checked_out_at: new Date().toISOString(),
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    if (bookingCompletionAuditPayload) {
+      broadcastEvent('BookingCompleted', {
+        booking_id: bookingRecord.id,
+        bid: bookingRecord.bid,
+        trigger_reservation_id: reservationId,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    return res.json({ status: 'SUCCESS', data: checkoutReservation });
   } catch (err: any) {
     await client.query('ROLLBACK');
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -1397,7 +3138,17 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
 app.get('/api/reservations/:id/folio', async (req, res) => {
   const reservationId = Number(req.params.id);
   try {
-    const reservation = await pool.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    const reservation = await pool.query(`
+      SELECT 
+        r.*,
+        r.id as reservation_id,
+        r.booking_number as legacy_booking_number,
+        b.bid,
+        b.id as booking_id_value
+      FROM reservations r
+      LEFT JOIN bookings b ON b.id = r.booking_id
+      WHERE r.id = $1
+    `, [reservationId]);
     if (!hasRows(reservation)) {
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
@@ -1481,14 +3232,17 @@ app.get('/api/tapechart', async (req, res) => {
 
     // fetch reservations overlapping range
     const reservationsRes = await pool.query(
-      `SELECT * FROM reservations WHERE NOT (check_out <= $1::timestamp OR check_in >= $2::timestamp)`,
+      `SELECT r.*, r.id as reservation_id, r.booking_number as legacy_booking_number, b.bid, b.id as booking_id_value
+       FROM reservations r
+       LEFT JOIN bookings b ON b.id = r.booking_id
+       WHERE NOT (check_out <= $1::timestamp OR check_in >= $2::timestamp)`,
       [start, end]
     );
     const reservations = reservationsRes.rows;
 
     // fetch availability for range (per room type & date)
     const availabilityRes = await pool.query(
-      `SELECT room_type, date, total_rooms, reserved_qty, (total_rooms - reserved_qty) as sellable FROM availability_dates WHERE date >= $1::date AND date < $2::date`,
+      `SELECT room_type, date, total_rooms, reserved_qty, (total_rooms - reserved_qty) as sellable FROM availability_dates WHERE (date AT TIME ZONE 'Asia/Jakarta')::date >= $1::date AND (date AT TIME ZONE 'Asia/Jakarta')::date < $2::date`,
       [start, end]
     );
     const availability = availabilityRes.rows;
@@ -1520,7 +3274,18 @@ app.get('/api/tapechart', async (req, res) => {
           // Nightly stay is inclusive on check-in and exclusive on check-out.
           // Example: 2026-08-20 -> 2026-08-21 blocks only 20; 2026-08-20 -> 2026-08-28 blocks 20..27.
           return dateStr >= ci && dateStr < co;
-        }).map((r: any) => ({ id: r.id, guest_name: r.guest_name, payment_status: r.payment_status, check_in: r.check_in, check_out: r.check_out, status: r.status || 'CONFIRMED' }));
+        }).map((r: any) => ({ 
+          id: r.id,
+          reservation_id: r.reservation_id,
+          booking_id: r.booking_id,
+          bid: r.bid,
+          stay_sequence: r.stay_sequence,
+          guest_name: r.guest_name, 
+          payment_status: r.payment_status, 
+          check_in: r.check_in, 
+          check_out: r.check_out, 
+          status: r.status || 'CONFIRMED' 
+        }));
 
         // availability by room_type (supports both legacy rooms.name and normalized room_types table)
         const availKey = `${room.name}::${dateStr}`;
@@ -1547,7 +3312,10 @@ app.post('/api/reservations/:id/move', async (req, res) => {
   try {
     await client.query('BEGIN');
     const rRes = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
-    if (!hasRows(rRes)) return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    if (!hasRows(rRes)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
     const reservation = rRes.rows[0];
 
     const fromRoomRes = await client.query(`
@@ -1565,6 +3333,14 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     if (!hasRows(toRoomRes)) throw new Error('target room not found');
     const fromRoomType = hasRows(fromRoomRes) ? fromRoomRes.rows[0].room_type : null;
     const toRoomType = toRoomRes.rows[0].room_type;
+    const currentStatus = String(reservation.status || '').toUpperCase();
+    if (currentStatus === 'BOOKED' || currentStatus === 'CHECKED_IN') {
+      const overlap = await findActiveRoomOverlap(client, Number(to_room_id), reservation.check_in, reservation.check_out, reservationId);
+      if (hasRows(overlap)) {
+        await client.query('ROLLBACK');
+        return sendRoomOverlapConflict(res);
+      }
+    }
 
     // If room_type changes, adjust availability per date
     const dates = enumerateDates(reservation.check_in, reservation.check_out);
@@ -1610,6 +3386,9 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     return res.json({ status: 'OK', message: 'moved', reservation_id: reservationId });
   } catch (err: any) {
     await client.query('ROLLBACK');
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
     console.error('Move error', err);
     return res.status(400).json({ status: 'FAILED', message: err.message });
   } finally {
