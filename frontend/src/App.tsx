@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 function buildWeekDays(anchorDate = new Date(), todayIndex = 2, windowSize = 7) {
   // Build a windowSize-day window where the anchorDate is positioned at index `todayIndex` (0-based)
@@ -44,6 +44,9 @@ function App() {
   const [selectedRes, setSelectedRes] = useState<any>(null);
   const [selectedFolio, setSelectedFolio] = useState<any>(null);
   const [reservationAudit, setReservationAudit] = useState<any[]>([]);
+  const [selectedBooking, setSelectedBooking] = useState<any>(null);
+  const [selectedBookingChildren, setSelectedBookingChildren] = useState<any[]>([]);
+  const [bidCopyState, setBidCopyState] = useState<{ kind: 'idle' | 'success' | 'error'; message: string }>({ kind: 'idle', message: '' });
   const [paymentDraft, setPaymentDraft] = useState<string>('');
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
@@ -55,11 +58,11 @@ function App() {
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<'Kalender' | 'Transaksi' | 'Laporan' | 'Produk & Inventori' | 'Pelanggan' | 'Pengaturan'>('Kalender');
+  const [calendarSearch, setCalendarSearch] = useState('');
   const [reservationFilter, setReservationFilter] = useState<'all' | 'booked' | 'checked_in' | 'checked_out'>('all');
   const [reservationSearch, setReservationSearch] = useState('');
   const [reservationDateFrom, setReservationDateFrom] = useState('');
   const [reservationDateTo, setReservationDateTo] = useState('');
-  const [reservationEditId, setReservationEditId] = useState<number | null>(null);
   const [quickBooking, setQuickBooking] = useState({
     guestName: '',
     guestPhone: '',
@@ -68,6 +71,14 @@ function App() {
     checkOut: '',
     roomVariant: 'Deluxe King'
   });
+  const [bookingComposerChildren, setBookingComposerChildren] = useState<any[]>([]);
+  const [childRoomAvailability, setChildRoomAvailability] = useState<Record<string, any[]>>({});
+  const [availabilityCache, setAvailabilityCache] = useState<Record<string, any[]>>({});
+  const [bookingAvailabilityState, setBookingAvailabilityState] = useState<Record<string, 'idle' | 'loading' | 'success' | 'empty' | 'error'>>({});
+  const [bookingSubmitting, setBookingSubmitting] = useState(false);
+  const availabilityRequestVersionRef = useRef<Record<string, number>>({});
+  const availabilityRequestPromiseRef = useRef<Record<string, Promise<void> | undefined>>({});
+  const availabilityRequestFailedRef = useRef<Record<string, number>>({});
   // Anchor date for the grid window and handlers to shift the window
   const [anchorDate, setAnchorDate] = useState<Date>(new Date());
   const [windowSize, setWindowSize] = useState<number>(7);
@@ -85,16 +96,8 @@ function App() {
   const [prefillRoomId, setPrefillRoomId] = useState<number | null>(null);
   const [bookingType, setBookingType] = useState<'walkin' | 'ota'>('walkin');
   const [guestSegment, setGuestSegment] = useState<'Reguler' | 'Group' | 'Corporate'>('Reguler');
-  const [discountType, setDiscountType] = useState<'nominal' | 'percent'>('nominal');
-  const [discountValue, setDiscountValue] = useState<string>('');
-  const [amountPaid, setAmountPaid] = useState<string>('');
-  const [subtotalDraft, setSubtotalDraft] = useState<number>(0);
   const [ktpFile, setKtpFile] = useState<File | null>(null);
   const [buktiBayarFile, setBuktiBayarFile] = useState<File | null>(null);
-  const billingSummary = useMemo(
-    () => computeBillingSummary(subtotalDraft, discountValue, discountType, amountPaid),
-    [subtotalDraft, discountValue, discountType, amountPaid]
-  );
   const days = useMemo(() => {
     if (isMonthView) {
       // build month days starting from anchorDate (which should be first of month)
@@ -123,10 +126,20 @@ function App() {
     });
   };
   const goToday = () => setAnchorDate(new Date());
+  const [reservationResizePreview, setReservationResizePreview] = useState<Record<string, string>>({});
+  const [reservationResizeState, setReservationResizeState] = useState<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
+  const reservationResizeRef = useRef<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
+  const reservationResizePreviewRef = useRef<Record<string, string>>({});
 
   // drag preview using setDragImage + cleanup element
   const handleDragStart = (e: any, r: any, fromRoomId: any) => {
     try {
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest && target.closest('.reservation-card-resize-handle')) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       e.dataTransfer.setData('reservation-id', String(r.id));
       e.dataTransfer.setData('from-room-id', String(fromRoomId));
       (e.currentTarget as any)?.classList?.add('dragging');
@@ -157,6 +170,55 @@ function App() {
     } catch (err) { }
   };
 
+  const handleReservationResizeMouseDown = (event: any, reservation: any) => {
+    const status = String(reservation?.status || '').toUpperCase();
+    if (!reservation || (status !== 'BOOKED' && status !== 'CHECKED_IN')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'none';
+      event.dataTransfer.dropEffect = 'none';
+    }
+
+    const startCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : localDateISO(new Date());
+    const resizeState = {
+      reservationId: Number(reservation.id),
+      startX: event.clientX,
+      startCheckOut,
+      pointerId: event.pointerId
+    };
+    reservationResizeRef.current = resizeState;
+    reservationResizePreviewRef.current = {
+      ...reservationResizePreviewRef.current,
+      [String(reservation.id)]: startCheckOut
+    };
+    setReservationResizeState(resizeState);
+    setReservationResizePreview(reservationResizePreviewRef.current);
+
+    console.log('RESIZE_DOWN', {
+      reservationId: Number(reservation.id),
+      originalCheckOut: startCheckOut,
+      checkIn: reservation.check_in ? localDateISO(reservation.check_in) : null,
+      pointerId: event.pointerId,
+      clientX: event.clientX
+    });
+
+    if (event.currentTarget && typeof event.currentTarget.setPointerCapture === 'function') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      console.log('RESIZE_CAPTURE_SET', { pointerId: event.pointerId, reservationId: Number(reservation.id) });
+    }
+  };
+
+  const displayedReservations = useMemo(() => {
+    const previewMap = reservationResizePreviewRef.current;
+
+    return reservations.map((reservation) => {
+      const previewCheckOut = previewMap[String(reservation.id)] ?? reservationResizePreview[String(reservation.id)];
+      if (!previewCheckOut) return reservation;
+      return { ...reservation, check_out: previewCheckOut };
+    });
+  }, [reservationResizePreview, reservations]);
+
   const reservationSpans = useMemo(() => {
     const map: Record<string, Array<any>> = {};
 
@@ -177,7 +239,7 @@ function App() {
       return { startIndex: visibleStart, span };
     };
 
-    for (const r of reservations) {
+    for (const r of displayedReservations) {
       const status = String(r?.status || '').toUpperCase();
       if (status === 'CHECKED_OUT' || status === 'CANCELLED') continue;
 
@@ -205,7 +267,7 @@ function App() {
       map[k] = merged;
     }
     return map;
-  }, [reservations, days]);
+  }, [displayedReservations, days]);
 
   // calendar helpers: build a month grid (6 rows x 7 cols) starting Monday
   const monthMatrix = (year: number, month: number) => {
@@ -258,7 +320,13 @@ function App() {
           for (const r of data.rooms) {
             for (const c of r.cells) {
               for (const rv of c.reservations || []) {
-                flat.push({ ...rv, room_id: r.id, room_number: r.room_number });
+                flat.push({
+                  ...rv,
+                  room_id: r.id,
+                  room_number: r.room_number,
+                  room_name: r.name,
+                  room_status: r.status,
+                });
               }
             }
           }
@@ -281,6 +349,20 @@ function App() {
     if (value === 'OCCUPIED_CLEAN' || value === 'OCCUPIED_DIRTY' || value.includes('OCC')) return 'Occupied';
     if (value === 'VACANT_CLEAN' || value === 'INSPECTED') return 'Ready';
     return 'Ready';
+  };
+
+  const getRoomTypeName = (room: any) => String(room?.name || room?.room_type || 'Standard Room').trim() || 'Standard Room';
+
+  const dateRangesOverlap = (startA?: string, endA?: string, startB?: string, endB?: string) => {
+    if (!startA || !endA || !startB || !endB) return false;
+    const leftStart = new Date(`${startA}T00:00:00`).getTime();
+    const leftEnd = new Date(`${endA}T00:00:00`).getTime();
+    const rightStart = new Date(`${startB}T00:00:00`).getTime();
+    const rightEnd = new Date(`${endB}T00:00:00`).getTime();
+    if (!Number.isFinite(leftStart) || !Number.isFinite(leftEnd) || !Number.isFinite(rightStart) || !Number.isFinite(rightEnd)) {
+      return false;
+    }
+    return leftStart < rightEnd && leftEnd > rightStart;
   };
 
   // Isolated operational-date helper so it can be replaced by business date/Night Audit later.
@@ -319,6 +401,45 @@ function App() {
     if (normalized === 'PAID') return 'segment-corporate';
     if (normalized === 'PARTIAL') return 'segment-group';
     return 'segment-reguler';
+  };
+
+  const calendarSearchQuery = calendarSearch.trim().toLowerCase();
+
+  const getCalendarReservationIdentity = (reservation: any) => {
+    const bid = String(reservation?.bid || '').trim();
+    const stay = Number(reservation?.stay_sequence || 0);
+
+    if (bid && stay > 0) return `${bid} · R${String(stay).padStart(2, '0')}`;
+    if (bid) return bid;
+
+    const legacy = String(reservation?.booking_number || reservation?.legacy_booking_number || '').trim();
+    if (legacy) return legacy;
+
+    return `Reservasi #${reservation?.id ?? '-'}`;
+  };
+
+  const getCalendarReservationSearchText = (reservation: any) => {
+    return [
+      reservation?.bid,
+      reservation?.booking_number,
+      reservation?.legacy_booking_number,
+      reservation?.guest_name,
+      reservation?.guest_phone,
+      reservation?.room_number,
+      reservation?.room_name,
+      reservation?.stay_sequence ? `R${String(reservation.stay_sequence).padStart(2, '0')}` : '',
+    ].join(' ').toLowerCase();
+  };
+
+  const isCalendarReservationMatch = (reservation: any) => {
+    if (!calendarSearchQuery) return true;
+    return getCalendarReservationSearchText(reservation).includes(calendarSearchQuery);
+  };
+
+  const getCalendarReservationDensity = (span: number) => {
+    if (span >= 4) return 'wide';
+    if (span >= 3) return 'medium';
+    return 'compact';
   };
 
   const filteredReservations = useMemo(() => {
@@ -368,17 +489,32 @@ function App() {
     return list;
   }, [reservations, reservationFilter, reservationSearch, reservationDateFrom, reservationDateTo]);
 
+  const calendarSummary = useMemo(() => {
+    const reservationsInRange = reservations.filter(isCalendarReservationMatch);
+    const byStatus = (status: string) => reservationsInRange.filter((reservation) => String(reservation?.status || '').toUpperCase() === status).length;
+    const totalRooms = rooms.length;
+    const roomValues = Object.values(roomStatuses || {});
+
+    return {
+      totalReservations: reservationsInRange.length,
+      bookedReservations: reservationsInRange.filter((reservation) => {
+        const status = String(reservation?.status || '').toUpperCase();
+        return status !== 'CHECKED_IN' && status !== 'CHECKED_OUT' && status !== 'CANCELLED';
+      }).length,
+      checkedInReservations: byStatus('CHECKED_IN'),
+      checkedOutReservations: byStatus('CHECKED_OUT'),
+      dirtyRooms: roomValues.filter((status) => status === 'Kotor').length,
+      readyRooms: roomValues.filter((status) => status === 'Ready').length,
+      totalRooms,
+    };
+  }, [reservations, roomStatuses, rooms, calendarSearchQuery]);
+
   const openReservationEditor = (reservation: any) => {
     const checkIn = reservation.check_in ? reservation.check_in.split('T')[0] : '';
     const checkOut = reservation.check_out ? reservation.check_out.split('T')[0] : '';
 
-    setReservationEditId(Number(reservation.id));
     setBookingType(reservation.booking_type || 'walkin');
     setGuestSegment((reservation.guest_segment || 'Reguler') as 'Reguler' | 'Group' | 'Corporate');
-    setDiscountType(Number(reservation.discount_percent || 0) > 0 ? 'percent' : 'nominal');
-    setDiscountValue(String(Number(reservation.discount_percent || reservation.discount_amount || 0)));
-    setAmountPaid(String(Number(reservation.amount_paid || 0)));
-    setSubtotalDraft(Number(reservation.subtotal_amount || reservation.total_price || 0));
     setPrefillRoomId(Number(reservation.room_id));
     setSelectedRange({ start: checkIn, end: checkOut });
     setQuickBooking({
@@ -423,27 +559,6 @@ function App() {
     }
   };
 
-  function computeBillingSummary(subtotal: number, discountValue: string, discountType: 'nominal' | 'percent', paidAmount: string) {
-    const subtotalNumber = Number(subtotal || 0);
-    const discountNumeric = Number(discountValue || 0);
-    const paidNumeric = Number(paidAmount || 0);
-    const discount = discountType === 'percent'
-      ? subtotalNumber * (discountNumeric / 100)
-      : discountNumeric;
-    const total = Math.max(subtotalNumber - discount, 0);
-    const remaining = Math.max(total - paidNumeric, 0);
-    const paymentStatus = paidNumeric <= 0 ? 'UNPAID' : remaining <= 0.01 ? 'PAID' : 'PARTIAL';
-
-    return {
-      subtotal: subtotalNumber,
-      discount: Math.min(Math.max(discount, 0), subtotalNumber),
-      total,
-      paid: paidNumeric,
-      remaining,
-      paymentStatus,
-    };
-  }
-
   const getReservationCardStyle = (reservation: any) => {
     const status = String(reservation?.status || '').toUpperCase();
     const paymentStatus = String(reservation?.payment_status || '').toUpperCase();
@@ -453,7 +568,7 @@ function App() {
         cardClass: 'res-checkedin',
         badge: 'CI',
         badgeClass: 'badge ci',
-        paymentLabel: paymentStatus === 'LUNAS' ? '(LUNAS)' : paymentStatus === 'DP' ? '(DP)' : '',
+        paymentLabel: paymentStatus === 'PAID' ? '(LUNAS)' : paymentStatus === 'PARTIAL' ? '(DP)' : '',
         segmentMeta: getGuestSegmentMeta(reservation?.guest_segment),
       };
     }
@@ -472,7 +587,7 @@ function App() {
       cardClass: 'res-booked',
       badge: 'BO',
       badgeClass: 'badge bo',
-      paymentLabel: paymentStatus === 'LUNAS' ? '(LUNAS)' : paymentStatus === 'DP' ? '(DP)' : '',
+      paymentLabel: paymentStatus === 'PAID' ? '(LUNAS)' : paymentStatus === 'PARTIAL' ? '(DP)' : '',
       segmentMeta: getGuestSegmentMeta(reservation?.guest_segment),
     };
   };
@@ -497,7 +612,13 @@ function App() {
           for (const r of data.rooms) {
             for (const c of r.cells) {
               for (const rv of c.reservations || []) {
-                flat.push({ ...rv, room_id: r.id, room_number: r.room_number });
+                flat.push({
+                  ...rv,
+                  room_id: r.id,
+                  room_number: r.room_number,
+                  room_name: r.name,
+                  room_status: r.status,
+                });
               }
             }
           }
@@ -586,108 +707,6 @@ function App() {
     } catch (error) {
       console.error('Create POS order failed', error);
       alert(`Gagal buat POS order: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
-
-  const createReservation = async (payload: any, files?: { ktp?: File | null; buktiBayar?: File | null }) => {
-    try {
-      if (reservationEditId) {
-        const response = await fetch(`/api/reservations/${reservationEditId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...payload,
-            room_id: payload.room_id,
-            guest_name: payload.guest_name,
-            guest_phone: payload.guest_phone,
-            guest_segment: payload.guest_segment,
-            check_in: payload.check_in,
-            check_out: payload.check_out,
-            subtotal_amount: payload.subtotal_amount,
-            total_price: payload.total_price,
-            discount_amount: payload.discount_amount,
-            discount_percent: payload.discount_percent,
-            amount_paid: payload.amount_paid,
-            remaining_balance: payload.remaining_balance,
-            payment_status: payload.payment_status,
-            room_variant: quickBooking.roomVariant,
-            status: payload.status || 'CONFIRMED'
-          })
-        });
-
-        const result = await response.json();
-        if (!response.ok) {
-          throw new Error(result.message || 'Failed to update reservation');
-        }
-
-        const updatedReservation = result.data;
-        setReservations((prev) => prev.map((reservation) =>
-          Number(reservation.id) === reservationEditId ? { ...reservation, ...updatedReservation } : reservation
-        ));
-
-        if (selectedRes && Number(selectedRes.id) === reservationEditId) {
-          setSelectedRes({ ...selectedRes, ...updatedReservation });
-        }
-
-        fetchData();
-        setCreateResOpen(false);
-        setSelectedRange({});
-        setDiscountType('nominal');
-        setDiscountValue('');
-        setAmountPaid('');
-        setSubtotalDraft(0);
-        setKtpFile(null);
-        setBuktiBayarFile(null);
-        setReservationEditId(null);
-        resetQuickBookingForm();
-        alert('Reservasi berhasil diperbarui');
-        return;
-      }
-
-      const hasFiles = Boolean(files?.ktp || files?.buktiBayar);
-      let res: Response;
-      let data: any;
-
-      if (hasFiles) {
-        const formData = new FormData();
-        Object.entries(payload).forEach(([key, value]) => {
-          if (value === undefined || value === null || value === '') return;
-          formData.append(key, String(value));
-        });
-        if (files?.ktp) formData.append('ktp_file', files.ktp);
-        if (files?.buktiBayar) formData.append('bukti_bayar_file', files.buktiBayar);
-
-        res = await fetch('/api/reservations/upload', {
-          method: 'POST',
-          body: formData
-        });
-        data = await res.json();
-      } else {
-        res = await fetch('/api/reservations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        data = await res.json();
-      }
-
-      if (!res.ok) throw new Error(data.message || 'Failed to create reservation');
-      fetchData();
-      fetchOperationsData();
-      setCreateResOpen(false);
-      setSelectedRange({});
-      setDiscountType('nominal');
-      setDiscountValue('');
-      setAmountPaid('');
-      setSubtotalDraft(0);
-      setKtpFile(null);
-      setBuktiBayarFile(null);
-      setReservationEditId(null);
-      resetQuickBookingForm();
-      alert('Reservasi berhasil dibuat');
-    } catch (err) {
-      console.error('Create reservation failed', err);
-      alert('Gagal membuat reservasi: ' + (err instanceof Error ? err.message : 'Unknown'));
     }
   };
 
@@ -862,6 +881,56 @@ function App() {
   }, [selectedRes?.id, selectedRes?.room_id]);
 
   useEffect(() => {
+    const bid = String(selectedRes?.bid || '').trim();
+    if (!bid) {
+      setSelectedBooking(null);
+      setSelectedBookingChildren([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const fetchBookingDetail = async () => {
+      try {
+        const [bookingRes, reservationsRes] = await Promise.all([
+          fetch(`/api/bookings/${encodeURIComponent(bid)}`),
+          fetch(`/api/bookings/${encodeURIComponent(bid)}/reservations`),
+        ]);
+
+        const bookingData = await bookingRes.json();
+        const reservationsData = await reservationsRes.json();
+
+        if (cancelled) return;
+        if (!bookingRes.ok) {
+          throw new Error(bookingData.message || 'Failed to load booking details');
+        }
+
+        setSelectedBooking(bookingData.data || bookingData);
+        setSelectedBookingChildren(
+          Array.isArray(reservationsData.data)
+            ? reservationsData.data
+            : Array.isArray(reservationsData)
+              ? reservationsData
+              : []
+        );
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Booking detail fetch failed', error);
+          setSelectedBooking(null);
+          setSelectedBookingChildren([]);
+        }
+      }
+    };
+
+    fetchBookingDetail();
+    setBidCopyState({ kind: 'idle', message: '' });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRes?.bid]);
+
+  useEffect(() => {
     fetchData();
     fetchOperationsData();
 
@@ -988,6 +1057,91 @@ function App() {
     }
   };
 
+  const makeBookingChild = (overrides: Partial<any> = {}) => {
+    const defaultStart = overrides.check_in || quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate);
+    const defaultEnd = overrides.check_out || quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
+
+    return {
+      id: overrides.id || `booking-child-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      room_id: overrides.room_id ?? quickBooking.roomId ?? prefillRoomId ?? null,
+      check_in: defaultStart,
+      check_out: defaultEnd,
+      guest_name: overrides.guest_name ?? quickBooking.guestName ?? '',
+      guest_phone: overrides.guest_phone ?? quickBooking.guestPhone ?? '',
+      guest_segment: overrides.guest_segment ?? guestSegment,
+      booking_type: overrides.booking_type ?? bookingType,
+      room_variant: overrides.room_variant ?? quickBooking.roomVariant,
+      subtotal_amount: overrides.subtotal_amount ?? 0,
+      total_price: overrides.total_price ?? overrides.subtotal_amount ?? 0,
+      discount_amount: overrides.discount_amount ?? 0,
+      discount_percent: overrides.discount_percent ?? 0,
+      discount_type: overrides.discount_type ?? 'nominal',
+      amount_paid: overrides.amount_paid ?? 0,
+      payment_status: overrides.payment_status ?? 'UNPAID',
+      property_id: overrides.property_id ?? null,
+    };
+  };
+
+  const getAvailabilityKey = (child: any) => {
+    const roomType = String(child?.room_variant || child?.room_type || '').trim();
+    const checkIn = String(child?.check_in || '').trim();
+    const checkOut = String(child?.check_out || '').trim();
+    if (!roomType || !checkIn || !checkOut) return '';
+    return `${roomType}|${checkIn}|${checkOut}`;
+  };
+
+  const getFilteredAvailabilityRooms = (rows: any[], key: string, child: any) => {
+    const [roomType, checkIn, checkOut] = String(key || '').split('|');
+    if (!roomType || !checkIn || !checkOut) {
+      return [] as any[];
+    }
+
+    const hasCapacity = Array.isArray(rows) && rows.length > 0 && rows.every((row: any) => Number(row?.sellable ?? 0) > 0);
+    if (!hasCapacity) {
+      return [] as any[];
+    }
+
+    return rooms.filter((room: any) => {
+      if (getRoomTypeName(room) !== roomType) {
+        return false;
+      }
+
+      const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
+      if (status === 'Maintenance' || status === 'Kotor') {
+        return false;
+      }
+
+      const roomId = Number(room.id);
+      const hasExistingReservationConflict = reservations.some((reservation: any) => {
+        if (Number(reservation?.room_id) !== roomId) return false;
+        const bookingStatus = String(reservation?.status || '').toUpperCase();
+        if (!['BOOKED', 'CHECKED_IN'].includes(bookingStatus)) return false;
+        return dateRangesOverlap(
+          String(reservation?.check_in || ''),
+          String(reservation?.check_out || ''),
+          checkIn,
+          checkOut
+        );
+      });
+      if (hasExistingReservationConflict) {
+        return false;
+      }
+
+      const hasSameBookingConflict = bookingComposerChildren.some((otherChild: any) => {
+        if (!otherChild || otherChild.id === child?.id) return false;
+        if (otherChild.room_id == null) return false;
+        if (Number(otherChild.room_id) !== roomId) return false;
+        return dateRangesOverlap(
+          String(otherChild.check_in || ''),
+          String(otherChild.check_out || ''),
+          checkIn,
+          checkOut
+        );
+      });
+      return !hasSameBookingConflict;
+    });
+  };
+
   const resetQuickBookingForm = () => {
     setQuickBooking({
       guestName: '',
@@ -997,17 +1151,407 @@ function App() {
       checkOut: '',
       roomVariant: 'Deluxe King'
     });
+    setBookingComposerChildren([]);
+    setChildRoomAvailability({});
+    setAvailabilityCache({});
+    setBookingAvailabilityState({});
+    availabilityRequestVersionRef.current = {};
+    availabilityRequestPromiseRef.current = {};
+    availabilityRequestFailedRef.current = {};
+  };
+
+  useEffect(() => {
+    if (!createResOpen) {
+      setAvailabilityCache({});
+      setChildRoomAvailability({});
+      setBookingAvailabilityState({});
+      availabilityRequestVersionRef.current = {};
+      availabilityRequestPromiseRef.current = {};
+      availabilityRequestFailedRef.current = {};
+      return;
+    }
+
+    setAvailabilityCache({});
+    setChildRoomAvailability({});
+    setBookingAvailabilityState({});
+    availabilityRequestVersionRef.current = {};
+    availabilityRequestPromiseRef.current = {};
+    availabilityRequestFailedRef.current = {};
+  }, [createResOpen]);
+
+  useEffect(() => {
+    const nextAvailability: Record<string, any[]> = {};
+    const nextState: Record<string, 'idle' | 'loading' | 'success' | 'empty' | 'error'> = {};
+
+    const applyAvailabilityResultForKey = (key: string, rows: any[], terminalState: 'success' | 'empty' | 'error') => {
+      const resultRows = Array.isArray(rows) ? rows : [];
+      const availableRoomSet = new Set(
+        getFilteredRoomsForKey(resultRows, key).map((room: any) => Number(room.id))
+      );
+
+      setChildRoomAvailability((prev) => {
+        const next = { ...prev };
+        for (const child of bookingComposerChildren) {
+          const childId = String(child?.id ?? '');
+          if (!childId || getAvailabilityKey(child) !== key) continue;
+          next[childId] = Array.from(availableRoomSet).length
+            ? rooms.filter((room: any) => availableRoomSet.has(Number(room.id)))
+            : [];
+        }
+        return next;
+      });
+
+      setBookingAvailabilityState((prev) => {
+        const next = { ...prev };
+        for (const child of bookingComposerChildren) {
+          const childId = String(child?.id ?? '');
+          if (!childId || getAvailabilityKey(child) !== key) continue;
+          next[childId] = terminalState;
+        }
+        return next;
+      });
+
+      setBookingComposerChildren((prev) => {
+        let changed = false;
+        const updated = prev.map((child: any) => {
+          if (String(child?.id ?? '') && getAvailabilityKey(child) === key && child.room_id != null) {
+            const roomId = Number(child.room_id);
+            const hasRoom = availableRoomSet.has(roomId);
+            if (!hasRoom && terminalState !== 'error') {
+              changed = true;
+              return { ...child, room_id: null };
+            }
+          }
+          return child;
+        });
+        return changed ? updated : prev;
+      });
+    };
+
+    const getFilteredRoomsForKey = (rows: any[], key: string) => {
+      const [roomType, checkIn, checkOut] = String(key || '').split('|');
+      if (!roomType || !checkIn || !checkOut) {
+        return [] as any[];
+      }
+
+      const hasCapacity = Array.isArray(rows) && rows.length > 0 && rows.every((row: any) => Number(row?.sellable ?? 0) > 0);
+      if (!hasCapacity) {
+        return [] as any[];
+      }
+
+      return rooms.filter((room: any) => {
+        if (getRoomTypeName(room) !== roomType) {
+          return false;
+        }
+
+        const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
+        if (status === 'Maintenance' || status === 'Kotor') {
+          return false;
+        }
+
+        const roomId = Number(room.id);
+        const hasExistingReservationConflict = reservations.some((reservation: any) => {
+          if (Number(reservation?.room_id) !== roomId) return false;
+          const bookingStatus = String(reservation?.status || '').toUpperCase();
+          if (!['BOOKED', 'CHECKED_IN'].includes(bookingStatus)) return false;
+          return dateRangesOverlap(
+            String(reservation?.check_in || ''),
+            String(reservation?.check_out || ''),
+            checkIn,
+            checkOut
+          );
+        });
+        if (hasExistingReservationConflict) {
+          return false;
+        }
+
+        const hasSameBookingConflict = bookingComposerChildren.some((otherChild: any) => {
+          if (!otherChild || otherChild.room_id == null) return false;
+          if (Number(otherChild.room_id) !== roomId) return false;
+          return dateRangesOverlap(
+            String(otherChild.check_in || ''),
+            String(otherChild.check_out || ''),
+            checkIn,
+            checkOut
+          );
+        });
+        return !hasSameBookingConflict;
+      });
+    };
+
+    const fetchAvailabilityRows = async (key: string, roomType: string, checkIn: string, checkOut: string, version: number) => {
+      console.log('AVAIL_FETCH_START', { key, roomType, checkIn, checkOut, version });
+      try {
+        const response = await fetch(`/api/availability?room_type=${encodeURIComponent(roomType)}&start=${checkIn}&end=${checkOut}`);
+        if (!response.ok) {
+          throw new Error(`availability request failed for ${key}`);
+        }
+
+        const payload = await response.json().catch(() => ({}));
+        const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+        if (availabilityRequestVersionRef.current[key] !== version) {
+          console.log('AVAIL_FETCH_STALE', { key, requestVersion: version, currentVersion: availabilityRequestVersionRef.current[key] || 0, resultCount: rows.length });
+          return;
+        }
+
+        console.log(rows.length > 0 ? 'AVAIL_FETCH_SUCCESS' : 'AVAIL_FETCH_EMPTY', {
+          key,
+          version,
+          resultCount: rows.length
+        });
+        delete availabilityRequestFailedRef.current[key];
+        delete availabilityRequestPromiseRef.current[key];
+        setBookingAvailabilityState((prev) => {
+          const next = { ...prev };
+          for (const child of bookingComposerChildren) {
+            const childId = String(child?.id ?? '');
+            if (!childId) continue;
+            if (getAvailabilityKey(child) === key) {
+              next[childId] = rows.length > 0 ? 'success' : 'empty';
+            }
+          }
+          return next;
+        });
+        setAvailabilityCache((prev) => {
+          if (prev[key] === rows) {
+            return prev;
+          }
+          return { ...prev, [key]: rows };
+        });
+        setChildRoomAvailability((prev) => {
+          const next = { ...prev };
+          for (const child of bookingComposerChildren) {
+            const childId = String(child?.id ?? '');
+            if (!childId || getAvailabilityKey(child) !== key) continue;
+            next[childId] = getFilteredRoomsForKey(rows, key);
+          }
+          return next;
+        });
+        applyAvailabilityResultForKey(key, rows, rows.length > 0 ? 'success' : 'empty');
+      } catch (error) {
+        if (availabilityRequestVersionRef.current[key] !== version) {
+          console.log('AVAIL_FETCH_STALE', { key, requestVersion: version, currentVersion: availabilityRequestVersionRef.current[key] || 0, resultCount: 0 });
+          return;
+        }
+
+        console.log('AVAIL_FETCH_ERROR', { key, version, error: error instanceof Error ? error.message : String(error) });
+        availabilityRequestFailedRef.current[key] = version;
+        delete availabilityRequestPromiseRef.current[key];
+        setBookingAvailabilityState((prev) => {
+          const next = { ...prev };
+          for (const child of bookingComposerChildren) {
+            const childId = String(child?.id ?? '');
+            if (!childId) continue;
+            if (getAvailabilityKey(child) === key) {
+              next[childId] = 'error';
+            }
+          }
+          return next;
+        });
+        applyAvailabilityResultForKey(key, [], 'error');
+        console.error('Availability fetch failed', error);
+      } finally {
+        console.log('AVAIL_FETCH_FINALLY', { key, version });
+        if (availabilityRequestVersionRef.current[key] === version) {
+          delete availabilityRequestPromiseRef.current[key];
+        }
+      }
+    };
+
+    const canUseCachedRows = (key: string) => Object.prototype.hasOwnProperty.call(availabilityCache, key);
+
+    const getFilteredRoomsForChild = (child: any, cachedRows: any[]) => {
+      const checkIn = String(child?.check_in || '').trim();
+      const checkOut = String(child?.check_out || '').trim();
+      const roomType = String(child?.room_variant || child?.room_type || '').trim();
+
+      const hasCapacity = Array.isArray(cachedRows) && cachedRows.length > 0 && cachedRows.every((row: any) => Number(row?.sellable ?? 0) > 0);
+      if (!hasCapacity || !roomType || !checkIn || !checkOut) {
+        return [];
+      }
+
+      const roomTypeIdByName = new Map<string, number | null>();
+      rooms.forEach((room: any) => {
+        const key = getRoomTypeName(room);
+        if (!roomTypeIdByName.has(key)) {
+          roomTypeIdByName.set(key, room?.room_type_id ?? null);
+        }
+      });
+
+      return rooms.filter((room: any) => {
+        const roomId = Number(room.id);
+        const roomNumber = String(room.room_number || roomId);
+        const roomTypeId = room?.room_type_id ?? roomTypeIdByName.get(getRoomTypeName(room)) ?? null;
+        const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
+        const statusSellable = operationalStatus !== 'Maintenance' && operationalStatus !== 'Kotor';
+        const roomTypeMatches = getRoomTypeName(room) === roomType;
+        const hasExistingReservationConflict = reservations.some((reservation: any) => {
+          if (Number(reservation?.room_id) !== roomId) return false;
+          const bookingStatus = String(reservation?.status || '').toUpperCase();
+          if (!['BOOKED', 'CHECKED_IN'].includes(bookingStatus)) return false;
+          return dateRangesOverlap(
+            String(reservation?.check_in || ''),
+            String(reservation?.check_out || ''),
+            checkIn,
+            checkOut
+          );
+        });
+        const siblingConflict = bookingComposerChildren.some((otherChild: any) => {
+          if (!otherChild || otherChild.id === child.id) return false;
+          if (otherChild.room_id == null) return false;
+          if (Number(otherChild.room_id) !== roomId) return false;
+          return dateRangesOverlap(
+            String(otherChild.check_in || ''),
+            String(otherChild.check_out || ''),
+            checkIn,
+            checkOut
+          );
+        });
+
+        const capacityAvailable = hasCapacity;
+        const eligible = roomTypeMatches && statusSellable && !hasExistingReservationConflict && !siblingConflict && capacityAvailable;
+        const exclusionReason = !roomTypeMatches
+          ? 'ROOM_TYPE_MISMATCH'
+          : !statusSellable
+            ? 'OPERATIONAL_STATUS'
+            : hasExistingReservationConflict
+              ? 'ACTIVE_OVERLAP'
+              : siblingConflict
+                ? 'SIBLING_CONFLICT'
+                : capacityAvailable
+                  ? ''
+                  : 'NO_CAPACITY';
+
+        console.log('AVAILABLE_ROOM_CANDIDATE_DEBUG', {
+          roomId,
+          roomNumber,
+          roomTypeId,
+          roomTypeName: getRoomTypeName(room),
+          roomStatus: operationalStatus,
+          activeOverlap: Boolean(hasExistingReservationConflict),
+          capacityAvailable,
+          siblingConflict,
+          eligible,
+          exclusionReason
+        });
+
+        return eligible;
+      });
+    };
+
+    for (const child of bookingComposerChildren) {
+      const childId = String(child?.id ?? '');
+      if (!childId) {
+        continue;
+      }
+
+      const key = getAvailabilityKey(child);
+      if (!key) {
+        nextAvailability[childId] = [];
+        nextState[childId] = 'idle';
+        continue;
+      }
+
+      const cachedRows = availabilityCache[key];
+      if (canUseCachedRows(key)) {
+        const availableRooms = getFilteredRoomsForChild(child, cachedRows || []);
+        nextAvailability[childId] = availableRooms;
+        nextState[childId] = availableRooms.length > 0 ? 'success' : 'empty';
+        continue;
+      }
+
+      if (availabilityRequestFailedRef.current[key]) {
+        nextAvailability[childId] = [];
+        nextState[childId] = 'error';
+        continue;
+      }
+
+      if (!availabilityRequestPromiseRef.current[key]) {
+        const version = (availabilityRequestVersionRef.current[key] ?? 0) + 1;
+        availabilityRequestVersionRef.current[key] = version;
+        const parts = key.split('|');
+        const roomType = parts[0] || '';
+        const checkIn = parts[1] || '';
+        const checkOut = parts[2] || '';
+        availabilityRequestPromiseRef.current[key] = fetchAvailabilityRows(key, roomType, checkIn, checkOut, version);
+      }
+
+      nextAvailability[childId] = [];
+      nextState[childId] = 'loading';
+    }
+
+    setChildRoomAvailability((prev) => ({ ...prev, ...nextAvailability }));
+    setBookingAvailabilityState((prev) => ({ ...prev, ...nextState }));
+    setBookingComposerChildren((prev) => {
+      let changed = false;
+      const updated = prev.map((child: any) => {
+        const childId = String(child?.id ?? '');
+        if (!childId) return child;
+        const availableIds = new Set((nextAvailability[childId] || []).map((room: any) => Number(room.id)));
+        const childState = nextState[childId];
+        if ((childState === 'success' || childState === 'empty') && child.room_id != null && !availableIds.has(Number(child.room_id))) {
+          changed = true;
+          return { ...child, room_id: null };
+        }
+        return child;
+      });
+      return changed ? updated : prev;
+    });
+  }, [availabilityCache, bookingComposerChildren, reservations, roomStatuses, rooms]);
+
+  const updateBookingChild = (childId: string, updates: Partial<any>) => {
+    setBookingComposerChildren((prev) => prev.map((child) => child.id === childId ? { ...child, ...updates } : child));
+  };
+
+  const addBookingChild = () => {
+    const baseChild = bookingComposerChildren[0] || {
+      check_in: quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate),
+      check_out: quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1))),
+      room_id: quickBooking.roomId ?? prefillRoomId ?? null,
+    };
+    const nextStart = baseChild.check_in || quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate);
+    const nextEnd = baseChild.check_out || quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
+
+    setBookingComposerChildren((prev) => [
+      ...prev,
+      makeBookingChild({
+        room_id: baseChild.room_id ?? quickBooking.roomId ?? prefillRoomId ?? null,
+        check_in: nextStart,
+        check_out: nextEnd,
+        total_price: 0,
+        subtotal_amount: 0,
+        discount_amount: 0,
+        discount_percent: 0,
+        amount_paid: 0,
+        payment_status: 'UNPAID',
+      })
+    ]);
+  };
+
+  const removeBookingChild = (childId: string) => {
+    setBookingComposerChildren((prev) => prev.length > 1 ? prev.filter((child) => child.id !== childId) : prev);
   };
 
   const openQuickBooking = (roomId: number, startDate?: string, endDate?: string) => {
     const defaultStart = startDate || localDateISO(anchorDate);
     const defaultEnd = endDate || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
+    const initialChild = makeBookingChild({
+      room_id: roomId,
+      check_in: defaultStart,
+      check_out: defaultEnd,
+      guest_name: '',
+      guest_phone: '',
+      room_variant: 'Deluxe King',
+      subtotal_amount: 0,
+      total_price: 0,
+      discount_amount: 0,
+      discount_percent: 0,
+      amount_paid: 0,
+      payment_status: 'UNPAID',
+    });
     setBookingType('walkin');
     setGuestSegment('Reguler');
-    setDiscountType('nominal');
-    setDiscountValue('');
-    setAmountPaid('');
-    setSubtotalDraft(0);
     setKtpFile(null);
     setBuktiBayarFile(null);
     setPrefillRoomId(roomId);
@@ -1020,6 +1564,7 @@ function App() {
       checkOut: defaultEnd,
       roomVariant: 'Deluxe King'
     });
+    setBookingComposerChildren([initialChild]);
     setCreateResOpen(true);
   };
 
@@ -1042,6 +1587,358 @@ function App() {
       </button>
     );
   };
+
+  const activeReservationStatus = String(selectedRes?.status || '').toUpperCase();
+  const activeStayStatus = String(selectedRes?.stay_status || '').toUpperCase();
+  const activeBookingStatus = String(selectedBooking?.booking_status || selectedBooking?.status || '').toUpperCase();
+  const activePaymentStatus = getPaymentStatusLabel(selectedRes?.payment_status);
+  const bookingChildren = [...selectedBookingChildren].sort((a, b) => Number(a?.stay_sequence || 0) - Number(b?.stay_sequence || 0));
+  const selectedStayLabel = selectedRes?.stay_sequence ? `R${String(selectedRes.stay_sequence).padStart(2, '0')}` : 'R01';
+  const selectedRoomLabel = selectedRes?.room_number || selectedRes?.room_id || '—';
+  const selectedRoomTypeLabel = selectedRes?.room_variant || selectedBooking?.room_type || selectedBooking?.room_variant || '—';
+  const selectedBookingIdentity = selectedRes?.bid || selectedBooking?.bid || selectedRes?.booking_number || `#${selectedRes?.id ?? '-'}`;
+  const selectedBookingLegacy = selectedRes?.booking_number || selectedBooking?.booking_number || '';
+  const selectedBookingSource = selectedBooking?.booking_source || selectedRes?.booking_source || '';
+  const selectedBookingChannel = selectedBooking?.channel || selectedRes?.channel || '';
+  const [stayChangeState, setStayChangeState] = useState<{ open: boolean; type: 'extend' | 'shorten'; reservationId: number | null; newCheckOut: string }>({
+    open: false,
+    type: 'extend',
+    reservationId: null,
+    newCheckOut: ''
+  });
+  const stayChangeReservation = useMemo(
+    () => reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes,
+    [reservations, stayChangeState.reservationId, selectedRes]
+  );
+  const selectedNights = Math.max(
+    1,
+    Math.floor(
+      (new Date(selectedRes?.check_out || selectedRes?.check_in || Date.now()).getTime() - new Date(selectedRes?.check_in || selectedRes?.check_out || Date.now()).getTime()) / (24 * 60 * 60 * 1000)
+    )
+  ) || 1;
+  const stayChangeNightsDelta = (() => {
+    if (!stayChangeState.open || !stayChangeState.reservationId) return 0;
+    const reservation = reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes;
+    if (!reservation) return 0;
+    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : '';
+    const nextCheckOut = stayChangeState.newCheckOut;
+    if (!currentCheckOut || !nextCheckOut) return 0;
+    const currentMs = new Date(`${currentCheckOut}T00:00:00`).getTime();
+    const nextMs = new Date(`${nextCheckOut}T00:00:00`).getTime();
+    return Math.round((nextMs - currentMs) / (24 * 60 * 60 * 1000));
+  })();
+  const canCheckIn = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
+  const canCheckOut = activeReservationStatus === 'CHECKED_IN';
+  const canCancel = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
+  const canPay = activeReservationStatus !== 'CANCELLED';
+  const canExtend = activeReservationStatus === 'BOOKED' || activeReservationStatus === 'CHECKED_IN';
+  const canShorten = activeReservationStatus === 'BOOKED';
+
+  const addDaysToIso = (value: string | Date | undefined, delta: number) => {
+    if (!value) return '';
+    const base = value instanceof Date ? new Date(value) : new Date(value);
+    if (Number.isNaN(base.getTime())) return '';
+    base.setDate(base.getDate() + delta);
+    return localDateISO(base);
+  };
+
+  const validateStayChangeCandidate = (reservation: any, requestedCheckOut: string) => {
+    const currentCheckIn = reservation.check_in ? localDateISO(reservation.check_in) : '';
+    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : '';
+    const requestedDate = new Date(`${requestedCheckOut}T00:00:00`);
+
+    if (!requestedCheckOut) {
+      return { valid: false, reason: 'Tanggal check-out baru wajib diisi.' };
+    }
+    if (Number.isNaN(requestedDate.getTime())) {
+      return { valid: false, reason: 'Tanggal check-out baru tidak valid.' };
+    }
+    if (currentCheckOut && requestedCheckOut === currentCheckOut) {
+      return { valid: false, reason: 'Tanggal check-out baru tidak berubah.' };
+    }
+    if (currentCheckIn && requestedDate.getTime() <= new Date(`${currentCheckIn}T00:00:00`).getTime()) {
+      return { valid: false, reason: 'Check-out baru harus setelah check-in.' };
+    }
+
+    return { valid: true, reason: '' };
+  };
+
+  const openStayChangePrompt = (type: 'extend' | 'shorten', reservationId: number, overrideNewCheckOut?: string) => {
+    const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
+    if (!reservation) {
+      console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'reservation missing before confirmation', reservationId, type });
+      return;
+    }
+
+    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : localDateISO(new Date());
+    const suggestedCheckOut = type === 'extend' ? addDaysToIso(currentCheckOut, 1) : addDaysToIso(currentCheckOut, -1);
+    const nextCheckOut = overrideNewCheckOut || suggestedCheckOut || currentCheckOut;
+
+    const validation = validateStayChangeCandidate(reservation, nextCheckOut);
+    if (!validation.valid) {
+      console.log('RESIZE_INVALID_DATE', {
+        reservationId,
+        type,
+        requestedCheckOut: nextCheckOut,
+        originalCheckOut: currentCheckOut,
+        reason: validation.reason
+      });
+      setReservationResizePreview((prev) => {
+        const next = { ...prev };
+        delete next[String(reservationId)];
+        return next;
+      });
+      if (overrideNewCheckOut) {
+        alert(validation.reason);
+      }
+      return;
+    }
+
+    console.log('RESIZE_CONFIRM_OPEN', {
+      operation: type.toUpperCase(),
+      oldCheckOut: currentCheckOut,
+      newCheckOut: nextCheckOut,
+      reservationId
+    });
+
+    setStayChangeState({
+      open: true,
+      type,
+      reservationId,
+      newCheckOut: nextCheckOut
+    });
+  };
+
+  useEffect(() => {
+    if (!reservationResizeState) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const activeResize = reservationResizeRef.current;
+      if (!activeResize) {
+        console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'pointermove no active state', pointerId: event.pointerId });
+        return;
+      }
+
+      if (event.pointerId !== activeResize.pointerId) {
+        console.log('RESIZE_POINTER_MISMATCH', {
+          expectedPointerId: activeResize.pointerId,
+          actualPointerId: event.pointerId,
+          reservationId: activeResize.reservationId,
+          clientX: event.clientX
+        });
+        return;
+      }
+
+      const table = document.querySelector('.calendar-grid-shell table');
+      const sampleCell = table?.querySelector('tbody tr td');
+      const cellWidth = sampleCell ? sampleCell.getBoundingClientRect().width || 76 : 76;
+      const deltaDays = Math.round((event.clientX - activeResize.startX) / cellWidth);
+      const previewDate = new Date(`${activeResize.startCheckOut}T00:00:00`);
+      previewDate.setDate(previewDate.getDate() + deltaDays);
+      const nextCheckOut = localDateISO(previewDate);
+      reservationResizePreviewRef.current = {
+        ...reservationResizePreviewRef.current,
+        [String(activeResize.reservationId)]: nextCheckOut
+      };
+      setReservationResizePreview(reservationResizePreviewRef.current);
+
+      console.log('RESIZE_MOVE', {
+        pointerId: event.pointerId,
+        clientX: event.clientX,
+        deltaDays,
+        previewNewCheckOut: nextCheckOut
+      });
+    };
+
+    const finalizeResize = (event?: PointerEvent) => {
+      const activeResize = reservationResizeRef.current;
+      if (!activeResize) {
+        console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'finalize before active state', pointerId: event?.pointerId ?? null });
+        return;
+      }
+
+      if (event && event.pointerId !== activeResize.pointerId) {
+        console.log('RESIZE_POINTER_MISMATCH', {
+          expectedPointerId: activeResize.pointerId,
+          actualPointerId: event.pointerId,
+          reservationId: activeResize.reservationId,
+          phase: 'pointerup'
+        });
+        return;
+      }
+
+      const reservationId = activeResize.reservationId;
+      const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
+      const previewCheckOut = reservationResizePreviewRef.current[String(reservationId)] || activeResize.startCheckOut;
+      const previousCheckOut = reservation?.check_out ? localDateISO(reservation.check_out) : activeResize.startCheckOut;
+
+      console.log('RESIZE_UP', {
+        pointerId: event?.pointerId ?? activeResize.pointerId,
+        finalPreviewNewCheckOut: previewCheckOut,
+        originalCheckOut: previousCheckOut,
+        reservationId
+      });
+
+      reservationResizeRef.current = null;
+      setReservationResizeState(null);
+      const nextPreview = { ...reservationResizePreviewRef.current };
+      delete nextPreview[String(reservationId)];
+      reservationResizePreviewRef.current = nextPreview;
+      setReservationResizePreview(nextPreview);
+
+      if (reservation && previousCheckOut !== previewCheckOut) {
+        const validation = validateStayChangeCandidate(reservation, previewCheckOut);
+        if (!validation.valid) {
+          console.log('RESIZE_INVALID_DATE', {
+            reservationId,
+            previewNewCheckOut: previewCheckOut,
+            originalCheckOut: previousCheckOut,
+            reason: validation.reason
+          });
+          alert(validation.reason);
+          return;
+        }
+        if (String(reservation.status || '').toUpperCase() === 'CHECKED_IN' && new Date(`${previewCheckOut}T00:00:00`).getTime() < new Date(`${previousCheckOut}T00:00:00`).getTime()) {
+          alert('Masa inap tamu yang sudah check-in tidak dapat diperpendek melalui resize. Gunakan proses Early Checkout.');
+          return;
+        }
+        const type = new Date(`${previewCheckOut}T00:00:00`).getTime() > new Date(`${previousCheckOut}T00:00:00`).getTime() ? 'extend' : 'shorten';
+        openStayChangePrompt(type, reservationId, previewCheckOut);
+      } else if (reservation && previousCheckOut === previewCheckOut) {
+        console.log('RESIZE_NOOP', {
+          reservationId,
+          previousCheckOut,
+          previewCheckOut,
+          reason: 'same checkout value'
+        });
+      }
+    };
+
+    const handlePointerEnd = (event: PointerEvent) => finalizeResize(event);
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerEnd);
+    window.addEventListener('pointercancel', handlePointerEnd);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerEnd);
+      window.removeEventListener('pointercancel', handlePointerEnd);
+    };
+  }, [reservationResizeState, reservations, selectedRes, openStayChangePrompt]);
+
+  const closeStayChangePrompt = () => {
+    const reservationId = stayChangeState.reservationId;
+    reservationResizePreviewRef.current = {
+      ...reservationResizePreviewRef.current
+    };
+    if (reservationId) {
+      delete reservationResizePreviewRef.current[String(reservationId)];
+    }
+    setReservationResizePreview(reservationResizePreviewRef.current);
+    setStayChangeState({ open: false, type: 'extend', reservationId: null, newCheckOut: '' });
+  };
+
+  const confirmStayChange = async () => {
+    if (!stayChangeState.open || stayChangeState.reservationId === null) return;
+
+    const reservationId = stayChangeState.reservationId;
+    const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
+    if (!reservation) {
+      closeStayChangePrompt();
+      return;
+    }
+
+    const requestedCheckOut = stayChangeState.newCheckOut.trim();
+    const validation = validateStayChangeCandidate(reservation, requestedCheckOut);
+    if (!validation.valid) {
+      alert(validation.reason);
+      closeStayChangePrompt();
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_check_out: requestedCheckOut })
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data?.message || `Gagal ${stayChangeState.type === 'extend' ? 'memperpanjang' : 'memendekkan'} masa inap`);
+      }
+
+      await fetchData();
+      await fetchOperationsData();
+      if (selectedRes && Number(selectedRes.id) === reservationId) {
+        setSelectedRes((prev: any) => prev ? { ...prev, ...data?.data, check_out: data?.data?.check_out || prev.check_out } : prev);
+      }
+      if (reservationId) {
+        fetchReservationFolio(reservationId);
+        fetchReservationAudit(reservationId);
+      }
+
+      closeStayChangePrompt();
+      alert(stayChangeState.type === 'extend' ? 'Perpanjangan masa inap berhasil.' : 'Pemendekan masa inap berhasil.');
+    } catch (error) {
+      reservationResizePreviewRef.current = {
+        ...reservationResizePreviewRef.current
+      };
+      delete reservationResizePreviewRef.current[String(reservationId)];
+      setReservationResizePreview(reservationResizePreviewRef.current);
+      await fetchData();
+      await fetchOperationsData();
+      closeStayChangePrompt();
+      console.error(`${stayChangeState.type} stay failed`, error);
+      alert(`Gagal ${stayChangeState.type === 'extend' ? 'memperpanjang' : 'memendekkan'} masa inap: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const quickActionButtons = [
+    { key: 'checkin', label: 'Check In', enabled: canCheckIn, variant: 'success', onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin') },
+    { key: 'checkout', label: 'Checkout', enabled: canCheckOut, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
+    { key: 'extend', label: 'Extend', enabled: canExtend, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id)) },
+    { key: 'shorten', label: 'Shorten', enabled: canShorten, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id)) },
+    { key: 'cancel', label: 'Cancel', enabled: canCancel, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
+    { key: 'payment', label: 'Payment', enabled: canPay, variant: 'primary', onClick: () => handlePayment() }
+  ].filter((button) => button.enabled && Number.isFinite(Number(selectedRes?.id)));
+
+  const copyBookingBid = async () => {
+    const bid = String(selectedBooking?.bid || selectedRes?.bid || '').trim();
+    if (!bid) {
+      setBidCopyState({ kind: 'error', message: 'BID tidak tersedia' });
+      window.setTimeout(() => setBidCopyState({ kind: 'idle', message: '' }), 1800);
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        throw new Error('Clipboard tidak tersedia');
+      }
+      await navigator.clipboard.writeText(bid);
+      setBidCopyState({ kind: 'success', message: 'BID berhasil disalin' });
+      window.setTimeout(() => setBidCopyState({ kind: 'idle', message: '' }), 1800);
+    } catch (error) {
+      console.error('Copy BID failed', error);
+      setBidCopyState({ kind: 'error', message: 'Gagal menyalin BID' });
+      window.setTimeout(() => setBidCopyState({ kind: 'idle', message: '' }), 2200);
+    }
+  };
+
+  const bookingComposerTotals = bookingComposerChildren.reduce((summary, child) => {
+    const subtotal = Number(child.subtotal_amount || child.total_price || 0);
+    const paid = Number(child.amount_paid || 0);
+    const discount = Number(child.discount_amount || 0) + (Number(child.discount_percent || 0) > 0 ? subtotal * (Number(child.discount_percent || 0) / 100) : 0);
+    const total = Math.max(subtotal - discount, 0);
+    return {
+      subtotal: summary.subtotal + subtotal,
+      discount: summary.discount + Math.min(Math.max(discount, 0), subtotal),
+      paid: summary.paid + paid,
+      total: summary.total + total,
+      remaining: summary.remaining + Math.max(total - paid, 0),
+    };
+  }, { subtotal: 0, discount: 0, paid: 0, total: 0, remaining: 0 });
 
   return (
     <div className="hotel-app">
@@ -1096,11 +1993,24 @@ function App() {
 
           {selectedMenu === 'Kalender' && (
           <>
-            <div className="grid grid-cols-4 gap-4">
-              <StatCard title="Total Reservasi" value={`${reservations.length} (24%)`} color="bg-blue-600 text-white" />
-              <StatCard title="Reservasi" value={reservations.length.toString()} color="bg-blue-500 text-white" />
-              <StatCard title="Check In" value={reservations.filter(r => (r.status || '').toUpperCase() === 'CHECKED_IN').length.toString()} color="bg-green-500 text-white" />
-              <StatCard title="Check Out" value={reservations.filter(r => (r.status || '').toUpperCase() === 'CHECKED_OUT').length.toString()} color="bg-orange-500 text-white" />
+            <div className="space-y-3">
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.24em] text-blue-600 font-semibold">Operasional kalender</div>
+                  <h3 className="text-lg font-semibold text-gray-900">Ringkasan booking hari ini</h3>
+                </div>
+                <div className="text-xs text-gray-500">
+                  {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+                <StatCard title="Total Reservasi" value={String(calendarSummary.totalReservations)} color="hotel-stat-card--primary" />
+                <StatCard title="Booked" value={String(calendarSummary.bookedReservations)} color="hotel-stat-card--booked" />
+                <StatCard title="Check In" value={String(calendarSummary.checkedInReservations)} color="hotel-stat-card--checkedin" />
+                <StatCard title="Check Out" value={String(calendarSummary.checkedOutReservations)} color="hotel-stat-card--checkout" />
+                <StatCard title="Kamar Kotor" value={String(calendarSummary.dirtyRooms)} color="hotel-stat-card--dirty" />
+                <StatCard title="Kamar Ready" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -1146,12 +2056,18 @@ function App() {
             </div>
 
             <div className="bg-white p-4 rounded shadow-sm border">
-              <div className="flex justify-between mb-4">
-                <div className="room-search-wrap">
+              <div className="flex flex-col gap-3 mb-4 lg:flex-row lg:justify-between lg:items-center">
+                <div className="room-search-wrap calendar-search-wrap">
                   <span className="room-search-icon">⌕</span>
-                  <input type="text" placeholder="Cari BID, nama, HP..." className="room-search-input" />
+                  <input
+                    type="text"
+                    value={calendarSearch}
+                    onChange={(e) => setCalendarSearch(e.target.value)}
+                    placeholder="Cari BID, nama, HP, atau room..."
+                    className="room-search-input"
+                  />
                 </div>
-                <div className="flex gap-2 items-center">
+                <div className="flex flex-wrap gap-2 items-center">
                   <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm">
                     <button onClick={() => shiftDays(-1)} className="px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded-sm">Kemarin</button>
                     <button onClick={() => goToday()} className="px-3 py-1.5 text-sm bg-blue-600 text-white font-semibold rounded-sm shadow-sm">Hari Ini</button>
@@ -1168,20 +2084,25 @@ function App() {
                     <span>{new Date(anchorDate).toLocaleString('id-ID', { month: 'long' })}</span>
                   </button>
                 </div>
+                {calendarSearchQuery && (
+                  <div className="text-xs text-gray-500">
+                    Menyorot {calendarSummary.totalReservations} reservasi yang cocok dengan pencarian.
+                  </div>
+                )}
               </div>
 
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto calendar-grid-shell">
                 <table className="w-full border-collapse text-xs" style={{ tableLayout: 'fixed' }}>
                   <thead>
-                    <tr className="bg-gray-100 border">
-                      <th className="p-3 border text-left" style={{ width: '220px', minWidth: '220px' }}>Kamar</th>
+                    <tr className="bg-gray-100 border calendar-header-row">
+                      <th className="p-3 border text-left calendar-sticky-corner" style={{ width: '220px', minWidth: '220px' }}>Kamar</th>
                       {days.map((d) => {
                         const todayIso = localDateISO(new Date());
                         const isToday = d.date === todayIso;
                         return (
                           <th
                             key={d.date}
-                            className={`header-date-cell ${isToday ? 'header-date-cell--today' : ''}`}
+                            className={`header-date-cell calendar-sticky-header ${isToday ? 'header-date-cell--today' : ''}`}
                           >
                             <div className="day-header-label">{d.label}</div>
                             <div className={`day-header-number ${isToday ? 'is-today' : ''}`}>{d.raw.getDate()}</div>
@@ -1193,7 +2114,7 @@ function App() {
                   <tbody>
                     {rooms.map(room => (
                       <tr key={room.id} className="border">
-                        <td className="room-cell border font-medium bg-gray-50 text-[12px] text-gray-700 text-center align-middle" style={{ width: '220px', minWidth: '220px' }}>
+                        <td className="room-cell border font-medium bg-gray-50 text-[12px] text-gray-700 text-center align-middle calendar-sticky-column" style={{ width: '220px', minWidth: '220px' }}>
                           <div className="room-cell-inner flex flex-col items-center justify-center text-center gap-1">
                             <div className="room-name-wrap flex items-center justify-center text-center">
                               <span className="room-dot"></span>
@@ -1211,6 +2132,11 @@ function App() {
                             if (spanAt) {
                               const r = spanAt.res;
                               const reservationStyle = getReservationCardStyle(r);
+                              const density = getCalendarReservationDensity(spanAt.span);
+                              const identity = getCalendarReservationIdentity(r);
+                              const searchMatch = isCalendarReservationMatch(r);
+                              const previewCheckOut = reservationResizePreview[String(r.id)] || r.check_out;
+                              const nights = Math.max(1, Math.floor((new Date(previewCheckOut).getTime() - new Date(r.check_in).getTime())/(24*3600*1000)));
                               cells.push(
                                 <td key={`${room.id}-${i}-${r.id}`} colSpan={spanAt.span} className="p-2 border align-middle h-14">
                                   <div
@@ -1221,21 +2147,37 @@ function App() {
                                       setSelectedRes(r);
                                       fetchReservationFolio(Number(r.id));
                                     }}
-                                    className={`reservation-card ${reservationStyle.cardClass} cursor-pointer truncate font-semibold`}
+                                    className={`reservation-card ${reservationStyle.cardClass} reservation-card--${density} ${searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold`}
                                   >
-                                    <div className="flex justify-between items-start">
-                                      <div>
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                          <div className="text-sm font-bold">{r.guest_name}</div>
-                                          <span className={reservationStyle.badgeClass}>{reservationStyle.badge}</span>
-                                          <span className={reservationStyle.segmentMeta.className}>{reservationStyle.segmentMeta.label}</span>
-                                          {reservationStyle.paymentLabel && <span className="badge paid">{reservationStyle.paymentLabel}</span>}
-                                        </div>
-                                        <div className="text-xs opacity-80">{Math.max(1, Math.floor((new Date(r.check_out).getTime() - new Date(r.check_in).getTime())/(24*3600*1000)))} malam</div>
-                                        <div className="text-xs opacity-80">{getPaymentStatusLabel(r.payment_status)}</div>
+                                    <div className="reservation-card-stack">
+                                      <div className="reservation-card-topline">
+                                        <div className="reservation-card-name">{r.guest_name}</div>
+                                        <span className={reservationStyle.badgeClass}>{reservationStyle.badge}</span>
+                                        <span className={reservationStyle.segmentMeta.className}>{reservationStyle.segmentMeta.label}</span>
                                       </div>
-                                      <div className="text-xs opacity-80 ml-2">{r.status}</div>
+                                      <div className="reservation-card-identity">{identity}</div>
+                                      <div className="reservation-card-meta">
+                                        <span>{nights} malam</span>
+                                        <span>{getPaymentStatusLabel(r.payment_status)}</span>
+                                        <span>{r.status}</span>
+                                        {reservationStyle.paymentLabel && <span>{reservationStyle.paymentLabel}</span>}
+                                      </div>
                                     </div>
+                                    {['BOOKED', 'CHECKED_IN'].includes(String(r.status || '').toUpperCase()) && (
+                                      <button
+                                        type="button"
+                                        draggable={false}
+                                        title="RESIZE HANDLE DEBUG"
+                                        className="reservation-card-resize-handle"
+                                        aria-label={`Resize ${r.guest_name}`}
+                                        onDragStart={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                        }}
+                                        onPointerDown={(event) => handleReservationResizeMouseDown(event, r)}
+                                        onClick={(event) => event.stopPropagation()}
+                                      />
+                                    )}
                                   </div>
                                 </td>
                               );
@@ -1374,7 +2316,7 @@ function App() {
                 <div className="booking-modal">
                   <div className="booking-modal-header">
                     <h4 className="booking-modal-title">Tambah Booking</h4>
-                    <button onClick={() => { setCreateResOpen(false); setDiscountType('nominal'); setDiscountValue(''); setAmountPaid(''); setSubtotalDraft(0); setKtpFile(null); setBuktiBayarFile(null); setReservationEditId(null); resetQuickBookingForm(); }} className="booking-modal-close" aria-label="Tutup dialog booking">×</button>
+                    <button onClick={() => { setCreateResOpen(false); setKtpFile(null); setBuktiBayarFile(null); resetQuickBookingForm(); }} className="booking-modal-close" aria-label="Tutup dialog booking">×</button>
                   </div>
 
                   <div className="booking-type-switch" role="tablist" aria-label="Tipe booking">
@@ -1404,7 +2346,7 @@ function App() {
                           placeholder="Ketik nama pelanggan..."
                         />
                       </div>
- 
+
                       <div className="booking-field booking-field--full">
                         <label>Nomor HP *</label>
                         <input
@@ -1413,7 +2355,7 @@ function App() {
                           placeholder="Ketik nomor HP..."
                         />
                       </div>
- 
+
                       <div className="booking-field booking-field--full">
                         <label>Segment Tamu</label>
                         <select value={guestSegment} onChange={(e) => setGuestSegment(e.target.value as 'Reguler' | 'Group' | 'Corporate')}>
@@ -1422,130 +2364,158 @@ function App() {
                           <option value="Corporate">Corporate</option>
                         </select>
                       </div>
- 
-                      <div className="booking-row two-col">
-                        <div className="booking-field">
-                          <label>Ruangan *</label>
-                          <select value={quickBooking.roomId ?? prefillRoomId ?? ''} onChange={(e) => {
-                            const value = e.target.value ? Number(e.target.value) : null;
-                            setPrefillRoomId(value);
-                            setQuickBooking(prev => ({ ...prev, roomId: value }));
-                          }}>
-                            <option value="">Pilih ruang</option>
-                            {rooms.map(r => <option key={r.id} value={r.id}>{r.room_number} {r.name}</option>)}
-                          </select>
-                        </div>
-                        <div className="booking-field">
-                          <label>Varian Kamar *</label>
-                          <select value={quickBooking.roomVariant} onChange={(e) => setQuickBooking(prev => ({ ...prev, roomVariant: e.target.value }))}>
-                            <option value="Deluxe King">Deluxe King</option>
-                            <option value="Superior Twin">Superior Twin</option>
-                            <option value="Suite Family">Suite Family</option>
-                          </select>
-                        </div>
-                      </div>
- 
-                      <div className="booking-row two-col booking-date-row">
-                        <div className="booking-field">
-                          <label>Check In</label>
-                          <input
-                            type="date"
-                            value={quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate)}
-                            onChange={(e) => setQuickBooking(prev => ({ ...prev, checkIn: e.target.value }))}
-                          />
-                        </div>
-                        <div className="booking-field">
-                          <label>Check Out</label>
-                          <input
-                            type="date"
-                            value={quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate()+1)))}
-                            onChange={(e) => setQuickBooking(prev => ({ ...prev, checkOut: e.target.value }))}
-                          />
-                        </div>
-                      </div>
 
-                      <div className="booking-field booking-field--full">
-                        <label>Harga Kamar</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1000"
-                          value={subtotalDraft}
-                          onChange={(e) => setSubtotalDraft(Number(e.target.value || 0))}
-                          placeholder="0"
-                        />
-                      </div>
+                      <div className="booking-field booking-field--full" style={{ marginTop: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                          <label style={{ marginBottom: 0 }}>Reservasi Kamar</label>
+                          <button type="button" className="booking-add-btn" onClick={addBookingChild}>+ Tambah Kamar</button>
+                        </div>
 
-                      <div className="booking-field booking-field--full">
-                        <label>Diskon</label>
-                        <div className="booking-discount-control">
-                          <select value={discountType} onChange={(e) => setDiscountType(e.target.value as 'nominal' | 'percent')}>
-                            <option value="nominal">Rp</option>
-                            <option value="percent">%</option>
-                          </select>
-                          <input
-                            type="number"
-                            min="0"
-                            step={discountType === 'percent' ? '1' : '1000'}
-                            value={discountValue}
-                            onChange={(e) => setDiscountValue(e.target.value)}
-                            placeholder={discountType === 'percent' ? '0' : '50000'}
-                          />
-                        </div>
-                      </div>
+                        {bookingComposerChildren.length === 0 ? (
+                          <div className="booking-child-card" style={{ padding: 12 }}>Belum ada kamar yang ditambahkan.</div>
+                        ) : (
+                          bookingComposerChildren.map((child, index) => (
+                            <div key={child.id} className="booking-child-card" style={{ marginBottom: 12, padding: 12, border: '1px solid #e5e7eb', borderRadius: 12, background: '#f8fafc' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                                <strong style={{ fontSize: 13 }}>R{String(index + 1).padStart(2, '0')}</strong>
+                                {bookingComposerChildren.length > 1 && (
+                                  <button type="button" onClick={() => removeBookingChild(child.id)} className="booking-cancel-btn" style={{ padding: '6px 10px', fontSize: 12 }}>Hapus</button>
+                                )}
+                              </div>
 
-                      <div className="booking-field booking-field--full">
-                        <label>Jumlah Dibayar / DP</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1000"
-                          value={amountPaid}
-                          onChange={(e) => setAmountPaid(e.target.value)}
-                          placeholder="0"
-                        />
-                      </div>
+                              <div className="booking-row two-col">
+                                <div className="booking-field">
+                                  <label>Ruangan *</label>
+                                  {(() => {
+                                  const availabilityKey = getAvailabilityKey(child);
+                                  const cachedRows = availabilityKey ? availabilityCache[availabilityKey] : undefined;
+                                  const derivedRooms = cachedRows
+                                    ? getFilteredAvailabilityRooms(cachedRows, availabilityKey, child)
+                                    : (childRoomAvailability[child.id] || []);
+                                  const derivedState = cachedRows
+                                    ? (derivedRooms.length > 0 ? 'success' : 'empty')
+                                    : bookingAvailabilityState[child.id];
+                                  const isLoading = derivedState === 'loading' && !cachedRows;
+                                  return (
+                                  <select
+                                    value={child.room_id ?? ''}
+                                    onChange={(e) => updateBookingChild(child.id, { room_id: e.target.value ? Number(e.target.value) : null })}
+                                    disabled={isLoading}
+                                  >
+                                    <option value="">
+                                      {isLoading
+                                        ? 'Memuat kamar tersedia...'
+                                        : derivedState === 'empty'
+                                          ? 'Tidak ada kamar tersedia untuk tanggal ini.'
+                                          : derivedState === 'error'
+                                            ? 'Gagal memuat ketersediaan kamar. Coba lagi.'
+                                          : 'Pilih ruang'}
+                                    </option>
+                                    {derivedRooms.map((room: any) => (
+                                      <option key={room.id} value={room.id}>
+                                        {room.room_number} {room.name ? `(${room.name})` : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  );
+                                  })()}
+                                </div>
+                                <div className="booking-field">
+                                  <label>Varian Kamar *</label>
+                                  <select
+                                    value={child.room_variant || quickBooking.roomVariant}
+                                    onChange={(e) => updateBookingChild(child.id, { room_variant: e.target.value })}
+                                  >
+                                    <option value="Deluxe King">Deluxe King</option>
+                                    <option value="Superior Twin">Superior Twin</option>
+                                    <option value="Suite Family">Suite Family</option>
+                                  </select>
+                                </div>
+                              </div>
 
-                      <div className="booking-optional">
-                        <div className="booking-subtitle">Tambah Produk (Optional)</div>
-                        <div className="booking-product-row">
-                          <div className="booking-product-column">
-                            <label>Nama Produk</label>
-                            <input placeholder="Pilih atau ketik nama produk" />
-                          </div>
-                          <div className="booking-product-column short">
-                            <label>Harga</label>
-                            <input placeholder="25000" />
-                          </div>
-                        </div>
-                        <div className="booking-product-row small">
-                          <div className="booking-product-column"><label>Qty</label><input value="1" readOnly /></div>
-                          <button type="button" className="booking-add-btn">Tambah</button>
-                        </div>
-                      </div>
+                              <div className="booking-row two-col booking-date-row">
+                                <div className="booking-field">
+                                  <label>Check In</label>
+                                  <input
+                                    type="date"
+                                    value={child.check_in || selectedRange.start || localDateISO(anchorDate)}
+                                    onChange={(e) => updateBookingChild(child.id, { check_in: e.target.value })}
+                                  />
+                                </div>
+                                <div className="booking-field">
+                                  <label>Check Out</label>
+                                  <input
+                                    type="date"
+                                    value={child.check_out || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)))}
+                                    onChange={(e) => updateBookingChild(child.id, { check_out: e.target.value })}
+                                  />
+                                </div>
+                              </div>
 
-                      <div className="booking-billing-box">
-                        <div className="booking-subtitle">Billing / Nota</div>
-                        <div className="booking-bill-row">
-                          <span>Harga Kamar</span>
-                          <strong>{formatCurrency(billingSummary.subtotal)}</strong>
-                        </div>
-                        <div className="booking-bill-row">
-                          <span>Diskon</span>
-                          <strong>- {formatCurrency(billingSummary.discount)}</strong>
-                        </div>
-                        <div className="booking-bill-row total">
-                          <span>Total Keseluruhan</span>
-                          <strong>{formatCurrency(billingSummary.total)}</strong>
-                        </div>
-                        <div className="booking-bill-row">
-                          <span>Jumlah Dibayar</span>
-                          <strong>{formatCurrency(billingSummary.paid)}</strong>
-                        </div>
-                        <div className="booking-bill-row">
-                          <span>Kekurangan Pembayaran / Sisa Tagihan</span>
-                          <strong>{formatCurrency(billingSummary.remaining)}</strong>
-                        </div>
+                              <div className="booking-field booking-field--full">
+                                <label>Harga Kamar</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="1000"
+                                  value={Number(child.subtotal_amount || 0)}
+                                  onChange={(e) => {
+                                    const nextSubtotal = Number(e.target.value || 0);
+                                    updateBookingChild(child.id, {
+                                      subtotal_amount: nextSubtotal,
+                                      total_price: nextSubtotal,
+                                      discount_amount: child.discount_type === 'nominal' ? Number(child.discount_amount || 0) : 0,
+                                    });
+                                  }}
+                                  placeholder="0"
+                                />
+                              </div>
+
+                              <div className="booking-field booking-field--full">
+                                <label>Diskon</label>
+                                <div className="booking-discount-control">
+                                  <select
+                                    value={child.discount_type || 'nominal'}
+                                    onChange={(e) => {
+                                      const nextType = e.target.value as 'nominal' | 'percent';
+                                      updateBookingChild(child.id, { discount_type: nextType, discount_percent: nextType === 'percent' ? Number(child.discount_percent || 0) : 0 });
+                                    }}
+                                  >
+                                    <option value="nominal">Rp</option>
+                                    <option value="percent">%</option>
+                                  </select>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step={child.discount_type === 'percent' ? '1' : '1000'}
+                                    value={child.discount_type === 'percent' ? Number(child.discount_percent || 0) : Number(child.discount_amount || 0)}
+                                    onChange={(e) => {
+                                      const nextValue = Number(e.target.value || 0);
+                                      if (child.discount_type === 'percent') {
+                                        updateBookingChild(child.id, { discount_percent: nextValue, discount_amount: 0 });
+                                      } else {
+                                        updateBookingChild(child.id, { discount_amount: nextValue, discount_percent: 0 });
+                                      }
+                                    }}
+                                    placeholder={child.discount_type === 'percent' ? '0' : '50000'}
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="booking-field booking-field--full">
+                                <label>Jumlah Dibayar / DP</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="1000"
+                                  value={Number(child.amount_paid || 0)}
+                                  onChange={(e) => updateBookingChild(child.id, { amount_paid: Number(e.target.value || 0) })}
+                                  placeholder="0"
+                                />
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
 
@@ -1556,8 +2526,16 @@ function App() {
                           <strong>Booked</strong>
                         </div>
                         <div className="booking-summary-row">
-                          <span>Room</span>
-                          <strong>{prefillRoomId ? rooms.find(r => r.id === prefillRoomId)?.room_number || 'Pilih kamar' : 'Pilih kamar'}</strong>
+                          <span>Kamar</span>
+                          <strong>{bookingComposerChildren.length} kamar</strong>
+                        </div>
+                        <div className="booking-summary-row">
+                          <span>Total</span>
+                          <strong>{formatCurrency(bookingComposerTotals.total)}</strong>
+                        </div>
+                        <div className="booking-summary-row">
+                          <span>Bayar</span>
+                          <strong>{formatCurrency(bookingComposerTotals.paid)}</strong>
                         </div>
                       </div>
                     </div>
@@ -1590,50 +2568,136 @@ function App() {
                   <div className="booking-modal-actions">
                     <button onClick={() => {
                       setCreateResOpen(false);
-                      setDiscountType('nominal');
-                      setDiscountValue('');
-                      setAmountPaid('');
-                      setSubtotalDraft(0);
                       setKtpFile(null);
                       setBuktiBayarFile(null);
-                      setReservationEditId(null);
                       resetQuickBookingForm();
                     }} className="booking-cancel-btn">Batal</button>
-                    <button onClick={async () => {
-                      const roomId = quickBooking.roomId ?? prefillRoomId;
-                      const ci = quickBooking.checkIn || selectedRange.start || '';
-                      const co = quickBooking.checkOut || selectedRange.end || '';
-                      const name = quickBooking.guestName.trim() || 'Tamu';
-                      const phone = quickBooking.guestPhone.trim();
+                    <button
+                      disabled={bookingComposerChildren.length === 0 || bookingSubmitting}
+                      onClick={async () => {
+                        if (bookingSubmitting) return;
+                        const name = quickBooking.guestName.trim() || 'Tamu';
+                        const phone = quickBooking.guestPhone.trim();
+                        const validChildren = bookingComposerChildren.filter((child) => child && child.room_id != null);
 
-                      if (!roomId) { alert('Pilih kamar'); return; }
-                      if (!ci || !co) { alert('Isi check-in dan check-out'); return; }
-                      if (new Date(co) <= new Date(ci)) { alert('Tanggal check-out harus setelah check-in'); return; }
-                      if (!phone) { alert('Nomor HP tamu wajib diisi'); return; }
+                        if (validChildren.length === 0) { alert('Pilih setidaknya satu kamar'); return; }
+                        if (!phone) { alert('Nomor HP tamu wajib diisi'); return; }
 
-                      const payload = {
-                        room_id: roomId,
-                        guest_name: name,
-                        guest_phone: phone,
-                        guest_segment: guestSegment,
-                        booking_type: bookingType,
-                        source: bookingType,
-                        check_in: ci,
-                        check_out: co,
-                        subtotal_amount: subtotalDraft,
-                        total_price: subtotalDraft,
-                        discount_amount: billingSummary.discount,
-                        discount_percent: discountType === 'percent' ? Number(discountValue || 0) : 0,
-                        amount_paid: Number(amountPaid || 0),
-                        payment_status: billingSummary.paymentStatus,
-                        room_variant: quickBooking.roomVariant
-                      };
-                      await createReservation(payload, { ktp: ktpFile, buktiBayar: buktiBayarFile });
-                    }} className="booking-submit-btn">Simpan Reservasi</button>
+                        for (const child of validChildren) {
+                          const checkIn = child.check_in || '';
+                          const checkOut = child.check_out || '';
+                          if (!child.room_id) { alert(`Kamar belum dipilih pada ${child.id ? 'reservasi' : 'kamar'}`); return; }
+                          if (!checkIn || !checkOut) { alert('Isi check-in dan check-out untuk setiap kamar'); return; }
+                          if (new Date(checkOut) <= new Date(checkIn)) { alert(`Check-out harus setelah check-in pada kamar ${child.room_id}`); return; }
+                        }
+
+                        const overlapMap = new Map<number, Array<{ start: string; end: string }>>();
+                        for (const child of validChildren) {
+                          const roomId = Number(child.room_id);
+                          const childPeriod = { start: child.check_in, end: child.check_out };
+                          const existing = overlapMap.get(roomId) || [];
+                          for (const existingPeriod of existing) {
+                            const startA = new Date(existingPeriod.start).getTime();
+                            const endA = new Date(existingPeriod.end).getTime();
+                            const startB = new Date(childPeriod.start).getTime();
+                            const endB = new Date(childPeriod.end).getTime();
+                            if (startB < endA && startA < endB) {
+                              const roomNumber = rooms.find((room) => Number(room.id) === roomId)?.room_number || roomId;
+                              alert(`Kamar ${roomNumber} memiliki tanggal yang tumpang tindih. Periksa kembali check-in dan check-out.`);
+                              return;
+                            }
+                          }
+                          existing.push(childPeriod);
+                          overlapMap.set(roomId, existing);
+                        }
+
+                        const propertyId = (() => {
+                          const roomRef = validChildren.find((child) => child.room_id != null) || bookingComposerChildren[0];
+                          const roomInfo = roomRef && roomRef.room_id != null ? rooms.find((room) => Number(room.id) === Number(roomRef.room_id)) : null;
+                          return Number(roomInfo?.property_id ?? rooms[0]?.property_id ?? 1);
+                        })();
+
+                        const payload = {
+                          property_id: propertyId,
+                          guest_name: name,
+                          guest_phone: phone,
+                          guest_segment: guestSegment,
+                          booking_source: bookingType,
+                          channel: bookingType === 'ota' ? 'OTA' : 'WALKIN',
+                          currency_code: 'IDR',
+                          reservations: validChildren.map((child) => {
+                            const subtotal = Number(child.subtotal_amount || 0);
+                            const discountAmount = child.discount_type === 'percent'
+                              ? 0
+                              : Number(child.discount_amount || 0);
+                            const discountPercent = child.discount_type === 'percent'
+                              ? Number(child.discount_percent || 0)
+                              : 0;
+                            const amountPaid = Number(child.amount_paid || 0);
+                            const totalPrice = Number(child.total_price ?? child.subtotal_amount ?? subtotal);
+                            const totalAfterDiscount = Math.max(totalPrice - (child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount), 0);
+                            return {
+                              room_id: Number(child.room_id),
+                              guest_name: child.guest_name || name,
+                              guest_phone: child.guest_phone || phone,
+                              guest_segment: child.guest_segment || guestSegment,
+                              booking_type: child.booking_type || bookingType,
+                              check_in: child.check_in,
+                              check_out: child.check_out,
+                              subtotal_amount: subtotal,
+                              total_price: totalPrice,
+                              discount_amount: child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount,
+                              discount_percent: discountPercent,
+                              amount_paid: amountPaid,
+                              payment_status: amountPaid > 0 ? (amountPaid >= totalAfterDiscount ? 'PAID' : 'PARTIAL') : 'UNPAID',
+                              qty: 1,
+                              room_variant: child.room_variant || quickBooking.roomVariant
+                            };
+                          })
+                        };
+
+                        try {
+                          setBookingSubmitting(true);
+                          setBookingComposerChildren((prev) => prev.map((child: any) => ({ ...child, payment_status: Number(child.amount_paid || 0) > 0 ? 'PAID' : 'UNPAID' })));
+                          const res = await fetch('/api/bookings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                          });
+                          const data = await res.json();
+
+                          if (!res.ok) {
+                            throw new Error(data.message || 'Gagal membuat booking');
+                          }
+
+                          const bid = String(data?.data?.bid || '').trim();
+                          const roomCount = Array.isArray(data?.data?.reservations) ? data.data.reservations.length : validChildren.length;
+                          if (bid && navigator.clipboard && navigator.clipboard.writeText) {
+                            try { await navigator.clipboard.writeText(bid); } catch (copyErr) { console.warn('Copy BID failed', copyErr); }
+                          }
+                          fetchData();
+                          fetchOperationsData();
+                          setCreateResOpen(false);
+                          setSelectedRange({});
+                          setKtpFile(null);
+                          setBuktiBayarFile(null);
+                          resetQuickBookingForm();
+                          alert(`Booking berhasil dibuat\nBID: ${bid}\n${roomCount} kamar berhasil dipesan`);
+                        } catch (error) {
+                          console.error('Booking creation failed', error);
+                          alert(`Gagal membuat booking: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                        } finally {
+                          setBookingSubmitting(false);
+                        }
+                      }}
+                      className="booking-submit-btn"
+                    >
+                      {bookingSubmitting ? 'Menyimpan...' : (bookingComposerChildren.length > 1 ? 'Simpan Booking' : 'Simpan Reservasi')}
+                    </button>
                   </div>
-                </div>
-              </div>
-            )}
+                 </div>
+               </div>
+             )}
 
           </>
         )}
@@ -1888,68 +2952,174 @@ function App() {
                 <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500 font-bold">Reservasi</div>
                 <h3 className="reservation-detail-title">Detail Reservasi</h3>
               </div>
-              <button onClick={() => { setSelectedRes(null); setSelectedFolio(null); setPaymentDraft(''); }} className="reservation-detail-close">Tutup</button>
+              <button onClick={() => { setSelectedRes(null); setSelectedFolio(null); setPaymentDraft(''); setBidCopyState({ kind: 'idle', message: '' }); }} className="reservation-detail-close">Tutup</button>
             </div>
 
             <div className="reservation-detail-body">
               <div className="reservation-detail-topbar">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500 font-bold">Tamu</div>
-                  <div className="reservation-detail-name">{selectedRes.guest_name}</div>
+                <div className="booking-identity-block">
+                  <div className="booking-identity-label">Booking Identity</div>
+                  <div className="booking-identity-bid-row">
+                    <div className="booking-identity-bid">{selectedBookingIdentity}</div>
+                    <button type="button" className="booking-copy-btn" onClick={copyBookingBid}>Copy</button>
+                  </div>
+                  <div className="booking-identity-name">{selectedRes.guest_name}</div>
+                  {bidCopyState.kind !== 'idle' && (
+                    <div className={`booking-copy-state booking-copy-state--${bidCopyState.kind}`}>
+                      {bidCopyState.message}
+                    </div>
+                  )}
+                  <div className="booking-identity-line">
+                    {selectedStayLabel} · Room {selectedRoomLabel} · {selectedRoomTypeLabel}
+                  </div>
+                  <div className="booking-identity-secondary">
+                    <span>Legacy: {selectedBookingLegacy || '—'}</span>
+                    <span>Reservation ID: {selectedRes.id}</span>
+                  </div>
                 </div>
-                <div className="reservation-detail-badges">
-                  <span className={`segment-badge ${(selectedRes.guest_segment || 'Reguler').toLowerCase() === 'group' ? 'segment-group' : (selectedRes.guest_segment || 'Reguler').toLowerCase() === 'corporate' ? 'segment-corporate' : 'segment-reguler'}`}>
-                    {selectedRes.guest_segment || 'Reguler'}
-                  </span>
-                  <span className={`segment-badge ${getPaymentBadgeClass(selectedRes.payment_status)}`}>
-                    {getPaymentStatusLabel(selectedRes.payment_status)}
-                  </span>
+
+                <div className="reservation-detail-badges reservation-detail-badges--stacked">
+                  <div className="status-grid">
+                    <div className="status-pill">
+                      <span className="status-pill__label">Booking</span>
+                      <span className="status-pill__value">{activeBookingStatus || '—'}</span>
+                    </div>
+                    <div className="status-pill">
+                      <span className="status-pill__label">Reservation</span>
+                      <span className="status-pill__value">{activeReservationStatus || '—'}</span>
+                    </div>
+                    <div className="status-pill">
+                      <span className="status-pill__label">Stay</span>
+                      <span className="status-pill__value">{activeStayStatus || '—'}</span>
+                    </div>
+                    <div className="status-pill">
+                      <span className="status-pill__label">Payment</span>
+                      <span className="status-pill__value">{activePaymentStatus}</span>
+                    </div>
+                  </div>
+                  <div className="source-channel-grid">
+                    <div className="mini-meta">
+                      <span className="mini-meta__label">Booking Source</span>
+                      <strong className="mini-meta__value">{selectedBookingSource || '—'}</strong>
+                    </div>
+                    <div className="mini-meta">
+                      <span className="mini-meta__label">Channel</span>
+                      <strong className="mini-meta__value">{selectedBookingChannel || '—'}</strong>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="reservation-detail-grid">
-                <div className="detail-info-card">
-              <div className="detail-card-label">Nomor Reservasi</div>
-              <div className="detail-card-value">{selectedRes.booking_number || selectedRes.id}</div>
-                  <div className="detail-card-meta">{selectedRes.status || 'CONFIRMED'}</div>
+              {bookingChildren.length > 1 && (
+                <div className="detail-section">
+                  <div className="detail-section-title">Rooms in this booking</div>
+                  <div className="booking-child-list">
+                    {bookingChildren.map((child: any) => {
+                      const childStay = child.stay_sequence ? `R${String(child.stay_sequence).padStart(2, '0')}` : 'R--';
+                      const childActive = Number(child.id) === Number(selectedRes.id);
+                      return (
+                        <button
+                          key={child.id}
+                          type="button"
+                          className={`booking-child-item booking-child-item--button ${childActive ? 'booking-child-item--active' : ''}`}
+                          onClick={() => {
+                            if (childActive) return;
+                            setSelectedRes(child);
+                            fetchReservationFolio(Number(child.id));
+                          }}
+                        >
+                          <div className="booking-child-item__top">
+                            <strong>{childStay} · Room {child.room_number || child.room_id || '—'}</strong>
+                            <span className="booking-child-status">{child.status || '—'}</span>
+                          </div>
+                          <div className="booking-child-item__meta">
+                            <span>{child.room_variant || child.room_type || '—'}</span>
+                            <span>{child.check_in ? child.check_in.split('T')[0] : '—'}</span>
+                            <span>{child.check_out ? child.check_out.split('T')[0] : '—'}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="detail-info-card">
-              <div className="detail-card-label">Informasi Kamar</div>
-              <div className="detail-card-value">{selectedRes.room_number || selectedRes.room_id}</div>
-              <div className="detail-card-meta">{selectedRes.room_variant || 'Deluxe King'}</div>
-                </div>
-                <div className="detail-info-card">
-              <div className="detail-card-label">Durasi</div>
-              <div className="detail-card-value">
-                {Math.max(1, Math.floor((new Date(selectedRes.check_out || selectedRes.check_in).getTime() - new Date(selectedRes.check_in || selectedRes.check_out).getTime()) / (24 * 60 * 60 * 1000))) || 1} malam
-              </div>
-              <div className="detail-card-meta">{selectedRes.check_in ? selectedRes.check_in.split('T')[0] : '-'} → {selectedRes.check_out ? selectedRes.check_out.split('T')[0] : '-'}</div>
-                </div>
-                <div className="detail-info-card">
-                  <div className="detail-card-label">Tagihan</div>
-                  <div className="detail-card-value">{formatCurrency(Number(selectedRes.total_price || selectedRes.subtotal_amount || 0))}</div>
-                  <div className="detail-card-meta">Sisa: {formatCurrency(Number(selectedRes.remaining_balance || 0))}</div>
+              )}
+
+              <div className="detail-section">
+                <div className="detail-section-title">Quick Actions</div>
+                <div className="reservation-action-row reservation-action-row--dense">
+                  {quickActionButtons.map((button) => (
+                    <button
+                      key={button.key}
+                      type="button"
+                      className={`reservation-action-button reservation-action-button--${button.variant}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        button.onClick();
+                      }}
+                    >
+                      {button.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div className="reservation-detail-summary">
-                <div className="summary-box">
-                  <div className="summary-box-head">Pembayaran</div>
-                  <div className="summary-box-row"><span>Diskon</span><strong>{formatCurrency(Number(selectedRes.discount_amount || 0))}</strong></div>
-                  <div className="summary-box-row"><span>Jumlah dibayar</span><strong>{formatCurrency(Number(selectedRes.amount_paid || 0))}</strong></div>
-                  <div className="summary-box-row total"><span>Sisa tagihan</span><strong>{formatCurrency(Number(selectedRes.remaining_balance || 0))}</strong></div>
+              <div className="detail-section">
+                <div className="detail-section-title">Stay information</div>
+                <div className="detail-info-grid">
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Check-in</div>
+                    <div className="detail-card-value">{selectedRes.check_in ? selectedRes.check_in.split('T')[0] : '—'}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Check-out</div>
+                    <div className="detail-card-value">{selectedRes.check_out ? selectedRes.check_out.split('T')[0] : '—'}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Nights</div>
+                    <div className="detail-card-value">{selectedNights}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Room</div>
+                    <div className="detail-card-value">{selectedRoomLabel}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Room Type</div>
+                    <div className="detail-card-value">{selectedRoomTypeLabel}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Guest Segment</div>
+                    <div className="detail-card-value">{selectedRes.guest_segment || '—'}</div>
+                  </div>
+                  <div className="detail-info-card">
+                    <div className="detail-card-label">Phone</div>
+                    <div className="detail-card-value">{selectedRes.guest_phone || '—'}</div>
+                  </div>
                 </div>
-                <div className="summary-box">
-                  <div className="summary-box-head">Folio</div>
-                  <div className="summary-box-row"><span>Total tagihan</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
-                  <div className="summary-box-row"><span>Sudah dibayar</span><strong>{formatCurrency(Number(selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0))}</strong></div>
-                  <div className="summary-box-row total"><span>Sisa</span><strong>{formatCurrency(Math.max(Number(selectedRes.total_price || 0) - (selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0), 0))}</strong></div>
+              </div>
+
+              <div className="detail-section">
+                <div className="detail-section-title">Financial summary</div>
+                <div className="detail-summary-grid">
+                  <div className="summary-box summary-box--compact">
+                    <div className="summary-box-row"><span>Subtotal</span><strong>{formatCurrency(Number(selectedRes.subtotal_amount || 0))}</strong></div>
+                    <div className="summary-box-row"><span>Discount</span><strong>{formatCurrency(Number(selectedRes.discount_amount || 0))}</strong></div>
+                    <div className="summary-box-row"><span>Total</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
+                    <div className="summary-box-row"><span>Paid</span><strong>{formatCurrency(Number(selectedRes.amount_paid || 0))}</strong></div>
+                    <div className="summary-box-row total"><span>Remaining Balance</span><strong>{formatCurrency(Number(selectedRes.remaining_balance || 0))}</strong></div>
+                    <div className="summary-box-row"><span>Payment Status</span><strong>{activePaymentStatus}</strong></div>
+                  </div>
+                  <div className="summary-box summary-box--compact">
+                    <div className="summary-box-head">Folio snapshot</div>
+                    <div className="summary-box-row"><span>Total tagihan</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
+                    <div className="summary-box-row"><span>Sudah dibayar</span><strong>{formatCurrency(Number(selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0))}</strong></div>
+                    <div className="summary-box-row total"><span>Sisa</span><strong>{formatCurrency(Math.max(Number(selectedRes.total_price || 0) - (selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0), 0))}</strong></div>
+                  </div>
                 </div>
               </div>
 
               {(selectedRes.ktp_path || selectedRes.bukti_bayar_path) && (
-                <div className="reservation-doc-panel">
-                  <div className="reservation-doc-title">Dokumen Tamu</div>
+                <div className="detail-section">
+                  <div className="detail-section-title">Documents</div>
                   <div className="reservation-doc-grid">
                     {selectedRes.ktp_path && (
                       <a
@@ -1977,12 +3147,47 @@ function App() {
                 </div>
               )}
 
-              {selectedRes.room_id && (
-                <div className="reservation-doc-panel">
-                  <div className="reservation-doc-title">Turnover kamar</div>
-                  <div className="reservation-turnover-row">
+              <div className="detail-section">
+                <div className="detail-section-title">Operational actions</div>
+                <div className="reservation-action-row reservation-action-row--dense">
+                  {canCheckIn && (
+                    <button
+                      onClick={() => handleReservationAction(Number(selectedRes.id), 'checkin')}
+                      className="reservation-action-button reservation-action-button--success"
+                    >
+                      Check In
+                    </button>
+                  )}
+                  {canCheckOut && (
+                    <button
+                      onClick={() => openCheckoutConfirmation(Number(selectedRes.id))}
+                      className="reservation-action-button reservation-action-button--warn"
+                    >
+                      Checkout
+                    </button>
+                  )}
+                  {canCancel && (
+                    <button
+                      onClick={() => handleReservationCancel(Number(selectedRes.id))}
+                      className="reservation-action-button reservation-action-button--danger"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  {canPay && (
+                    <button
+                      onClick={handlePayment}
+                      className="reservation-action-button reservation-action-button--primary"
+                    >
+                      Payment
+                    </button>
+                  )}
+                </div>
+
+                {selectedRes.room_id && (
+                  <div className="reservation-turnover-row reservation-turnover-row--spaced">
                     <div>
-                      <div className="text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold">Status</div>
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold">Room status</div>
                       <div className="font-bold text-slate-800">
                         {normalizeRoomStatus(roomStatuses[String(selectedRes.room_id)] || 'Ready')}
                       </div>
@@ -1997,12 +3202,26 @@ function App() {
                         : 'Tandai kamar kotor'}
                     </button>
                   </div>
-                </div>
-              )}
+                )}
 
-              {reservationAudit.length ? (
+                <div className="reservation-payment-panel">
+                  <label className="text-xs font-semibold text-slate-700">Pembayaran baru</label>
+                  <div className="reservation-payment-row">
+                    <input
+                      type="number"
+                      value={paymentDraft}
+                      onChange={(e) => setPaymentDraft(e.target.value)}
+                      placeholder="Masukkan nominal"
+                      className="flex-1 border rounded px-3 py-2 text-sm"
+                    />
+                    <button onClick={handlePayment} className="bg-blue-600 text-white px-3 py-2 rounded text-sm">Bayar</button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="detail-history-grid">
                 <div className="reservation-audit-panel">
-                  <div className="reservation-doc-title">Audit trail</div>
+                  <div className="reservation-doc-title">Reservation Activity</div>
                   <div className="reservation-audit-list">
                     {reservationAudit.slice(0, 8).map((audit: any) => (
                       <div key={`${audit.audit_id || audit.id}-${audit.timestamp}`} className="reservation-audit-item">
@@ -2019,44 +3238,43 @@ function App() {
                     ))}
                   </div>
                 </div>
-              ) : null}
 
-              {selectedFolio?.folio?.length ? (
-                <div className="reservation-folio-panel">
-                  <div className="reservation-doc-title">Riwayat folio</div>
-                  <div className="space-y-2 text-xs">
-                    {selectedFolio.folio.map((entry: any, idx: number) => (
-                      <div key={idx} className="flex justify-between border-b pb-1 last:border-0">
-                        <span>{entry.description || 'Entry'}</span>
-                        <span className={Number(entry.amount || 0) > 0 ? 'text-slate-700' : 'text-red-600'}>
-                          {formatCurrency(Number(entry.amount || 0))}
-                        </span>
-                      </div>
-                    ))}
+                {selectedFolio?.folio?.length ? (
+                  <div className="reservation-folio-panel">
+                    <div className="reservation-doc-title">Folio History</div>
+                    <div className="space-y-2 text-xs">
+                      {selectedFolio.folio.map((entry: any, idx: number) => (
+                        <div key={idx} className="flex justify-between border-b pb-1 last:border-0">
+                          <span>{entry.description || 'Entry'}</span>
+                          <span className={Number(entry.amount || 0) > 0 ? 'text-slate-700' : 'text-red-600'}>
+                            {formatCurrency(Number(entry.amount || 0))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
 
-              <div className="reservation-payment-panel">
-                <label className="text-xs font-semibold text-slate-700">Pembayaran baru</label>
-                <div className="reservation-payment-row">
-                  <input
-                    type="number"
-                    value={paymentDraft}
-                    onChange={(e) => setPaymentDraft(e.target.value)}
-                    placeholder="Masukkan nominal"
-                    className="flex-1 border rounded px-3 py-2 text-sm"
-                  />
-                  <button onClick={handlePayment} className="bg-blue-600 text-white px-3 py-2 rounded text-sm">Bayar</button>
-                </div>
-              </div>
-
-              <div className="reservation-action-row">
-                {selectedRes.status === 'CHECKED_IN' ? (
-                  <button onClick={() => openCheckoutConfirmation(Number(selectedRes.id))} className="reservation-action-button reservation-action-button--warn">Check Out</button>
-                ) : (
-                  <button onClick={() => handleReservationAction(Number(selectedRes.id), 'checkin')} className="reservation-action-button reservation-action-button--success">Check In</button>
-                )}
+                {reservationAudit.length ? (
+                  <div className="reservation-audit-panel">
+                    <div className="reservation-doc-title">Audit Trail</div>
+                    <div className="reservation-audit-list">
+                      {reservationAudit.slice(0, 8).map((audit: any) => (
+                        <div key={`${audit.audit_id || audit.id}-${audit.timestamp}-trail`} className="reservation-audit-item">
+                          <div className="reservation-audit-icon">
+                            {String(audit.action || 'UPDATE').slice(0, 1).toUpperCase()}
+                          </div>
+                          <div className="reservation-audit-copy">
+                            <div className="font-semibold text-slate-800">{audit.action || 'UPDATE'}</div>
+                            <div className="text-[11px] text-slate-500">
+                              {audit.module || 'PMS'} • {audit.timestamp ? new Date(audit.timestamp).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -2075,6 +3293,54 @@ function App() {
               </button>
               <button type="button" className="checkout-confirm-btn checkout-confirm-btn--primary" onClick={confirmCheckout}>
                 Sudah
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stayChangeState.open && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="checkout-confirm-modal">
+            <div className="checkout-confirm-icon">{stayChangeState.type === 'extend' ? '↗' : '↘'}</div>
+            <h3 className="checkout-confirm-title">{stayChangeState.type === 'extend' ? 'Perpanjang masa menginap?' : 'Perpendek masa menginap?'}</h3>
+            <p className="checkout-confirm-text">
+              {stayChangeState.type === 'extend'
+                ? 'Konfirmasi perpanjangan hingga tanggal check-out baru.'
+                : 'Konfirmasi pemendekan hingga tanggal check-out baru.'}
+            </p>
+            <div className="reservation-payment-panel" style={{ marginTop: 8 }}>
+              <div className="text-xs text-slate-600 mb-2">
+                BID: <strong>{String(stayChangeReservation?.bid || selectedBooking?.bid || selectedRes?.bid || '—')}</strong>
+              </div>
+              <div className="text-xs text-slate-600 mb-2">
+                Kamar: <strong>{stayChangeReservation?.room_number || stayChangeReservation?.room_id || '—'}</strong>
+              </div>
+              <div className="text-xs text-slate-600 mb-2">
+                Check-out saat ini: <strong>{(() => {
+                return stayChangeReservation?.check_out ? localDateISO(stayChangeReservation.check_out) : '—';
+                })()}</strong>
+              </div>
+              <div className="text-xs text-slate-600 mb-2">
+                Check-out baru: <strong>{stayChangeState.newCheckOut || '—'}</strong>
+              </div>
+              <div className="text-xs text-slate-600 mb-2">
+                Perubahan malam: <strong>{stayChangeNightsDelta > 0 ? `+${stayChangeNightsDelta}` : stayChangeNightsDelta < 0 ? `${stayChangeNightsDelta}` : '0'}</strong>
+              </div>
+              <label className="text-xs font-semibold text-slate-700">New check-out</label>
+              <input
+                type="date"
+                value={stayChangeState.newCheckOut}
+                onChange={(event) => setStayChangeState((prev) => ({ ...prev, newCheckOut: event.target.value }))}
+                className="mt-2 flex-1 border rounded px-3 py-2 text-sm w-full"
+              />
+            </div>
+            <div className="checkout-confirm-actions">
+              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--secondary" onClick={closeStayChangePrompt}>
+                Batal
+              </button>
+              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--primary" onClick={confirmStayChange}>
+                {stayChangeState.type === 'extend' ? 'Confirm Extend' : 'Confirm Shorten'}
               </button>
             </div>
           </div>

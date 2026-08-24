@@ -1,0 +1,2708 @@
+OAK MANAGEMENT
+HOTEL INTEGRATED MANAGEMENT PLATFORM
+MASTER BLUEPRINT CONSOLIDATED FINAL V1.0
+
+Status: CANONICAL MASTER BLUEPRINT
+Platform: OAK Management
+Current Property: OAK Lawang
+Current Property Code: LWG
+
+Architecture:
+Multi-Tenant
+Multi-Property
+Modular Monolith First
+Domain-Driven
+Event-Driven
+API-First
+Transaction-Safe
+Concurrency-Safe
+Audit-Ready
+Financially Reconciled
+SaaS-Ready
+
+================================================================================
+0. ABSOLUTE PLATFORM PRINCIPLE
+================================================================================
+
+OAK Management bukan sekadar:
+
+- hotel website
+- simple PMS
+- CRUD dashboard
+- reservation calendar
+- POS application
+- accounting application
+
+OAK Management dibangun sebagai satu hotel operating platform:
+
+ONE PLATFORM
+    ↓
+MULTIPLE ORGANIZATIONS
+    ↓
+MULTIPLE PROPERTIES
+    ↓
+MULTIPLE DEPARTMENTS
+    ↓
+MULTIPLE OUTLETS
+    ↓
+ONE SOURCE OF TRUTH PER DOMAIN
+    ↓
+ONE TRANSACTION ARCHITECTURE
+    ↓
+ONE EVENT ARCHITECTURE
+    ↓
+ONE AUDIT TRAIL
+    ↓
+ONE FINANCIAL LEDGER
+    ↓
+ONE RECONCILIATION SYSTEM
+    ↓
+ONE REPORTING ECOSYSTEM
+
+Absolute rules:
+
+- tidak ada double booking
+- tidak ada double payment
+- tidak ada duplicate event
+- tidak ada lost event
+- tidak ada orphan transaction
+- tidak ada silent inventory drift
+- tidak ada silent financial imbalance
+- tidak ada lifecycle mutation tanpa authoritative workflow
+- critical mutation harus transactional
+- critical mutation harus auditable
+- external mutation harus idempotent
+- tenant/property data tidak boleh bercampur
+
+================================================================================
+1. PLATFORM HIERARCHY
+================================================================================
+
+Target hierarchy:
+
+PLATFORM
+│
+├── ORGANIZATION / TENANT
+│   │
+│   ├── PROPERTY
+│   │   │
+│   │   ├── DEPARTMENT
+│   │   ├── OUTLET
+│   │   ├── ROOM
+│   │   ├── WAREHOUSE
+│   │   ├── EMPLOYEE
+│   │   └── TRANSACTIONS
+│   │
+│   └── PROPERTY N
+│
+└── ORGANIZATION N
+
+Current implementation:
+
+Platform Name:
+OAK Management
+
+Current Property:
+OAK Lawang
+
+Property Code:
+LWG
+
+Currency:
+IDR
+
+Timezone:
+Asia/Jakarta
+
+Future organization_id:
+tenant ownership boundary.
+
+property_id:
+operational ownership boundary.
+
+Every important transactional entity must ultimately be traceable to:
+
+organization_id
+property_id
+
+================================================================================
+2. ARCHITECTURAL MODEL
+================================================================================
+
+Canonical architecture:
+
+- modular monolith first
+- microservice-ready later
+- domain-driven
+- API-first
+- event-ready
+- audit-first
+- transaction-safe
+- concurrency-safe
+- multi-property ready
+- SaaS-ready
+
+Current stack:
+
+Frontend:
+- React
+- TypeScript
+- Vite
+
+Backend:
+- Express
+- TypeScript
+
+Database:
+- PostgreSQL
+
+Supporting:
+- Redis
+- Docker
+
+PostgreSQL remains authoritative source for durable business state.
+
+Redis may be used for:
+
+- temporary availability locks
+- cache
+- rate limiting
+- distributed coordination
+- short-lived queue/worker state
+
+Do not migrate framework merely because another framework appears more enterprise.
+
+Architecture changes require measurable technical justification.
+
+================================================================================
+3. DOMAIN OWNERSHIP
+================================================================================
+
+Core domains:
+
+Identity & Access
+Organization
+Property
+
+Guest CRM
+Loyalty
+
+Booking
+Reservation / Stay
+Availability
+Room
+Front Office
+
+Housekeeping
+Maintenance
+
+Folio
+Payment
+
+POS / F&B
+Inventory
+Procurement
+
+Accounts Payable
+Accounts Receivable
+Accounting / General Ledger
+
+HR
+Attendance
+Payroll
+
+Distribution
+Booking Engine
+OTA / Channel Manager
+
+CRM / Marketing
+
+Analytics
+Owner Reporting
+
+Audit
+Event / Outbox
+Notification
+Integration
+
+Rules:
+
+- each domain owns authoritative writes to its state
+- cross-domain direct mutation is restricted
+- cross-domain operations use controlled orchestration
+- cross-domain event propagation uses transactional outbox
+- no UI component owns business integrity
+- no client may bypass authoritative lifecycle commands
+
+================================================================================
+4. PROPERTY DOMAIN
+================================================================================
+
+Canonical entities:
+
+organizations                  [TARGET]
+properties                     [LIVE]
+departments                    [TARGET]
+outlets                        [TARGET]
+property_settings              [TARGET]
+property_sequences             [TARGET]
+
+properties minimum fields:
+
+id
+organization_id               [TARGET]
+property_code
+name
+address
+phone
+timezone
+currency
+status
+created_at
+updated_at
+
+Current property:
+
+id:
+1
+
+name:
+OAK Lawang
+
+property_code:
+LWG
+
+timezone:
+Asia/Jakarta
+
+currency:
+IDR
+
+property_code rules:
+
+- immutable
+- stable
+- uppercase
+- human-readable
+- business-facing
+- independent from database numeric id
+
+================================================================================
+5. BOOKING DOMAIN — VERIFIED FOUNDATION
+================================================================================
+
+Canonical hierarchy:
+
+PROPERTY
+   │
+   └── BOOKING
+          │
+          ├── RESERVATION / STAY #1
+          ├── RESERVATION / STAY #2
+          └── RESERVATION / STAY #N
+
+Core invariant:
+
+1 Booking = 1..N Reservations
+
+Booking represents:
+
+commercial/customer booking header.
+
+Reservation represents:
+
+one room stay.
+
+Example:
+
+BOOKING
+BID: LWG-260822-ABCDEFGH
+
+├── Reservation #1 / Room 101
+├── Reservation #2 / Room 102
+└── Reservation #3 / Room 103
+
+Internal database identities:
+
+bookings.id
+reservations.id
+
+remain internal.
+
+Visible business booking identity:
+
+bookings.bid
+
+================================================================================
+6. BOOKING IDENTITY — BID
+================================================================================
+
+Canonical format:
+
+{PROPERTY_CODE}-{YYMMDD}-{CROCKFORD_BASE32_SUFFIX}
+
+Example:
+
+LWG-260822-CSB6AAKY
+
+BID rules:
+
+- globally unique
+- immutable
+- property-aware
+- human-readable
+- concurrency-safe
+- searchable
+- staff-visible
+- customer-visible
+- not based on reservations.id
+- not based on OTA reference
+- booking source is not embedded into BID
+
+Date segment:
+
+uses property local date.
+
+For OAK Lawang:
+
+Asia/Jakarta
+
+Collision handling:
+
+1. Generate suffix.
+2. Attempt insert.
+3. UNIQUE(bid) is authoritative.
+4. On conflict regenerate.
+5. Retry bounded number of times.
+6. Fail hard when retry limit exhausted.
+
+================================================================================
+7. RESERVATION / STAY IDENTITY
+================================================================================
+
+Reservation identity fields:
+
+id
+booking_id
+stay_sequence
+
+Verified invariants:
+
+booking_id NOT NULL
+stay_sequence NOT NULL
+
+UNIQUE:
+booking_id + stay_sequence
+
+Human-readable stay identity:
+
+BID-R01
+BID-R02
+BID-R03
+
+Example:
+
+LWG-260822-ABCDEFGH-R01
+
+Full RSID does not need to be stored.
+
+RSID is derived from:
+
+BID
++
+stay_sequence
+
+Legacy numeric IDs remain internal compatibility identifiers.
+
+================================================================================
+8. BOOKING SOURCE & CHANNEL
+================================================================================
+
+BID does not identify source.
+
+booking_source target values:
+
+DIRECT
+WALKIN
+WEBSITE
+OTA
+CORPORATE
+TRAVEL_AGENT
+CALL_CENTER
+GROUP
+OTHER
+
+channel examples:
+
+Front Desk
+OAK Booking Engine
+Booking.com
+Agoda
+Traveloka
+Tiket.com
+Expedia
+Corporate Account
+Travel Agent
+
+Future canonical table:
+
+booking_external_refs
+
+Minimum fields:
+
+id
+booking_id
+reservation_id nullable
+property_id
+channel
+external_booking_id
+external_reservation_id
+external_confirmation_number
+sync_status
+last_synced_at
+raw_reference_metadata
+
+External source identifiers never replace internal BID.
+
+================================================================================
+9. BOOKING LIFECYCLE
+================================================================================
+
+Current parent lifecycle:
+
+ACTIVE
+CANCELLED
+COMPLETED
+
+Future richer read-state may support:
+
+CONFIRMED
+PARTIALLY_IN_HOUSE
+IN_HOUSE
+PARTIALLY_CHECKED_OUT
+PARTIALLY_CANCELLED
+NO_SHOW
+
+No state may be introduced without:
+
+- business meaning
+- transition rules
+- inventory effects
+- financial effects
+- audit behavior
+- tests
+
+Lifecycle cannot be changed through arbitrary metadata PATCH.
+
+================================================================================
+10. RESERVATION / STAY LIFECYCLE
+================================================================================
+
+Canonical reservation states:
+
+BOOKED
+CHECKED_IN
+CHECKED_OUT
+CANCELLED
+NO_SHOW             [TARGET]
+
+Operational stay statuses:
+
+RESERVED
+IN_HOUSE
+DEPARTED
+CANCELLED
+
+Lifecycle transitions must use authoritative commands.
+
+Examples:
+
+check-in
+checkout
+cancel
+room move
+extend stay
+shorten stay
+no-show
+
+Forbidden design:
+
+PATCH status = arbitrary lifecycle state
+
+================================================================================
+11. CANCELLATION SAFETY CONTRACT — VERIFIED
+================================================================================
+
+Booking cancellation must be atomic.
+
+Flow:
+
+BEGIN
+↓
+LOCK BOOKING FOR UPDATE
+↓
+LOCK ALL CHILD RESERVATIONS FOR UPDATE
+↓
+PRE-VALIDATE ALL CHILDREN
+↓
+LOCK AVAILABILITY ROWS FOR UPDATE
+↓
+VALIDATE INVENTORY OWNERSHIP
+↓
+RELEASE INVENTORY
+↓
+CANCEL CHILD RESERVATIONS
+↓
+WRITE RESERVATION AUDITS
+↓
+UPDATE PARENT BOOKING
+↓
+WRITE BOOKING AUDIT
+↓
+OUTBOX EVENT                   [TARGET]
+↓
+COMMIT
+
+Any failure:
+
+ROLLBACK ALL
+
+Rules:
+
+BOOKED
+→ cancellable
+
+CANCELLED
+→ idempotent no-op
+
+CHECKED_IN
+→ cancellation rejected
+
+CHECKED_OUT
+→ cancellation rejected
+
+Generic PATCH must reject:
+
+booking_status = CANCELLED
+
+booking_status = COMPLETED
+
+Verified cancellation safety:
+
+single cancellation inventory release
+PASS
+
+repeat/double cancellation
+PASS
+
+CHECKED_IN cancellation rejection
+PASS
+
+CHECKED_IN zero mutation
+PASS
+
+CHECKED_OUT cancellation rejection
+PASS
+
+CHECKED_OUT zero mutation
+PASS
+
+multi-room booking cancellation
+PASS
+
+mixed child status rollback
+PASS
+
+inventory underflow rollback
+PASS
+
+missing availability row rollback
+PASS
+
+PATCH CANCELLED bypass protection
+PASS
+
+PATCH COMPLETED bypass protection
+PASS
+
+================================================================================
+12. AVAILABILITY ENGINE
+================================================================================
+
+Availability is an authoritative domain.
+
+Canonical formula:
+
+PHYSICAL INVENTORY
+-
+DURABLE RESERVATION OWNERSHIP
+-
+ROOM BLOCK
+-
+OUT OF ORDER
+-
+OUT OF SERVICE
+-
+TEMPORARY LOCK
+=
+SELLABLE INVENTORY
+
+Core tables:
+
+availability_dates             [LIVE]
+availability_locks             [LIVE]
+room_blocks                    [TARGET]
+room_state                     [TARGET]
+
+Critical invariant:
+
+0 <= reserved_qty <= total_rooms
+
+Availability mutation must be transaction-safe for:
+
+booking creation
+reservation creation
+cancellation
+room move
+extend stay
+shorten stay
+no-show
+room block
+release block
+maintenance downtime
+
+================================================================================
+13. CONCURRENCY
+================================================================================
+
+Unsafe pattern:
+
+SELECT available
+then
+INSERT reservation
+
+Canonical concurrency protection:
+
+DB transaction
++
+row-level locking
++
+database constraints
++
+idempotency
++
+inventory ownership validation
+
+Targets:
+
+zero double booking
+zero negative inventory
+zero capacity overflow
+zero duplicate BID
+zero duplicate stay_sequence
+
+Room overlap concurrency protection:
+
+VERIFIED
+
+================================================================================
+14. GUEST CRM
+================================================================================
+
+Canonical guest master:
+
+guest_profiles
+
+Target entities:
+
+guest_profiles
+guest_contacts
+guest_addresses
+guest_documents
+guest_preferences
+guest_merge_history
+guest_segments
+guest_notes
+guest_communication_preferences
+guest_stay_history
+
+Booking canonical reference:
+
+primary_guest_profile_id
+
+Booking-time snapshots:
+
+guest_name_snapshot
+guest_phone_snapshot
+
+Reason:
+
+guest master data may change.
+
+Historical booking state must remain traceable.
+
+================================================================================
+15. LOYALTY
+================================================================================
+
+Loyalty is a first-class domain.
+
+Target:
+
+loyalty_accounts
+loyalty_tiers
+loyalty_point_ledger
+loyalty_rules
+loyalty_redemptions
+loyalty_adjustments
+loyalty_expirations
+
+Absolute principle:
+
+points are ledger-based.
+
+Do not use only:
+
+customer.points_balance
+
+Canonical flow:
+
+Eligible Transaction
+→ Loyalty Earning Rule
+→ Loyalty Ledger Credit
+→ Balance Projection
+
+Redemption:
+
+Points
+→ Redemption
+→ Discount / Benefit
+→ Loyalty Ledger Debit
+
+Cancellation/refund:
+
+must support traceable reversal.
+
+Possible benefits:
+
+discount
+room upgrade
+F&B discount
+voucher
+room benefit
+promotional benefit
+
+================================================================================
+16. FRONT OFFICE
+================================================================================
+
+Core front-office capabilities:
+
+Reservation Search
+Booking Search
+Booking Detail
+Guest Detail
+Room Assignment
+Check-In
+Check-Out
+Room Move
+Extend Stay
+Shorten Stay
+Split Stay
+No Show
+Cancellation
+Deposit
+Folio
+Payment
+Guest Notes
+
+Frontend never owns database integrity.
+
+Frontend calls authoritative backend commands.
+
+================================================================================
+17. TAPE CHART
+================================================================================
+
+Primary front desk interface:
+
+sidebar
+header
+property selector
+KPI
+search
+filters
+date navigator
+room grid
+reservation cards
+room status
+booking details
+guest details
+folio/payment
+action menu
+
+Canonical reservation card contract:
+
+reservation_id
+booking_id
+bid
+stay_sequence
+
+guest
+room
+room_type
+
+check_in
+check_out
+
+booking_status
+reservation_status
+stay_status
+
+payment_status
+booking_source
+channel
+
+BID becomes primary visible booking identity.
+
+Numeric reservation id remains internal.
+
+================================================================================
+18. ROOM DOMAIN
+================================================================================
+
+Separate concepts:
+
+Room Identity
+Room Type
+Occupancy State
+Housekeeping State
+Maintenance State
+Sellability
+
+Operational room states:
+
+VACANT_CLEAN
+VACANT_DIRTY
+OCCUPIED_CLEAN
+OCCUPIED_DIRTY
+INSPECTED
+
+Sellability exception states:
+
+OUT_OF_ORDER
+OUT_OF_SERVICE
+HOUSE_USE
+MAINTENANCE
+
+Do not use one ambiguous room status to represent all dimensions indefinitely.
+
+================================================================================
+19. HOUSEKEEPING
+================================================================================
+
+Canonical flow:
+
+Checkout
+↓
+VACANT_DIRTY
+↓
+Housekeeping Task
+↓
+Cleaning
+↓
+Supervisor Inspection
+↓
+VACANT_CLEAN / INSPECTED
+↓
+Ready
+
+Target tables:
+
+housekeeping_tasks
+housekeeping_task_history
+room_cleaning_history
+room_inspections
+linen_movements
+lost_and_found
+
+Housekeeping integrates with:
+
+checkout
+room readiness
+front office
+maintenance
+
+================================================================================
+20. MAINTENANCE
+================================================================================
+
+Target:
+
+assets
+maintenance_tickets
+maintenance_work_orders
+maintenance_history
+preventive_maintenance
+maintenance_parts
+room_downtime
+maintenance_sla
+
+Critical integration:
+
+Maintenance
+↓
+Room Downtime
+↓
+Availability
+
+OUT_OF_ORDER room must not remain sellable.
+
+================================================================================
+21. FOLIO & BILLING
+================================================================================
+
+Canonical target:
+
+folio_accounts
+folio_entries
+folio_adjustments
+folio_routing_rules
+folio_closures
+
+Support:
+
+booking-level folio
+reservation-level folio
+split folio
+routing
+guest payer
+company payer
+multiple payer
+deposit
+credit
+adjustment
+discount
+tax
+service charge
+
+folio_accounts.owner_type:
+
+BOOKING
+RESERVATION
+
+Legacy reservation-linked financial rows remain during migration.
+
+================================================================================
+22. PAYMENT DOMAIN
+================================================================================
+
+Payment is not just:
+
+amount_paid
+
+Canonical target:
+
+payments
+payment_transactions
+payment_allocations
+payment_refunds
+payment_reconciliations
+payment_gateway_events
+
+Payment states:
+
+INITIATED
+AUTHORIZED
+CAPTURED
+FAILED
+VOIDED
+PARTIALLY_REFUNDED
+REFUNDED
+
+Idempotency required for:
+
+capture
+refund
+webhook
+callback processing
+
+================================================================================
+23. DEPOSIT
+================================================================================
+
+Deposit is conceptually separate from revenue.
+
+Flow:
+
+Deposit Received
+↓
+Booking / Guest Liability
+↓
+Allocated During Stay
+↓
+Revenue / Settlement
+
+Deposit is not recognized as revenue simply because cash was received.
+
+================================================================================
+24. POS / F&B
+================================================================================
+
+Canonical flow:
+
+ORDER
+↓
+ORDER ITEMS
+↓
+KITCHEN
+↓
+COMPLETION
+↓
+PAYMENT or ROOM CHARGE
+↓
+INVENTORY CONSUMPTION
+↓
+COGS
+↓
+ACCOUNTING EVENT
+
+Target entities:
+
+outlets
+tables
+pos_orders
+pos_order_items
+menu_items
+menu_modifiers
+kitchen_orders
+kitchen_order_items
+pos_payments
+room_charge_links
+
+POS integrates with:
+
+folio
+payment
+inventory
+accounting
+
+================================================================================
+25. INVENTORY
+================================================================================
+
+Inventory source of truth:
+
+stock_ledger
+
+Do not rely only on:
+
+stock_items.quantity
+
+Target:
+
+warehouses
+stock_items
+stock_ledger
+stock_movements
+recipes
+bom_items
+stock_counts
+stock_adjustments
+waste
+transfers
+
+Movement types:
+
+RECEIPT
+ISSUE
+TRANSFER
+CONSUMPTION
+WASTE
+ADJUSTMENT
+COUNT_VARIANCE
+RETURN
+
+Every movement records:
+
+actor
+timestamp
+warehouse
+reference
+reason
+quantity
+cost
+correlation_id
+
+================================================================================
+26. PROCUREMENT
+================================================================================
+
+Canonical flow:
+
+Purchase Request
+↓
+Approval
+↓
+Purchase Order
+↓
+Goods Receipt
+↓
+Supplier Invoice
+↓
+3-Way Match
+↓
+Accounts Payable
+↓
+Payment
+↓
+General Ledger
+
+Target:
+
+purchase_requests
+purchase_orders
+purchase_order_lines
+goods_received_notes
+goods_received_lines
+supplier_invoices
+supplier_invoice_lines
+three_way_match_results
+
+================================================================================
+27. ACCOUNTS PAYABLE
+================================================================================
+
+Flow:
+
+Supplier
+↓
+Invoice
+↓
+Approval
+↓
+AP Ledger
+↓
+Payment
+↓
+Settlement
+
+Support:
+
+aging
+partial payment
+credit note
+withholding
+payment schedule
+supplier reconciliation
+
+================================================================================
+28. ACCOUNTS RECEIVABLE
+================================================================================
+
+Applicable to:
+
+Corporate Account
+Travel Agent
+OTA Receivable
+Group/Event
+Long Stay
+Other Credit Customers
+
+Support:
+
+invoice
+credit limit
+aging
+collection
+receipt
+allocation
+write-off
+credit hold
+
+================================================================================
+29. ACCOUNTING / GENERAL LEDGER
+================================================================================
+
+Canonical flow:
+
+Operational Transaction
+↓
+Accounting Event
+↓
+Posting Rule
+↓
+Journal
+↓
+Ledger
+↓
+Trial Balance
+↓
+Financial Statements
+
+Target tables:
+
+chart_of_accounts
+accounting_events
+posting_rules
+journal_headers
+journal_lines
+ledger_entries
+financial_periods
+
+Absolute accounting invariant:
+
+SUM(DEBIT) = SUM(CREDIT)
+
+for every journal.
+
+Operational modules may not post arbitrary unbalanced journals.
+
+================================================================================
+30. NIGHT AUDIT
+================================================================================
+
+Night audit is not only changing the date.
+
+Canonical flow:
+
+Operational Validation
+↓
+Unresolved Departure Check
+↓
+Room/Folio Validation
+↓
+Revenue Posting
+↓
+Tax/Service Posting
+↓
+Payment Reconciliation
+↓
+Occupancy Snapshot
+↓
+ADR / RevPAR Snapshot
+↓
+Business Date Close
+
+Night audit must be:
+
+idempotent
+auditable
+recoverable
+property business-date aware
+
+================================================================================
+31. HR
+================================================================================
+
+Target:
+
+employees
+employee_contracts
+departments
+positions
+shifts
+attendance_logs
+leave
+overtime
+disciplinary_records
+
+Employee access can be:
+
+single-property
+or
+multi-property
+
+according to authorization policy.
+
+================================================================================
+32. PAYROLL
+================================================================================
+
+Flow:
+
+Employee
+↓
+Attendance
+↓
+Overtime / Leave
+↓
+Payroll Calculation
+↓
+Approval
+↓
+Payroll Posting
+↓
+Bank Transfer
+↓
+Accounting
+
+Target:
+
+payroll_runs
+payroll_lines
+payroll_adjustments
+payroll_approvals
+
+Maker-checker required.
+
+================================================================================
+33. BOOKING ENGINE
+================================================================================
+
+Direct customer flow:
+
+Search Dates
+↓
+Availability
+↓
+Room Type
+↓
+Rate
+↓
+Temporary Lock
+↓
+Guest
+↓
+Login / Register
+↓
+Payment
+↓
+Booking
+↓
+BID
+↓
+Confirmation
+↓
+Loyalty
+
+Booking Engine does not own separate room inventory.
+
+It consumes authoritative Availability Engine.
+
+================================================================================
+34. OTA / CHANNEL MANAGER
+================================================================================
+
+Inbound flow:
+
+OTA Reservation
+↓
+Authentication
+↓
+Idempotency
+↓
+External Reference Mapping
+↓
+Availability Validation
+↓
+Booking
+↓
+Reservation(s)
+↓
+BID
+
+Outbound flow:
+
+Inventory / Rate Change
+↓
+Outbox
+↓
+Channel Worker
+↓
+OTA
+↓
+Acknowledgement
+↓
+Reconciliation
+
+Integration must be:
+
+retry-safe
+idempotent
+observable
+reconcilable
+
+================================================================================
+35. RATE & REVENUE MANAGEMENT
+================================================================================
+
+Target:
+
+rate_plans
+rate_calendar
+restrictions
+promotions
+packages
+derived_rates
+corporate_rates
+channel_rates
+
+Restrictions:
+
+MinLOS
+MaxLOS
+CTA
+CTD
+Stop Sell
+Occupancy Restriction
+
+Future RMS inputs:
+
+forecast
+pickup
+pace
+occupancy
+demand
+competitor data
+
+Outputs:
+
+recommended rate
+recommended restrictions
+demand alerts
+
+================================================================================
+36. USER & AUTH
+================================================================================
+
+Actor categories:
+
+OWNER
+GM
+ACCOUNTANT / FINANCE
+MANAGER
+USER / STAFF
+CUSTOMER
+SYSTEM
+
+Target:
+
+users
+roles
+permissions
+role_permissions
+user_property_access
+user_department_access
+user_outlet_access
+approval_limits
+sessions
+auth_audit
+
+================================================================================
+37. RBAC + ABAC
+================================================================================
+
+RBAC:
+
+Role
+→ Permissions
+
+ABAC dimensions:
+
+Organization
+Property
+Department
+Outlet
+Amount
+Transaction Type
+Time
+Device
+Ownership
+
+Authorization must be backend-enforced.
+
+Hiding a button in frontend is not access control.
+
+================================================================================
+38. MAKER-CHECKER
+================================================================================
+
+Required for high-risk operations:
+
+large refund
+manual journal
+financial period reopen
+stock adjustment
+purchase approval
+supplier payment
+payroll approval
+large discount
+rate override
+sensitive data access
+
+================================================================================
+39. AUDIT ARCHITECTURE
+================================================================================
+
+Critical mutation generates immutable audit trail.
+
+Canonical audit context:
+
+organization_id
+property_id
+
+actor_id
+actor_role
+
+module
+action
+
+entity_type
+entity_id
+
+booking_id
+bid
+reservation_id
+
+previous_value
+new_value
+
+reason
+
+correlation_id
+request_id
+
+timestamp
+ip
+device
+
+Audit is not a mutable business table.
+
+================================================================================
+40. CORRELATION ID
+================================================================================
+
+correlation_id is a trace identifier.
+
+It is not:
+
+BID
+reservation ID
+guest ID
+OTA ID
+payment ID
+
+One operation can include:
+
+booking mutation
+reservation mutation
+availability mutation
+payment mutation
+audit
+outbox event
+
+linked by one correlation_id.
+
+================================================================================
+41. TRANSACTIONAL OUTBOX
+================================================================================
+
+Canonical pattern:
+
+BEGIN
+
+Business Mutation
+Audit Insert
+Outbox Insert
+
+COMMIT
+
+Then:
+
+Outbox Worker
+↓
+Publish Event
+↓
+Consumer
+↓
+Idempotency
+
+Forbidden:
+
+commit business transaction
+then publish event without transactional guarantee.
+
+Target:
+
+outbox_events
+idempotency_keys
+event_consumption_log
+dead_letter_events
+
+================================================================================
+42. EVENT CONTRACT
+================================================================================
+
+Canonical fields:
+
+event_id
+event_type
+event_version
+
+organization_id
+property_id
+
+aggregate_type
+aggregate_id
+
+booking_id nullable
+bid nullable
+reservation_id nullable
+
+correlation_id
+causation_id
+
+actor_id
+
+occurred_at
+payload
+
+================================================================================
+43. EVENT TAXONOMY
+================================================================================
+
+Core events:
+
+BookingCreated
+BookingUpdated
+BookingCancelled
+
+ReservationCreated
+ReservationCancelled
+
+GuestCheckedIn
+GuestCheckedOut
+
+RoomMoved
+RoomStatusChanged
+
+AvailabilityChanged
+
+FolioCreated
+FolioCharged
+FolioAdjusted
+FolioClosed
+
+PaymentCaptured
+PaymentRefunded
+
+POSOrderCompleted
+
+InventoryReceived
+InventoryConsumed
+
+PurchaseOrderApproved
+GRNCompleted
+
+SupplierInvoicePosted
+
+LoyaltyPointsEarned
+LoyaltyPointsRedeemed
+
+JournalPosted
+
+NightAuditCompleted
+
+NotificationQueued
+
+================================================================================
+44. IDEMPOTENCY
+================================================================================
+
+Required for:
+
+booking creation
+OTA ingestion
+payment capture
+payment webhook
+refund
+cancellation
+outbox consumer
+inventory sync
+notification send
+
+Target idempotency_keys fields:
+
+scope
+key
+request_hash
+response
+status
+expires_at
+
+================================================================================
+45. API STRATEGY
+================================================================================
+
+Target version:
+
+/api/v1/...
+
+Existing:
+
+/api/...
+
+remains compatibility layer during transition.
+
+Booking APIs:
+
+POST   /api/v1/bookings
+GET    /api/v1/bookings/:bid
+PATCH  /api/v1/bookings/:bid
+POST   /api/v1/bookings/:bid/cancel
+GET    /api/v1/bookings/:bid/reservations
+
+Reservation APIs:
+
+POST /api/v1/reservations/:id/check-in
+POST /api/v1/reservations/:id/check-out
+POST /api/v1/reservations/:id/cancel
+POST /api/v1/reservations/:id/move
+POST /api/v1/reservations/:id/extend
+POST /api/v1/reservations/:id/shorten
+
+Availability:
+
+GET  /api/v1/availability
+POST /api/v1/availability/locks
+
+================================================================================
+46. STANDARD API RESPONSE
+================================================================================
+
+Success:
+
+{
+  "status": "SUCCESS",
+  "data": {},
+  "error": null,
+  "correlation_id": "..."
+}
+
+Error:
+
+{
+  "status": "ERROR",
+  "data": null,
+  "error": {
+    "code": "BOOKING_NOT_CANCELLABLE",
+    "message": "..."
+  },
+  "correlation_id": "..."
+}
+
+================================================================================
+47. ERROR TAXONOMY
+================================================================================
+
+Canonical target codes:
+
+VALIDATION_ERROR
+AUTHENTICATION_REQUIRED
+PERMISSION_DENIED
+
+BOOKING_NOT_FOUND
+RESERVATION_NOT_FOUND
+
+ROOM_NOT_AVAILABLE
+ROOM_OVERLAP
+
+BOOKING_NOT_CANCELLABLE
+RESERVATION_NOT_CANCELLABLE
+
+INVENTORY_INTEGRITY_ERROR
+
+IDEMPOTENCY_CONFLICT
+
+PAYMENT_FAILED
+
+ACCOUNTING_INTEGRITY_ERROR
+
+================================================================================
+48. GLOBAL SEARCH
+================================================================================
+
+Search targets:
+
+BID
+RSID
+Guest Name
+Phone
+Email
+Room Number
+OTA ID
+Confirmation Number
+Company
+Folio
+Invoice
+Payment Reference
+
+All search is tenant/property scoped.
+
+================================================================================
+49. NOTIFICATION
+================================================================================
+
+Target:
+
+notification_templates
+notification_jobs
+notification_attempts
+notification_preferences
+
+Channels:
+
+Email
+WhatsApp
+SMS
+Push
+In-App
+
+Notification should generally be triggered through events.
+
+================================================================================
+50. REPORTING
+================================================================================
+
+Operational:
+
+Occupancy
+Arrivals
+Departures
+In House
+Room Status
+Cancellation
+No Show
+Pickup
+Channel Mix
+
+Commercial:
+
+Room Revenue
+ADR
+RevPAR
+TRevPAR
+F&B Revenue
+Other Revenue
+Discount
+Tax
+Service Charge
+
+Financial:
+
+Cash
+Bank
+AR
+AP
+Trial Balance
+P&L
+Balance Sheet
+Cash Flow
+
+================================================================================
+51. OWNER DASHBOARD
+================================================================================
+
+Cross-property dashboard:
+
+Total Revenue
+Occupancy
+ADR
+RevPAR
+
+Property Comparison
+
+Cash
+Receivables
+Payables
+
+Channel Mix
+Booking Pace
+
+Forecast
+Budget vs Actual
+
+Department Profitability
+
+Owner should not need to open each property separately.
+
+================================================================================
+52. MULTI-TENANT SECURITY
+================================================================================
+
+Tenant boundary:
+
+organization_id
+
+Property boundary:
+
+property_id
+
+Authenticated request context:
+
+user
+organization
+allowed properties
+active property
+role
+permissions
+
+Production queries may not ignore tenant/property scope.
+
+Future:
+
+RLS evaluation
+tenant isolation testing
+cross-tenant security tests
+
+================================================================================
+53. DATABASE CONSTRAINT PHILOSOPHY
+================================================================================
+
+Business invariants enforceable by DB should be enforced by DB.
+
+Use:
+
+NOT NULL
+FOREIGN KEY
+UNIQUE
+CHECK
+EXCLUSION
+trigger only when declarative constraints are insufficient
+
+Application validation supplements database integrity.
+
+It does not replace it.
+
+================================================================================
+54. MONEY MODEL
+================================================================================
+
+For IDR:
+
+BIGINT
+
+stores integer Rupiah.
+
+Do not use JavaScript floating point as authoritative monetary arithmetic.
+
+Future multi-currency:
+
+amount_minor
+currency_code
+exchange_rate_snapshot
+base_amount_minor
+base_currency_code
+
+================================================================================
+55. TIME MODEL
+================================================================================
+
+Separate:
+
+Business Date
+Property Local Time
+UTC Event Timestamp
+
+OAK Lawang:
+
+Asia/Jakarta
+
+Night audit uses property business date.
+
+BID date uses property-local date.
+
+================================================================================
+56. OBSERVABILITY
+================================================================================
+
+Production targets:
+
+structured logs
+correlation ID
+request ID
+metrics
+distributed tracing
+health checks
+alerting
+error monitoring
+slow-query monitoring
+integration health monitoring
+
+================================================================================
+57. BACKUP & DISASTER RECOVERY
+================================================================================
+
+Required:
+
+automated PostgreSQL backups
+point-in-time recovery
+restore drills
+encrypted offsite backups
+Redis recovery strategy
+secret backup
+documented RPO
+documented RTO
+
+Backup is only considered valid after successful restore testing.
+
+================================================================================
+58. TEST ARCHITECTURE
+================================================================================
+
+Critical domains require:
+
+unit tests
+integration tests
+database invariant tests
+concurrency tests
+rollback tests
+idempotency tests
+API contract tests
+end-to-end tests
+
+Build success alone is not sufficient.
+
+================================================================================
+59. PERMANENT BOOKING INVARIANTS
+================================================================================
+
+Permanent Phase 1D gates:
+
+duplicate BID = 0
+
+orphan bookings = 0
+
+broken reservation → booking references = 0
+
+NULL booking_id = 0
+
+NULL stay_sequence = 0
+
+duplicate (booking_id, stay_sequence) = 0
+
+active room overlap = 0
+
+invalid active stay dates = 0
+
+inventory violation = 0
+
+invalid booking/reservation lifecycle mismatch = 0
+
+These become permanent regression gates.
+
+================================================================================
+60. DEVELOPMENT STATUS CLASSIFICATION
+================================================================================
+
+LIVE
+
+Meaning:
+already exists in code/database.
+
+VERIFIED
+
+Meaning:
+exists and passed defined integrity/safety tests.
+
+PARTIAL
+
+Meaning:
+exists but is not yet canonical or production-complete.
+
+NEXT
+
+Meaning:
+active next implementation phase.
+
+TARGET
+
+Meaning:
+canonical future design not yet implemented.
+
+DEFERRED
+
+Meaning:
+intentionally postponed.
+
+Every major module must carry a status.
+
+================================================================================
+61. CURRENT VERIFIED FOUNDATION
+================================================================================
+
+Property Identity / LWG
+LIVE / VERIFIED
+
+Booking Parent
+LIVE
+
+BID
+VERIFIED
+
+Booking → Reservation Relationship
+VERIFIED
+
+stay_sequence
+VERIFIED
+
+booking_id NOT NULL
+VERIFIED
+
+stay_sequence NOT NULL
+VERIFIED
+
+BID Uniqueness
+VERIFIED
+
+No Orphan Booking
+VERIFIED
+
+No Broken Booking Reference
+VERIFIED
+
+No Duplicate Stay Sequence
+VERIFIED
+
+Room Overlap Protection
+VERIFIED
+
+Booking Cancellation
+VERIFIED
+
+Inventory Release
+VERIFIED
+
+Double Cancellation Safety
+VERIFIED
+
+CHECKED_IN Cancellation Protection
+VERIFIED
+
+CHECKED_OUT Cancellation Protection
+VERIFIED
+
+Multi-Room Cancellation
+VERIFIED
+
+Mixed-Status Atomic Rollback
+VERIFIED
+
+Inventory Underflow Rollback
+VERIFIED
+
+Missing Availability Rollback
+VERIFIED
+
+PATCH Lifecycle Protection
+VERIFIED
+
+Room-Overlap Test Cleanup
+VERIFIED
+
+Booking Invariant Audit
+VERIFIED
+
+================================================================================
+62. WHAT IS NOT YET COMPLETE
+================================================================================
+
+The PMS is not yet fully production-complete.
+
+Still required:
+
+canonical booking create
+
+multi-room booking create API
+
+booking aggregate contract
+
+reservation child management
+
+reservation-level cancellation semantics
+
+booking completion derivation
+
+no-show
+
+room move full atomicity
+
+extend stay
+
+shorten stay
+
+split stay
+
+canonical guest identity
+
+folio
+
+deposit
+
+payment ledger
+
+payment allocation
+
+refund
+
+reconciliation
+
+night audit
+
+housekeeping workflow
+
+maintenance workflow
+
+authentication hardening
+
+RBAC / ABAC enforcement
+
+transactional outbox
+
+idempotency
+
+API v1
+
+operational reports
+
+revenue reports
+
+owner dashboard
+
+OTA / channel manager
+
+loyalty
+
+booking engine
+
+accounting integration
+
+================================================================================
+63. REVISED EXECUTION ROADMAP
+================================================================================
+
+FOUNDATION
+
+PHASE 1A – 1D
+
+Existing Foundation
++
+Booking Identity
++
+Dual Identity Migration
++
+Booking Safety Hardening
+
+STATUS:
+
+COMPLETED / VERIFIED
+
+
+------------------------------------------------------------
+PHASE 1E — BOOKING CORE COMPLETION
+------------------------------------------------------------
+
+STATUS:
+
+NEXT
+
+Scope:
+
+canonical booking create
+
+multi-room booking create
+
+booking detail aggregation
+
+reservation child management
+
+booking completion derivation
+
+reservation cancellation rules
+
+no-show rules
+
+room move
+
+extend stay
+
+shorten stay
+
+split stay preparation
+
+API consistency
+
+error taxonomy improvement
+
+regression suite
+
+Before implementation:
+
+1. Current-state audit
+2. Phase 1E Gap Matrix
+3. Acceptance criteria
+4. Implementation plan
+5. One controlled implementation step at a time
+
+
+------------------------------------------------------------
+PHASE 1F — GUEST IDENTITY / CRM FOUNDATION
+------------------------------------------------------------
+
+Scope:
+
+guest_profiles
+
+guest dedupe
+
+booking guest reference
+
+snapshot strategy
+
+guest search
+
+guest history
+
+preferences
+
+guest segmentation foundation
+
+
+------------------------------------------------------------
+PHASE 1G — FOLIO / DEPOSIT / PAYMENT FOUNDATION
+------------------------------------------------------------
+
+Scope:
+
+folio
+
+charges
+
+deposit
+
+payment transaction
+
+payment allocation
+
+refund
+
+reconciliation
+
+
+------------------------------------------------------------
+PHASE 1H — FRONT OFFICE COMPLETION
+------------------------------------------------------------
+
+Scope:
+
+check-in
+
+checkout
+
+room move
+
+extend stay
+
+shorten stay
+
+split stay
+
+booking detail UI
+
+guest detail UI
+
+folio UI
+
+payment UI
+
+
+------------------------------------------------------------
+PHASE 1I — HOUSEKEEPING / ROOM STATE
+------------------------------------------------------------
+
+Scope:
+
+vacant dirty
+
+vacant clean
+
+inspection
+
+housekeeping task
+
+room readiness
+
+
+------------------------------------------------------------
+PHASE 1J — NIGHT AUDIT & HOTEL REPORTS
+------------------------------------------------------------
+
+Scope:
+
+daily revenue
+
+occupancy
+
+ADR
+
+RevPAR
+
+arrivals
+
+departures
+
+in-house
+
+payment summary
+
+business date close
+
+================================================================================
+64. BUSINESS OPERATIONS ROADMAP
+================================================================================
+
+After hotel core:
+
+POS / F&B
+
+Inventory
+
+Procurement
+
+Accounts Payable
+
+Accounts Receivable
+
+Accounting
+
+Maintenance
+
+HR
+
+Payroll
+
+Then:
+
+Guest Loyalty
+
+Booking Engine
+
+OTA
+
+Channel Manager
+
+CRM Marketing
+
+Revenue Management
+
+Platform scale:
+
+organization activation
+
+multi-property administration
+
+cross-property reporting
+
+SaaS provisioning
+
+subscription
+
+central management
+
+data warehouse
+
+DR / failover
+
+Multi-property foundation must be considered from now.
+
+It is not merely a Phase 5 afterthought.
+
+================================================================================
+65. DEPLOYMENT GATE
+================================================================================
+
+OAK Management does not need the entire ecosystem completed before hotel use.
+
+First controlled operational deployment milestone:
+
+Booking
+Reservation
+Availability
+Tape Chart
+Check-In
+Check-Out
+Room State
+Folio
+Payment
+Daily Revenue
+Occupancy
+ADR
+RevPAR
+Basic Authentication
+Minimum RBAC
+Audit
+Backup
+Restore Validation
+
+Then:
+
+Development
+↓
+Staging
+↓
+Production Domain / Hosting
+↓
+Controlled Hotel Usage
+↓
+Incremental Feature Expansion
+
+================================================================================
+66. CANONICAL SOURCE OF TRUTH FOR DEVELOPMENT
+================================================================================
+
+Development hierarchy:
+
+MASTER BLUEPRINT
+↓
+PHASE SPECIFICATION
+↓
+DATABASE MIGRATION
+↓
+BACKEND CONTRACT
+↓
+FRONTEND CONTRACT
+↓
+TEST / ACCEPTANCE GATE
+↓
+IMPLEMENTATION
+
+If code and blueprint differ:
+
+DO NOT blindly change code.
+
+DO NOT blindly change blueprint.
+
+First decide:
+
+code is wrong
+
+or
+
+blueprint requires architectural revision.
+
+All meaningful architecture changes must be consolidated back into this Master Blueprint.
+
+================================================================================
+67. FINAL ARCHITECTURAL PRIORITY
+================================================================================
+
+Development priority:
+
+CORRECTNESS
+↓
+DATA INTEGRITY
+↓
+TRANSACTION SAFETY
+↓
+AUDITABILITY
+↓
+SECURITY
+↓
+OPERATIONAL COMPLETENESS
+↓
+FINANCIAL INTEGRITY
+↓
+USER EXPERIENCE
+↓
+INTEGRATION
+↓
+SCALE
+
+Do not build in this order:
+
+MORE UI
+↓
+MORE TABLES
+↓
+MORE FEATURES
+↓
+FIX INTEGRATION LATER
+
+================================================================================
+68. MASTER BLUEPRINT STATUS
+================================================================================
+
+Previous file:
+
+OAK HOTEL HIMS - ECOSYSTEM BLUEPRINT
+
+Status:
+
+SUPERSEDED
+LEGACY REFERENCE ONLY
+
+
+Current canonical file:
+
+OAK MANAGEMENT
+HOTEL INTEGRATED MANAGEMENT PLATFORM
+MASTER BLUEPRINT CONSOLIDATED FINAL V1.0
+
+Status:
+
+CANONICAL
+
+
+MASTER BLUEPRINT CONSOLIDATION:
+
+COMPLETE
+
+
+NEXT DEVELOPMENT PHASE:
+
+PHASE 1E
+BOOKING CORE COMPLETION
+
+
+Before Phase 1E implementation:
+
+CURRENT STATE AUDIT
+
+↓
+
+PHASE 1E GAP MATRIX
+
+↓
+
+ACCEPTANCE GATES
+
+↓
+
+IMPLEMENTATION PLAN
+
+↓
+
+CONTROLLED IMPLEMENTATION
+
+↓
+
+BUILD
+
+↓
+
+REGRESSION TESTS
+
+↓
+
+DATABASE INVARIANT AUDIT
+
+↓
+
+GO / NO-GO
+
+================================================================================
+END OF
+OAK MANAGEMENT
+MASTER BLUEPRINT CONSOLIDATED FINAL V1.0
+================================================================================

@@ -216,6 +216,18 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS bukti_bayar_path VARCHAR(500);
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
+
+    DO $$
+    BEGIN
+      IF (SELECT COUNT(*) FROM reservations WHERE booking_id IS NULL) > 0 THEN
+        RAISE EXCEPTION 'Cannot enforce NOT NULL on reservations.booking_id because null values still exist';
+      END IF;
+      IF (SELECT COUNT(*) FROM reservations WHERE stay_sequence IS NULL) > 0 THEN
+        RAISE EXCEPTION 'Cannot enforce NOT NULL on reservations.stay_sequence because null values still exist';
+      END IF;
+      ALTER TABLE reservations ALTER COLUMN booking_id SET NOT NULL;
+      ALTER TABLE reservations ALTER COLUMN stay_sequence SET NOT NULL;
+    END $$;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
   `);

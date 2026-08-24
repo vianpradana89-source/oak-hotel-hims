@@ -302,6 +302,14 @@ function normalizeRoomPhysicalStatus(value: any): string | null {
   return null;
 }
 
+function isRoomStatusSellable(statusValue: any): boolean {
+  const normalizedStatus = normalizeRoomPhysicalStatus(statusValue);
+  if (normalizedStatus === null) {
+    return true;
+  }
+  return ['VACANT_CLEAN', 'INSPECTED'].includes(normalizedStatus);
+}
+
 // Utility: enumerate dates between two dates using nightly stay semantics
 // [check_in, check_out) means checkout date is excluded from room blocking.
 function enumerateDates(startStr: string, endStr: string): string[] {
@@ -898,7 +906,7 @@ async function createCanonicalBooking(
 
     for (const child of normalizedChildren) {
       const roomRow = await client.query(
-        `SELECT r.id AS room_id, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code
+        `SELECT r.id AS room_id, r.status AS room_status, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code
          FROM rooms r
          LEFT JOIN room_types rt ON rt.id = r.room_type_id
          JOIN properties p ON p.id = r.property_id
@@ -914,6 +922,11 @@ async function createCanonicalBooking(
       const roomPropertyId = Number(roomInfo.property_id);
       if (bookingPropertyId !== roomPropertyId) {
         throw createHttpError(409, `room ${child.roomId} does not belong to property ${bookingPropertyId}`);
+      }
+
+      const roomStatus = roomInfo.room_status;
+      if (!isRoomStatusSellable(roomStatus)) {
+        throw createHttpError(409, `room ${child.roomId} is not sellable: status=${String(roomStatus || 'UNKNOWN')}`);
       }
 
       child.roomType = String(roomInfo.room_type || '');
