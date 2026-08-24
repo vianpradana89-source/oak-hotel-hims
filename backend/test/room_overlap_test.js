@@ -133,6 +133,18 @@ function trackCancellationRelease(reservationId) {
   }
 }
 
+function trackCheckoutRelease(reservationId) {
+  const record = reservationOwnership.get(Number(reservationId));
+  if (!record) throw new Error(`Missing ownership record for checkout ${reservationId}`);
+  for (const nightKey of record.ownedNights) {
+    record.releasedNights.add(nightKey);
+  }
+}
+
+async function establishSellableRoomStatus(client, roomId) {
+  await client.query('UPDATE rooms SET status = $1 WHERE id = $2', ['VACANT_CLEAN', Number(roomId)]);
+}
+
 function trackMoveTransfer(reservationId, toRoomId) {
   const record = reservationOwnership.get(Number(reservationId));
   if (!record) throw new Error(`Missing ownership record for move ${reservationId}`);
@@ -751,10 +763,13 @@ async function run() {
 
     // D. overlap with CHECKED_OUT -> success
     {
+      await establishSellableRoomStatus(client, scenarioDRoom.id);
       const base = await createReservation(scenarioDRoom.id, day(15), day(17), 'D1');
       expect(base.status === 201, `D1 create failed: ${base.status} ${base.text}`);
       const checkout = await request('POST', `/api/reservations/${base.json?.data?.id}/checkout`, null, 'D1-checkout');
       expect(checkout.status === 200, `D1 checkout failed: ${checkout.status} ${checkout.text}`);
+      trackCheckoutRelease(base.json?.data?.id);
+      await establishSellableRoomStatus(client, scenarioDRoom.id);
       const overlapCheckedOut = await createReservation(scenarioDRoom.id, day(16), day(18), 'D2');
       expect(overlapCheckedOut.status === 201, `D2 must succeed over CHECKED_OUT, got ${overlapCheckedOut.status}`);
       markScenario('D', true);
@@ -773,6 +788,7 @@ async function run() {
 
     // F. move into occupied room -> 409
     {
+      await establishSellableRoomStatus(client, roomA.id);
       const occupied = await createReservation(roomB.id, day(25), day(27), 'F1');
       expect(occupied.status === 201, `F1 occupied create failed: ${occupied.status} ${occupied.text}`);
       const movable = await createReservation(roomA.id, day(25), day(27), 'F2');
@@ -787,6 +803,7 @@ async function run() {
 
     // G. PATCH room/date into overlap -> 409
     {
+      await establishSellableRoomStatus(client, roomA.id);
       const occupied = await createReservation(roomB.id, day(30), day(32), 'G1');
       expect(occupied.status === 201, `G1 occupied create failed: ${occupied.status} ${occupied.text}`);
       const patchable = await createReservation(roomA.id, day(33), day(34), 'G2');
@@ -803,6 +820,7 @@ async function run() {
 
     // H. check-in overlap -> 409
     {
+      await establishSellableRoomStatus(client, roomA.id);
       const occupied = await createReservation(roomA.id, day(35), day(37), 'H1');
       expect(occupied.status === 201, `H1 occupied create failed: ${occupied.status} ${occupied.text}`);
       const checkinOccupied = await request('POST', `/api/reservations/${occupied.json?.data?.id}/checkin`, null, 'H1-checkin');
@@ -820,6 +838,7 @@ async function run() {
 
     // I. rollback preserves inventory
     {
+      await establishSellableRoomStatus(client, roomA.id);
       const base = await createReservation(roomA.id, day(40), day(42), 'I1');
       expect(base.status === 201, `I1 base create failed: ${base.status} ${base.text}`);
       const before = await client.query(

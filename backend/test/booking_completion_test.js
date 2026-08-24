@@ -110,10 +110,15 @@ async function ensureRoomBaseline(roomId, roomStatusBaseline) {
   roomStatusBaseline.set(roomId, String(result.rows[0].status || ''));
 }
 
+const SELLABLE_ROOM_STATUSES = new Set(['VACANT_CLEAN', 'READY', 'INSPECTED']);
+
 async function findSafeContext(nights, minOffset) {
   const rooms = await getRooms();
 
   for (const room of rooms) {
+    if (!SELLABLE_ROOM_STATUSES.has(String(room.status || '').toUpperCase())) {
+      continue;
+    }
     const active = await pool.query(
       `SELECT to_char(check_in::date, 'YYYY-MM-DD') AS check_in_key,
               to_char(check_out::date, 'YYYY-MM-DD') AS check_out_key
@@ -180,25 +185,30 @@ async function insertSiblingReservation(baseReservation, room, start, suffix, in
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const date = addDays(start, 1);
-    const availability = await client.query(
-      `SELECT reserved_qty, total_rooms
-       FROM availability_dates
-       WHERE room_type = $1 AND date = $2
-       FOR UPDATE`,
-      [room.roomType, date]
-    );
-    expect(availability.rowCount === 1, `Missing availability row for ${room.roomType} on ${date}`);
-    const currentReserved = Number(availability.rows[0].reserved_qty || 0);
-    const totalRooms = Number(availability.rows[0].total_rooms || 0);
-    expect(currentReserved < totalRooms, `No capacity for sibling reservation on ${date}`);
+    const checkIn = start;
+    const checkOut = addDays(start, 1);
+    const nights = enumerateDates(checkIn, checkOut);
+    expect(nights.length === 1, `Sibling reservation must be exactly one night (${checkIn} -> ${checkOut})`);
+    for (const date of nights) {
+      const availability = await client.query(
+        `SELECT reserved_qty, total_rooms
+         FROM availability_dates
+         WHERE room_type = $1 AND date = $2
+         FOR UPDATE`,
+        [room.roomType, date]
+      );
+      expect(availability.rowCount === 1, `Missing availability row for ${room.roomType} on ${date}`);
+      const currentReserved = Number(availability.rows[0].reserved_qty || 0);
+      const totalRooms = Number(availability.rows[0].total_rooms || 0);
+      expect(currentReserved < totalRooms, `No capacity for sibling reservation on ${date}`);
 
-    await client.query(
-      `UPDATE availability_dates
-       SET reserved_qty = reserved_qty + 1
-       WHERE room_type = $1 AND date = $2`,
-      [room.roomType, date]
-    );
+      await client.query(
+        `UPDATE availability_dates
+         SET reserved_qty = reserved_qty + 1
+         WHERE room_type = $1 AND date = $2`,
+        [room.roomType, date]
+      );
+    }
 
     const bookingNumber = `${String(baseReservation.booking_number || baseReservation.legacy_booking_number || `LEG-${baseReservation.id}`)}-${suffix}`;
     const inserted = await client.query(
@@ -216,8 +226,8 @@ async function insertSiblingReservation(baseReservation, room, start, suffix, in
         `${runId} ${suffix}`,
         baseReservation.guest_phone || '081900000000',
         baseReservation.guest_segment || 'Reguler',
-        start,
-        date,
+        checkIn,
+        checkOut,
         Number(baseReservation.total_price || 150000),
         'UNPAID',
         bookingNumber,
@@ -244,13 +254,15 @@ async function setReservationCancelled(reservationId, roomType, start) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const date = addDays(start, 1);
-    await client.query(
-      `UPDATE availability_dates
-       SET reserved_qty = reserved_qty - 1
-       WHERE room_type = $1 AND date = $2`,
-      [roomType, date]
-    );
+    const nights = enumerateDates(start, addDays(start, 1));
+    for (const date of nights) {
+      await client.query(
+        `UPDATE availability_dates
+         SET reserved_qty = reserved_qty - 1
+         WHERE room_type = $1 AND date = $2`,
+        [roomType, date]
+      );
+    }
     await client.query(
       `UPDATE reservations
        SET status = 'CANCELLED',
@@ -310,7 +322,10 @@ async function cleanupBooking(bookingId, roomStatusBaseline) {
     const reservations = await client.query('SELECT * FROM reservations WHERE booking_id = $1 FOR UPDATE', [bookingId]);
     for (const reservation of reservations.rows) {
       const status = String(reservation.status || '').toUpperCase();
-      if (status !== 'CANCELLED') {
+      // RM-1B semantics: CHECKED_OUT nights were already released by the
+      // checkout endpoint. Only stays still holding inventory (BOOKED /
+      // CHECKED_IN) need a manual release here.
+      if (status === 'BOOKED' || status === 'CHECKED_IN') {
         const roomTypeResult = await client.query(
           `SELECT COALESCE(rt.name, r.name) AS room_type
            FROM rooms r
@@ -361,12 +376,15 @@ async function main() {
       const context = await findSafeContext(2, 60);
       await ensureRoomBaseline(context.room.id, roomStatusBaseline);
       const reservation = await createBaseReservation(context.room, context.start, 'single');
-      const response = await request('POST', `/api/reservations/${reservation.id}/checkout`, null, 'single-checkout');
-      expect(response.status === 200, `single checkout failed: ${response.status} ${response.text}`);
-      expect(await getBookingStatus(reservation.booking_id) === 'COMPLETED', 'single checkout did not complete parent');
-      expect(await getReservationStatus(reservation.id) === 'CHECKED_OUT', 'single checkout did not close child');
-      expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === 1, 'single checkout completion audit missing');
-      await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+      try {
+        const response = await request('POST', `/api/reservations/${reservation.id}/checkout`, null, 'single-checkout');
+        expect(response.status === 200, `single checkout failed: ${response.status} ${response.text}`);
+        expect(await getBookingStatus(reservation.booking_id) === 'COMPLETED', 'single checkout did not complete parent');
+        expect(await getReservationStatus(reservation.id) === 'CHECKED_OUT', 'single checkout did not close child');
+        expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === 1, 'single checkout completion audit missing');
+      } finally {
+        await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+      }
     }
 
     // B/C. first checkout ACTIVE, final checkout COMPLETED
@@ -376,16 +394,19 @@ async function main() {
       const baseReservation = await createBaseReservation(context.room, context.start, 'pair-base');
       const secondReservation = await insertSiblingReservation(baseReservation, context.room, addDays(context.start, 1), 'pair-second', 'BOOKED');
 
-      const firstCheckout = await request('POST', `/api/reservations/${baseReservation.id}/checkout`, null, 'pair-first-checkout');
-      expect(firstCheckout.status === 200, `pair first checkout failed: ${firstCheckout.status} ${firstCheckout.text}`);
-      expect(await getBookingStatus(baseReservation.booking_id) === 'ACTIVE', 'parent should remain ACTIVE after first checkout');
-      expect(await countBookingAudit(baseReservation.booking_id, 'COMPLETE') === 0, 'completion audit written too early');
+      try {
+        const firstCheckout = await request('POST', `/api/reservations/${baseReservation.id}/checkout`, null, 'pair-first-checkout');
+        expect(firstCheckout.status === 200, `pair first checkout failed: ${firstCheckout.status} ${firstCheckout.text}`);
+        expect(await getBookingStatus(baseReservation.booking_id) === 'ACTIVE', 'parent should remain ACTIVE after first checkout');
+        expect(await countBookingAudit(baseReservation.booking_id, 'COMPLETE') === 0, 'completion audit written too early');
 
-      const secondCheckout = await request('POST', `/api/reservations/${secondReservation.id}/checkout`, null, 'pair-second-checkout');
-      expect(secondCheckout.status === 200, `pair second checkout failed: ${secondCheckout.status} ${secondCheckout.text}`);
-      expect(await getBookingStatus(baseReservation.booking_id) === 'COMPLETED', 'parent not completed after final checkout');
-      expect(await countBookingAudit(baseReservation.booking_id, 'COMPLETE') === 1, 'completion audit not written exactly once');
-      await cleanupBooking(baseReservation.booking_id, roomStatusBaseline);
+        const secondCheckout = await request('POST', `/api/reservations/${secondReservation.id}/checkout`, null, 'pair-second-checkout');
+        expect(secondCheckout.status === 200, `pair second checkout failed: ${secondCheckout.status} ${secondCheckout.text}`);
+        expect(await getBookingStatus(baseReservation.booking_id) === 'COMPLETED', 'parent not completed after final checkout');
+        expect(await countBookingAudit(baseReservation.booking_id, 'COMPLETE') === 1, 'completion audit not written exactly once');
+      } finally {
+        await cleanupBooking(baseReservation.booking_id, roomStatusBaseline);
+      }
     }
 
     // D. mixed CANCELLED + CHECKED_OUT completes
@@ -396,10 +417,13 @@ async function main() {
       const cancelledReservation = await insertSiblingReservation(baseReservation, context.room, addDays(context.start, 1), 'mixed-cancelled', 'BOOKED');
       await setReservationCancelled(cancelledReservation.id, context.room.roomType, addDays(context.start, 1));
 
-      const checkout = await request('POST', `/api/reservations/${baseReservation.id}/checkout`, null, 'mixed-checkout');
-      expect(checkout.status === 200, `mixed checkout failed: ${checkout.status} ${checkout.text}`);
-      expect(await getBookingStatus(baseReservation.booking_id) === 'COMPLETED', 'mixed booking did not complete');
-      await cleanupBooking(baseReservation.booking_id, roomStatusBaseline);
+      try {
+        const checkout = await request('POST', `/api/reservations/${baseReservation.id}/checkout`, null, 'mixed-checkout');
+        expect(checkout.status === 200, `mixed checkout failed: ${checkout.status} ${checkout.text}`);
+        expect(await getBookingStatus(baseReservation.booking_id) === 'COMPLETED', 'mixed booking did not complete');
+      } finally {
+        await cleanupBooking(baseReservation.booking_id, roomStatusBaseline);
+      }
     }
 
     // E. all CANCELLED remains CANCELLED
@@ -407,11 +431,14 @@ async function main() {
       const context = await findSafeContext(2, 120);
       await ensureRoomBaseline(context.room.id, roomStatusBaseline);
       const reservation = await createBaseReservation(context.room, context.start, 'cancel-all');
-      const cancel = await request('POST', `/api/bookings/${reservation.bid}/cancel`, null, 'cancel-all');
-      expect(cancel.status === 200, `booking cancel failed: ${cancel.status} ${cancel.text}`);
-      expect(await getBookingStatus(reservation.booking_id) === 'CANCELLED', 'all-cancelled booking not cancelled');
-      expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === 0, 'cancelled booking should not have completion audit');
-      await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+      try {
+        const cancel = await request('POST', `/api/bookings/${reservation.bid}/cancel`, null, 'cancel-all');
+        expect(cancel.status === 200, `booking cancel failed: ${cancel.status} ${cancel.text}`);
+        expect(await getBookingStatus(reservation.booking_id) === 'CANCELLED', 'all-cancelled booking not cancelled');
+        expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === 0, 'cancelled booking should not have completion audit');
+      } finally {
+        await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+      }
     }
 
     // F/G/H. repeat checkout safe, completed booking stable, audit exactly once
@@ -422,15 +449,18 @@ async function main() {
       const firstCheckout = await request('POST', `/api/reservations/${reservation.id}/checkout`, null, 'repeat-first');
       expect(firstCheckout.status === 200, `repeat first checkout failed: ${firstCheckout.status} ${firstCheckout.text}`);
 
-      const reservationAuditBefore = await countReservationAudit(reservation.id, 'CHECK_OUT');
-      const bookingAuditBefore = await countBookingAudit(reservation.booking_id, 'COMPLETE');
+      try {
+        const reservationAuditBefore = await countReservationAudit(reservation.id, 'CHECK_OUT');
+        const bookingAuditBefore = await countBookingAudit(reservation.booking_id, 'COMPLETE');
 
-      const secondCheckout = await request('POST', `/api/reservations/${reservation.id}/checkout`, null, 'repeat-second');
-      expect(secondCheckout.status === 200, `repeat checkout failed: ${secondCheckout.status} ${secondCheckout.text}`);
-      expect(await getBookingStatus(reservation.booking_id) === 'COMPLETED', 'completed booking changed on repeat checkout');
-      expect(await countReservationAudit(reservation.id, 'CHECK_OUT') === reservationAuditBefore, 'repeat checkout duplicated reservation audit');
-      expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === bookingAuditBefore, 'repeat checkout duplicated completion audit');
-      await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+        const secondCheckout = await request('POST', `/api/reservations/${reservation.id}/checkout`, null, 'repeat-second');
+        expect(secondCheckout.status === 200, `repeat checkout failed: ${secondCheckout.status} ${secondCheckout.text}`);
+        expect(await getBookingStatus(reservation.booking_id) === 'COMPLETED', 'completed booking changed on repeat checkout');
+        expect(await countReservationAudit(reservation.id, 'CHECK_OUT') === reservationAuditBefore, 'repeat checkout duplicated reservation audit');
+        expect(await countBookingAudit(reservation.booking_id, 'COMPLETE') === bookingAuditBefore, 'repeat checkout duplicated completion audit');
+      } finally {
+        await cleanupBooking(reservation.booking_id, roomStatusBaseline);
+      }
     }
 
     console.log('Booking completion derivation');

@@ -13,6 +13,7 @@
     "test:reservation-stay-dates": "node test/reservation_stay_dates_test.js",
     "test:reservation-patch-hardening": "node test/reservation_patch_hardening_test.js",
     "test:room-overlap": "node test/room_overlap_test.js",
+    "test:rm1b-canonical-identity": "node test/rm1b_canonical_identity_test.js",
     "test:concurrency": "node test/concurrency_test.js",
     "test:idempotency": "node test/idempotency_test.js",
     "test:booking-invariants": "node scripts/booking_invariants.js",

@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 
 const baseUrl = (process.argv[2] || 'http://localhost:5000').replace(/\/$/, '');
 const runId = `STAY-DATES-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+const createdReservationIds = new Set();
 
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
@@ -216,7 +217,11 @@ async function createReservation(roomId, start, end, suffix) {
   };
   const result = await request('POST', '/api/reservations', payload, suffix);
   expect(result.status === 201, `${suffix} create failed: ${result.status} ${result.text}`);
-  return result.json.data;
+  const created = result.json.data;
+  if (created && Number.isFinite(Number(created.id))) {
+    createdReservationIds.add(Number(created.id));
+  }
+  return created;
 }
 
 async function cleanupReservation(reservationId, roomStatusBaseline) {
@@ -472,12 +477,15 @@ async function main() {
       await ensureRoomStatusBaseline(checkedInContext.room.id, roomStatusBaseline);
       const checkedInWindow = checkedInContext.window;
       const checkedInReservation = await createReservation(checkedInContext.room.id, checkedInWindow.start, checkedInWindow.end, 'checkedin-guards');
+
+      // overlap rollback
+      // The adjacent conflict reservation must be created while the physical
+      // room is still sellable (the check-in below flips it to OCCUPIED_CLEAN).
+      const overlapConflict = await createReservation(checkedInContext.room.id, checkedInWindow.end, addDays(checkedInWindow.end, 1), 'checkedin-overlap-conflict');
       const checkinResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/checkin`, null, 'checkedin-guards-checkin');
       expect(checkinResponse.status === 200, `checked-in setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const checkedInBaseline = await fetchReservationRow(checkedInReservation.id);
 
-      // overlap rollback
-      const overlapConflict = await createReservation(checkedInContext.room.id, checkedInWindow.end, addDays(checkedInWindow.end, 1), 'checkedin-overlap-conflict');
       const overlapBefore = await getAvailabilityMap(checkedInContext.room.roomType, enumerateDates(checkedInWindow.start, addDays(checkedInWindow.end, 1)));
       const overlapAuditBefore = await countReservationAudits(checkedInReservation.id);
       const overlapResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/extend`, { new_check_out: addDays(checkedInWindow.end, 1) }, 'checkedin-overlap');
@@ -622,6 +630,8 @@ async function main() {
       expect(siblingReservations.length === 2, 'sibling booking did not return two reservations');
       const siblingTargetId = Number(siblingReservations[0].id);
       const siblingOtherId = Number(siblingReservations[1].id);
+      createdReservationIds.add(siblingTargetId);
+      createdReservationIds.add(siblingOtherId);
       const siblingBaseline = await fetchReservationRow(siblingOtherId);
       expect((await request('POST', `/api/reservations/${siblingTargetId}/checkin`, null, 'sibling-target-checkin')).status === 200, 'sibling target check-in failed');
       const siblingExtendResponse = await request('POST', `/api/reservations/${siblingTargetId}/extend`, { new_check_out: addDays(siblingPrimary.window.end, 1) }, 'sibling-target-extend');
@@ -639,6 +649,13 @@ async function main() {
     console.log('PASS | extend success, no-op, overlap guard, status guard');
     console.log('PASS | shorten success, no-op, direction guard, status guard');
   } finally {
+    for (const reservationId of Array.from(createdReservationIds).sort((a, b) => b - a)) {
+      try {
+        await cleanupReservation(reservationId, roomStatusBaseline);
+      } catch (cleanupError) {
+        console.error(`Cleanup failed for reservation ${reservationId}: ${cleanupError.message}`);
+      }
+    }
     await pool.end();
   }
 }

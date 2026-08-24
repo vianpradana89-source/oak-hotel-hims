@@ -61,6 +61,52 @@ export async function initializeDatabase(pool: Pool) {
 
   await pool.query(query);
 
+  // RM-1B: canonical inventory identity (additive, idempotent)
+  // Adds room_type_id alongside legacy room_type name; never drops legacy columns.
+  if (
+    (
+      await pool.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'room_types'`
+      )
+    ).rowCount! > 0
+  ) {
+    await pool.query(`
+      ALTER TABLE availability_dates ADD COLUMN IF NOT EXISTS room_type_id INTEGER;
+      ALTER TABLE availability_locks ADD COLUMN IF NOT EXISTS room_type_id INTEGER;
+
+      UPDATE availability_dates ad
+      SET room_type_id = rt.id
+      FROM room_types rt
+      WHERE ad.room_type_id IS NULL AND rt.name = ad.room_type;
+
+      UPDATE availability_locks al
+      SET room_type_id = rt.id
+      FROM room_types rt
+      WHERE al.room_type_id IS NULL AND rt.name = al.room_type;
+
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rm_1b_availability_dates_room_type_id_fkey') THEN
+          ALTER TABLE availability_dates
+            ADD CONSTRAINT rm_1b_availability_dates_room_type_id_fkey
+            FOREIGN KEY (room_type_id) REFERENCES room_types(id) NOT VALID;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rm_1b_availability_locks_room_type_id_fkey') THEN
+          ALTER TABLE availability_locks
+            ADD CONSTRAINT rm_1b_availability_locks_room_type_id_fkey
+            FOREIGN KEY (room_type_id) REFERENCES room_types(id) NOT VALID;
+        END IF;
+      END $$;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS rm_1b_availability_dates_room_type_id_date_key
+        ON availability_dates (room_type_id, date)
+        WHERE room_type_id IS NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS rm_1b_availability_locks_room_type_id_date_idx
+        ON availability_locks (room_type_id, date);
+    `);
+  }
+
   // Migrasi kolom baru pada tabel yang sudah ada sebelumnya
   await pool.query(`
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_number VARCHAR(50);
@@ -114,12 +160,12 @@ export async function initializeDatabase(pool: Pool) {
 
   // Seed availability_dates for next 180 days based on room types present
   const roomTypesRes = await pool.query(`
-    SELECT DISTINCT COALESCE(rt.name, r.name) AS room_type
+    SELECT DISTINCT COALESCE(rt.name, r.name) AS room_type, rt.id AS room_type_id
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
     WHERE COALESCE(rt.name, r.name) IS NOT NULL
   `);
-  const roomTypes = roomTypesRes.rows.map((r: any) => r.room_type);
+  const roomTypes = roomTypesRes.rows.map((r: any) => ({ name: r.room_type, id: r.room_type_id }));
   const today = new Date();
   const days = 180; // seed for 180 days
 
@@ -127,9 +173,9 @@ export async function initializeDatabase(pool: Pool) {
     const cntRes = await pool.query(
       `SELECT COUNT(*) as cnt
        FROM rooms r
-       LEFT JOIN room_types rt ON rt.id = r.room_type_id
-       WHERE COALESCE(rt.name, r.name) = $1`,
-      [rt]
+       LEFT JOIN room_types rt2 ON rt2.id = r.room_type_id
+       WHERE COALESCE(rt2.name, r.name) = $1`,
+      [rt.name]
     );
     const totalRooms = parseInt(cntRes.rows[0].cnt) || 0;
 
@@ -138,10 +184,11 @@ export async function initializeDatabase(pool: Pool) {
       d.setDate(today.getDate() + i);
       const dateStr = d.toISOString().slice(0, 10);
       await pool.query(
-        `INSERT INTO availability_dates (room_type, date, total_rooms, reserved_qty)
-         VALUES ($1, $2, $3, 0)
-         ON CONFLICT (room_type, date) DO NOTHING`,
-        [rt, dateStr, totalRooms]
+        `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+         VALUES ($1, $2, $3, $4, 0)
+         ON CONFLICT (room_type, date) DO UPDATE
+           SET room_type_id = COALESCE(availability_dates.room_type_id, EXCLUDED.room_type_id)`,
+        [rt.id ?? null, rt.name, dateStr, totalRooms]
       );
     }
   }

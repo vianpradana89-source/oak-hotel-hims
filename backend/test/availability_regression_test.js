@@ -11,6 +11,9 @@ const pool = new Pool({
 
 const fetchFn = globalThis.fetch || require('node-fetch');
 
+const runCorrelationPrefix = `AVAILREG-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+const issuedCorrelationIds = new Set();
+
 function expect(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -33,10 +36,32 @@ function addDays(dateStr, days) {
   return localDate(date);
 }
 
+function toDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return localDate(date);
+}
+
+function jakartaDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === 'year')?.value || '';
+  const month = parts.find((part) => part.type === 'month')?.value || '';
+  const day = parts.find((part) => part.type === 'day')?.value || '';
+  return `${year}-${month}-${day}`;
+}
+
 function request(method, path, body, correlationIdSuffix = '') {
   const headers = { 'Content-Type': 'application/json' };
-  const correlationId = `AVAIL-REG-${Date.now()}-${Math.random().toString(16).slice(2, 8)}${correlationIdSuffix ? `-${correlationIdSuffix}` : ''}`;
+  const correlationId = `${runCorrelationPrefix}${correlationIdSuffix ? `-${correlationIdSuffix}` : ''}`;
   headers['X-Correlation-Id'] = correlationId;
+  issuedCorrelationIds.add(correlationId);
   return fetchFn(`${baseUrl}${path}`, {
     method,
     headers,
@@ -53,10 +78,45 @@ function request(method, path, body, correlationIdSuffix = '') {
   });
 }
 
+async function releaseReservationNights(client, reservation) {
+  const status = String(reservation.status || '').toUpperCase();
+  if (status !== 'BOOKED' && status !== 'CHECKED_IN') {
+    return;
+  }
+  const roomTypeResult = await client.query('SELECT room_type_id FROM rooms WHERE id = $1', [reservation.room_id]);
+  if (!roomTypeResult.rows.length || roomTypeResult.rows[0].room_type_id === null) {
+    return;
+  }
+  const roomTypeId = roomTypeResult.rows[0].room_type_id;
+  const nights = [];
+  let cursor = new Date(`${toDateKey(reservation.check_in)}T00:00:00`);
+  const end = new Date(`${toDateKey(reservation.check_out)}T00:00:00`);
+  while (cursor < end) {
+    nights.push(toDateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  for (const night of nights) {
+    await client.query(
+      `UPDATE availability_dates
+       SET reserved_qty = reserved_qty - 1
+       WHERE room_type_id = $1 AND date::date = $2::date
+         AND reserved_qty > 0`,
+      [roomTypeId, night]
+    );
+  }
+}
+
 async function cleanupCorrelation(correlationId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const reservations = await client.query(
+      'SELECT id, room_id, check_in, check_out, status FROM reservations WHERE correlation_id = $1 FOR UPDATE',
+      [correlationId]
+    );
+    for (const reservation of reservations.rows) {
+      await releaseReservationNights(client, reservation);
+    }
     await client.query('DELETE FROM folio_entries WHERE reservation_id IN (SELECT id FROM reservations WHERE correlation_id = $1)', [correlationId]);
     await client.query('DELETE FROM audit_logs WHERE correlation_id = $1', [correlationId]);
     await client.query('DELETE FROM reservations WHERE correlation_id = $1', [correlationId]);
@@ -70,17 +130,42 @@ async function cleanupCorrelation(correlationId) {
   }
 }
 
-async function pickReadyRoom() {
-  const result = await pool.query(`
+async function roomHasActiveOverlap(roomId, start, end) {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS conflicts
+     FROM reservations
+     WHERE room_id = $1
+       AND status IN ('BOOKED', 'CHECKED_IN')
+       AND check_in::date < $3::date
+       AND check_out::date > $2::date`,
+    [roomId, start, end]
+  );
+  return Number(result.rows[0]?.conflicts || 0) > 0;
+}
+
+async function pickReadyRoom(start, end) {
+  const candidates = await pool.query(`
     SELECT r.id, r.status, COALESCE(rt.name, r.name) AS room_type, r.room_number
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
-    WHERE r.status IN ('Ready', 'VACANT_CLEAN', 'INSPECTED')
+    WHERE UPPER(r.status) IN ('READY', 'VACANT_CLEAN', 'INSPECTED')
     ORDER BY r.id
-    LIMIT 1
   `);
-  expect(result.rowCount > 0, 'No ready room available for availability regression tests');
-  return result.rows[0];
+  expect(candidates.rowCount > 0, 'No ready room available for availability regression tests');
+  for (const candidate of candidates.rows) {
+    if (await roomHasActiveOverlap(candidate.id, start, end)) {
+      continue;
+    }
+    const rows = await getAvailabilityForType(candidate.room_type, start, end);
+    if (!Array.isArray(rows) || rows.length === 0) {
+      continue;
+    }
+    const everyNightSellable = rows.every((row) => Number(row.sellable || 0) > 0);
+    if (everyNightSellable) {
+      return candidate;
+    }
+  }
+  throw new Error(`No ready room with sellable availability for every night between ${start} and ${end}`);
 }
 
 async function setRoomStatus(roomId, status) {
@@ -99,18 +184,18 @@ async function createReservationWithPayload(payload, label) {
 }
 
 async function testAvailableRoomReturned() {
-  const room = await pickReadyRoom();
   const start = addDays(localDate(), 8);
   const end = addDays(start, 2);
+  const room = await pickReadyRoom(start, end);
   const rows = await getAvailabilityForType(room.room_type, start, end);
   expect(Array.isArray(rows) && rows.length > 0, `Expected availability rows for ${room.room_type}`);
   expect(rows.some((row) => Number(row.sellable || 0) > 0), `No sellable night found for ${room.room_type}`);
 }
 
 async function testBookedRoomExcluded() {
-  const room = await pickReadyRoom();
   const checkIn = addDays(localDate(), 12);
   const checkOut = addDays(checkIn, 1);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const payload = { room_id: room.id, guest_name: 'Booked Exclusion', guest_phone: '081212000001', check_in: checkIn, check_out: checkOut, total_price: 500000, qty: 1 };
   const create = await createReservationWithPayload(payload, 'BOOKED-EXCLUDED');
   expect(create.status === 201, `Booked-room exclusion first create should succeed: ${create.text}`);
@@ -122,9 +207,9 @@ async function testBookedRoomExcluded() {
 }
 
 async function testCheckedInRoomExcluded() {
-  const room = await pickReadyRoom();
   const checkIn = addDays(localDate(), 15);
   const checkOut = addDays(checkIn, 2);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Checked In Exclusion',
@@ -157,9 +242,9 @@ async function testCheckedInRoomExcluded() {
 }
 
 async function testCancelledReservationDoesNotBlock() {
-  const room = await pickReadyRoom();
   const checkIn = addDays(localDate(), 18);
   const checkOut = addDays(checkIn, 1);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Cancelled Block',
@@ -189,10 +274,44 @@ async function testCancelledReservationDoesNotBlock() {
   await cleanupCorrelation(allowed.correlationId);
 }
 
+async function releaseHeldNightsForReservation(reservationId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const target = await client.query(
+      'SELECT room_id, check_in, check_out FROM reservations WHERE id = $1 FOR UPDATE',
+      [reservationId]
+    );
+    expect(target.rowCount === 1, `Reservation ${reservationId} not found for night release`);
+    const reservation = target.rows[0];
+    const roomTypeResult = await client.query('SELECT room_type_id FROM rooms WHERE id = $1', [reservation.room_id]);
+    const roomTypeId = roomTypeResult.rows[0]?.room_type_id ?? null;
+    if (roomTypeId !== null) {
+      let cursor = toDateKey(reservation.check_in);
+      const end = toDateKey(reservation.check_out);
+      while (cursor && end && cursor < end) {
+        await client.query(
+          `UPDATE availability_dates
+           SET reserved_qty = reserved_qty - 1
+           WHERE room_type_id = $1 AND date::date = $2::date AND reserved_qty > 0`,
+          [roomTypeId, cursor]
+        );
+        cursor = addDays(cursor, 1);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function testHistoricalCheckedOutDoesNotBlock() {
-  const room = await pickReadyRoom();
   const checkIn = addDays(localDate(), 20);
   const checkOut = addDays(checkIn, 1);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Historical Check Out',
@@ -209,6 +328,7 @@ async function testHistoricalCheckedOutDoesNotBlock() {
     `UPDATE reservations SET status = 'CHECKED_OUT', stay_status = 'COMPLETED', checked_in_at = NOW() - INTERVAL '3 day', checked_out_at = NOW() - INTERVAL '2 day' WHERE id = $1`,
     [reservationId]
   );
+  await releaseHeldNightsForReservation(reservationId);
 
   const allowed = await createReservationWithPayload({
     room_id: room.id,
@@ -225,27 +345,36 @@ async function testHistoricalCheckedOutDoesNotBlock() {
 }
 
 async function testMaintenanceRoomExcluded() {
-  const room = await pickReadyRoom();
-  await setRoomStatus(room.id, 'OUT_OF_ORDER');
   const checkIn = addDays(localDate(), 22);
   const checkOut = addDays(checkIn, 1);
-  const response = await createReservationWithPayload({
-    room_id: room.id,
-    guest_name: 'Maintenance Exclusion',
-    guest_phone: '081212000008',
-    check_in: checkIn,
-    check_out: checkOut,
-    total_price: 350000,
-    qty: 1
-  }, 'MAINTENANCE-EXCLUDE');
-  expect(response.status === 409, `Maintenance room should be rejected: ${response.text}`);
-  await setRoomStatus(room.id, 'Ready');
+  const room = await pickReadyRoom(checkIn, checkOut);
+  const originalStatusResult = await pool.query('SELECT status FROM rooms WHERE id = $1', [room.id]);
+  expect(originalStatusResult.rowCount === 1, `Room ${room.id} not found for maintenance test`);
+  const originalStatus = String(originalStatusResult.rows[0].status || 'VACANT_CLEAN');
+  await setRoomStatus(room.id, 'OUT_OF_ORDER');
+  try {
+    const response = await createReservationWithPayload({
+      room_id: room.id,
+      guest_name: 'Maintenance Exclusion',
+      guest_phone: '081212000008',
+      check_in: checkIn,
+      check_out: checkOut,
+      total_price: 350000,
+      qty: 1
+    }, 'MAINTENANCE-EXCLUDE');
+    if (response.status === 201) {
+      await cleanupCorrelation(response.correlationId);
+    }
+    expect(response.status === 409, `Maintenance room should be rejected: ${response.text}`);
+  } finally {
+    await setRoomStatus(room.id, originalStatus);
+  }
 }
 
 async function testBoundaryPreviousCheckoutAllowed() {
-  const room = await pickReadyRoom();
   const priorCheckIn = addDays(localDate(), 23);
   const priorCheckOut = addDays(priorCheckIn, 1);
+  const room = await pickReadyRoom(priorCheckIn, addDays(priorCheckOut, 1));
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Boundary Previous',
@@ -272,9 +401,9 @@ async function testBoundaryPreviousCheckoutAllowed() {
 }
 
 async function testBoundaryRequestedCheckoutEqualsNextCheckinAllowed() {
-  const room = await pickReadyRoom();
   const firstCheckIn = addDays(localDate(), 25);
   const firstCheckOut = addDays(firstCheckIn, 2);
+  const room = await pickReadyRoom(firstCheckIn, addDays(firstCheckOut, 1));
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Boundary Checkout',
@@ -301,9 +430,9 @@ async function testBoundaryRequestedCheckoutEqualsNextCheckinAllowed() {
 }
 
 async function testMultiNightRequiresAvailabilityEveryNight() {
-  const room = await pickReadyRoom();
   const start = addDays(localDate(), 27);
   const end = addDays(start, 2);
+  const room = await pickReadyRoom(start, end);
   const first = await createReservationWithPayload({
     room_id: room.id,
     guest_name: 'Multi Night First',
@@ -330,22 +459,34 @@ async function testMultiNightRequiresAvailabilityEveryNight() {
 }
 
 async function testTimezoneDateBehavior() {
-  const room = await pickReadyRoom();
-  const start = '2026-08-23';
-  const end = '2026-08-24';
-  const rows = await getAvailabilityForType(room.room_type, start, end);
-  expect(Array.isArray(rows) && rows.some((row) => String(row.date) === start || String(row.date).startsWith(start)), 'Asia/Jakarta date should include 2026-08-23 in the local availability window');
+  const start = addDays(jakartaDateKey(), -1);
+  const end = jakartaDateKey();
+  const roomResult = await pool.query(`
+    SELECT COALESCE(rt.name, r.name) AS room_type
+    FROM rooms r
+    LEFT JOIN room_types rt ON rt.id = r.room_type_id
+    ORDER BY r.id
+    LIMIT 1
+  `);
+  expect(roomResult.rowCount === 1, 'No rooms configured for timezone behavior test');
+  const rows = await getAvailabilityForType(roomResult.rows[0].room_type, start, end);
+  expect(
+    Array.isArray(rows) && rows.some((row) => jakartaDateKey(row.date) === start),
+    `Asia/Jakarta date should include ${start} in the local availability window`
+  );
 }
 
 async function testR01SelectedRoomExcludedFromOverlappingR02() {
-  const room = await pickReadyRoom();
+  const checkIn = addDays(localDate(), 30);
+  const checkOut = addDays(checkIn, 2);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const payload = {
     guest_name: 'Booking Multi Room Overlap',
     guest_phone: '081212000015',
     property_id: 1,
     reservations: [
-      { room_id: room.id, check_in: addDays(localDate(), 30), check_out: addDays(localDate(), 32), guest_name: 'R01', guest_phone: '081212000015', total_price: 500000, qty: 1 },
-      { room_id: room.id, check_in: addDays(localDate(), 30), check_out: addDays(localDate(), 32), guest_name: 'R02', guest_phone: '081212000016', total_price: 500000, qty: 1 }
+      { room_id: room.id, check_in: checkIn, check_out: checkOut, guest_name: 'R01', guest_phone: '081212000015', total_price: 500000, qty: 1 },
+      { room_id: room.id, check_in: checkIn, check_out: checkOut, guest_name: 'R02', guest_phone: '081212000016', total_price: 500000, qty: 1 }
     ]
   };
   const response = await request('POST', '/api/bookings', payload, 'MULTI-ROOM-OVERLAP');
@@ -353,9 +494,9 @@ async function testR01SelectedRoomExcludedFromOverlappingR02() {
 }
 
 async function testBackendBookingCreateRejectsStaleDoubleBookingAttempt() {
-  const room = await pickReadyRoom();
   const checkIn = addDays(localDate(), 31);
   const checkOut = addDays(checkIn, 1);
+  const room = await pickReadyRoom(checkIn, checkOut);
   const payload = {
     guest_name: 'Stale Booking Guard',
     guest_phone: '081212000017',
@@ -381,20 +522,30 @@ async function main() {
   }
   expect(response.ok, `Server responded with ${response.status} at ${baseUrl}`);
 
-  await testAvailableRoomReturned();
-  await testBookedRoomExcluded();
-  await testCheckedInRoomExcluded();
-  await testCancelledReservationDoesNotBlock();
-  await testHistoricalCheckedOutDoesNotBlock();
-  await testMaintenanceRoomExcluded();
-  await testBoundaryPreviousCheckoutAllowed();
-  await testBoundaryRequestedCheckoutEqualsNextCheckinAllowed();
-  await testMultiNightRequiresAvailabilityEveryNight();
-  await testTimezoneDateBehavior();
-  await testR01SelectedRoomExcludedFromOverlappingR02();
-  await testBackendBookingCreateRejectsStaleDoubleBookingAttempt();
+  try {
+    await testAvailableRoomReturned();
+    await testBookedRoomExcluded();
+    await testCheckedInRoomExcluded();
+    await testCancelledReservationDoesNotBlock();
+    await testHistoricalCheckedOutDoesNotBlock();
+    await testMaintenanceRoomExcluded();
+    await testBoundaryPreviousCheckoutAllowed();
+    await testBoundaryRequestedCheckoutEqualsNextCheckinAllowed();
+    await testMultiNightRequiresAvailabilityEveryNight();
+    await testTimezoneDateBehavior();
+    await testR01SelectedRoomExcludedFromOverlappingR02();
+    await testBackendBookingCreateRejectsStaleDoubleBookingAttempt();
 
-  console.log('Availability regression tests passed (12 scenarios).');
+    console.log('Availability regression tests passed (12 scenarios).');
+  } finally {
+    for (const correlationId of issuedCorrelationIds) {
+      try {
+        await cleanupCorrelation(correlationId);
+      } catch (cleanupError) {
+        console.error(`Cleanup failed for correlation ${correlationId}: ${cleanupError.message}`);
+      }
+    }
+  }
 }
 
 main().catch((error) => {
