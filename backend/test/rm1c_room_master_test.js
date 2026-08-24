@@ -377,6 +377,12 @@ async function run() {
 
       const allowed = await request('PATCH', `/api/room-types/${typeOne.id}`, { capacity: 4 });
       expect(allowed.status === 200 && Number(allowed.json.data.capacity) === 4, 'D capacity raise must succeed');
+
+      // The fixture reserved-peak row is scoped to THIS scenario only; later
+      // scenarios (type change / deactivation guards) must not see it as
+      // authoritative inventory.
+      await pool.query('DELETE FROM availability_dates WHERE id = $1', [seeded.rows[0].id]);
+      fixtureTypeId = null;
       mark('D. capacity decrease guard', true);
     }
 

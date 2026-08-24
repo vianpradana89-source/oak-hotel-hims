@@ -250,40 +250,53 @@ export async function initializeDatabase(pool: Pool) {
     console.log('Default rooms seeded successfully.');
   }
 
-  // Seed availability_dates for next 180 days based on room types present
-  const roomTypesRes = await pool.query(`
-    SELECT DISTINCT COALESCE(rt.name, r.name) AS room_type, rt.id AS room_type_id
-    FROM rooms r
-    LEFT JOIN room_types rt ON rt.id = r.room_type_id
-    WHERE COALESCE(rt.name, r.name) IS NOT NULL
+  // RM-1C.2: canonical availability seeding.
+  await seedAvailabilityDates(pool);
+
+  console.log('Database schema & tables initialized successfully (schema_v2).');
+}
+
+// Seeds today/future availability rows from canonical Room Master authority:
+//   room_types.id is the identity; total_rooms counts ONLY active physical
+//   rooms attached by room_type_id. Legacy room_type text is kept purely as
+//   compatibility/display data. Temporary housekeeping/maintenance statuses
+//   are irrelevant here and must never influence physical capacity.
+//
+// - Inactive room types are skipped so they cannot seed sellable future capacity.
+// - Existing rows are never rewritten: ON CONFLICT only adopts an unclaimed
+//   legacy row into canonical identity when the exact name matches
+//   (COALESCE keeps any existing non-null id). total_rooms and reserved_qty
+//   of existing rows stay untouched; safe today/future drift is owned by the
+//   RM-1C.1 reconciliation authority.
+// - Dates are derived from Asia/Jakarta hotel-date semantics.
+export async function seedAvailabilityDates(pool: Pool) {
+  const todayResult = await pool.query(
+    "SELECT to_char((NOW() AT TIME ZONE 'Asia/Jakarta')::date, 'YYYY-MM-DD') AS d"
+  );
+  const todayKey = String(todayResult.rows[0].d);
+
+  const canonicalTypes = await pool.query(`
+    SELECT rt.id AS room_type_id,
+           rt.name AS room_type,
+           COUNT(r.id) FILTER (WHERE COALESCE(r.is_active, TRUE))::int AS active_rooms
+    FROM room_types rt
+    LEFT JOIN rooms r ON r.room_type_id = rt.id
+    WHERE rt.is_active
+    GROUP BY rt.id
+    ORDER BY rt.id
   `);
-  const roomTypes = roomTypesRes.rows.map((r: any) => ({ name: r.room_type, id: r.room_type_id }));
-  const today = new Date();
-  const days = 180; // seed for 180 days
 
-  for (const rt of roomTypes) {
-    const cntRes = await pool.query(
-      `SELECT COUNT(*) as cnt
-       FROM rooms r
-       LEFT JOIN room_types rt2 ON rt2.id = r.room_type_id
-       WHERE COALESCE(rt2.name, r.name) = $1`,
-      [rt.name]
-    );
-    const totalRooms = parseInt(cntRes.rows[0].cnt) || 0;
-
-    for (let i = 0; i < days; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() + i);
-      const dateStr = d.toISOString().slice(0, 10);
+  const horizonDays = 180;
+  for (const rt of canonicalTypes.rows) {
+    const totalRooms = Number(rt.active_rooms || 0);
+    for (let i = 0; i < horizonDays; i += 1) {
       await pool.query(
         `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
-         VALUES ($1, $2, $3, $4, 0)
+         VALUES ($1, $2, ($3::date + ($4 || ' days')::interval), $5, 0)
          ON CONFLICT (room_type, date) DO UPDATE
            SET room_type_id = COALESCE(availability_dates.room_type_id, EXCLUDED.room_type_id)`,
-        [rt.id ?? null, rt.name, dateStr, totalRooms]
+        [rt.room_type_id, rt.room_type, todayKey, String(i), totalRooms]
       );
     }
   }
-
-  console.log('Database schema & tables initialized successfully (schema_v2).');
 }
