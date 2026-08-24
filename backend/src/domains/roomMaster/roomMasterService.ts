@@ -181,6 +181,96 @@ export async function getFutureReservedPeak(client: PoolClient | Pool, roomTypeI
   return Number(result.rows[0]?.peak || 0);
 }
 
+export async function getFutureReservedPeaks(client: PoolClient | Pool): Promise<Map<number, number>> {
+  const result = await client.query(
+    `SELECT room_type_id, MAX(reserved_qty)::int AS peak
+     FROM availability_dates
+     WHERE room_type_id IS NOT NULL
+       AND (date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+     GROUP BY room_type_id`
+  );
+  const peaks = new Map<number, number>();
+  for (const row of result.rows) {
+    peaks.set(Number(row.room_type_id), Number(row.peak || 0));
+  }
+  return peaks;
+}
+
+// RM-1C.1: Physical Room Master is the source of truth for PHYSICAL CAPACITY.
+// Active physical capacity counts only canonical active rooms; temporary
+// housekeeping/maintenance states never influence it.
+export async function getActivePhysicalCapacity(client: PoolClient | Pool, roomTypeId: number): Promise<number> {
+  const result = await client.query(
+    `SELECT COUNT(*)::int AS active_count
+     FROM rooms
+     WHERE room_type_id = $1 AND COALESCE(is_active, TRUE)`,
+    [roomTypeId]
+  );
+  return Number(result.rows[0]?.active_count || 0);
+}
+
+export async function countActivePhysicalRooms(client: PoolClient | Pool, roomTypeId: number): Promise<number> {
+  return getActivePhysicalCapacity(client, roomTypeId);
+}
+
+// Aligns ledger total_rooms with active physical capacity for today/future
+// (Jakarta hotel dates). Rows whose reserved_qty already exceeds the target
+// capacity are NEVER rewritten here; they are reported as conflicts so the
+// caller can reject the operation instead of clamping or silently overbooking.
+// Returns the number of aligned rows and conflicting rows encountered.
+export async function syncLedgerCapacityFromMaster(
+  client: PoolClient,
+  roomTypeId: number
+): Promise<{ updatedRows: number; conflictRows: number }> {
+  const capacity = await getActivePhysicalCapacity(client, roomTypeId);
+  const updated = await client.query(
+    `UPDATE availability_dates ad
+     SET total_rooms = $2
+     WHERE ad.room_type_id = $1
+       AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+       AND ad.total_rooms <> $2
+       AND ad.reserved_qty <= $2
+     RETURNING ad.id`,
+    [roomTypeId, capacity]
+  );
+  const conflicts = await client.query(
+    `SELECT id FROM availability_dates
+     WHERE room_type_id = $1
+       AND (date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+       AND reserved_qty > $2`,
+    [roomTypeId, capacity]
+  );
+  return { updatedRows: updated.rowCount ?? 0, conflictRows: conflicts.rowCount ?? 0 };
+}
+
+export async function assertDeactivationInventorySafe(
+  client: PoolClient,
+  roomTypeId: number,
+  resultingCapacity: number
+): Promise<void> {
+  const conflicts = await client.query(
+    `SELECT date::date AS day, reserved_qty FROM availability_dates
+     WHERE room_type_id = $1
+       AND (date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+       AND reserved_qty > $2
+     ORDER BY date
+     LIMIT 5`,
+    [roomTypeId, resultingCapacity]
+  );
+  if ((conflicts.rowCount ?? 0) > 0) {
+    const detail = conflicts.rows
+      .map((r: any) => `${jakartaDayKey(r.day)}(reserved=${r.reserved_qty})`)
+      .join(', ');
+    throw httpError(409, 'CAPACITY_CONFLICT',
+      `deactivation would leave active capacity ${resultingCapacity} below already-reserved quantity on ${detail}; resolve reservations first`);
+  }
+}
+
+function jakartaDayKey(value: unknown): string {
+  const date = value instanceof Date ? value : new Date(String(value));
+  return new Date(date.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export async function countActiveReservationsForRoom(
   client: PoolClient | Pool,
   roomId: number,

@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
+  assertDeactivationInventorySafe,
   countActiveReservationsForRoom,
+  getActivePhysicalCapacity,
   httpError,
+  syncLedgerCapacityFromMaster,
   writeRoomMasterAudit
 } from './roomMasterService';
 
@@ -95,6 +98,8 @@ export function createRoomsRouter(pool: Pool) {
         recordId: created.id,
         newValue: created
       });
+      // RM-1C.1: physical capacity grew by one; align today/future ledger rows.
+      await syncLedgerCapacityFromMaster(client, typeId);
       await client.query('COMMIT');
       return res.status(201).json({ status: 'OK', data: created });
     } catch (err: any) {
@@ -176,9 +181,41 @@ export function createRoomsRouter(pool: Pool) {
           throw httpError(409, 'ROOM_HAS_ACTIVE_RESERVATIONS',
             `room ${current.room_number} has ${activeReservations} active reservation(s); cancel or complete them before changing the room type`);
         }
+        // RM-1C.1: the donor type loses one active room; ensure its ledger stays safe.
+        const donorTypeId = current.room_type_id === null ? null : Number(current.room_type_id);
+        if (donorTypeId !== null && Number(donorTypeId) !== Number(targetTypeId)) {
+          const donorCapacity = await getActivePhysicalCapacity(client, donorTypeId);
+          if (Number(current.is_active)) {
+            await assertDeactivationInventorySafe(client, donorTypeId, donorCapacity - 1);
+          }
+        }
         setField('room_type_id', targetTypeId);
         setField('name', targetType.name);
         typeChangeApplied = true;
+      }
+
+      const deactivating = body.is_active !== undefined && !Boolean(body.is_active) && Boolean(current.is_active);
+      const activating = body.is_active !== undefined && Boolean(body.is_active) && !Boolean(current.is_active);
+
+      if (deactivating) {
+        const activeReservations = await countActiveReservationsForRoom(client, roomId);
+        if (activeReservations > 0) {
+          throw httpError(409, 'ROOM_HAS_ACTIVE_RESERVATIONS',
+            `room ${current.room_number} still holds ${activeReservations} active reservation(s); move, cancel or complete them before deactivating`);
+        }
+        const typeIdForDeactivation = current.room_type_id === null ? null : Number(current.room_type_id);
+        if (typeIdForDeactivation !== null) {
+          const resultingCapacity = (await getActivePhysicalCapacity(client, typeIdForDeactivation)) - 1;
+          await assertDeactivationInventorySafe(client, typeIdForDeactivation, resultingCapacity);
+        }
+      }
+
+      if (activating && current.room_type_id !== null && current.room_type_id !== undefined) {
+        const ownerType = await client.query('SELECT is_active, code, name FROM room_types WHERE id = $1', [Number(current.room_type_id)]);
+        if ((ownerType.rowCount ?? 0) > 0 && !ownerType.rows[0].is_active) {
+          throw httpError(409, 'ROOM_TYPE_INACTIVE',
+            `cannot activate room ${current.room_number}: room type ${ownerType.rows[0].code} (${ownerType.rows[0].name}) is inactive`);
+        }
       }
 
       let activationAction: string | null = null;
@@ -199,6 +236,18 @@ export function createRoomsRouter(pool: Pool) {
         params
       );
       const row = updated.rows[0];
+
+      // RM-1C.1: re-align ledger capacity for every affected room type.
+      const affectedTypeIds = new Set<number>();
+      if (current.room_type_id !== null && current.room_type_id !== undefined) {
+        affectedTypeIds.add(Number(current.room_type_id));
+      }
+      if (row.room_type_id !== null && row.room_type_id !== undefined) {
+        affectedTypeIds.add(Number(row.room_type_id));
+      }
+      for (const typeId of affectedTypeIds) {
+        await syncLedgerCapacityFromMaster(client, typeId);
+      }
 
       await writeRoomMasterAudit(client, {
         action: activationAction ?? (typeChangeApplied ? 'CHANGE_TYPE' : 'UPDATE'),

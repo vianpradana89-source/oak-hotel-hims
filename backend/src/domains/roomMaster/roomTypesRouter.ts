@@ -2,7 +2,9 @@ import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
   assertRoomTypeCodeAvailable,
+  countActivePhysicalRooms,
   getFutureReservedPeak,
+  getFutureReservedPeaks,
   httpError,
   parseRoomTypePayload,
   writeRoomMasterAudit
@@ -48,7 +50,12 @@ export function createRoomTypesRouter(pool: Pool) {
       }
       sql += ` ORDER BY rt.display_order, rt.id`;
       const result = await pool.query(sql, params);
-      return res.json({ status: 'OK', data: result.rows });
+      const peaks = await getFutureReservedPeaks(pool);
+      const data = result.rows.map((row: any) => ({
+        ...row,
+        future_reserved_peak: peaks.get(Number(row.id)) ?? 0
+      }));
+      return res.json({ status: 'OK', data });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message });
     }
@@ -64,7 +71,9 @@ export function createRoomTypesRouter(pool: Pool) {
       if ((result.rowCount ?? 0) === 0) {
         return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `room type ${typeId} not found` });
       }
-      return res.json({ status: 'OK', data: result.rows[0] });
+      const row = result.rows[0];
+      const futureReservedPeak = await getFutureReservedPeak(pool, typeId);
+      return res.json({ status: 'OK', data: { ...row, future_reserved_peak: futureReservedPeak } });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message });
     }
@@ -193,6 +202,16 @@ export function createRoomTypesRouter(pool: Pool) {
 
       let activationAction: string | null = null;
       if (body.is_active !== undefined && Boolean(body.is_active) !== Boolean(current.is_active)) {
+        // RM-1C.1: never allow contradictory state — an inactive type must not
+        // own active, sellable physical rooms. Require explicit room
+        // deactivation first.
+        if (!payload.is_active) {
+          const attachedActiveRooms = await countActivePhysicalRooms(client, typeId);
+          if (attachedActiveRooms > 0) {
+            throw httpError(409, 'TYPE_HAS_ACTIVE_ROOMS',
+              `room type ${current.code} still has ${attachedActiveRooms} active physical room(s); deactivate those rooms first`);
+          }
+        }
         setField('is_active', payload.is_active);
         activationAction = payload.is_active ? 'ACTIVATE' : 'DEACTIVATE';
       }
