@@ -8,6 +8,8 @@ import multer from 'multer';
 import { Pool } from 'pg';
 import { generateBid } from './utils/bid';
 import { initializeDatabase } from './db/schema_v3';
+import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
+import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 
 const app: any = express();
 app.use(cors());
@@ -992,7 +994,9 @@ async function createCanonicalBooking(
 
     for (const child of normalizedChildren) {
       const roomRow = await client.query(
-        `SELECT r.id AS room_id, r.status AS room_status, r.room_type_id AS canonical_room_type_id, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code
+        `SELECT r.id AS room_id, r.status AS room_status, r.room_type_id AS canonical_room_type_id, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code,
+                r.is_active AS room_is_active,
+                rt.is_active AS room_type_is_active
          FROM rooms r
          LEFT JOIN room_types rt ON rt.id = r.room_type_id
          JOIN properties p ON p.id = r.property_id
@@ -1013,6 +1017,10 @@ async function createCanonicalBooking(
       const roomStatus = roomInfo.room_status;
       if (!isRoomStatusSellable(roomStatus)) {
         throw createHttpError(409, `room ${child.roomId} is not sellable: status=${String(roomStatus || 'UNKNOWN')}`);
+      }
+
+      if (roomInfo.room_is_active === false || roomInfo.room_type_is_active === false) {
+        throw createHttpError(409, `room ${child.roomId} or its room type is inactive in Room Master and cannot accept new bookings`);
       }
 
       child.roomType = String(roomInfo.room_type || '');
@@ -2193,13 +2201,31 @@ app.get('/api/availability', async (req, res) => {
 
 app.get('/api/rooms', async (req, res) => {
   try {
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (req.query.room_type_id !== undefined) {
+      const typeId = Number(req.query.room_type_id);
+      if (!Number.isInteger(typeId) || typeId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room_type_id filter' });
+      }
+      params.push(typeId);
+      conditions.push(`r.room_type_id = $${params.length}`);
+    }
+    if (req.query.is_active !== undefined) {
+      params.push(String(req.query.is_active).toLowerCase() === 'true');
+      conditions.push(`COALESCE(r.is_active, TRUE) = $${params.length}`);
+    }
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const rooms = await pool.query(`
       SELECT r.id, r.room_number, COALESCE(rt.name, r.name, 'Standard Room') AS name,
-             r.room_type_id, COALESCE(r.name, rt.name) AS legacy_name, r.status
+             r.room_type_id, rt.code AS room_type_code,
+             COALESCE(r.name, rt.name) AS legacy_name, r.status,
+             COALESCE(r.is_active, TRUE) AS is_active
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+      ${whereClause}
       ORDER BY r.room_number
-    `);
+    `, params);
     res.json({ status: 'OK', data: rooms.rows });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -3410,11 +3436,16 @@ app.post('/api/availability/lock', async (req, res) => {
     res.json({ status: 'OK', message: 'locked', expires_at: expiresAt.toISOString(), room_type_id: ident.roomTypeId });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(409).json({ status: 'FAILED', message: err.message });
+    res.status(500).json({ status: 'ERROR', message: err.message });
   } finally {
     client.release();
   }
 });
+
+// RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
+app.use('/api/room-types', createRoomTypesRouter(pool));
+app.use('/api/rooms', createRoomsRouter(pool));
+
 
 // GET tapechart: rooms × dates with reservations per cell
 app.get('/api/tapechart', async (req, res) => {
@@ -3535,12 +3566,23 @@ app.post('/api/reservations/:id/move', async (req, res) => {
       WHERE r.id = $1
     `, [reservation.room_id]);
     const toRoomRes = await client.query(`
-      SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type
+      SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type,
+             r.is_active AS room_is_active,
+             rt.is_active AS room_type_is_active
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
       WHERE r.id = $1
     `, [to_room_id]);
     if (!hasRows(toRoomRes)) throw new Error('target room not found');
+    const moveTargetRow = toRoomRes.rows[0];
+    if (moveTargetRow.room_is_active === false || moveTargetRow.room_type_is_active === false) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'CONFLICT',
+        code: 'ROOM_MASTER_INACTIVE',
+        message: 'target room or its room type is inactive in Room Master; choose another room'
+      });
+    }
     const fromIdent: RoomTypeIdentity | null = hasRows(fromRoomRes)
       ? toRoomTypeIdentity(fromRoomRes.rows[0].room_type_id, fromRoomRes.rows[0].room_type)
       : null;
