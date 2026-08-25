@@ -8,7 +8,6 @@ import {
   syncLedgerCapacityFromMaster,
   writeRoomMasterAudit
 } from './roomMasterService';
-
 function normalizeRoomNumber(raw: unknown): string | null {
   const value = String(raw ?? '').trim();
   if (value.length < 1 || value.length > 20) {
@@ -266,6 +265,97 @@ export function createRoomsRouter(pool: Pool) {
         meta: row.is_active
           ? undefined
           : { note: 'deactivated; existing reservations remain valid and new bookings are rejected' }
+      });
+    } catch (err: any) {
+      try { await client.query('ROLLBACK'); } catch (_e) { /* noop */ }
+      if (err && typeof err.statusCode === 'number' && err.code) {
+        return res.status(err.statusCode).json({ status: err.statusCode === 409 ? 'CONFLICT' : 'ERROR', code: err.code, message: err.message });
+      }
+      return res.status(500).json({ status: 'ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // RM-1D Safe Delete: permanent deletion ONLY for rooms with zero
+  // operational/historical dependency. Any reservation, housekeeping or
+  // maintenance reference forces the caller to Nonaktifkan instead.
+  router.delete('/:id', async (req: any, res: any) => {
+    const roomId = Number(req.params.id);
+    if (!Number.isInteger(roomId) || roomId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room id' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const currentResult = await client.query('SELECT * FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
+      if ((currentResult.rowCount ?? 0) === 0) {
+        throw httpError(404, 'NOT_FOUND', `room ${roomId} not found`);
+      }
+      const current = currentResult.rows[0];
+      const roomLabel = String(current.room_number ?? roomId);
+
+      // History guard 1: reservations (any status, incl. CHECKED_OUT/CANCELLED).
+      const reservationRefs = await client.query(
+        `SELECT COUNT(*)::int AS c,
+                COUNT(*) FILTER (WHERE status IN ('BOOKED','CHECKED_IN'))::int AS active_c
+         FROM reservations WHERE room_id = $1`,
+        [roomId]
+      );
+      if (Number(reservationRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_HAS_HISTORY',
+          `room ${roomLabel} has ${reservationRefs.rows[0].c} reservation record(s) (${reservationRefs.rows[0].active_c} active); permanent deletion is rejected`);
+      }
+
+      // History guard 2/3: housekeeping & maintenance traces by room number.
+      const hkRefs = await client.query(
+        'SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE room_number = $1',
+        [String(current.room_number ?? '')]
+      );
+      if (Number(hkRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_HAS_HISTORY',
+          `room ${roomLabel} has ${hkRefs.rows[0].c} housekeeping task record(s); permanent deletion is rejected`);
+      }
+      const mtRefs = await client.query(
+        'SELECT COUNT(*)::int AS c FROM maintenance_tasks WHERE room_number = $1',
+        [String(current.room_number ?? '')]
+      );
+      if (Number(mtRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_HAS_HISTORY',
+          `room ${roomLabel} has ${mtRefs.rows[0].c} maintenance task record(s); permanent deletion is rejected`);
+      }
+
+      // Inventory safety: removing one active physical room lowers future
+      // capacity; reject if already-reserved nights would exceed it.
+      const typeId = current.room_type_id === null || current.room_type_id === undefined
+        ? null
+        : Number(current.room_type_id);
+      if (typeId !== null) {
+        const capacityAfterDelete = (await getActivePhysicalCapacity(client, typeId)) - 1;
+        await assertDeactivationInventorySafe(client, typeId, capacityAfterDelete);
+      }
+
+      await client.query('DELETE FROM rooms WHERE id = $1', [roomId]);
+
+      if (typeId !== null) {
+        const sync = await syncLedgerCapacityFromMaster(client, typeId);
+        if (sync.conflictRows > 0) {
+          throw httpError(409, 'CAPACITY_CONFLICT',
+            `ledger holds reserved quantities above the resulting capacity for room type ${typeId}`);
+        }
+      }
+
+      await writeRoomMasterAudit(client, {
+        action: 'DELETE',
+        entity: 'ROOM',
+        recordId: roomId,
+        newValue: { room_number: current.room_number, room_type_id: current.room_type_id }
+      });
+      await client.query('COMMIT');
+      return res.json({
+        status: 'OK',
+        data: { id: roomId },
+        meta: { note: 'unused room permanently deleted; capacity ledger re-synchronized' }
       });
     } catch (err: any) {
       try { await client.query('ROLLBACK'); } catch (_e) { /* noop */ }

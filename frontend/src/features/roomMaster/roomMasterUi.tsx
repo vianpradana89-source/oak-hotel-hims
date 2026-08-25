@@ -61,6 +61,9 @@ const KNOWN_ERROR_MESSAGES: Record<string, string> = {
   ROOM_HAS_ACTIVE_RESERVATIONS: 'Kamar masih memiliki reservasi aktif (BOOKED / CHECKED_IN).',
   CAPACITY_CONFLICT: 'Perubahan akan membuat kapasitas aktif di bawah reservasi yang sudah ada.',
   ROOM_MASTER_INACTIVE: 'Data room master tidak aktif.',
+  ROOM_HAS_HISTORY: 'Kamar tidak dapat dihapus karena sudah memiliki riwayat. Gunakan Nonaktifkan.',
+  ROOM_TYPE_HAS_ROOMS: 'Tipe kamar masih memiliki kamar fisik. Nonaktifkan atau pindahkan kamar terlebih dahulu.',
+  ROOM_TYPE_HAS_HISTORY: 'Tipe kamar tidak dapat dihapus karena sudah memiliki riwayat. Gunakan Nonaktifkan.',
   VALIDATION_ERROR: 'Validasi gagal.',
   NOT_FOUND: 'Data tidak ditemukan.'
 };

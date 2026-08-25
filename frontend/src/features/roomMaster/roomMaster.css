@@ -205,6 +205,39 @@
 
 .rm-btn--danger:not(:disabled):hover { background: var(--oak-accent-soft); }
 
+/* Safe Delete: restrained destructive table action — dark-red text + hairline
+   border, deliberately quieter than the gold lifecycle (Nonaktifkan) action. */
+.rm-btn--delete {
+  border: 1px solid rgba(124, 58, 45, 0.32);
+  background: transparent;
+  color: #7c3a2d;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.rm-btn--delete:hover { background: var(--oak-unpaid); }
+
+/* Confirm-delete primary action: clear danger fill, no icons. */
+.rm-btn--destructive {
+  border: 1px solid #7c3a2d;
+  background: #7c3a2d;
+  color: #f7f3ec;
+}
+
+.rm-btn--destructive:not(:disabled):hover {
+  border-color: #6a3125;
+  background: #6a3125;
+}
+
+.rm-modal--confirm { max-width: 430px; }
+
+.rm-confirm-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--oak-text-secondary);
+}
+
 .rm-table-wrap { overflow-x: auto; }
 
 .rm-table {

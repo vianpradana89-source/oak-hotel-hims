@@ -3,6 +3,7 @@ import { roomMasterApi } from './roomMasterApi';
 import { describeApiError, EmptyState, ErrorState, LoadingState, MasterStatusBadge } from './roomMasterUi';
 import type { RoomType } from './roomMasterTypes';
 import RoomTypeModal from './RoomTypeModal';
+import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 interface Props {
   roomTypes: RoomType[];
@@ -15,7 +16,6 @@ interface Props {
 }
 
 type ModalState = { kind: 'create' } | { kind: 'edit'; target: RoomType } | null;
-
 export default function RoomTypesView({
   roomTypes,
   loading,
@@ -28,6 +28,7 @@ export default function RoomTypesView({
   const [modal, setModal] = useState<ModalState>(null);
   const [rowBusyId, setRowBusyId] = useState<number | null>(null);
   const [rowError, setRowError] = useState<{ code: string; message: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<RoomType | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [search, setSearch] = useState('');
 
@@ -169,6 +170,15 @@ export default function RoomTypesView({
                         >
                           {rowBusyId === rt.id ? '…' : rt.is_active ? 'Nonaktifkan' : 'Aktifkan'}
                         </button>
+                        <button
+                          type="button"
+                          className="rm-btn rm-btn--delete"
+                          disabled={rowBusyId === rt.id}
+                          title="Hapus permanen (hanya jika belum memiliki riwayat)"
+                          onClick={() => setDeleteTarget(rt)}
+                        >
+                          Hapus
+                        </button>
                       </span>
                     </td>
                   </tr>
@@ -195,6 +205,19 @@ export default function RoomTypesView({
           onClose={(changed) => {
             setModal(null);
             if (changed) onChanged(`Tipe ${modal.target.code} diperbarui.`);
+          }}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDeleteModal
+          title={`Hapus Tipe Kamar ${deleteTarget.code}?`}
+          description="Penghapusan permanen hanya dapat dilakukan jika tipe kamar belum memiliki riwayat."
+          onConfirm={() => roomMasterApi.deleteRoomType(deleteTarget.id)}
+          onCancelled={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setDeleteTarget(null);
+            onChanged(`Tipe ${deleteTarget.code} dihapus.`);
           }}
         />
       )}

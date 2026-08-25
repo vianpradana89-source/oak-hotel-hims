@@ -38,14 +38,47 @@ async function request(method, p, body) {
   return { status: resp.status, json };
 }
 
+// Guarded, idempotent cleanup scoped to this run's disposable ids.
+// Runs on success AND failure so the suite never leaves RM1D- residue behind.
+async function cleanupFixtures(typeAId, typeBId, roomId) {
+  const typeIds = [typeAId, typeBId].filter((v) => v !== null);
+  if (typeIds.length === 0 && roomId === null) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (roomId !== null) {
+      await client.query("DELETE FROM rooms WHERE id = ANY($1::int[]) AND room_number LIKE 'RM1D-%'", [[roomId]]);
+    }
+    await client.query('DELETE FROM availability_dates WHERE room_type_id = ANY($1::int[])', [typeIds]);
+    await client.query("DELETE FROM room_types WHERE id = ANY($1::int[]) AND code LIKE 'RM1D-%'", [typeIds]);
+    const recordIds = [typeAId, typeBId, roomId].filter((v) => v !== null).map(String);
+    if (recordIds.length > 0) {
+      await client.query("DELETE FROM audit_logs WHERE entity IN ('ROOM_TYPE','ROOM') AND record_id = ANY($1::text[])", [
+        recordIds
+      ]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function main() {
+  let typeAId = null;
+  let typeBId = null;
+  let roomId = null;
+
+  try {
   // A. Create disposable types
   const a = await request('POST', '/api/room-types', { code: 'RM1D-A', name: 'RM1D Fixture A', capacity: 2 });
   expect(a.status === 201 && a.json.data.code === 'RM1D-A', 'fixture A created (RM1D-A)');
+  typeAId = Number(a.json.data.id);
   const b = await request('POST', '/api/room-types', { code: 'RM1D-B', name: 'RM1D Fixture B', capacity: 2 });
   expect(b.status === 201 && b.json.data.code === 'RM1D-B', 'fixture B created (RM1D-B)');
-  const typeAId = Number(a.json.data.id);
-  const typeBId = Number(b.json.data.id);
+  typeBId = Number(b.json.data.id);
   const originalCodeA = String(a.json.data.code);
 
   // B. Rename code DLXK-style scenario: RM1D-A -> RM1D-Z
@@ -59,7 +92,7 @@ async function main() {
   // C. Physical room binding survives code change via room_type_id
   const room = await request('POST', '/api/rooms', { room_number: 'RM1D-901', room_type_id: typeAId });
   expect(room.status === 201 && Number(room.json.data.room_type_id) === typeAId, 'disposable room bound to type id');
-  const roomId = Number(room.json.data.id);
+  roomId = Number(room.json.data.id);
 
   const rename2 = await request('PATCH', `/api/room-types/${typeAId}`, { code: 'RM1D-Y' });
   expect(rename2.status === 200 && rename2.json.data.code === 'RM1D-Y', 'second rename RM1D-Z -> RM1D-Y succeeds');
@@ -79,31 +112,9 @@ async function main() {
   const bad = await request('PATCH', `/api/room-types/${typeAId}`, { code: 'BAD CODE!' });
   expect(bad.status === 400, `invalid format rejected with HTTP 400 (got ${bad.status})`);
 
-  // F. Cleanup — guarded deletes scoped to disposable ids + RM1D- prefixes
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      "DELETE FROM rooms WHERE id = ANY($1::int[]) AND room_number LIKE 'RM1D-%'",
-      [[roomId]]
-    );
-    await client.query(
-      'DELETE FROM availability_dates WHERE room_type_id = ANY($1::int[])',
-      [[typeAId, typeBId]]
-    );
-    await client.query(
-      "DELETE FROM room_types WHERE id = ANY($1::int[]) AND code LIKE 'RM1D-%'",
-      [[typeAId, typeBId]]
-    );
-    await client.query("DELETE FROM audit_logs WHERE entity IN ('ROOM_TYPE','ROOM') AND record_id = ANY($1::text[])", [
-      [String(typeAId), String(typeBId), String(roomId)]
-    ]);
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
+  // F. Cleanup runs in finally (guarded deletes scoped to disposable ids + RM1D- prefixes)
   } finally {
-    client.release();
+    await cleanupFixtures(typeAId, typeBId, roomId);
   }
 
   // G. Residue verification

@@ -10,6 +10,7 @@ import {
 } from './roomMasterUi';
 import type { PhysicalRoom, RoomType } from './roomMasterTypes';
 import RoomModal from './RoomModal';
+import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 interface Props {
   rooms: PhysicalRoom[];
@@ -37,6 +38,7 @@ export default function PhysicalRoomsView({
   const [modal, setModal] = useState<ModalState>(null);
   const [rowBusyId, setRowBusyId] = useState<number | null>(null);
   const [rowError, setRowError] = useState<{ code: string; message: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PhysicalRoom | null>(null);
 
   // Canonical room_type_id filter — never name matching (AGENTS.md §2).
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -213,8 +215,17 @@ export default function PhysicalRoomsView({
                         onClick={() => void toggleActive(room)}
                       >
                         {rowBusyId === room.id ? '…' : room.is_active ? 'Nonaktifkan' : 'Aktifkan'}
-                      </button>
-                    </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="rm-btn rm-btn--delete"
+                          disabled={rowBusyId === room.id}
+                          title="Hapus permanen (hanya jika belum memiliki riwayat)"
+                          onClick={() => setDeleteTarget(room)}
+                        >
+                          Hapus
+                        </button>
+                      </span>
                   </td>
                 </tr>
               ))}
@@ -241,6 +252,19 @@ export default function PhysicalRoomsView({
           onClose={(changed) => {
             setModal(null);
             if (changed) onChanged(`Kamar ${modal.target.room_number} diperbarui.`);
+          }}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDeleteModal
+          title={`Hapus Kamar ${deleteTarget.room_number}?`}
+          description="Penghapusan permanen hanya dapat dilakukan jika kamar belum memiliki riwayat operasional."
+          onConfirm={() => roomMasterApi.deleteRoom(deleteTarget.id)}
+          onCancelled={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setDeleteTarget(null);
+            onChanged(`Kamar ${deleteTarget.room_number} dihapus.`);
           }}
         />
       )}

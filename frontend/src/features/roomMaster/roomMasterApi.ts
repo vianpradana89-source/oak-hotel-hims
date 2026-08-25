@@ -78,5 +78,13 @@ export const roomMasterApi = {
 
   async updateRoom(id: number, payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {
     return request<PhysicalRoom>(`/api/rooms/${id}`, jsonInit('PATCH', payload));
+  },
+
+  async deleteRoom(id: number): Promise<void> {
+    await request<{ id: number }>(`/api/rooms/${id}`, { method: 'DELETE' });
+  },
+
+  async deleteRoomType(id: number): Promise<void> {
+    await request<{ id: number }>(`/api/room-types/${id}`, { method: 'DELETE' });
   }
 };

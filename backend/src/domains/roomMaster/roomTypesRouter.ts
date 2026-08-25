@@ -253,5 +253,75 @@ export function createRoomTypesRouter(pool: Pool) {
     }
   });
 
+  // RM-1D Safe Delete: a Room Type may be permanently deleted ONLY when no
+  // physical room and no inventory/ledger/lock dependency references it.
+  // Historical availability rows are NEVER removed to make deletion succeed;
+  // their presence is exactly what forces Nonaktifkan instead.
+  router.delete('/:id', async (req: any, res: any) => {
+    const typeId = Number(req.params.id);
+    if (!Number.isInteger(typeId) || typeId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room type id' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const currentResult = await client.query('SELECT * FROM room_types WHERE id = $1 FOR UPDATE', [typeId]);
+      if ((currentResult.rowCount ?? 0) === 0) {
+        throw httpError(404, 'NOT_FOUND', `room type ${typeId} not found`);
+      }
+      const current = currentResult.rows[0];
+
+      const roomRefs = await client.query(
+        'SELECT COUNT(*)::int AS c FROM rooms WHERE room_type_id = $1',
+        [typeId]
+      );
+      if (Number(roomRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_TYPE_HAS_ROOMS',
+          `room type ${current.code} still has ${roomRefs.rows[0].c} physical room(s); deactivate or move them first`);
+      }
+
+      const ledgerRefs = await client.query(
+        'SELECT COUNT(*)::int AS c FROM availability_dates WHERE room_type_id = $1',
+        [typeId]
+      );
+      if (Number(ledgerRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
+          `room type ${current.code} has ${ledgerRefs.rows[0].c} availability ledger row(s); permanent deletion is rejected`);
+      }
+
+      const lockRefs = await client.query(
+        'SELECT COUNT(*)::int AS c FROM availability_locks WHERE room_type_id = $1',
+        [typeId]
+      );
+      if (Number(lockRefs.rows[0].c) > 0) {
+        throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
+          `room type ${current.code} still has booking lock references; permanent deletion is rejected`);
+      }
+
+      await client.query('DELETE FROM room_types WHERE id = $1', [typeId]);
+
+      await writeRoomMasterAudit(client, {
+        action: 'DELETE',
+        entity: 'ROOM_TYPE',
+        recordId: typeId,
+        newValue: { code: current.code, name: current.name, property_id: current.property_id }
+      });
+      await client.query('COMMIT');
+      return res.json({
+        status: 'OK',
+        data: { id: typeId },
+        meta: { note: 'unused room type permanently deleted; no history existed' }
+      });
+    } catch (err: any) {
+      try { await client.query('ROLLBACK'); } catch (_e) { /* noop */ }
+      if (err && typeof err.statusCode === 'number' && err.code) {
+        return res.status(err.statusCode).json({ status: err.statusCode === 409 ? 'CONFLICT' : 'ERROR', code: err.code, message: err.message });
+      }
+      return res.status(500).json({ status: 'ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   return router;
 }
