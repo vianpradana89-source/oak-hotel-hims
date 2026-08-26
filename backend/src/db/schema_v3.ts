@@ -203,9 +203,78 @@ export async function initializeDatabase(pool: Pool) {
   `;
 
   await pool.query(q);
-  // Ensure column exists for older deployments
+
+  // Bookings foundation: canonical booking entity required by reservation FK.
+  // Idempotent CREATE TABLE + triggers. Mirrors 1d_1_bookings_schema.sql
+  // production migration but lives in bootstrap for fresh-DB support.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bookings (
+      id BIGSERIAL PRIMARY KEY,
+      bid VARCHAR(32) NOT NULL,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      guest_name_snapshot VARCHAR(150) NOT NULL,
+      guest_phone_snapshot VARCHAR(50) NULL,
+      booking_source VARCHAR(20) NOT NULL DEFAULT 'WALKIN',
+      channel VARCHAR(40) NULL,
+      booking_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+      currency_code CHAR(3) NOT NULL DEFAULT 'IDR',
+      legacy_booking_number VARCHAR(50) NULL,
+      created_by VARCHAR(100) NULL,
+      correlation_id VARCHAR(100) NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT bookings_bid_unique UNIQUE (bid),
+      CONSTRAINT bookings_status_check CHECK (booking_status IN ('ACTIVE', 'CANCELLED', 'COMPLETED')),
+      CONSTRAINT bookings_currency_upper_check CHECK (currency_code = upper(currency_code)),
+      CONSTRAINT bookings_bid_format_check CHECK (bid ~ '^[A-Z0-9-]+$')
+    );
+
+    CREATE OR REPLACE FUNCTION bookings_set_updated_at()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      NEW.updated_at = NOW();
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'bookings_set_updated_at') THEN
+        CREATE TRIGGER bookings_set_updated_at
+        BEFORE UPDATE ON bookings
+        FOR EACH ROW
+        EXECUTE FUNCTION bookings_set_updated_at();
+      END IF;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION bookings_prevent_bid_change()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF OLD.bid IS DISTINCT FROM NEW.bid THEN
+        RAISE EXCEPTION 'booking BID is immutable: % -> %', OLD.bid, NEW.bid;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'bookings_prevent_bid_change') THEN
+        CREATE TRIGGER bookings_prevent_bid_change
+        BEFORE UPDATE OF bid ON bookings
+        FOR EACH ROW
+        EXECUTE FUNCTION bookings_prevent_bid_change();
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS bookings_property_id_idx
+      ON bookings (property_id);
+  `);
+
+  // Ensure reservation columns exist for older deployments and fresh DB.
+  // booking_id and stay_sequence MUST exist before NOT NULL enforcement.
   await pool.query(`
     ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS response_headers TEXT;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_id BIGINT NULL;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS stay_sequence SMALLINT NULL;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_type VARCHAR(20) DEFAULT 'WALKIN';
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'CONFIRMED';
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP;
@@ -216,6 +285,28 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS bukti_bayar_path VARCHAR(500);
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'reservations_booking_id_fkey') THEN
+        ALTER TABLE reservations
+          ADD CONSTRAINT reservations_booking_id_fkey
+          FOREIGN KEY (booking_id) REFERENCES bookings(id);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'reservations_stay_sequence_check') THEN
+        ALTER TABLE reservations
+          ADD CONSTRAINT reservations_stay_sequence_check
+          CHECK (stay_sequence IS NULL OR stay_sequence > 0);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS reservations_booking_id_idx
+      ON reservations (booking_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS reservations_booking_id_stay_sequence_key
+      ON reservations (booking_id, stay_sequence)
+      WHERE booking_id IS NOT NULL AND stay_sequence IS NOT NULL;
 
     DO $$
     BEGIN
@@ -228,8 +319,6 @@ export async function initializeDatabase(pool: Pool) {
       ALTER TABLE reservations ALTER COLUMN booking_id SET NOT NULL;
       ALTER TABLE reservations ALTER COLUMN stay_sequence SET NOT NULL;
     END $$;
-    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
-    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
   `);
 
   const housekeepingCount = await pool.query('SELECT COUNT(*) AS total FROM housekeeping_tasks');

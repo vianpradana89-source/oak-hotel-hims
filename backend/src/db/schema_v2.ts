@@ -2,6 +2,25 @@ import { Pool } from 'pg';
 
 export async function initializeDatabase(pool: Pool) {
   const query = `
+    -- Property foundation (required by room_categories, bookings, room_types, rooms FKs)
+    CREATE TABLE IF NOT EXISTS properties (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(200) NOT NULL,
+      property_code VARCHAR(6) NOT NULL,
+      address TEXT,
+      phone VARCHAR(50),
+      email VARCHAR(150),
+      timezone VARCHAR(50) DEFAULT 'Asia/Jakarta',
+      currency_code CHAR(3) DEFAULT 'IDR',
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      CONSTRAINT properties_property_code_format_check
+        CHECK (property_code ~ '^[A-Z0-9]{2,6}$')
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS properties_property_code_key
+      ON properties (property_code);
+
     -- Tabel Kamar
     CREATE TABLE IF NOT EXISTS rooms (
       id SERIAL PRIMARY KEY,
@@ -199,6 +218,57 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS rm_1c_room_types_property_id_idx ON room_types (property_id);
   `);
 
+  // C3C canonical identity hardening for fresh DB.
+  // Ensures availability_dates/availability_locks have room_type_id NOT NULL
+  // even when the RM-1B guarded block was skipped (room_types didn't exist yet).
+  await pool.query(`
+    ALTER TABLE availability_dates ADD COLUMN IF NOT EXISTS room_type_id INTEGER;
+    ALTER TABLE availability_locks ADD COLUMN IF NOT EXISTS room_type_id INTEGER;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rm_1b_availability_dates_room_type_id_fkey') THEN
+        ALTER TABLE availability_dates
+          ADD CONSTRAINT rm_1b_availability_dates_room_type_id_fkey
+          FOREIGN KEY (room_type_id) REFERENCES room_types(id) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'rm_1b_availability_locks_room_type_id_fkey') THEN
+        ALTER TABLE availability_locks
+          ADD CONSTRAINT rm_1b_availability_locks_room_type_id_fkey
+          FOREIGN KEY (room_type_id) REFERENCES room_types(id) NOT VALID;
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS rm_1b_availability_dates_room_type_id_date_key
+      ON availability_dates (room_type_id, date)
+      WHERE room_type_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS rm_1b_availability_locks_room_type_id_date_idx
+      ON availability_locks (room_type_id, date);
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'c3c_ad_room_type_id_not_null') THEN
+        ALTER TABLE availability_dates
+          ADD CONSTRAINT c3c_ad_room_type_id_not_null
+          CHECK (room_type_id IS NOT NULL) NOT VALID;
+      END IF;
+    END $$;
+    ALTER TABLE availability_dates VALIDATE CONSTRAINT c3c_ad_room_type_id_not_null;
+    ALTER TABLE availability_dates ALTER COLUMN room_type_id SET NOT NULL;
+    ALTER TABLE availability_dates DROP CONSTRAINT c3c_ad_room_type_id_not_null;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'c3c_al_room_type_id_not_null') THEN
+        ALTER TABLE availability_locks
+          ADD CONSTRAINT c3c_al_room_type_id_not_null
+          CHECK (room_type_id IS NOT NULL) NOT VALID;
+      END IF;
+    END $$;
+    ALTER TABLE availability_locks VALIDATE CONSTRAINT c3c_al_room_type_id_not_null;
+    ALTER TABLE availability_locks ALTER COLUMN room_type_id SET NOT NULL;
+    ALTER TABLE availability_locks DROP CONSTRAINT c3c_al_room_type_id_not_null;
+  `);
+
   // RM-2C.2: additive category/snapshot schema only. The approved production
   // category seed and explicit room_type_id mapping live in the guarded SQL
   // migration so normal startup never rewrites editable Room Master data.
@@ -315,24 +385,6 @@ export async function initializeDatabase(pool: Pool) {
     FROM room_types rt
     WHERE r.room_type_id = rt.id AND (r.name IS NULL OR r.name = '')
   `);
-
-  // Otomatis isi data kamar (Seeding) jika tabel masih kosong
-  const roomCheck = await pool.query('SELECT COUNT(*) FROM rooms');
-  if (parseInt(roomCheck.rows[0].count) === 0) {
-    await pool.query(`
-      INSERT INTO rooms (room_number, name, status) VALUES
-      ('101', 'Standard Room', 'Ready'),
-      ('102', 'Standard Room', 'Ready'),
-      ('103', 'Deluxe Room', 'Ready'),
-      ('104', 'Deluxe Room', 'Ready'),
-      ('105', 'Suite Room', 'Ready'),
-      ('106', 'Suite Room', 'Ready'),
-      ('107', 'Standard Room', 'Ready'),
-      ('108', 'Deluxe Room', 'Ready'),
-      ('109', 'Suite Room', 'Ready');
-    `);
-    console.log('Default rooms seeded successfully.');
-  }
 
   // RM-1C.2: canonical availability seeding.
   await seedAvailabilityDates(pool);
