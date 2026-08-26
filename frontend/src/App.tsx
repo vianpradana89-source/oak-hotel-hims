@@ -820,10 +820,11 @@ function App() {
   }, [days[0]?.date, days[days.length - 1]?.date, calendarIncludeInactive, selectedMenu, propertyId]);
 
   const fetchOperationsData = async () => {
+    if (propertyId === null) return;
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, guestsRes, employeesRes, payrollRes] = await Promise.all([
-        fetch('/api/housekeeping/tasks'),
-        fetch('/api/maintenance/tasks'),
+        fetch(`/api/housekeeping/tasks?property_id=${propertyId}`),
+        fetch(`/api/maintenance/tasks?property_id=${propertyId}`),
         fetch('/api/pos/menu'),
         fetch('/api/pos/orders'),
         fetch('/api/accounting/summary'),
@@ -1182,6 +1183,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          property_id: propertyId,
           room_number: String(roomNumber),
           task_type: 'ROOM_CLEANING',
           priority: 'MEDIUM',
@@ -1209,7 +1211,7 @@ function App() {
     const response = await fetch(`/api/housekeeping/tasks/${taskId}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status })
+      body: JSON.stringify({ property_id: propertyId, status })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {

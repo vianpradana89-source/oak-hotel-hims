@@ -40,6 +40,7 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS housekeeping_tasks (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       room_number VARCHAR(10),
       task_type VARCHAR(30) NOT NULL DEFAULT 'ROOM_SERVICE',
       priority VARCHAR(20) DEFAULT 'MEDIUM',
@@ -52,6 +53,7 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS maintenance_tasks (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       room_number VARCHAR(10),
       issue_type VARCHAR(30) NOT NULL DEFAULT 'GENERAL',
       priority VARCHAR(20) DEFAULT 'MEDIUM',
@@ -321,27 +323,7 @@ export async function initializeDatabase(pool: Pool) {
     END $$;
   `);
 
-  const housekeepingCount = await pool.query('SELECT COUNT(*) AS total FROM housekeeping_tasks');
-  if (Number(housekeepingCount.rows[0].total) === 0) {
-    await pool.query(`
-      INSERT INTO housekeeping_tasks (room_number, task_type, priority, status, assignee, notes, due_at)
-      VALUES
-        ('101', 'MAKEUP', 'HIGH', 'PENDING', 'Housekeeping 1', 'Tukar linen dan bersihkan bath tub', NOW() + INTERVAL '2 hours'),
-        ('205', 'TURN_DOWN', 'MEDIUM', 'IN_PROGRESS', 'Housekeeping 2', 'Persiapan check-in guest baru', NOW() + INTERVAL '90 minutes'),
-        ('304', 'DEEP_CLEAN', 'LOW', 'PENDING', 'Housekeeping 3', 'Membersihkan area kamar mandi dan lantai', NOW() + INTERVAL '5 hours');
-    `);
-  }
-
-  const maintenanceCount = await pool.query('SELECT COUNT(*) AS total FROM maintenance_tasks');
-  if (Number(maintenanceCount.rows[0].total) === 0) {
-    await pool.query(`
-      INSERT INTO maintenance_tasks (room_number, issue_type, priority, status, assignee, notes, due_at)
-      VALUES
-        ('204', 'AC', 'HIGH', 'OPEN', 'Teknisi AC', 'AC kamar tidak dingin, perlu cek kompresor', NOW() + INTERVAL '1 day'),
-        ('118', 'PLUMBING', 'MEDIUM', 'IN_PROGRESS', 'Teknisi Plumbing', 'Keran kamar mandi bocor ringan', NOW() + INTERVAL '4 hours'),
-        ('402', 'LIGHTING', 'LOW', 'OPEN', 'Teknisi Listrik', 'Lampu tidur mengganti bohlam', NOW() + INTERVAL '6 hours');
-    `);
-  }
+  // Housekeeping and maintenance seed data removed — property_id required
 
   const categoryCount = await pool.query('SELECT COUNT(*) AS total FROM pos_menu_categories');
   if (Number(categoryCount.rows[0].total) === 0) {

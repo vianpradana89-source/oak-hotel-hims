@@ -386,16 +386,16 @@ export function createRoomsRouter(pool: Pool) {
 
       // History guard 2/3: housekeeping & maintenance traces by room number.
       const hkRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE room_number = $1',
-        [String(current.room_number ?? '')]
+        'SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE room_number = $1 AND property_id = $2',
+        [String(current.room_number ?? ''), current.property_id]
       );
       if (Number(hkRefs.rows[0].c) > 0) {
         throw httpError(409, 'ROOM_HAS_HISTORY',
           `room ${roomLabel} has ${hkRefs.rows[0].c} housekeeping task record(s); permanent deletion is rejected`);
       }
       const mtRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM maintenance_tasks WHERE room_number = $1',
-        [String(current.room_number ?? '')]
+        'SELECT COUNT(*)::int AS c FROM maintenance_tasks WHERE room_number = $1 AND property_id = $2',
+        [String(current.room_number ?? ''), current.property_id]
       );
       if (Number(mtRefs.rows[0].c) > 0) {
         throw httpError(409, 'ROOM_HAS_HISTORY',
