@@ -1,11 +1,12 @@
 export interface TapechartRequest {
   start: string;
   end: string;
+  propertyId: number;
   includeInactive?: boolean;
 }
 
 export async function fetchTapechart(request: TapechartRequest): Promise<TapechartResponse> {
-  const params = new URLSearchParams({ start: request.start, end: request.end });
+  const params = new URLSearchParams({ start: request.start, end: request.end, property_id: String(request.propertyId) });
   if (request.includeInactive) params.set('include_inactive', '1');
 
   const response = await fetch(`/api/tapechart?${params.toString()}`);
@@ -18,8 +19,9 @@ export function buildAvailabilityRequest(
   roomTypeName: string,
   checkIn: string,
   checkOut: string,
+  propertyId: number,
 ): string {
-  const params = new URLSearchParams({ start: checkIn, end: checkOut });
+  const params = new URLSearchParams({ start: checkIn, end: checkOut, property_id: String(propertyId) });
   if (roomTypeId !== null) params.set('room_type_id', String(roomTypeId));
   else params.set('room_type', roomTypeName);
   return `/api/availability?${params.toString()}`;

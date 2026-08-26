@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
+  assertCategoryBelongsToProperty,
+  assertPropertyExists,
   assertRoomCategoryUnique,
   httpError,
+  parsePropertyId,
   parseRoomCategoryPayload,
   roomMasterErrorResponse,
   writeRoomMasterAudit
@@ -42,23 +45,22 @@ export function createRoomCategoriesRouter(pool: Pool) {
 
   router.get('/', async (req: any, res: any) => {
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+
       const activeFilter = String(req.query.active ?? 'all').toLowerCase();
       if (!['all', 'true', 'false'].includes(activeFilter)) {
         throw httpError(400, 'VALIDATION_ERROR', 'active must be all, true, or false');
       }
 
-      const params: any[] = [];
-      const conditions: string[] = [];
-      if (req.query.property_id !== undefined) {
-        params.push(parsePositiveId(req.query.property_id, 'property_id'));
-        conditions.push(`rc.property_id = $${params.length}`);
-      }
+      const params: any[] = [propertyId];
+      const conditions: string[] = [`rc.property_id = $${params.length}`];
       if (activeFilter !== 'all') {
         params.push(activeFilter === 'true');
         conditions.push(`rc.is_active = $${params.length}`);
       }
 
-      const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+      const where = ` WHERE ${conditions.join(' AND ')}`;
       const result = await pool.query(`${ROOM_CATEGORY_READ_SQL}${where} ORDER BY rc.display_order, rc.id`, params);
       return res.json({ status: 'OK', data: result.rows });
     } catch (err: unknown) {
@@ -69,6 +71,9 @@ export function createRoomCategoriesRouter(pool: Pool) {
   router.get('/:id', async (req: any, res: any) => {
     try {
       const categoryId = parsePositiveId(req.params.id, 'room category id');
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+      await assertCategoryBelongsToProperty(pool, categoryId, propertyId);
       const result = await pool.query(`${ROOM_CATEGORY_READ_SQL} WHERE rc.id = $1`, [categoryId]);
       if ((result.rowCount ?? 0) === 0) {
         throw httpError(404, 'ROOM_CATEGORY_NOT_FOUND', `room category ${categoryId} not found`);
@@ -83,13 +88,10 @@ export function createRoomCategoriesRouter(pool: Pool) {
     const client = await pool.connect();
     try {
       const payload = parseRoomCategoryPayload(req.body || {}, 'CREATE');
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
 
       await client.query('BEGIN');
-      const propertyResult = await client.query('SELECT id FROM properties ORDER BY id LIMIT 1 FOR UPDATE');
-      if ((propertyResult.rowCount ?? 0) === 0) {
-        throw httpError(409, 'PROPERTY_MISSING', 'no property exists to attach the room category to');
-      }
-      const propertyId = Number(propertyResult.rows[0].id);
+      await assertPropertyExists(client, propertyId);
 
       await assertRoomCategoryUnique(client, propertyId, payload.code!, payload.name!);
       const nextOrderResult = await client.query(
@@ -306,8 +308,11 @@ export function createRoomCategoriesRouter(pool: Pool) {
     const client = await pool.connect();
     try {
       const categoryId = parsePositiveId(req.params.id, 'room category id');
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
 
       await client.query('BEGIN');
+      await assertPropertyExists(client, propertyId);
+      await assertCategoryBelongsToProperty(client, categoryId, propertyId);
       const currentResult = await client.query('SELECT * FROM room_categories WHERE id = $1 FOR UPDATE', [categoryId]);
       if ((currentResult.rowCount ?? 0) === 0) {
         throw httpError(404, 'ROOM_CATEGORY_NOT_FOUND', `room category ${categoryId} not found`);

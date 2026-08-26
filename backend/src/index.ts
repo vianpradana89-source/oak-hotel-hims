@@ -11,6 +11,7 @@ import { initializeDatabase } from './db/schema_v3';
 import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
+import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
   applyCancellationInventoryPlan,
   buildLegacyPreLedgerCancellationAudit,
@@ -52,6 +53,45 @@ const upload = multer({
 });
 
 const hasRows = (result: { rowCount?: number | null } | null | undefined): boolean => Number(result?.rowCount ?? 0) > 0;
+
+function parsePositiveInt(value: any): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function assertPropertyId(bodyOrQuery: any): number {
+  const raw = bodyOrQuery?.property_id;
+  const propertyId = parsePositiveInt(raw);
+  if (propertyId === null) {
+    throw { statusCode: 400, code: 'VALIDATION_ERROR', message: 'property_id is required and must be a positive integer' };
+  }
+  return propertyId;
+}
+
+async function assertPropertyExists(pool: any, propertyId: number): Promise<void> {
+  const result = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+  if ((result.rowCount ?? 0) === 0) {
+    throw { statusCode: 404, code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` };
+  }
+}
+
+async function assertReservationBelongsToProperty(pool: any, reservationId: number, propertyId: number): Promise<void> {
+  const result = await pool.query(
+    `SELECT res.id, r.property_id AS room_property_id
+     FROM reservations res
+     JOIN rooms r ON r.id = res.room_id
+     WHERE res.id = $1`,
+    [reservationId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw { statusCode: 404, code: 'NOT_FOUND', message: `reservation ${reservationId} not found` };
+  }
+  const roomPropertyId = result.rows[0].room_property_id;
+  if (roomPropertyId != null && Number(roomPropertyId) !== propertyId) {
+    throw { statusCode: 403, code: 'PROPERTY_MISMATCH', message: `reservation ${reservationId} does not belong to property ${propertyId}` };
+  }
+}
+
 const ROOM_OVERLAP_SQLSTATE = '23P01';
 const ROOM_OVERLAP_RESPONSE = {
   status: 'CONFLICT',
@@ -1301,6 +1341,10 @@ async function createReservationRecord(req: any, payload: any) {
 app.get('/api/reservations/:id', async (req, res) => {
   const reservationId = Number(req.params.id);
   try {
+    const propertyId = assertPropertyId(req.query);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     const result = await pool.query(`
       SELECT 
         r.*,
@@ -1317,6 +1361,9 @@ app.get('/api/reservations/:id', async (req, res) => {
     }
     res.json({ status: 'OK', data: withReservationHotelDates(result.rows[0]) });
   } catch (err: any) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
 });
@@ -1329,6 +1376,9 @@ app.get('/api/bookings/:bid', async (req, res) => {
   }
   
   try {
+    const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+
     const result = await pool.query(
       `SELECT 
         id as booking_id,
@@ -1351,6 +1401,11 @@ app.get('/api/bookings/:bid', async (req, res) => {
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
     }
+
+    const booking = result.rows[0];
+    if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
+      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
+    }
     
     res.json({ status: 'OK', data: result.rows[0] });
   } catch (err: any) {
@@ -1366,17 +1421,25 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
   }
   
   try {
+    const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+
     // First get the booking
     const bookingResult = await pool.query(
-      `SELECT id FROM bookings WHERE UPPER(bid) = $1`,
+      `SELECT id, property_id FROM bookings WHERE UPPER(bid) = $1`,
       [bidParam]
     );
     
     if (!hasRows(bookingResult)) {
       return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
     }
+
+    const booking = bookingResult.rows[0];
+    if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
+      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
+    }
     
-    const bookingId = bookingResult.rows[0].id;
+    const bookingId = booking.id;
     
     // Then get all reservations for this booking
     const reservationsResult = await pool.query(
@@ -1428,6 +1491,9 @@ app.patch('/api/bookings/:bid', async (req, res) => {
   }
 
   try {
+    const propertyId = parsePropertyId(req.body.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+
     const result = await pool.query(
       `SELECT * FROM bookings WHERE UPPER(bid) = $1`,
       [bidParam]
@@ -1438,6 +1504,10 @@ app.patch('/api/bookings/:bid', async (req, res) => {
     }
 
     const booking = result.rows[0];
+    if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
+      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
+    }
+
     const updatedBooking = await pool.query(
       `UPDATE bookings
        SET guest_name_snapshot = COALESCE($1, guest_name_snapshot),
@@ -1476,6 +1546,9 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = parsePropertyId(req.body.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+
     await client.query('BEGIN');
 
     const bookingResult = await client.query(
@@ -1492,6 +1565,11 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
     }
 
     const booking = bookingResult.rows[0];
+
+    if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
+    }
 
     const reservationsResult = await client.query(
       `SELECT *
@@ -1674,6 +1752,10 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
 app.get('/api/reservations/:id/audit', async (req, res) => {
   const reservationId = Number(req.params.id);
   try {
+    const propertyId = assertPropertyId(req.query);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     const result = await pool.query(
       `SELECT * FROM audit_logs
        WHERE entity = 'RESERVATION' AND record_id = $1
@@ -1683,6 +1765,9 @@ app.get('/api/reservations/:id/audit', async (req, res) => {
     );
     res.json({ status: 'OK', data: result.rows });
   } catch (err: any) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
 });
@@ -1690,6 +1775,10 @@ app.get('/api/reservations/:id/audit', async (req, res) => {
 app.get('/api/rooms/:id/audit', async (req, res) => {
   const roomId = Number(req.params.id);
   try {
+    const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+    await assertRoomBelongsToProperty(pool, roomId, propertyId);
+
     const result = await pool.query(
       `SELECT * FROM audit_logs
        WHERE entity = 'ROOM' AND record_id = $1
@@ -1852,6 +1941,10 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
     const reservationLookup = await client.query(
       'SELECT id, booking_id FROM reservations WHERE id = $1',
@@ -2033,7 +2126,10 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
       }
     });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     const message = String(err?.message || err);
     if (
       message.includes('INVENTORY_INTEGRITY_ERROR') ||
@@ -2218,6 +2314,19 @@ app.post('/api/reservations/upload', upload.fields([
 
 // GET availability by canonical room type, with explicit NULL-ID legacy mode.
 app.get('/api/availability', async (req, res) => {
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+  const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+  if ((propCheck.rowCount ?? 0) === 0) {
+    return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+  }
+
   const roomTypeIdRaw = req.query.room_type_id;
   const roomTypeName = String(req.query.room_type || '').trim();
   const legacyCompatible = String(req.query.legacy_compatible || '').toLowerCase() === 'true';
@@ -2234,9 +2343,12 @@ app.get('/api/availability', async (req, res) => {
       if (!Number.isInteger(roomTypeId) || roomTypeId <= 0) {
         return res.status(400).json({ status: 'ERROR', message: 'invalid room_type_id' });
       }
-      const typeRow = await pool.query('SELECT id FROM room_types WHERE id = $1', [roomTypeId]);
+      const typeRow = await pool.query('SELECT id, property_id FROM room_types WHERE id = $1', [roomTypeId]);
       if (typeRow.rowCount !== 1) {
         return res.status(409).json({ status: 'ERROR', code: 'ROOM_TYPE_NOT_FOUND', message: `room_type_id ${roomTypeId} not found` });
+      }
+      if (Number(typeRow.rows[0].property_id) !== propertyId) {
+        return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: `room_type_id ${roomTypeId} does not belong to property ${propertyId}` });
       }
       const result = await pool.query(
         `SELECT ad.date, ad.total_rooms, ad.reserved_qty,
@@ -2273,6 +2385,10 @@ app.get('/api/availability', async (req, res) => {
     if (!roomTypeName) {
       return res.status(400).json({ status: 'ERROR', message: 'room_type is required in legacy-compatible mode' });
     }
+    const typeRow = await pool.query('SELECT id FROM room_types WHERE name = $1 AND property_id = $2', [roomTypeName, propertyId]);
+    if (typeRow.rowCount === 0) {
+      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: `room_type "${roomTypeName}" does not belong to property ${propertyId}` });
+    }
     const result = await pool.query(
       `SELECT ad.date, ad.total_rooms, ad.reserved_qty,
               (ad.total_rooms - ad.reserved_qty) AS sellable,
@@ -2295,8 +2411,21 @@ app.get('/api/availability', async (req, res) => {
 
 app.get('/api/rooms', async (req, res) => {
   try {
-    const conditions: string[] = [];
-    const params: any[] = [];
+    const propertyIdRaw = req.query.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    const conditions: string[] = [`r.property_id = $1`];
+    const params: any[] = [propertyId];
     if (req.query.room_type_id !== undefined) {
       const typeId = Number(req.query.room_type_id);
       if (!Number.isInteger(typeId) || typeId <= 0) {
@@ -2309,7 +2438,7 @@ app.get('/api/rooms', async (req, res) => {
       params.push(String(req.query.is_active).toLowerCase() === 'true');
       conditions.push(`COALESCE(r.is_active, TRUE) = $${params.length}`);
     }
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
     // RM-1D: additive operational detail for the Room Master UI (floor,
     // notes, canonical type label, active reservation load). Existing
     // columns and aliases are unchanged; legacy consumers keep working.
@@ -2816,7 +2945,11 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
 
   const client = await pool.connect();
   try {
+    const propertyId = parsePropertyId(req.body.property_id, 'property_id');
+    await assertPropertyExists(pool, propertyId);
+
     await client.query('BEGIN');
+    await assertRoomBelongsToProperty(client, roomId, propertyId);
     const result = await client.query(
       'UPDATE rooms SET status = $1 WHERE id = $2 RETURNING *',
       [mappedStatus, roomId]
@@ -2858,6 +2991,10 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
 
     // C2C2: Initial plain read to discover room_id (NOT authoritative).
@@ -3015,6 +3152,9 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     });
   } catch (err: any) {
     await client.query('ROLLBACK');
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     if (isRoomOverlapViolation(err)) {
       return sendRoomOverlapConflict(res);
     }
@@ -3049,6 +3189,10 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
 
     const reservationResult = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
@@ -3164,7 +3308,10 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       meta: auditPayload
     });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     const message = String(err?.message || err);
     if (
       message.includes('availability row missing') ||
@@ -3186,6 +3333,10 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
 
     // C2C2: Initial plain read to discover room_id (NOT authoritative).
@@ -3261,7 +3412,10 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
 
     res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated.rows[0]) });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     if (isRoomOverlapViolation(err)) {
       return sendRoomOverlapConflict(res);
     }
@@ -3276,6 +3430,10 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
     const reservationLookup = await client.query('SELECT id, booking_id FROM reservations WHERE id = $1', [reservationId]);
     if (!hasRows(reservationLookup)) {
@@ -3430,7 +3588,10 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
 
     return res.json({ status: 'SUCCESS', data: withReservationHotelDates(checkoutReservation) });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     const message = String(err?.message || err);
     res.status(message.includes('INVENTORY_INTEGRITY_ERROR') ? 409 : 500).json({ status: 'ERROR', message });
   } finally {
@@ -3626,6 +3787,18 @@ app.post('/api/availability/lock', async (req, res) => {
   }
 });
 
+// Property list endpoint (used by frontend to resolve current property context)
+app.get('/api/properties', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, property_code, timezone, currency, is_active FROM properties ORDER BY id'
+    );
+    res.json({ status: 'OK', data: result.rows });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
 app.use('/api/room-types', createRoomTypesRouter(pool));
@@ -3634,6 +3807,19 @@ app.use('/api/rooms', createRoomsRouter(pool));
 
 // GET tapechart: rooms × dates with reservations per cell
 app.get('/api/tapechart', async (req, res) => {
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+  const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+  if ((propCheck.rowCount ?? 0) === 0) {
+    return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+  }
+
   const defaultStart = hotelDateFromInstant(new Date());
   const start = normalizeHotelDate(req.query.start || defaultStart);
   const end = normalizeHotelDate(req.query.end || addHotelDays(defaultStart, 7));
@@ -3646,7 +3832,7 @@ app.get('/api/tapechart', async (req, res) => {
 
   try {
     // fetch rooms (RM-2B.1: canonical Room Master fields + future commitment aggregate)
-    const activeClause = includeInactive ? '' : 'WHERE COALESCE(r.is_active, TRUE) AND COALESCE(rt.is_active, TRUE)';
+    const includeClause = includeInactive ? '' : 'AND COALESCE(r.is_active, TRUE) AND COALESCE(rt.is_active, TRUE)';
     const roomsRes = await pool.query(`
       SELECT r.id, r.room_number,
              r.room_type_id, rt.code AS room_type_code,
@@ -3676,28 +3862,38 @@ app.get('/api/tapechart', async (req, res) => {
           AND r2.status = 'BOOKED'
           AND r2.check_in > (now() AT TIME ZONE 'Asia/Jakarta')::date
       ) f ON TRUE
-      ${activeClause}
+      WHERE r.property_id = $1 ${includeClause}
       ORDER BY r.room_number
-    `);
+    `, [propertyId]);
     const rooms = roomsRes.rows;
 
-    // fetch reservations overlapping range
-    const reservationsRes = await pool.query(
-      `SELECT r.*, r.id as reservation_id, r.booking_number as legacy_booking_number, b.bid, b.id as booking_id_value
-       FROM reservations r
-       LEFT JOIN bookings b ON b.id = r.booking_id
-       WHERE NOT (check_out <= $1::timestamp OR check_in >= $2::timestamp)`,
-      [start, end]
-    );
+    // fetch reservations overlapping range (only for property-owned rooms)
+    const roomIds = rooms.map((r: any) => Number(r.id));
+    const reservationsRes = roomIds.length > 0
+      ? await pool.query(
+          `SELECT r.*, r.id as reservation_id, r.booking_number as legacy_booking_number, b.bid, b.id as booking_id_value
+           FROM reservations r
+           LEFT JOIN bookings b ON b.id = r.booking_id
+           WHERE r.room_id = ANY($1::int[])
+             AND NOT (check_out <= $2::timestamp OR check_in >= $3::timestamp)`,
+          [roomIds, start, end]
+        )
+      : { rows: [] as any[] };
     const reservations = reservationsRes.rows;
 
-    // fetch availability for range (per room type & date)
-    const availabilityRes = await pool.query(
-      `SELECT ad.room_type_id, ad.room_type, ad.date, ad.total_rooms, ad.reserved_qty, (ad.total_rooms - ad.reserved_qty) as sellable
-       FROM availability_dates ad
-       WHERE (ad.date AT TIME ZONE 'Asia/Jakarta')::date >= $1::date AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date < $2::date`,
-      [start, end]
-    );
+    // fetch availability for range (per room type & date) - scoped to property's room types
+    const propertyTypeRes = await pool.query('SELECT id FROM room_types WHERE property_id = $1', [propertyId]);
+    const propertyTypeIds = propertyTypeRes.rows.map((r: any) => Number(r.id));
+    const availabilityRes = propertyTypeIds.length > 0
+      ? await pool.query(
+          `SELECT ad.room_type_id, ad.room_type, ad.date, ad.total_rooms, ad.reserved_qty, (ad.total_rooms - ad.reserved_qty) as sellable
+           FROM availability_dates ad
+           WHERE ad.room_type_id = ANY($1::int[])
+             AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+             AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date < $3::date`,
+          [propertyTypeIds, start, end]
+        )
+      : { rows: [] as any[] };
     const availability = availabilityRes.rows;
 
     const dates = enumerateHotelDates(start, end);
@@ -3812,6 +4008,10 @@ app.post('/api/reservations/:id/move', async (req, res) => {
 
   const client = await pool.connect();
   try {
+    const propertyId = assertPropertyId(req.body);
+    await assertPropertyExists(pool, propertyId);
+    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+
     await client.query('BEGIN');
 
     // C2C2: Initial plain read to discover source room_id (NOT authoritative).
@@ -3949,7 +4149,10 @@ app.post('/api/reservations/:id/move', async (req, res) => {
 
     return res.json({ status: 'OK', message: 'moved', reservation_id: reservationId });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     if (isRoomOverlapViolation(err)) {
       return sendRoomOverlapConflict(res);
     }

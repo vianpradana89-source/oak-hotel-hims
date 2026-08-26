@@ -2,10 +2,13 @@ import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
   assertDeactivationInventorySafe,
+  assertPropertyExists,
+  assertRoomBelongsToProperty,
   countActiveReservationsForRoom,
   getActiveReservationsForRoom,
   getActivePhysicalCapacity,
   httpError,
+  parsePropertyId,
   syncLedgerCapacityFromMaster,
   writeRoomMasterAudit
 } from './roomMasterService';
@@ -26,6 +29,10 @@ export function createRoomsRouter(pool: Pool) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room id' });
     }
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+      await assertRoomBelongsToProperty(pool, roomId, propertyId);
+
       const roomResult = await pool.query(
         'SELECT id, room_number FROM rooms WHERE id = $1',
         [roomId]
@@ -44,6 +51,9 @@ export function createRoomsRouter(pool: Pool) {
         }
       });
     } catch (err: any) {
+      if (err && typeof err.statusCode === 'number' && err.code) {
+        return res.status(err.statusCode).json({ status: err.statusCode === 409 ? 'CONFLICT' : 'ERROR', code: err.code, message: err.message });
+      }
       return res.status(500).json({ status: 'ERROR', message: err.message });
     }
   });
@@ -54,6 +64,10 @@ export function createRoomsRouter(pool: Pool) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room id' });
     }
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+      await assertRoomBelongsToProperty(pool, roomId, propertyId);
+
       const result = await pool.query(
         `SELECT r.id, r.property_id, r.room_number, r.room_type_id, rt.code AS room_type_code,
                 COALESCE(rt.name, r.name) AS room_type_name,
@@ -71,6 +85,9 @@ export function createRoomsRouter(pool: Pool) {
       const activeCount = await countActiveReservationsForRoom(pool, roomId);
       return res.json({ status: 'OK', data: { ...result.rows[0], active_reservation_count: activeCount } });
     } catch (err: any) {
+      if (err && typeof err.statusCode === 'number' && err.code) {
+        return res.status(err.statusCode).json({ status: err.statusCode === 409 ? 'CONFLICT' : 'ERROR', code: err.code, message: err.message });
+      }
       return res.status(500).json({ status: 'ERROR', message: err.message });
     }
   });
@@ -104,6 +121,14 @@ export function createRoomsRouter(pool: Pool) {
         throw httpError(409, 'ROOM_TYPE_INACTIVE', `room type ${roomType.code} (${roomType.name}) is inactive`);
       }
       const propertyId = Number(roomType.property_id);
+
+      if (body.property_id !== undefined) {
+        const requestedPropertyId = parsePropertyId(body.property_id, 'property_id');
+        await assertPropertyExists(client, requestedPropertyId);
+        if (propertyId !== requestedPropertyId) {
+          throw httpError(403, 'PROPERTY_MISMATCH', `room type ${typeId} does not belong to property ${requestedPropertyId}`);
+        }
+      }
 
       const duplicate = await client.query(
         'SELECT id FROM rooms WHERE property_id IS NOT DISTINCT FROM $1 AND room_number = $2',
@@ -149,8 +174,12 @@ export function createRoomsRouter(pool: Pool) {
     const client = await pool.connect();
     try {
       const body = req.body || {};
+      const propertyId = parsePropertyId(body.property_id, 'property_id');
 
       await client.query('BEGIN');
+      await assertPropertyExists(client, propertyId);
+      await assertRoomBelongsToProperty(client, roomId, propertyId);
+
       const currentResult = await client.query('SELECT * FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
       if ((currentResult.rowCount ?? 0) === 0) {
         throw httpError(404, 'NOT_FOUND', `room ${roomId} not found`);
@@ -328,12 +357,19 @@ export function createRoomsRouter(pool: Pool) {
     }
     const client = await pool.connect();
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+
       await client.query('BEGIN');
+      await assertPropertyExists(client, propertyId);
       const currentResult = await client.query('SELECT * FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
       if ((currentResult.rowCount ?? 0) === 0) {
         throw httpError(404, 'NOT_FOUND', `room ${roomId} not found`);
       }
       const current = currentResult.rows[0];
+
+      if (current.property_id != null && Number(current.property_id) !== propertyId) {
+        throw httpError(403, 'PROPERTY_MISMATCH', `room ${roomId} does not belong to property ${propertyId}`);
+      }
       const roomLabel = String(current.room_number ?? roomId);
 
       // History guard 1: reservations (any status, incl. CHECKED_OUT/CANCELLED).

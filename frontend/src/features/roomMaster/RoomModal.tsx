@@ -7,6 +7,7 @@ type Mode = 'create' | 'edit';
 
 interface Props {
   mode: Mode;
+  propertyId?: number | null;
   room?: PhysicalRoom | null;
   categories: RoomCategory[];
   roomTypes: RoomType[];
@@ -21,7 +22,7 @@ interface Draft {
   is_active: boolean;
 }
 
-export default function RoomModal({ mode, room, categories, roomTypes, onClose }: Props) {
+export default function RoomModal({ mode, propertyId, room, categories, roomTypes, onClose }: Props) {
   const [viewing, setViewing] = useState(mode === 'edit');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
@@ -69,14 +70,16 @@ export default function RoomModal({ mode, room, categories, roomTypes, onClose }
     setError(null);
     try {
       if (mode === 'create') {
-        await roomMasterApi.createRoom({
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.createRoom(propertyId, {
           room_number: draft.room_number.trim(),
           room_type_id: Number(draft.room_type_id),
           floor: draft.floor.trim() || null,
           notes: draft.notes.trim() || null
         });
       } else if (room) {
-        await roomMasterApi.updateRoom(room.id, {
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.updateRoom(room.id, propertyId, {
           room_number: draft.room_number.trim(),
           room_type_id: Number(draft.room_type_id),
           floor: draft.floor.trim() || null,

@@ -1,12 +1,15 @@
 import { Router } from 'express';
 import type { Pool, PoolClient } from 'pg';
 import {
+  assertPropertyExists,
   assertRoomTypeCodeAvailable,
+  assertRoomTypeBelongsToProperty,
   countActivePhysicalRooms,
   getFutureReservedPeak,
   getFutureReservedPeaks,
   httpError,
   lockRoomCategoryForAssignment,
+  parsePropertyId,
   parseRoomTypePayload,
   roomMasterErrorResponse,
   writeRoomMasterAudit
@@ -75,13 +78,16 @@ export function createRoomTypesRouter(pool: Pool) {
 
   router.get('/', async (req: any, res: any) => {
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+
       const activeFilter = String(req.query.active || 'all').toLowerCase();
-      const params: any[] = [];
-      let sql = ROOM_TYPE_LIST_SQL;
+      const params: any[] = [propertyId];
+      let sql = `${ROOM_TYPE_LIST_SQL} WHERE rt.property_id = $1`;
       if (activeFilter === 'true') {
-        sql += ` WHERE rt.is_active`;
+        sql += ` AND rt.is_active`;
       } else if (activeFilter === 'false') {
-        sql += ` WHERE NOT rt.is_active`;
+        sql += ` AND NOT rt.is_active`;
       }
       sql += ` ORDER BY rt.display_order, rt.id`;
       const result = await pool.query(sql, params);
@@ -102,6 +108,9 @@ export function createRoomTypesRouter(pool: Pool) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room type id' });
     }
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      await assertPropertyExists(pool, propertyId);
+      await assertRoomTypeBelongsToProperty(pool, typeId, propertyId);
       const result = await pool.query(`${ROOM_TYPE_LIST_SQL} WHERE rt.id = $1`, [typeId]);
       if ((result.rowCount ?? 0) === 0) {
         return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `room type ${typeId} not found` });
@@ -118,13 +127,10 @@ export function createRoomTypesRouter(pool: Pool) {
     const client = await pool.connect();
     try {
       const payload = parseRoomTypePayload(req.body || {}, 'CREATE');
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
 
       await client.query('BEGIN');
-      const propertyResult = await client.query('SELECT id FROM properties ORDER BY id LIMIT 1 FOR UPDATE');
-      if ((propertyResult.rowCount ?? 0) === 0) {
-        throw httpError(409, 'PROPERTY_MISSING', 'no property exists to attach the room type to');
-      }
-      const propertyId = Number(propertyResult.rows[0].id);
+      await assertPropertyExists(client, propertyId);
 
       let roomCategory: any = null;
       if (payload.room_category_id !== undefined && payload.room_category_id !== null) {
@@ -194,10 +200,14 @@ export function createRoomTypesRouter(pool: Pool) {
     }
     const client = await pool.connect();
     try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
       const payload = parseRoomTypePayload(req.body || {}, 'UPDATE');
       const body = req.body || {};
 
       await client.query('BEGIN');
+      await assertPropertyExists(client, propertyId);
+      await assertRoomTypeBelongsToProperty(client, typeId, propertyId);
+
       const currentResult = await client.query('SELECT * FROM room_types WHERE id = $1 FOR UPDATE', [typeId]);
       if ((currentResult.rowCount ?? 0) === 0) {
         throw httpError(404, 'NOT_FOUND', `room type ${typeId} not found`);
@@ -326,7 +336,10 @@ export function createRoomTypesRouter(pool: Pool) {
     }
     const client = await pool.connect();
     try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
       await client.query('BEGIN');
+      await assertPropertyExists(client, propertyId);
+      await assertRoomTypeBelongsToProperty(client, typeId, propertyId);
       const currentResult = await client.query('SELECT * FROM room_types WHERE id = $1 FOR UPDATE', [typeId]);
       if ((currentResult.rowCount ?? 0) === 0) {
         throw httpError(404, 'NOT_FOUND', `room type ${typeId} not found`);

@@ -31,10 +31,14 @@ async function hotelDate(offset) {
 }
 
 async function request(method, path, body, label) {
+  let effectiveBody = body;
+  if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object') {
+    effectiveBody = { ...effectiveBody, property_id: propertyId };
+  }
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-${label}` },
-    body: body === undefined ? undefined : JSON.stringify(body)
+    body: effectiveBody === undefined ? undefined : JSON.stringify(effectiveBody)
   });
   const text = await response.text();
   let json = null;
@@ -149,10 +153,10 @@ async function testCanonicalHoldAndRead(legacyBaseline) {
   expect(locks.rows.every(row => Number(row.room_type_id) === Number(typeA.id) && row.room_type === commonName), 'wrong client text redirected or persisted as lock identity');
   expect(await legacyFingerprint() === legacyBaseline, 'canonical hold changed legacy collision row');
 
-  const canonicalRead = await request('GET', `/api/availability?room_type_id=${typeA.id}&room_type=${encodeURIComponent('WRONG')}&start=${dates[0]}&end=${dates[2]}`, undefined, 'GET-ID');
+  const canonicalRead = await request('GET', `/api/availability?property_id=${propertyId}&room_type_id=${typeA.id}&room_type=${encodeURIComponent('WRONG')}&start=${dates[0]}&end=${dates[2]}`, undefined, 'GET-ID');
   expect(canonicalRead.status === 200 && canonicalRead.json?.identity_mode === 'CANONICAL', `canonical GET failed: ${canonicalRead.status} ${canonicalRead.text}`);
   expect(canonicalRead.json.data.length === 2 && canonicalRead.json.data.every(row => Number(row.room_type_id) === Number(typeA.id)), 'canonical GET merged or redirected identity');
-  const legacyRead = await request('GET', `/api/availability?legacy_compatible=true&room_type=${encodeURIComponent(commonName)}&start=${dates[0]}&end=${dates[2]}`, undefined, 'GET-LEGACY');
+  const legacyRead = await request('GET', `/api/availability?property_id=${propertyId}&legacy_compatible=true&room_type=${encodeURIComponent(commonName)}&start=${dates[0]}&end=${dates[2]}`, undefined, 'GET-LEGACY');
   expect(legacyRead.status === 200 && legacyRead.json?.identity_mode === 'LEGACY_NULL_ID', 'explicit legacy GET failed');
   expect(legacyRead.json.data.length === 0, 'legacy GET returned rows after NOT NULL hardening');
 
@@ -223,7 +227,7 @@ async function testAvailabilityMissing() {
     [typeA.id, dates[4]]
   );
   try {
-    const response = await request('GET', `/api/availability?room_type_id=${typeA.id}&room_type=${encodeURIComponent(commonName)}&start=${dates[4]}&end=${dates[5]}`, undefined, 'GET-MISSING');
+    const response = await request('GET', `/api/availability?property_id=${propertyId}&room_type_id=${typeA.id}&room_type=${encodeURIComponent(commonName)}&start=${dates[4]}&end=${dates[5]}`, undefined, 'GET-MISSING');
     expect(response.status === 409 && response.json?.code === 'CANONICAL_AVAILABILITY_MISSING', 'missing canonical GET was not surfaced');
     expect(JSON.stringify(response.json?.missing_dates) === JSON.stringify([dates[4]]), 'missing canonical GET reported wrong dates');
   } finally {

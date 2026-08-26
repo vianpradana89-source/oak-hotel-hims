@@ -55,68 +55,75 @@ function jsonInit(method: string, payload: unknown): RequestInit {
 }
 
 export const roomMasterApi = {
-  async listRoomCategories(active?: boolean): Promise<RoomCategory[]> {
-    const suffix = active === undefined ? '' : `?active=${active}`;
-    return request<RoomCategory[]>(`/api/room-categories${suffix}`);
+  async listRoomCategories(propertyId: number, active?: boolean): Promise<RoomCategory[]> {
+    const params = new URLSearchParams();
+    params.set('property_id', String(propertyId));
+    if (active !== undefined) params.set('active', String(active));
+    return request<RoomCategory[]>(`/api/room-categories?${params.toString()}`);
   },
 
-  async createRoomCategory(payload: RoomCategoryWritePayload): Promise<RoomCategory> {
-    return request<RoomCategory>('/api/room-categories', jsonInit('POST', payload));
+  async createRoomCategory(propertyId: number, payload: RoomCategoryWritePayload): Promise<RoomCategory> {
+    return request<RoomCategory>('/api/room-categories', jsonInit('POST', { ...payload, property_id: propertyId }));
   },
 
   async updateRoomCategory(
     id: number,
+    propertyId: number,
     payload: RoomCategoryWritePayload & { is_active?: boolean }
   ): Promise<RoomCategory> {
-    return request<RoomCategory>(`/api/room-categories/${id}`, jsonInit('PATCH', payload));
+    return request<RoomCategory>(`/api/room-categories/${id}`, jsonInit('PATCH', { ...payload, property_id: propertyId }));
   },
 
-  async reorderRoomCategories(payload: RoomCategoryReorderPayload): Promise<RoomCategory[]> {
-    return request<RoomCategory[]>('/api/room-categories/reorder', jsonInit('PATCH', payload));
+  async reorderRoomCategories(propertyId: number, payload: RoomCategoryReorderPayload): Promise<RoomCategory[]> {
+    return request<RoomCategory[]>('/api/room-categories/reorder', jsonInit('PATCH', { ...payload, property_id: propertyId }));
   },
 
-  async deleteRoomCategory(id: number): Promise<void> {
-    await request<{ id: number }>(`/api/room-categories/${id}`, { method: 'DELETE' });
+  async deleteRoomCategory(id: number, propertyId: number): Promise<void> {
+    await request<{ id: number }>(`/api/room-categories/${id}?property_id=${propertyId}`, { method: 'DELETE' });
   },
 
-  async listRoomTypes(active?: boolean): Promise<RoomType[]> {
-    const suffix = active === undefined ? '' : `?active=${active}`;
-    return request<RoomType[]>(`/api/room-types${suffix}`);
-  },
-
-  async createRoomType(payload: RoomTypeWritePayload): Promise<RoomType> {
-    return request<RoomType>('/api/room-types', jsonInit('POST', payload));
-  },
-
-  async updateRoomType(id: number, payload: RoomTypeWritePayload & { is_active?: boolean }): Promise<RoomType> {
-    return request<RoomType>(`/api/room-types/${id}`, jsonInit('PATCH', payload));
-  },
-
-  async listRooms(filter?: { room_type_id?: number; is_active?: boolean }): Promise<PhysicalRoom[]> {
+  async listRoomTypes(propertyId: number, active?: boolean): Promise<RoomType[]> {
     const params = new URLSearchParams();
+    params.set('property_id', String(propertyId));
+    if (active !== undefined) params.set('active', String(active));
+    return request<RoomType[]>(`/api/room-types?${params.toString()}`);
+  },
+
+  async createRoomType(propertyId: number, payload: RoomTypeWritePayload): Promise<RoomType> {
+    return request<RoomType>('/api/room-types', jsonInit('POST', { ...payload, property_id: propertyId }));
+  },
+
+  async updateRoomType(id: number, propertyId: number, payload: RoomTypeWritePayload & { is_active?: boolean }): Promise<RoomType> {
+    return request<RoomType>(`/api/room-types/${id}`, jsonInit('PATCH', { ...payload, property_id: propertyId }));
+  },
+
+  async listRooms(propertyId: number, filter?: { room_type_id?: number; is_active?: boolean }): Promise<PhysicalRoom[]> {
+    const params = new URLSearchParams();
+    params.set('property_id', String(propertyId));
     if (filter?.room_type_id !== undefined) params.set('room_type_id', String(filter.room_type_id));
     if (filter?.is_active !== undefined) params.set('is_active', String(filter.is_active));
-    const query = params.toString();
-    return request<PhysicalRoom[]>(`/api/rooms${query ? `?${query}` : ''}`);
+    return request<PhysicalRoom[]>(`/api/rooms?${params.toString()}`);
   },
 
-  async listActiveRoomReservations(roomId: number): Promise<ActiveRoomReservationDrilldown> {
-    return request<ActiveRoomReservationDrilldown>(`/api/rooms/${roomId}/active-reservations`);
+  async listActiveRoomReservations(roomId: number, propertyId: number): Promise<ActiveRoomReservationDrilldown> {
+    const params = new URLSearchParams();
+    params.set('property_id', String(propertyId));
+    return request<ActiveRoomReservationDrilldown>(`/api/rooms/${roomId}/active-reservations?${params.toString()}`);
   },
 
-  async createRoom(payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {
-    return request<PhysicalRoom>('/api/rooms', jsonInit('POST', payload));
+  async createRoom(propertyId: number, payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {
+    return request<PhysicalRoom>('/api/rooms', jsonInit('POST', { ...payload, property_id: propertyId }));
   },
 
-  async updateRoom(id: number, payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {
-    return request<PhysicalRoom>(`/api/rooms/${id}`, jsonInit('PATCH', payload));
+  async updateRoom(id: number, propertyId: number, payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {
+    return request<PhysicalRoom>(`/api/rooms/${id}`, jsonInit('PATCH', { ...payload, property_id: propertyId }));
   },
 
-  async deleteRoom(id: number): Promise<void> {
-    await request<{ id: number }>(`/api/rooms/${id}`, { method: 'DELETE' });
+  async deleteRoom(id: number, propertyId: number): Promise<void> {
+    await request<{ id: number }>(`/api/rooms/${id}?property_id=${propertyId}`, { method: 'DELETE' });
   },
 
-  async deleteRoomType(id: number): Promise<void> {
-    await request<{ id: number }>(`/api/room-types/${id}`, { method: 'DELETE' });
+  async deleteRoomType(id: number, propertyId: number): Promise<void> {
+    await request<{ id: number }>(`/api/room-types/${id}?property_id=${propertyId}`, { method: 'DELETE' });
   }
 };

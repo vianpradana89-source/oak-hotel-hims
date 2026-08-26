@@ -421,7 +421,7 @@ async function testValidMoveReleasesSourceExactly1() {
   const response = await fetch(`${baseUrl}/api/reservations/${reservationId}/move`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-MA-VALID` },
-    body: JSON.stringify({ to_room_id: Number(roomB.id) })
+    body: JSON.stringify({ to_room_id: Number(roomB.id), property_id: pid })
   });
   expect(response.status === 200, `move: status=${response.status}`);
 
@@ -466,7 +466,7 @@ async function testMoveSourceZeroReservedQtyFails() {
   const response = await fetch(`${baseUrl}/api/reservations/${reservationId}/move`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-MC-ZERO` },
-    body: JSON.stringify({ to_room_id: Number(roomB.id) })
+    body: JSON.stringify({ to_room_id: Number(roomB.id), property_id: pid })
   });
   expect(response.status === 400, `move-zero: expected 400, got ${response.status}`);
 
@@ -509,7 +509,7 @@ async function testMoveNoNegativeInventory() {
   const response = await fetch(`${baseUrl}/api/reservations/${reservationId}/move`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-ME-NEG` },
-    body: JSON.stringify({ to_room_id: Number(roomB.id) })
+    body: JSON.stringify({ to_room_id: Number(roomB.id), property_id: pid })
   });
   expect(response.status === 400, `move-neg: expected 400, got ${response.status}`);
 
@@ -553,7 +553,7 @@ async function testMoveTargetInventoryUnchangedOnFailure() {
   const response = await fetch(`${baseUrl}/api/reservations/${reservationId}/move`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-MH-TGT` },
-    body: JSON.stringify({ to_room_id: Number(roomB.id) })
+    body: JSON.stringify({ to_room_id: Number(roomB.id), property_id: pid })
   });
   expect(response.status === 400, `move-tgt: expected 400, got ${response.status}`);
 

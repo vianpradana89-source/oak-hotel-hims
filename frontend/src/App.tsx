@@ -59,6 +59,8 @@ function localDateISO(value: Date | string | undefined) {
 }
 
 function App() {
+  const [propertyId, setPropertyId] = useState<number | null>(null);
+  const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
   const [rooms, setRooms] = useState<any[]>([]);
   const [selectedRes, setSelectedRes] = useState<any>(null);
@@ -112,6 +114,24 @@ function App() {
   useEffect(() => {
     bookingComposerChildrenRef.current = bookingComposerChildren;
   }, [bookingComposerChildren]);
+
+  useEffect(() => {
+    fetch('/api/properties')
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === 'OK' && Array.isArray(d.data)) {
+          const list = d.data.filter((p: any) => p.is_active !== false);
+          setProperties(list);
+          if (list.length === 1) {
+            setPropertyId(list[0].id);
+          } else if (list.length === 0) {
+            setPropertyId(null);
+          }
+          // multiple: propertyId stays null until user selects
+        }
+      })
+      .catch(() => {});
+  }, []);
   // Anchor date for the grid window and handlers to shift the window
   const [anchorDate, setAnchorDate] = useState<Date>(new Date());
   const [windowSize, setWindowSize] = useState<number>(7);
@@ -675,7 +695,8 @@ function App() {
     try {
       const response = await fetch(`/api/reservations/${reservationId}/cancel`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId })
       });
 
       const data = await response.json();
@@ -744,6 +765,7 @@ function App() {
   };
 
   const fetchData = async () => {
+    if (propertyId === null) return;
     // Determine date range from days array
     const start = days.length ? days[0].date : hotelDateFromInstant(new Date());
     // end should be exclusive - take day after last
@@ -752,7 +774,7 @@ function App() {
 
     const requestVersion = ++tapechartRequestVersionRef.current;
     try {
-      const data = await fetchTapechart({ start, end, includeInactive: calendarIncludeInactive });
+      const data = await fetchTapechart({ start, end, propertyId, includeInactive: calendarIncludeInactive });
         if (requestVersion !== tapechartRequestVersionRef.current) return;
         if (data && data.rooms) {
           setRooms(data.rooms || []);
@@ -794,8 +816,8 @@ function App() {
   fetchDataRef.current = fetchData;
 
   useEffect(() => {
-    if (selectedMenu === 'Kalender') void fetchDataRef.current();
-  }, [days[0]?.date, days[days.length - 1]?.date, calendarIncludeInactive, selectedMenu]);
+    if (selectedMenu === 'Kalender' && propertyId !== null) void fetchDataRef.current();
+  }, [days[0]?.date, days[days.length - 1]?.date, calendarIncludeInactive, selectedMenu, propertyId]);
 
   const fetchOperationsData = async () => {
     try {
@@ -834,7 +856,7 @@ function App() {
 
   const fetchReservationAudit = async (reservationId: number) => {
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/audit`);
+      const response = await fetch(`/api/reservations/${reservationId}/audit?property_id=${propertyId}`);
       const data = await response.json();
       setReservationAudit(data.data || []);
     } catch (error) {
@@ -845,7 +867,7 @@ function App() {
 
   const fetchRoomAudit = async (roomId: number) => {
     try {
-      const response = await fetch(`/api/rooms/${roomId}/audit`);
+      const response = await fetch(`/api/rooms/${roomId}/audit?property_id=${propertyId}`);
       const data = await response.json();
       return data.data || [];
     } catch (error) {
@@ -889,7 +911,7 @@ function App() {
 
   const viewRoomMasterReservation = async (summary: ActiveRoomReservation) => {
     try {
-      const response = await fetch(`/api/reservations/${summary.id}`);
+      const response = await fetch(`/api/reservations/${summary.id}?property_id=${propertyId}`);
       const body = await response.json();
       if (!response.ok) throw new Error(body.message || 'Gagal memuat detail reservasi');
       setSelectedRes({
@@ -907,7 +929,8 @@ function App() {
     try {
       const response = await fetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId })
       });
       const data = await response.json();
       if (!response.ok) {
@@ -1067,8 +1090,8 @@ function App() {
     const fetchBookingDetail = async () => {
       try {
         const [bookingRes, reservationsRes] = await Promise.all([
-          fetch(`/api/bookings/${encodeURIComponent(bid)}`),
-          fetch(`/api/bookings/${encodeURIComponent(bid)}/reservations`),
+          fetch(`/api/bookings/${encodeURIComponent(bid)}?property_id=${propertyId}`),
+          fetch(`/api/bookings/${encodeURIComponent(bid)}/reservations?property_id=${propertyId}`),
         ]);
 
         const bookingData = await bookingRes.json();
@@ -1205,7 +1228,7 @@ function App() {
       const res = await fetch(`/api/rooms/${roomId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus })
+        body: JSON.stringify({ property_id: propertyId, status: newStatus })
       });
 
       const data = await res.json().catch(() => ({}));
@@ -1414,7 +1437,7 @@ function App() {
     const fetchAvailabilityRows = async (key: string, roomTypeId: number | null, roomTypeName: string, checkIn: string, checkOut: string, version: number) => {
       console.log('AVAIL_FETCH_START', { key, roomTypeId, roomTypeName, checkIn, checkOut, version });
       try {
-        const response = await fetch(buildAvailabilityRequest(roomTypeId, roomTypeName, checkIn, checkOut));
+        const response = await fetch(buildAvailabilityRequest(roomTypeId, roomTypeName, checkIn, checkOut, propertyId!));
         if (!response.ok) {
           throw new Error(`availability request failed for ${key}`);
         }
@@ -1981,7 +2004,7 @@ function App() {
       const response = await fetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_check_out: requestedCheckOut })
+        body: JSON.stringify({ property_id: propertyId, new_check_out: requestedCheckOut })
       });
       const data = await response.json().catch(() => ({}));
 
@@ -2079,7 +2102,7 @@ function App() {
 
       <div className="hotel-layout">
         <aside className="hotel-sidebar">
-          <div className="hotel-brand">OAK LAWANG</div>
+          <div className="hotel-brand">{properties.find((p) => p.id === propertyId)?.name || 'OAK HIMS'}</div>
           <nav className="hotel-nav">
             {[
               'Kalender',
@@ -2102,16 +2125,39 @@ function App() {
         <main className="hotel-main">
           <header className="hotel-header">
            <div>
-             <h2 className="hotel-header-title">OAK LAWANG</h2>
+             <h2 className="hotel-header-title">{properties.find((p: any) => p.id === propertyId)?.name || 'OAK HIMS'}</h2>
              <p className="hotel-header-subtitle">Selamat datang, vian.pradana89@gmail.com (Owner)</p>
            </div>
            <div className="hotel-header-actions">
+             {properties.length > 1 && (
+               <select
+                 className="hotel-action-btn"
+                 value={propertyId ?? ''}
+                 onChange={(e) => {
+                   const val = Number(e.target.value);
+                   if (Number.isInteger(val) && val > 0) setPropertyId(val);
+                 }}
+                 style={{ marginRight: 8 }}
+               >
+                 <option value="" disabled>Pilih Properti</option>
+                 {properties.map((p: any) => (
+                   <option key={p.id} value={p.id}>{p.name}</option>
+                 ))}
+               </select>
+             )}
              <button className="hotel-action-btn">POS</button>
              <button className="hotel-action-btn">Deposit</button>
            </div>
           </header>
 
-          {selectedMenu === 'Kalender' && (
+          {propertyId === null && (
+            <div className="p-8 text-center text-gray-500">
+              <p className="text-lg font-semibold">Tidak ada properti yang dikonfigurasi</p>
+              <p className="text-sm mt-2">Hubungi administrator untuk menambahkan properti.</p>
+            </div>
+          )}
+
+          {propertyId !== null && selectedMenu === 'Kalender' && (
           <>
             <div className="space-y-3">
               <div className="flex items-end justify-between gap-3">
@@ -2355,7 +2401,7 @@ function App() {
                                               const response = await fetch(`/api/reservations/${reservationId}/move`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ to_room_id: toRoomId })
+                                                body: JSON.stringify({ property_id: propertyId, to_room_id: toRoomId })
                                               });
                                               const data = await response.json();
                                               if (response.ok) {
@@ -2792,7 +2838,7 @@ function App() {
                          const propertyId = (() => {
                            const roomRef = validChildren[0];
                            const roomInfo = rooms.find((room) => Number(room.id) === canonicalBookingChildRoomId(roomRef));
-                          return Number(roomInfo?.property_id ?? rooms[0]?.property_id ?? 1);
+                          return Number(roomInfo?.property_id ?? rooms[0]?.property_id);
                         })();
 
                         const payload = {
@@ -3070,6 +3116,7 @@ function App() {
 
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
+            propertyId={propertyId}
             posMenuCount={posMenu.length}
             posOrderCount={posOrders.length}
             onViewReservation={viewRoomMasterReservation}

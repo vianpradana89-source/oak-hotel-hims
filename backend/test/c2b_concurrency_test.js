@@ -144,11 +144,17 @@ async function cleanup() {
   }
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, propId) {
+  let effectiveBody = body;
+  if ((method === 'POST' || method === 'PATCH') && effectiveBody && typeof effectiveBody === 'object') {
+    if (propId !== undefined) {
+      effectiveBody = { ...effectiveBody, property_id: propId };
+    }
+  }
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': `${runTag}-${Date.now()}` },
-    body: body ? JSON.stringify(body) : undefined
+    body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   });
   const json = await response.json().catch(() => null);
   return { status: response.status, json };
@@ -294,8 +300,8 @@ async function testC_concurrentMoveOverlap() {
 
   // now try to move both to the same target room — overlapping
   const [r1, r2] = await Promise.all([
-    api('POST', `/api/reservations/${resId1}/move`, { to_room_id: Number(roomTarget.id) }),
-    api('POST', `/api/reservations/${resId2}/move`, { to_room_id: Number(roomTarget.id) })
+    api('POST', `/api/reservations/${resId1}/move`, { to_room_id: Number(roomTarget.id) }, pid),
+    api('POST', `/api/reservations/${resId2}/move`, { to_room_id: Number(roomTarget.id) }, pid)
   ]);
 
   const successes = [r1, r2].filter(r => r.status === 200);
@@ -346,7 +352,7 @@ async function testD_extendConflict() {
   if (resId2) tracked.reservations.push(Number(resId2));
 
   // try to extend D1 from day2 to day4 — overlaps with D2 [day3, day4)
-  const r = await api('POST', `/api/reservations/${resId1}/extend`, { new_check_out: day4 });
+  const r = await api('POST', `/api/reservations/${resId1}/extend`, { new_check_out: day4 }, pid);
   expect(r.status === 409, `testD: extend into occupied expected 409, got ${r.status}`);
 
   const inv = await pool.query(
@@ -495,7 +501,7 @@ async function testG_reassignWithActive() {
     for (const rid of rids) tracked.reservations.push(Number(rid));
   }
 
-  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) });
+  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) }, pid);
   expect(r.status === 409, `testG: reassign with active expected 409, got ${r.status}`);
 
   const roomCheck = await pool.query('SELECT room_type_id FROM rooms WHERE id = $1', [room.id]);
@@ -519,7 +525,7 @@ async function testH_reassignNoActive() {
   await ensureAvailability(typeA.id, typeA.name, await plusDays(today, 85));
   await ensureAvailability(typeB.id, typeB.name, await plusDays(today, 85));
 
-  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) });
+  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) }, pid);
   expect(r.status === 200, `testH: reassign without active expected 200, got ${r.status}`);
 
   const roomCheck = await pool.query('SELECT room_type_id FROM rooms WHERE id = $1', [room.id]);
@@ -553,7 +559,7 @@ async function testI_concurrentCreateVsReassign() {
 
   const [bookingResult, reassignResult] = await Promise.all([
     api('POST', '/api/bookings', bookingPayload),
-    api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) })
+    api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) }, pid)
   ]);
 
   if (bookingResult.status === 201) {
@@ -633,7 +639,7 @@ async function testL_failedReassignRollback() {
     for (const rid of rids) tracked.reservations.push(Number(rid));
   }
 
-  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) });
+  const r = await api('PATCH', `/api/rooms/${room.id}`, { room_type_id: Number(typeB.id) }, pid);
   expect(r.status === 409, `testL: reassign expected 409, got ${r.status}`);
 
   const roomCheck = await pool.query('SELECT room_type_id, room_number FROM rooms WHERE id = $1', [room.id]);

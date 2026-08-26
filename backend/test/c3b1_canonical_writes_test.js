@@ -32,10 +32,14 @@ async function hotelDate(offset) {
 
 async function request(method, path, body, label) {
   const correlationId = `${runTag}-${label}`;
+  let effectiveBody = body;
+  if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object') {
+    effectiveBody = { ...effectiveBody, property_id: propertyId };
+  }
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': correlationId },
-    body: body === undefined ? undefined : JSON.stringify(body)
+    body: effectiveBody === undefined ? undefined : JSON.stringify(effectiveBody)
   });
   const text = await response.text();
   let json = null;

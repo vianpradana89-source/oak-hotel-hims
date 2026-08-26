@@ -7,6 +7,7 @@ type Mode = 'create' | 'edit';
 
 interface Props {
   mode: Mode;
+  propertyId?: number | null;
   category?: RoomCategory | null;
   initialViewing?: boolean;
   onClose: (changed: boolean) => void;
@@ -35,7 +36,7 @@ function categoryDraft(category: RoomCategory): CategoryDraft {
   };
 }
 
-export default function RoomCategoryModal({ mode, category, initialViewing = true, onClose }: Props) {
+export default function RoomCategoryModal({ mode, propertyId, category, initialViewing = true, onClose }: Props) {
   const [viewing, setViewing] = useState(mode === 'edit' && initialViewing);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<CategoryDraft>(() =>
@@ -128,13 +129,15 @@ export default function RoomCategoryModal({ mode, category, initialViewing = tru
     setError(null);
     try {
       if (mode === 'create') {
-        await roomMasterApi.createRoomCategory({
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.createRoomCategory(propertyId, {
           code: nextCode,
           name: draft.name.trim(),
           description: draft.description.trim() || null
         });
       } else if (category) {
-        await roomMasterApi.updateRoomCategory(category.id, {
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.updateRoomCategory(category.id, propertyId, {
           ...(nextCode !== category.code ? { code: nextCode } : {}),
           name: draft.name.trim(),
           description: draft.description.trim() || null,

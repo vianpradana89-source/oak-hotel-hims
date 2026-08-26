@@ -7,6 +7,7 @@ import { describeApiError, EmptyState, ErrorState, LoadingState, MasterStatusBad
 import type { RoomCategory } from './roomMasterTypes';
 
 interface Props {
+  propertyId: number | null;
   categories: RoomCategory[];
   loading: boolean;
   error: string | null;
@@ -25,6 +26,7 @@ type ModalState =
 type DropTarget = { id: number; edge: 'before' | 'after' } | null;
 
 export default function RoomCategoriesView({
+  propertyId,
   categories,
   loading,
   error,
@@ -66,11 +68,12 @@ export default function RoomCategoriesView({
     && categories.length > 1;
 
   async function toggleActive(category: RoomCategory) {
+    if (!propertyId) return;
     setMoreMenuId(null);
     setRowBusyId(category.id);
     setRowError(null);
     try {
-      await roomMasterApi.updateRoomCategory(category.id, { is_active: !category.is_active });
+      await roomMasterApi.updateRoomCategory(category.id, propertyId, { is_active: !category.is_active });
       onChanged(`Kategori ${category.code} ${category.is_active ? 'dinonaktifkan' : 'diaktifkan'}.`);
     } catch (err) {
       setRowError(describeApiError(err));
@@ -80,7 +83,7 @@ export default function RoomCategoriesView({
   }
 
   async function saveOrder(nextCategories: RoomCategory[], movedCategory: RoomCategory) {
-    if (reorderInFlightRef.current) return;
+    if (reorderInFlightRef.current || !propertyId) return;
     const propertyIds = new Set(
       nextCategories
         .map((category) => Number(category.property_id))
@@ -99,7 +102,7 @@ export default function RoomCategoriesView({
     setRowError(null);
     setMoreMenuId(null);
     try {
-      const saved = await roomMasterApi.reorderRoomCategories({
+      const saved = await roomMasterApi.reorderRoomCategories(propertyId, {
         property_id: Array.from(propertyIds)[0],
         category_ids: nextCategories.map((category) => category.id)
       });
@@ -375,6 +378,7 @@ export default function RoomCategoriesView({
       {modal?.kind === 'create' && (
         <RoomCategoryModal
           mode="create"
+          propertyId={propertyId}
           onClose={(changed) => {
             setModal(null);
             if (changed) onChanged('Kategori kamar baru dibuat.');
@@ -384,6 +388,7 @@ export default function RoomCategoriesView({
       {modal && modal.kind !== 'create' && (
         <RoomCategoryModal
           mode="edit"
+          propertyId={propertyId}
           category={modal.target}
           initialViewing={modal.kind === 'view'}
           onClose={(changed) => {
@@ -398,7 +403,7 @@ export default function RoomCategoriesView({
         <ConfirmDeleteModal
           title={`Hapus Kategori ${deleteTarget.code}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika kategori tidak digunakan oleh tipe / varian atau snapshot reservasi."
-          onConfirm={() => roomMasterApi.deleteRoomCategory(deleteTarget.id)}
+          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoomCategory(deleteTarget.id, propertyId)}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

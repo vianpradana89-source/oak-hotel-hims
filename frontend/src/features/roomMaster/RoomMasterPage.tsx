@@ -9,10 +9,11 @@ import './roomMaster.css';
 type Tab = 'categories' | 'types' | 'rooms';
 
 interface Props {
+  propertyId: number | null;
   onViewReservation: (reservation: ActiveRoomReservation) => void | Promise<void>;
 }
 
-export default function RoomMasterPage({ onViewReservation }: Props) {
+export default function RoomMasterPage({ propertyId, onViewReservation }: Props) {
   const [tab, setTab] = useState<Tab>('categories');
   const [categories, setCategories] = useState<RoomCategory[]>([]);
   const [roomTypes, setRoomTypes] = useState<RoomType[]>([]);
@@ -23,15 +24,22 @@ export default function RoomMasterPage({ onViewReservation }: Props) {
   const loadVersionRef = useRef(0);
 
   const load = useCallback(async () => {
+    if (!propertyId) {
+      setCategories([]);
+      setRoomTypes([]);
+      setRooms([]);
+      setLoading(false);
+      return;
+    }
     const version = loadVersionRef.current + 1;
     loadVersionRef.current = version;
     setLoading(true);
     setLoadError(null);
     try {
       const [categoryList, types, roomList] = await Promise.all([
-        roomMasterApi.listRoomCategories(),
-        roomMasterApi.listRoomTypes(),
-        roomMasterApi.listRooms()
+        roomMasterApi.listRoomCategories(propertyId),
+        roomMasterApi.listRoomTypes(propertyId),
+        roomMasterApi.listRooms(propertyId)
       ]);
       if (loadVersionRef.current === version) {
         setCategories(categoryList);
@@ -46,7 +54,7 @@ export default function RoomMasterPage({ onViewReservation }: Props) {
     } finally {
       if (loadVersionRef.current === version) setLoading(false);
     }
-  }, []);
+  }, [propertyId]);
 
   useEffect(() => {
     void load();
@@ -143,6 +151,7 @@ export default function RoomMasterPage({ onViewReservation }: Props) {
 
       {tab === 'categories' ? (
         <RoomCategoriesView
+          propertyId={propertyId}
           categories={categories}
           loading={loading}
           error={loadError}
@@ -154,6 +163,7 @@ export default function RoomMasterPage({ onViewReservation }: Props) {
         />
       ) : tab === 'types' ? (
         <RoomTypesView
+          propertyId={propertyId}
           categories={categories}
           roomTypes={roomTypes}
           loading={loading}
@@ -165,6 +175,7 @@ export default function RoomMasterPage({ onViewReservation }: Props) {
         />
       ) : (
         <PhysicalRoomsView
+          propertyId={propertyId}
           rooms={rooms}
           categories={categories}
           roomTypes={roomTypes}

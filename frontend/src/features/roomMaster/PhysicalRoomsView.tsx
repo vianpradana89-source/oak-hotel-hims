@@ -19,6 +19,7 @@ import RoomModal from './RoomModal';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 interface Props {
+  propertyId: number | null;
   rooms: PhysicalRoom[];
   categories: RoomCategory[];
   roomTypes: RoomType[];
@@ -44,6 +45,7 @@ function reservationStatusLabel(status: ActiveRoomReservation['status']) {
 }
 
 export default function PhysicalRoomsView({
+  propertyId,
   rooms,
   categories,
   roomTypes,
@@ -98,10 +100,11 @@ export default function PhysicalRoomsView({
   }, [rooms, categoryFilter, typeFilter, activeFilter, floorFilter, typeById, categoryById, search]);
 
   async function toggleActive(room: PhysicalRoom) {
+    if (!propertyId) return;
     setRowBusyId(room.id);
     setRowError(null);
     try {
-      await roomMasterApi.updateRoom(room.id, { is_active: !room.is_active });
+      await roomMasterApi.updateRoom(room.id, propertyId, { is_active: !room.is_active });
       onChanged(`Kamar ${room.room_number} ${room.is_active ? 'dinonaktifkan' : 'diaktifkan'}.`);
     } catch (err) {
       setRowError(describeApiError(err));
@@ -111,9 +114,10 @@ export default function PhysicalRoomsView({
   }
 
   async function openActiveReservations(room: PhysicalRoom) {
+    if (!propertyId) return;
     setReservationDrilldown({ room, data: null, loading: true, error: null });
     try {
-      const data = await roomMasterApi.listActiveRoomReservations(room.id);
+      const data = await roomMasterApi.listActiveRoomReservations(room.id, propertyId);
       setReservationDrilldown((current) => current?.room.id === room.id
         ? { room, data, loading: false, error: null }
         : current);
@@ -325,6 +329,7 @@ export default function PhysicalRoomsView({
       {modal?.kind === 'create' && (
         <RoomModal
           mode="create"
+          propertyId={propertyId}
           categories={categories}
           roomTypes={roomTypes}
           onClose={(changed) => {
@@ -336,6 +341,7 @@ export default function PhysicalRoomsView({
       {modal?.kind === 'edit' && (
         <RoomModal
           mode="edit"
+          propertyId={propertyId}
           room={modal.target}
           categories={categories}
           roomTypes={roomTypes}
@@ -419,7 +425,7 @@ export default function PhysicalRoomsView({
         <ConfirmDeleteModal
           title={`Hapus Kamar ${deleteTarget.room_number}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika kamar belum memiliki riwayat operasional."
-          onConfirm={() => roomMasterApi.deleteRoom(deleteTarget.id)}
+          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoom(deleteTarget.id, propertyId)}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

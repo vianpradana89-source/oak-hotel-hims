@@ -2,6 +2,7 @@ const { Pool } = require('pg');
 
 const baseUrl = (process.argv[2] || 'http://localhost:5000').replace(/\/$/, '');
 const runId = `BOOKING-COMP-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+let propertyId = null;
 
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
@@ -25,6 +26,12 @@ function expect(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+async function discoverProperty() {
+  const result = await pool.query('SELECT id FROM properties ORDER BY id LIMIT 1');
+  expect(result.rows.length >= 1, 'No properties found');
+  propertyId = Number(result.rows[0].id);
 }
 
 function toDateKey(value) {
@@ -68,13 +75,19 @@ function enumerateDates(startStr, endStr) {
 
 async function request(method, path, body, suffix = '') {
   const correlationId = `${runId}${suffix ? `-${suffix}` : ''}`;
+  let effectiveBody = body;
+  if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object' && propertyId) {
+    effectiveBody = { ...effectiveBody, property_id: propertyId };
+  } else if (method === 'POST' && (effectiveBody === null || effectiveBody === undefined) && propertyId) {
+    effectiveBody = { property_id: propertyId };
+  }
   const resp = await fetchFn(`${baseUrl}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
       'X-Correlation-Id': correlationId
     },
-    body: body ? JSON.stringify(body) : undefined
+    body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   });
   const text = await resp.text();
   let json = null;
@@ -371,6 +384,8 @@ async function main() {
   const roomStatusBaseline = new Map();
 
   try {
+    await discoverProperty();
+
     // A. single-room checkout completes parent
     {
       const context = await findSafeContext(2, 60);

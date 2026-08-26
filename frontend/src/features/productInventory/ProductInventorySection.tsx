@@ -3,6 +3,7 @@ import RoomMasterPage from '../roomMaster/RoomMasterPage';
 import type { ActiveRoomReservation } from '../roomMaster/roomMasterTypes';
 
 interface Props {
+  propertyId: number | null;
   posMenuCount: number;
   posOrderCount: number;
   onViewReservation: (reservation: ActiveRoomReservation) => void | Promise<void>;
@@ -10,7 +11,7 @@ interface Props {
 
 // Produk & Inventori landing section: Kamar (Room Master) is the primary
 // operational view; the legacy POS summary remains available as a tab.
-export default function ProductInventorySection({ posMenuCount, posOrderCount, onViewReservation }: Props) {
+export default function ProductInventorySection({ propertyId, posMenuCount, posOrderCount, onViewReservation }: Props) {
   const [section, setSection] = useState<'kamar' | 'pos'>('kamar');
 
   return (
@@ -39,7 +40,7 @@ export default function ProductInventorySection({ posMenuCount, posOrderCount, o
       </div>
 
       {section === 'kamar' ? (
-        <RoomMasterPage onViewReservation={onViewReservation} />
+        <RoomMasterPage propertyId={propertyId} onViewReservation={onViewReservation} />
       ) : (
         <div className="bg-white border rounded shadow-sm p-4">
           <h3 className="font-bold text-lg mb-3">Produk &amp; Inventori</h3>

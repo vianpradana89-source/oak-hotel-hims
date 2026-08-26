@@ -7,6 +7,7 @@ type Mode = 'create' | 'edit';
 
 interface Props {
   mode: Mode;
+  propertyId?: number | null;
   roomType?: RoomType | null;
   categories: RoomCategory[];
   onClose: (changed: boolean) => void;
@@ -38,7 +39,7 @@ const EMPTY_DRAFT: TypeDraft = {
   is_active: true
 };
 
-export default function RoomTypeModal({ mode, roomType, categories, onClose }: Props) {
+export default function RoomTypeModal({ mode, propertyId, roomType, categories, onClose }: Props) {
   const [viewing, setViewing] = useState(mode === 'edit');
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<TypeDraft>(() =>
@@ -94,7 +95,8 @@ export default function RoomTypeModal({ mode, roomType, categories, onClose }: P
     setError(null);
     try {
       if (mode === 'create') {
-        await roomMasterApi.createRoomType({
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.createRoomType(propertyId, {
           code: nextCode,
           name: draft.name.trim(),
           room_category_id: Number(draft.room_category_id),
@@ -106,7 +108,8 @@ export default function RoomTypeModal({ mode, roomType, categories, onClose }: P
           display_order: Number(draft.display_order || 0)
         });
       } else if (roomType) {
-        await roomMasterApi.updateRoomType(roomType.id, {
+        if (!propertyId) throw new Error('property_id is required');
+        await roomMasterApi.updateRoomType(roomType.id, propertyId, {
           // Canonical identity stays room_types.id; the code is a unique human
           // label. Send it only when changed; backend guards duplicates.
           ...(nextCode !== roomType.code ? { code: nextCode } : {}),

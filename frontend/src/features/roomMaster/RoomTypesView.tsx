@@ -6,6 +6,7 @@ import RoomTypeModal from './RoomTypeModal';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 interface Props {
+  propertyId: number | null;
   categories: RoomCategory[];
   roomTypes: RoomType[];
   loading: boolean;
@@ -18,6 +19,7 @@ interface Props {
 
 type ModalState = { kind: 'create' } | { kind: 'edit'; target: RoomType } | null;
 export default function RoomTypesView({
+  propertyId,
   categories,
   roomTypes,
   loading,
@@ -53,10 +55,11 @@ export default function RoomTypesView({
   }, [roomTypes, statusFilter, categoryFilter, categoryById, search]);
 
   async function toggleActive(roomType: RoomType) {
+    if (!propertyId) return;
     setRowBusyId(roomType.id);
     setRowError(null);
     try {
-      await roomMasterApi.updateRoomType(roomType.id, { is_active: !roomType.is_active });
+      await roomMasterApi.updateRoomType(roomType.id, propertyId, { is_active: !roomType.is_active });
       onChanged(`Tipe ${roomType.code} ${roomType.is_active ? 'dinonaktifkan' : 'diaktifkan'}.`);
     } catch (err) {
       setRowError(describeApiError(err));
@@ -226,6 +229,7 @@ export default function RoomTypesView({
       {modal?.kind === 'create' && (
         <RoomTypeModal
           mode="create"
+          propertyId={propertyId}
           categories={categories}
           onClose={(changed) => {
             setModal(null);
@@ -236,6 +240,7 @@ export default function RoomTypesView({
       {modal?.kind === 'edit' && (
         <RoomTypeModal
           mode="edit"
+          propertyId={propertyId}
           roomType={modal.target}
           categories={categories}
           onClose={(changed) => {
@@ -249,7 +254,7 @@ export default function RoomTypesView({
         <ConfirmDeleteModal
           title={`Hapus Tipe Kamar ${deleteTarget.code}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika tipe kamar belum memiliki riwayat."
-          onConfirm={() => roomMasterApi.deleteRoomType(deleteTarget.id)}
+          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoomType(deleteTarget.id, propertyId)}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

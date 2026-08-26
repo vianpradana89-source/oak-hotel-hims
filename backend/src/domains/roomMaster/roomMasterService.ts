@@ -15,6 +15,99 @@ export function httpError(statusCode: number, code: string, message: string): Ro
   return new RoomMasterHttpError(statusCode, code, message);
 }
 
+export function parsePropertyId(raw: unknown, label = 'property_id'): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', `invalid ${label}`);
+  }
+  return value;
+}
+
+export async function assertPropertyExists(
+  client: PoolClient | Pool,
+  propertyId: number
+): Promise<void> {
+  const result = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'PROPERTY_NOT_FOUND', `property ${propertyId} not found`);
+  }
+}
+
+export async function assertRoomBelongsToProperty(
+  client: PoolClient | Pool,
+  roomId: number,
+  propertyId: number
+): Promise<void> {
+  const result = await client.query(
+    'SELECT id, property_id FROM rooms WHERE id = $1',
+    [roomId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'NOT_FOUND', `room ${roomId} not found`);
+  }
+  const roomPropertyId = result.rows[0].property_id;
+  if (roomPropertyId != null && Number(roomPropertyId) !== propertyId) {
+    throw httpError(403, 'PROPERTY_MISMATCH', `room ${roomId} does not belong to property ${propertyId}`);
+  }
+}
+
+export async function assertReservationBelongsToProperty(
+  client: PoolClient | Pool,
+  reservationId: number,
+  propertyId: number
+): Promise<void> {
+  const result = await client.query(
+    `SELECT res.id, res.room_id, r.property_id AS room_property_id
+     FROM reservations res
+     JOIN rooms r ON r.id = res.room_id
+     WHERE res.id = $1`,
+    [reservationId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'NOT_FOUND', `reservation ${reservationId} not found`);
+  }
+  const roomPropertyId = result.rows[0].room_property_id;
+  if (roomPropertyId != null && Number(roomPropertyId) !== propertyId) {
+    throw httpError(403, 'PROPERTY_MISMATCH', `reservation ${reservationId} does not belong to property ${propertyId}`);
+  }
+}
+
+export async function assertCategoryBelongsToProperty(
+  client: PoolClient | Pool,
+  categoryId: number,
+  propertyId: number
+): Promise<void> {
+  const result = await client.query(
+    'SELECT id, property_id FROM room_categories WHERE id = $1',
+    [categoryId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'ROOM_CATEGORY_NOT_FOUND', `room category ${categoryId} not found`);
+  }
+  const catPropertyId = result.rows[0].property_id;
+  if (catPropertyId != null && Number(catPropertyId) !== propertyId) {
+    throw httpError(403, 'PROPERTY_MISMATCH', `room category ${categoryId} does not belong to property ${propertyId}`);
+  }
+}
+
+export async function assertRoomTypeBelongsToProperty(
+  client: PoolClient | Pool,
+  typeId: number,
+  propertyId: number
+): Promise<void> {
+  const result = await client.query(
+    'SELECT id, property_id FROM room_types WHERE id = $1',
+    [typeId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'NOT_FOUND', `room type ${typeId} not found`);
+  }
+  const typePropertyId = result.rows[0].property_id;
+  if (typePropertyId != null && Number(typePropertyId) !== propertyId) {
+    throw httpError(403, 'PROPERTY_MISMATCH', `room type ${typeId} does not belong to property ${propertyId}`);
+  }
+}
+
 const TYPE_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,19}$/;
 const CATEGORY_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,19}$/;
 
