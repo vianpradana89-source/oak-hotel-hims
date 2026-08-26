@@ -85,14 +85,16 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS pos_orders (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       reservation_id INTEGER REFERENCES reservations(id),
-      order_number VARCHAR(50) UNIQUE,
+      order_number VARCHAR(50),
       table_number VARCHAR(20),
       guest_name VARCHAR(100),
       status VARCHAR(30) DEFAULT 'OPEN',
       total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_pos_order_number_per_property UNIQUE (property_id, order_number)
     );
 
     CREATE TABLE IF NOT EXISTS pos_order_items (
@@ -407,6 +409,56 @@ export async function initializeDatabase(pool: Pool) {
         EXECUTE FUNCTION pos_menu_items_enforce_property_scope();
       END IF;
     END $$;
+  `);
+
+  // POS order property isolation (idempotent for existing DBs)
+  // pos_orders row count MUST be zero before property_id can be backfilled.
+  // If rows unexpectedly exist, abort to force manual classification.
+  await pool.query(`
+    DO $$
+    DECLARE
+      v_count BIGINT;
+    BEGIN
+      SELECT COUNT(*) INTO v_count FROM pos_orders;
+      IF v_count > 0 THEN
+        -- Only abort if column is still missing (not yet migrated)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'pos_orders' AND column_name = 'property_id'
+        ) THEN
+          RAISE EXCEPTION 'pos_orders has % rows but property_id column is missing. Classify ownership before migration.', v_count;
+        END IF;
+      END IF;
+    END $$;
+
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS property_id INTEGER;
+
+    -- Drop legacy global unique constraint if it still exists (replaced by per-property unique)
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pos_orders_order_number_key') THEN
+        ALTER TABLE pos_orders DROP CONSTRAINT pos_orders_order_number_key;
+      END IF;
+    END $$;
+
+    -- Enforce NOT NULL only after column exists (fresh DB already has it NOT NULL from CREATE TABLE)
+    ALTER TABLE pos_orders ALTER COLUMN property_id SET NOT NULL;
+
+    -- FK to properties
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_pos_orders_property') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT fk_pos_orders_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+    END $$;
+
+    -- Per-property unique on order_number
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pos_order_number_per_property') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT uq_pos_order_number_per_property UNIQUE (property_id, order_number);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_property ON pos_orders(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_property_status ON pos_orders(property_id, status);
   `);
 
   const accountCount = await pool.query('SELECT COUNT(*) AS total FROM accounting_gl_accounts');

@@ -115,10 +115,17 @@ async function main() {
     var alNotNull = await columnIsNotNull('availability_locks', 'room_type_id');
     assert(alNotNull, 'I. availability_locks.room_type_id is NOT NULL');
 
-    assert(await countRows('properties') === 0, 'J. zero properties is valid');
-    assert(await countRows('rooms') === 0, 'K. zero rooms is valid');
-    assert(await countRows('room_types') === 0, 'L. zero room_types is valid');
-    assert(await countRows('availability_dates') === 0, 'M. zero availability_dates is valid');
+    var posOrdersPropNotNull = await columnIsNotNull('pos_orders', 'property_id');
+    assert(posOrdersPropNotNull, 'J. pos_orders.property_id is NOT NULL');
+
+    assert(await countRows('properties') === 0, 'K. zero properties is valid');
+    assert(await countRows('rooms') === 0, 'L. zero rooms is valid');
+    assert(await countRows('room_types') === 0, 'M. zero room_types is valid');
+    assert(await countRows('availability_dates') === 0, 'N. zero availability_dates is valid');
+    assert(await countRows('pos_menu_categories') === 0, 'O. zero pos_menu_categories is valid');
+    assert(await countRows('pos_menu_items') === 0, 'P. zero pos_menu_items is valid');
+    assert(await countRows('pos_orders') === 0, 'Q. zero pos_orders is valid');
+    assert(await countRows('pos_order_items') === 0, 'R. zero pos_order_items is valid');
 
     var secondBootError = null;
     try {
@@ -126,7 +133,7 @@ async function main() {
     } catch (e) {
       secondBootError = e;
     }
-    assert(secondBootError === null, 'N. second initializeDatabase() succeeds' + (secondBootError ? ': ' + secondBootError.message : ''));
+    assert(secondBootError === null, 'S. second initializeDatabase() succeeds' + (secondBootError ? ': ' + secondBootError.message : ''));
 
     var residueCounts = [
       await countRows('properties'),
@@ -136,10 +143,14 @@ async function main() {
       await countRows('reservations'),
       await countRows('bookings'),
       await countRows('availability_dates'),
-      await countRows('availability_locks')
+      await countRows('availability_locks'),
+      await countRows('pos_menu_categories'),
+      await countRows('pos_menu_items'),
+      await countRows('pos_orders'),
+      await countRows('pos_order_items')
     ];
     var hasNoResidue = residueCounts.every(function(c) { return c === 0; });
-    assert(hasNoResidue, 'O. no fixture residue (all counts=0)');
+    assert(hasNoResidue, 'T. no fixture residue (all counts=0)');
 
   } finally {
     await testPool.end();

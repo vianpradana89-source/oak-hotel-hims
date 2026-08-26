@@ -2710,13 +2710,27 @@ app.get('/api/pos/menu', async (req, res) => {
 
 app.get('/api/pos/orders', async (req, res) => {
   try {
+    const propertyIdRaw = req.query.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
     const orders = await pool.query(`
       SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
       FROM pos_orders po
       LEFT JOIN pos_order_items poi ON poi.order_id = po.id
+      WHERE po.property_id = $1
       GROUP BY po.id
       ORDER BY po.created_at DESC
-    `);
+    `, [propertyId]);
 
     for (const order of orders.rows) {
       const items = await pool.query(
@@ -2736,7 +2750,15 @@ app.get('/api/pos/orders', async (req, res) => {
 });
 
 app.post('/api/pos/orders', async (req, res) => {
-  const { reservation_id, table_number, guest_name, items } = req.body;
+  const { property_id: propertyIdRaw, reservation_id, table_number, guest_name, items } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ status: 'ERROR', message: 'items must not be empty' });
@@ -2746,23 +2768,61 @@ app.post('/api/pos/orders', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Validate property exists
+    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    // Validate reservation linkage: reservation must belong to same property
+    if (reservation_id != null) {
+      const resCheck = await client.query(
+        'SELECT b.property_id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE r.id = $1',
+        [reservation_id]
+      );
+      if ((resCheck.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: `reservation ${reservation_id} not found` });
+      }
+      if (Number(resCheck.rows[0].property_id) !== propertyId) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'reservation belongs to a different property' });
+      }
+    }
+
+    // Validate all menu items belong to the same property
+    for (const item of items) {
+      const menuItem = await client.query(
+        'SELECT id, price, name, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
+        [item.menu_item_id]
+      );
+      if (!hasRows(menuItem)) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ status: 'ERROR', message: `Menu item ${item.menu_item_id} not found` });
+      }
+      if (Number(menuItem.rows[0].property_id) !== propertyId) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_MENU_ITEM', message: `Menu item ${item.menu_item_id} belongs to a different property` });
+      }
+    }
+
     const orderNumber = `POS-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Date.now().toString().slice(-6)}`;
     const orderInsert = await client.query(
-      `INSERT INTO pos_orders (reservation_id, order_number, table_number, guest_name, total_amount, status)
-       VALUES ($1, $2, $3, $4, 0, 'OPEN')
+      `INSERT INTO pos_orders (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status)
+       VALUES ($1, $2, $3, $4, $5, 0, 'OPEN')
        RETURNING *`,
-      [reservation_id || null, orderNumber, table_number || 'Walk In', guest_name || 'Guest', 0]
+      [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In', guest_name || 'Guest']
     );
 
     const orderId = orderInsert.rows[0].id;
     let totalAmount = 0;
 
     for (const item of items) {
-      const menuItem = await client.query('SELECT id, price, name FROM pos_menu_items WHERE id = $1 AND is_active = TRUE', [item.menu_item_id]);
-      if (!hasRows(menuItem)) {
-        throw new Error(`Menu item ${item.menu_item_id} not found`);
-      }
-
+      const menuItem = await client.query(
+        'SELECT id, price, name FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
+        [item.menu_item_id]
+      );
       const menu = menuItem.rows[0];
       const qty = Number(item.quantity || 1);
       const unitPrice = Number(menu.price);
@@ -2800,17 +2860,34 @@ app.post('/api/pos/orders', async (req, res) => {
 
 app.patch('/api/pos/orders/:id/status', async (req, res) => {
   const orderId = Number(req.params.id);
-  const { status } = req.body;
+  const { status, property_id: propertyIdRaw } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   try {
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    const orderCheck = await pool.query('SELECT id, property_id FROM pos_orders WHERE id = $1', [orderId]);
+    if (!hasRows(orderCheck)) {
+      return res.status(404).json({ status: 'ERROR', message: 'order not found' });
+    }
+    if (Number(orderCheck.rows[0].property_id) !== propertyId) {
+      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_ORDER', message: 'order belongs to a different property' });
+    }
+
     const result = await pool.query(
       'UPDATE pos_orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [status || 'OPEN', orderId]
     );
-
-    if (!hasRows(result)) {
-      return res.status(404).json({ status: 'ERROR', message: 'order not found' });
-    }
 
     res.json({ status: 'SUCCESS', data: result.rows[0] });
   } catch (err: any) {

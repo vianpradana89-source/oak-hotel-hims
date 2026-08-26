@@ -822,16 +822,18 @@ function App() {
   const fetchOperationsData = async () => {
     if (propertyId === null) {
       setPosMenu([]);
+      setPosOrders([]);
       return;
     }
     const targetPropertyId = propertyId;
     setPosMenu([]);
+    setPosOrders([]);
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, guestsRes, employeesRes, payrollRes] = await Promise.all([
         fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
-        fetch('/api/pos/orders'),
+        fetch('/api/pos/orders?property_id=' + targetPropertyId),
         fetch('/api/accounting/summary'),
         fetch('/api/guest-profiles'),
         fetch('/api/hr/employees'),
@@ -884,13 +886,14 @@ function App() {
   };
 
   const createPosOrder = async () => {
+    if (propertyId === null) return;
     const sampleItems = posMenu.slice(0, 2).map((item: any) => ({ menu_item_id: item.id, quantity: 1 }));
 
     try {
       const res = await fetch('/api/pos/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ table_number: '101', guest_name: 'Walk In Guest', items: sampleItems })
+        body: JSON.stringify({ property_id: propertyId, table_number: '101', guest_name: 'Walk In Guest', items: sampleItems })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Failed to create POS order');
