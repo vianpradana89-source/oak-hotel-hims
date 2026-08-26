@@ -8,8 +8,23 @@ import multer from 'multer';
 import { Pool } from 'pg';
 import { generateBid } from './utils/bid';
 import { initializeDatabase } from './db/schema_v3';
+import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
+import {
+  applyCancellationInventoryPlan,
+  buildLegacyPreLedgerCancellationAudit,
+  planReservationCancellationInventory
+} from './domains/reservations/cancellationInventoryPolicy';
+import {
+  CanonicalAvailabilityKey,
+  CanonicalAvailabilityRow,
+  canonicalAvailabilityKey,
+  lockCanonicalAvailabilityRows,
+  mutateCanonicalAvailabilityRow
+} from './domains/inventory/canonicalAvailability';
+import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
+import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 
 const app: any = express();
 app.use(cors());
@@ -163,20 +178,26 @@ app.get('/api/events', (req, res) => {
 });
 
 async function startServer() {
-  try {
-    await initializeDatabase(pool);
-    await reconcileAvailabilityDates(pool);
-    console.log('Database connected & initialized successfully.');
-  } catch (err: any) {
-    console.error('WARNING: Database connection failed:', err.message);
-  }
-
+  await initializeDatabase(pool);
+  const sweepSummary = await sweepExpiredLocks();
+  const reconciliation = await reconcileCanonicalAvailability(pool);
+  console.log('Database connected, expired holds swept, and canonical availability reconciled.', {
+    sweepSummary,
+    reconciliation
+  });
   app.listen(5000, () => {
     console.log('Backend running on port 5000');
   });
 }
 
-startServer();
+if (require.main === module) {
+  startServer().catch((err: any) => {
+    console.error('Backend startup failed:', err.message);
+    process.exitCode = 1;
+  });
+}
+
+export { app, pool };
 
 // Helper generate booking identifier with source-based prefix.
 // Example: WALKIN-20260821-0001 or OTA-20260821-0001.
@@ -281,13 +302,13 @@ async function createBookingRecordForReservation(
   return bookingInsert.rows[0];
 }
 
-function toDateKey(value: string | Date): string {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+function withReservationHotelDates<T extends Record<string, any>>(row: T): T {
+  if (!row) return row;
+  return {
+    ...row,
+    check_in: row.check_in == null ? row.check_in : hotelDateKey(row.check_in),
+    check_out: row.check_out == null ? row.check_out : hotelDateKey(row.check_out)
+  };
 }
 
 function normalizeRoomPhysicalStatus(value: any): string | null {
@@ -310,24 +331,6 @@ function isRoomStatusSellable(statusValue: any): boolean {
     return true;
   }
   return ['VACANT_CLEAN', 'INSPECTED'].includes(normalizedStatus);
-}
-
-// Utility: enumerate dates between two dates using nightly stay semantics
-// [check_in, check_out) means checkout date is excluded from room blocking.
-function enumerateDates(startStr: string, endStr: string): string[] {
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || startStr === endStr) {
-    return [];
-  }
-
-  const dates: string[] = [];
-  const current = new Date(start);
-  while (current < end) {
-    dates.push(toDateKey(current));
-    current.setDate(current.getDate() + 1);
-  }
-  return dates;
 }
 
 function isRoomOverlapViolation(err: any): boolean {
@@ -364,16 +367,6 @@ const RESERVATION_PATCH_ALLOWLIST = new Set([
   'booking_type'
 ]);
 
-function normalizeReservationDateKey(value: any): string | null {
-  const raw = String(value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    return null;
-  }
-
-  const normalized = toDateKey(`${raw}T00:00:00Z`);
-  return normalized === raw ? raw : null;
-}
-
 type RoomTypeIdentity = {
   roomTypeId: number | null;
   roomTypeName: string;
@@ -406,45 +399,21 @@ function toRoomTypeIdentity(rawTypeId: any, rawTypeName: any): RoomTypeIdentity 
   };
 }
 
-// RM-1B dual-read predicate: canonical room_type_id preferred, legacy name fallback
-// for rows that predate the canonical backfill (room_type_id IS NULL).
-function appendAvailabilityIdentityFilter(ident: RoomTypeIdentity, params: any[], alias = 'ad'): string {
-  if (ident.roomTypeId !== null && Number.isFinite(ident.roomTypeId)) {
-    params.push(ident.roomTypeId);
-    const idParam = `$${params.length}`;
-    params.push(ident.roomTypeName);
-    const nameParam = `$${params.length}`;
-    return `(${alias}.room_type_id = ${idParam}::int OR (${alias}.room_type_id IS NULL AND ${alias}.room_type = ${nameParam}))`;
-  }
-  params.push(ident.roomTypeName);
-  const nameParam = `$${params.length}`;
-  return `${alias}.room_type_id IS NULL AND ${alias}.room_type = ${nameParam}`;
-}
-
 async function lockAndValidateAvailabilityDates(
   client: any,
   roomType: RoomTypeIdentity,
   dates: string[],
   mode: 'EXTEND' | 'SHORTEN'
-) {
+) : Promise<Map<string, CanonicalAvailabilityRow>> {
+  const roomTypeId = requireCanonicalRoomTypeId(roomType, 'reservation inventory change');
+  const rows = await lockCanonicalAvailabilityRows(
+    client,
+    dates.map(date => ({ roomTypeId, roomTypeName: roomType.roomTypeName, date }))
+  );
   for (const date of dates) {
-    const filterParams: any[] = [];
-    const identityClause = appendAvailabilityIdentityFilter(roomType, filterParams);
-    const availabilityResult = await client.query(
-      `SELECT reserved_qty, total_rooms
-       FROM availability_dates ad
-       WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-       FOR UPDATE`,
-      [...filterParams, date]
-    );
-
-    if (!hasRows(availabilityResult)) {
-      throw new Error(`availability row missing for ${roomType.roomTypeName} on ${date}`);
-    }
-
-    const reservedQty = Number(availabilityResult.rows[0].reserved_qty || 0);
-    const totalRooms = Number(availabilityResult.rows[0].total_rooms || 0);
-
+    const availability = rows.get(canonicalAvailabilityKey(roomTypeId, date))!;
+    const reservedQty = availability.reservedQty;
+    const totalRooms = availability.totalRooms;
     if (mode === 'EXTEND') {
       if (reservedQty >= totalRooms) {
         throw new Error(`capacity exhausted for ${roomType.roomTypeName} on ${date}`);
@@ -453,6 +422,30 @@ async function lockAndValidateAvailabilityDates(
       throw new Error(`reserved_qty underflow for ${roomType.roomTypeName} on ${date}`);
     }
   }
+  return rows;
+}
+
+// C2C2: Deterministic multi-row availability locking helper.
+// Accepts canonical identities, deduplicates, sorts by (room_type_id ASC, date ASC),
+// locks all rows with FOR UPDATE, and returns them keyed by canonical identity string.
+type AvailabilityLockKey = CanonicalAvailabilityKey & { roomTypeName: string };
+
+function requireCanonicalRoomTypeId(ident: RoomTypeIdentity, context: string): number {
+  if (!Number.isInteger(ident.roomTypeId) || Number(ident.roomTypeId) <= 0) {
+    throw new Error(`INVENTORY_INTEGRITY_ERROR: canonical room_type_id is required for ${context}`);
+  }
+  return Number(ident.roomTypeId);
+}
+
+async function lockAvailabilityRows(
+  client: any,
+  keys: AvailabilityLockKey[]
+): Promise<Map<string, CanonicalAvailabilityRow>> {
+  return lockCanonicalAvailabilityRows(client, keys);
+}
+
+function availabilityMapKey(ident: RoomTypeIdentity, date: string): string {
+  return canonicalAvailabilityKey(requireCanonicalRoomTypeId(ident, `availability on ${date}`), date);
 }
 
 type BookingChildStatusSummary = {
@@ -569,41 +562,31 @@ function buildBookingCompletionAuditPayload(
 
 // RM-1B drift fix: checkout must release reserved_qty for each occupied night.
 // Reconciliation semantics treat CHECKED_OUT stays as non-consuming; releasing here
-// keeps runtime ledger consistent with reconcileAvailabilityDates().
+// keeps runtime ledger consistent with canonical startup reconciliation.
 async function releaseReservationStayInventory(
   client: any,
   ident: RoomTypeIdentity,
   checkIn: string | Date,
   checkOut: string | Date
 ) {
-  const dates = enumerateDates(toDateKey(checkIn), toDateKey(checkOut));
+  const dates = enumerateHotelDates(hotelDateKey(checkIn), hotelDateKey(checkOut));
   if (dates.length === 0) {
     return;
   }
 
+  const roomTypeId = requireCanonicalRoomTypeId(ident, 'checkout inventory release');
+  const rows = await lockCanonicalAvailabilityRows(
+    client,
+    dates.map(date => ({ roomTypeId, roomTypeName: ident.roomTypeName, date }))
+  );
   for (const date of dates) {
-    const filterParams: any[] = [];
-    const identityClause = appendAvailabilityIdentityFilter(ident, filterParams);
-    const availabilityRow = await client.query(
-      `SELECT ad.reserved_qty
-       FROM availability_dates ad
-       WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-       FOR UPDATE`,
-      [...filterParams, date]
-    );
-    if (!hasRows(availabilityRow)) {
-      throw new Error(`INVENTORY_INTEGRITY_ERROR: availability row missing for ${ident.roomTypeName} on ${date}`);
+    const row = rows.get(canonicalAvailabilityKey(roomTypeId, date))!;
+    if (row.reservedQty < 1) {
+      throw new Error(`INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${ident.roomTypeName} on ${date} (reserved_qty=${row.reservedQty}, release=1)`);
     }
-    const reservedQty = Number(availabilityRow.rows[0].reserved_qty || 0);
-    if (reservedQty < 1) {
-      throw new Error(`INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${ident.roomTypeName} on ${date} (reserved_qty=${reservedQty}, release=1)`);
-    }
-    await client.query(
-      `UPDATE availability_dates ad
-       SET reserved_qty = ad.reserved_qty - $${filterParams.length + 1}
-       WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-      [...filterParams, 1, date]
-    );
+  }
+  for (const date of dates) {
+    await mutateCanonicalAvailabilityRow(client, rows.get(canonicalAvailabilityKey(roomTypeId, date))!, -1);
   }
 }
 
@@ -622,65 +605,10 @@ async function findActiveRoomOverlap(
        AND existing.check_in < $2::date
        AND existing.check_out > $3::date
        AND ($4::int IS NULL OR existing.id <> $4)
-     LIMIT 1`,
+     LIMIT 1
+     FOR UPDATE OF existing`,
     [targetRoomId, requestedCheckOut, requestedCheckIn, excludeReservationId]
   );
-}
-
-async function reconcileAvailabilityDates(client: any = pool) {
-  try {
-    const roomTypesResult = await client.query(`
-      SELECT rt.id AS room_type_id, rt.name AS room_type
-      FROM room_types rt
-      WHERE EXISTS (SELECT 1 FROM rooms r WHERE r.room_type_id = rt.id)
-      UNION
-      SELECT NULL::integer AS room_type_id, r.name AS room_type
-      FROM rooms r
-      WHERE r.room_type_id IS NULL AND r.name IS NOT NULL
-    `);
-
-    for (const row of roomTypesResult.rows) {
-      const ident = toRoomTypeIdentity(row.room_type_id, row.room_type);
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(ident, filterParams);
-      await client.query(
-        `UPDATE availability_dates ad SET reserved_qty = 0 WHERE ${identityClause}`,
-        filterParams
-      );
-    }
-
-    const activeReservations = await client.query(`
-      SELECT res.id, res.check_in, res.check_out,
-             r.room_type_id AS room_type_id,
-             COALESCE(rt.name, r.name) AS room_type
-      FROM reservations res
-      JOIN rooms r ON r.id = res.room_id
-      LEFT JOIN room_types rt ON rt.id = r.room_type_id
-      WHERE res.status NOT IN ('CANCELLED', 'CHECKED_OUT')
-        AND res.check_in IS NOT NULL
-        AND res.check_out IS NOT NULL
-        AND res.check_out > res.check_in
-    `);
-
-    for (const reservation of activeReservations.rows) {
-      const ident = toRoomTypeIdentity(reservation.room_type_id, reservation.room_type);
-      if (!ident.roomTypeName && ident.roomTypeId === null) continue;
-      const dates = enumerateDates(reservation.check_in, reservation.check_out);
-      for (const date of dates) {
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(ident, filterParams);
-        await client.query(
-          `UPDATE availability_dates ad SET reserved_qty = reserved_qty + 1 WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}`,
-          [...filterParams, date]
-        );
-      }
-    }
-
-    return true;
-  } catch (error) {
-    console.error('Availability reconciliation failed', error);
-    return false;
-  }
 }
 
 function normalizeBookingSourceValue(value: any): 'OTA' | 'WALKIN' {
@@ -834,9 +762,16 @@ async function createChildReservationRecord(
         `INSERT INTO reservations (
           room_id, guest_name, guest_phone, guest_segment, check_in, check_out,
           total_price, payment_status, discount_amount, discount_percent, amount_paid, remaining_balance,
-          booking_number, booking_type, booking_id, stay_sequence, status, stay_status, correlation_id, ktp_path, bukti_bayar_path
+          booking_number, booking_type, booking_id, stay_sequence, status, stay_status, correlation_id, ktp_path, bukti_bayar_path,
+          booked_room_type_id_snapshot, booked_room_type_code_snapshot, booked_room_type_name_snapshot,
+          booked_room_category_id_snapshot, booked_room_category_code_snapshot, booked_room_category_name_snapshot,
+          classification_snapshot_source, classification_snapshotted_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'BOOKED', 'RESERVED', $17, $18, $19)
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          'BOOKED', 'RESERVED', $17, $18, $19,
+          $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP
+        )
         RETURNING *;`,
         [
           child.roomId,
@@ -857,7 +792,14 @@ async function createChildReservationRecord(
           params.staySequence,
           params.correlationId || null,
           child.ktpPath || null,
-          child.buktiBayarPath || null
+          child.buktiBayarPath || null,
+          child.roomTypeIdSnapshot,
+          child.roomTypeCodeSnapshot,
+          child.roomTypeNameSnapshot,
+          child.roomCategoryIdSnapshot,
+          child.roomCategoryCodeSnapshot,
+          child.roomCategoryNameSnapshot,
+          child.classificationSnapshotSource
         ]
       );
 
@@ -949,12 +891,12 @@ async function createCanonicalBooking(
         throw createHttpError(400, `reservations[${index}].room_id is required`);
       }
 
-      const checkIn = normalizeReservationDateKey(child.check_in);
+      const checkIn = normalizeHotelDate(child.check_in);
       if (!checkIn) {
         throw createHttpError(400, `reservations[${index}].check_in is invalid`);
       }
 
-      const checkOut = normalizeReservationDateKey(child.check_out);
+      const checkOut = normalizeHotelDate(child.check_out);
       if (!checkOut) {
         throw createHttpError(400, `reservations[${index}].check_out is invalid`);
       }
@@ -979,12 +921,27 @@ async function createCanonicalBooking(
         discountPercent: Number(child.discount_percent ?? 0),
         amountPaid: Number(child.amount_paid ?? 0),
         paymentStatus: child.payment_status || null,
-        quantity: toPositiveInteger(child.qty ?? child.quantity ?? 1, 1),
+        quantity: (() => {
+          const q = toPositiveInteger(child.qty ?? child.quantity ?? 1, 1);
+          if (q > 1) {
+            throw createHttpError(400,
+              'Satu reservasi kamar hanya dapat menggunakan 1 kamar fisik. Gunakan Tambah Kamar untuk reservasi beberapa kamar.',
+              'RESERVATION_QUANTITY_UNSUPPORTED');
+          }
+          return q;
+        })(),
         ktpPath: child.ktp_path || null,
         buktiBayarPath: child.bukti_bayar_path || null,
         roomType: null,
         roomTypeId: null,
-        roomPropertyId: null
+        roomPropertyId: null,
+        roomTypeIdSnapshot: null,
+        roomTypeCodeSnapshot: null,
+        roomTypeNameSnapshot: null,
+        roomCategoryIdSnapshot: null,
+        roomCategoryCodeSnapshot: null,
+        roomCategoryNameSnapshot: null,
+        classificationSnapshotSource: 'CANONICAL_ROOM_MASTER'
       });
     }
 
@@ -992,15 +949,27 @@ async function createCanonicalBooking(
     const duplicatePairs: Array<[number, number]> = [];
     const roomWindows = new Map<number, Array<{ start: string; end: string; index: number }>>();
 
+    normalizedChildren.sort((a, b) => a.roomId - b.roomId);
+
     for (const child of normalizedChildren) {
       const roomRow = await client.query(
-        `SELECT r.id AS room_id, r.status AS room_status, r.room_type_id AS canonical_room_type_id, COALESCE(rt.name, r.name) AS room_type, p.id AS property_id, p.property_code,
+        `SELECT r.id AS room_id, r.room_number, r.status AS room_status,
+                r.room_type_id AS canonical_room_type_id,
+                rt.code AS room_type_code,
+                COALESCE(rt.name, r.name) AS room_type,
+                rc.id AS room_category_id,
+                rc.code AS room_category_code,
+                rc.name AS room_category_name,
+                p.id AS property_id, p.property_code,
                 r.is_active AS room_is_active,
                 rt.is_active AS room_type_is_active
          FROM rooms r
-         LEFT JOIN room_types rt ON rt.id = r.room_type_id
+          JOIN room_types rt ON rt.id = r.room_type_id
+         LEFT JOIN room_categories rc
+           ON rc.id = rt.room_category_id AND rc.property_id = rt.property_id
          JOIN properties p ON p.id = r.property_id
-         WHERE r.id = $1`,
+          WHERE r.id = $1
+          FOR UPDATE OF r`,
         [child.roomId]
       );
 
@@ -1030,7 +999,24 @@ async function createCanonicalBooking(
       child.roomTypeId = roomInfo.canonical_room_type_id === null || roomInfo.canonical_room_type_id === undefined
         ? null
         : Number(roomInfo.canonical_room_type_id);
+      if (child.roomTypeId === null || !roomInfo.room_type_code) {
+        throw createHttpError(409, `room ${child.roomId} is not attached to a canonical room type`);
+      }
       child.roomPropertyId = roomPropertyId;
+      child.roomTypeIdSnapshot = child.roomTypeId;
+      child.roomTypeCodeSnapshot = roomInfo.room_type_code === null || roomInfo.room_type_code === undefined
+        ? null
+        : String(roomInfo.room_type_code);
+      child.roomTypeNameSnapshot = child.roomType;
+      child.roomCategoryIdSnapshot = roomInfo.room_category_id === null || roomInfo.room_category_id === undefined
+        ? null
+        : Number(roomInfo.room_category_id);
+      child.roomCategoryCodeSnapshot = roomInfo.room_category_code === null || roomInfo.room_category_code === undefined
+        ? null
+        : String(roomInfo.room_category_code);
+      child.roomCategoryNameSnapshot = roomInfo.room_category_name === null || roomInfo.room_category_name === undefined
+        ? null
+        : String(roomInfo.room_category_name);
 
       const windows = roomWindows.get(child.roomId) || [];
       for (const previous of windows) {
@@ -1041,9 +1027,9 @@ async function createCanonicalBooking(
       windows.push({ start: child.checkIn, end: child.checkOut, index: child.index });
       roomWindows.set(child.roomId, windows);
 
-      const dates = enumerateDates(child.checkIn, child.checkOut);
+      const dates = enumerateHotelDates(child.checkIn, child.checkOut);
       for (const date of dates) {
-        const key = `${child.roomTypeId ?? 'legacy'}|${child.roomType}|${date}`;
+        const key = canonicalAvailabilityKey(child.roomTypeId, date);
         const current = roomKeyMap.get(key);
         if (current) {
           current.delta += child.quantity;
@@ -1062,8 +1048,8 @@ async function createCanonicalBooking(
     }
 
     const lockKeys = Array.from(roomKeyMap.values()).sort((a, b) => {
-      const aId = a.ident.roomTypeId ?? Number.MAX_SAFE_INTEGER;
-      const bId = b.ident.roomTypeId ?? Number.MAX_SAFE_INTEGER;
+      const aId = requireCanonicalRoomTypeId(a.ident, `booking availability on ${a.date}`);
+      const bId = requireCanonicalRoomTypeId(b.ident, `booking availability on ${b.date}`);
       if (aId !== bId) {
         return aId - bId;
       }
@@ -1073,28 +1059,8 @@ async function createCanonicalBooking(
       return a.date.localeCompare(b.date);
     });
 
-    const availabilityRows = new Map<string, { reservedQty: number; totalRooms: number }>();
-    for (const key of lockKeys) {
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(key.ident, filterParams);
-      const row = await client.query(
-        `SELECT ad.reserved_qty, ad.total_rooms
-         FROM availability_dates ad
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-         FOR UPDATE`,
-        [...filterParams, key.date]
-      );
-
-      if (!hasRows(row)) {
-        throw createHttpError(409, `availability row missing for ${key.ident.roomTypeName} on ${key.date}`);
-      }
-
-      availabilityRows.set(`${key.ident.roomTypeId ?? 'legacy'}|${key.ident.roomTypeName}|${key.date}`, {
-        reservedQty: Number(row.rows[0].reserved_qty || 0),
-        totalRooms: Number(row.rows[0].total_rooms || 0)
-      });
-    }
-
+    // C2C2: LOCK RESERVATIONS (overlap) BEFORE AVAILABILITY.
+    // Canonical lock order: ROOM → RESERVATION → AVAILABILITY
     for (const child of normalizedChildren) {
       const overlap = await findActiveRoomOverlap(client, child.roomId, child.checkIn, child.checkOut);
       if (hasRows(overlap)) {
@@ -1105,8 +1071,18 @@ async function createCanonicalBooking(
       }
     }
 
+    // C2C2: LOCK AVAILABILITY after RESERVATION, using deterministic helper.
+    const availabilityRows = await lockAvailabilityRows(
+      client,
+      lockKeys.map(k => ({
+        roomTypeId: requireCanonicalRoomTypeId(k.ident, `booking availability on ${k.date}`),
+        roomTypeName: k.ident.roomTypeName,
+        date: k.date
+      }))
+    );
+
     for (const key of lockKeys) {
-      const availability = availabilityRows.get(`${key.ident.roomTypeId ?? 'legacy'}|${key.ident.roomTypeName}|${key.date}`);
+      const availability = availabilityRows.get(availabilityMapKey(key.ident, key.date));
       if (!availability) {
         throw createHttpError(409, `availability row missing for ${key.ident.roomTypeName} on ${key.date}`);
       }
@@ -1117,6 +1093,14 @@ async function createCanonicalBooking(
           `Not enough availability for ${key.ident.roomTypeName} on ${key.date} (available=${availability.totalRooms - availability.reservedQty}, requested=${key.delta})`
         );
       }
+    }
+
+    for (const key of lockKeys) {
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(availabilityMapKey(key.ident, key.date))!,
+        key.delta
+      );
     }
 
     const insertedChildren: any[] = [];
@@ -1140,17 +1124,6 @@ async function createCanonicalBooking(
                updated_at = NOW()
            WHERE id = $2`,
           [bookingLegacyNumber, Number(bookingRecord.id)]
-        );
-      }
-
-      for (const date of enumerateDates(child.checkIn, child.checkOut)) {
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(toRoomTypeIdentity(child.roomTypeId, child.roomType), filterParams);
-        await client.query(
-          `UPDATE availability_dates ad
-           SET reserved_qty = ad.reserved_qty + $${filterParams.length + 1}
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-          [...filterParams, child.quantity, date]
         );
       }
 
@@ -1207,8 +1180,8 @@ async function createCanonicalBooking(
             reservation_id: Number(reservation.id),
             stay_sequence: Number(reservation.stay_sequence),
             room_id: Number(reservation.room_id),
-            check_in: reservation.check_in,
-            check_out: reservation.check_out,
+            check_in: hotelDateKey(reservation.check_in),
+            check_out: hotelDateKey(reservation.check_out),
             status: reservation.status,
             correlation_id: correlationId
           }),
@@ -1233,11 +1206,12 @@ async function createCanonicalBooking(
         legacy_booking_number: bookingLegacyNumber,
         correlation_id: correlationId
       },
-      reservations: insertedChildren,
+      reservations: insertedChildren.map(withReservationHotelDates),
       correlationId,
       bookingLegacyNumber
     };
   } catch (err: any) {
+    try { require('fs').writeFileSync('debug_create_error.txt', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail, stack: err?.stack?.split('\n').slice(0, 8) }, null, 2)); } catch(_e) {}
     await client.query('ROLLBACK');
     throw err;
   } finally {
@@ -1341,7 +1315,7 @@ app.get('/api/reservations/:id', async (req, res) => {
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
-    res.json({ status: 'OK', data: result.rows[0] });
+    res.json({ status: 'OK', data: withReservationHotelDates(result.rows[0]) });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
@@ -1419,7 +1393,7 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
       [bookingId]
     );
     
-    res.json({ status: 'OK', data: reservationsResult.rows });
+    res.json({ status: 'OK', data: reservationsResult.rows.map(withReservationHotelDates) });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
@@ -1583,14 +1557,15 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
       });
     }
 
+    const releaseByKey = new Map<string, { roomTypeId: number; roomTypeName: string; date: string; delta: number }>();
     for (const reservation of childReservations) {
       const childStatus = String(reservation.status || '').toUpperCase();
       if (childStatus === 'CANCELLED') continue;
 
       const roomTypeResult = await client.query(
-        `SELECT r.room_type_id, COALESCE(rt.name, r.name) AS room_type
+        `SELECT r.room_type_id, rt.name AS room_type
          FROM rooms r
-         LEFT JOIN room_types rt ON rt.id = r.room_type_id
+         JOIN room_types rt ON rt.id = r.room_type_id
          WHERE r.id = $1`,
         [reservation.room_id]
       );
@@ -1600,50 +1575,45 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
       }
 
       const roomTypeIdent = toRoomTypeIdentity(roomTypeResult.rows[0].room_type_id, roomTypeResult.rows[0].room_type);
-      if (!roomTypeIdent.roomTypeName && roomTypeIdent.roomTypeId === null) {
-        throw new Error(`INVENTORY_INTEGRITY_ERROR: room type missing for reservation ${reservation.id}`);
-      }
+      const roomTypeId = requireCanonicalRoomTypeId(roomTypeIdent, `booking cancellation reservation ${reservation.id}`);
 
-      const occupiedDates = enumerateDates(reservation.check_in, reservation.check_out).sort();
+      const occupiedDates = enumerateHotelDates(reservation.check_in, reservation.check_out).sort();
 
       if (occupiedDates.length === 0) {
         throw new Error(`INVENTORY_INTEGRITY_ERROR: invalid stay range for reservation ${reservation.id}`);
       }
 
-      // Lock and validate every stay night before decrementing any of them.
       for (const date of occupiedDates) {
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(roomTypeIdent, filterParams);
-        const availabilityResult = await client.query(
-          `SELECT ad.reserved_qty, ad.total_rooms
-           FROM availability_dates ad
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-           FOR UPDATE`,
-          [...filterParams, date]
-        );
-
-        if (!hasRows(availabilityResult)) {
-          throw new Error(`INVENTORY_INTEGRITY_ERROR: availability row missing for ${roomTypeIdent.roomTypeName} on ${date}`);
-        }
-
-        const reservedQty = Number(availabilityResult.rows[0].reserved_qty || 0);
-        if (reservedQty < 1) {
-          throw new Error(
-            `INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${roomTypeIdent.roomTypeName} on ${date} (reserved_qty=${reservedQty}, release=1)`
-          );
-        }
+        const key = canonicalAvailabilityKey(roomTypeId, date);
+        const current = releaseByKey.get(key);
+        if (current) current.delta += 1;
+        else releaseByKey.set(key, { roomTypeId, roomTypeName: roomTypeIdent.roomTypeName, date, delta: 1 });
       }
+    }
 
-      for (const date of occupiedDates) {
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(roomTypeIdent, filterParams);
-        await client.query(
-          `UPDATE availability_dates ad
-           SET reserved_qty = ad.reserved_qty - $${filterParams.length + 1}
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-          [...filterParams, 1, date]
+    const releaseEntries = Array.from(releaseByKey.values()).sort((a, b) =>
+      a.roomTypeId - b.roomTypeId || a.date.localeCompare(b.date)
+    );
+    const availabilityRows = await lockCanonicalAvailabilityRows(client, releaseEntries);
+    for (const entry of releaseEntries) {
+      const row = availabilityRows.get(canonicalAvailabilityKey(entry.roomTypeId, entry.date))!;
+      if (row.reservedQty < entry.delta) {
+        throw new Error(
+          `INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${entry.roomTypeName} on ${entry.date} (reserved_qty=${row.reservedQty}, release=${entry.delta})`
         );
       }
+    }
+    for (const entry of releaseEntries) {
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(canonicalAvailabilityKey(entry.roomTypeId, entry.date))!,
+        -entry.delta
+      );
+    }
+
+    for (const reservation of childReservations) {
+      const childStatus = String(reservation.status || '').toUpperCase();
+      if (childStatus === 'CANCELLED') continue;
 
       const updatedReservation = await client.query(
         `UPDATE reservations
@@ -1693,7 +1663,9 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
       console.error('Booking cancellation rollback failed', rollbackErr);
     }
 
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const message = String(err?.message || err);
+    const status = message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('CANCELLATION_INTEGRITY_ERROR') ? 409 : 500;
+    res.status(status).json({ status: 'ERROR', message });
   } finally {
     client.release();
   }
@@ -1840,7 +1812,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'UPDATE', 'RESERVATION', reservationId, JSON.stringify(updated.rows[0]), req.headers['x-correlation-id'] || null]
+      ['PMS', 'UPDATE', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null]
     );
 
     await client.query('COMMIT');
@@ -1851,7 +1823,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
-    res.json({ status: 'SUCCESS', data: updated.rows[0] });
+    res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated.rows[0]) });
   } catch (err: any) {
     await client.query('ROLLBACK');
     if (isRoomOverlapViolation(err)) {
@@ -1874,22 +1846,54 @@ app.patch('/api/reservations/:id', async (req, res) => {
 
 app.post('/api/reservations/:id/cancel', async (req, res) => {
   const reservationId = Number(req.params.id);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
+  }
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
-    const reservation = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
-    if (!hasRows(reservation)) {
+    const reservationLookup = await client.query(
+      'SELECT id, booking_id FROM reservations WHERE id = $1',
+      [reservationId]
+    );
+    if (!hasRows(reservationLookup)) {
       await client.query('ROLLBACK');
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
 
-    const current = reservation.rows[0];
-    const currentStatus = String(current.status || '').toUpperCase();
-    if (currentStatus === 'CANCELLED') {
-      await client.query('COMMIT');
-      return res.json({ status: 'SUCCESS', data: current, message: 'reservation already cancelled' });
+    const bookingId = Number(reservationLookup.rows[0].booking_id || 0);
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation is not linked to a booking' });
     }
+
+    const bookingResult = await client.query(
+      'SELECT * FROM bookings WHERE id = $1 FOR UPDATE',
+      [bookingId]
+    );
+    if (!hasRows(bookingResult)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
+    }
+
+    const childrenResult = await client.query(
+      `SELECT *
+       FROM reservations
+       WHERE booking_id = $1
+       ORDER BY stay_sequence, id
+       FOR UPDATE`,
+      [bookingId]
+    );
+    const lockedChildren = childrenResult.rows;
+    const targetIndex = lockedChildren.findIndex((row: any) => Number(row.id) === reservationId);
+    if (targetIndex < 0) {
+      throw new Error(`CANCELLATION_INTEGRITY_ERROR: reservation ${reservationId} does not belong to booking ${bookingId}`);
+    }
+
+    const booking = bookingResult.rows[0];
+    const current = lockedChildren[targetIndex];
+    const currentStatus = String(current.status || '').toUpperCase();
     if (currentStatus === 'CHECKED_IN') {
       await client.query('ROLLBACK');
       return res.status(409).json({ status: 'ERROR', message: 'checked-in reservation cannot be cancelled; use checkout flow' });
@@ -1898,84 +1902,142 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(409).json({ status: 'ERROR', message: 'checked-out reservation cannot be cancelled' });
     }
-    if (currentStatus !== 'BOOKED') {
+    if (currentStatus !== 'BOOKED' && currentStatus !== 'CANCELLED') {
       await client.query('ROLLBACK');
       return res.status(409).json({ status: 'ERROR', message: `reservation status ${currentStatus || 'UNKNOWN'} is not cancellable in this phase` });
     }
 
-    const releaseQuantity = 1;
-    const roomTypeResult = await client.query(
-      `SELECT r.room_type_id, COALESCE(rt.name, r.name) AS room_type
-       FROM rooms r
-       LEFT JOIN room_types rt ON rt.id = r.room_type_id
-       WHERE r.id = $1`,
-      [current.room_id]
-    );
-    if (!hasRows(roomTypeResult)) {
-      throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservationId}`);
-    }
-    const roomTypeIdent = toRoomTypeIdentity(roomTypeResult.rows[0].room_type_id, roomTypeResult.rows[0].room_type);
-    if (!roomTypeIdent.roomTypeName && roomTypeIdent.roomTypeId === null) {
-      throw new Error(`INVENTORY_INTEGRITY_ERROR: room type missing for reservation ${reservationId}`);
-    }
+    const alreadyCancelled = currentStatus === 'CANCELLED';
+    let cancelledReservation = current;
+    let inventoryPlan: Awaited<ReturnType<typeof planReservationCancellationInventory>> | null = null;
+    if (!alreadyCancelled) {
+      inventoryPlan = await planReservationCancellationInventory(client, current, booking, { lockRows: true });
+      if (!inventoryPlan.eligible) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: ${inventoryPlan.reason}`);
+      }
+      await applyCancellationInventoryPlan(client, inventoryPlan);
 
-    const occupiedDates = enumerateDates(current.check_in, current.check_out);
-    for (const date of occupiedDates) {
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(roomTypeIdent, filterParams);
-      const availabilityRow = await client.query(
-        `SELECT ad.reserved_qty
-         FROM availability_dates ad
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-         FOR UPDATE`,
-        [...filterParams, date]
+      const updated = await client.query(
+        `UPDATE reservations
+         SET status = 'CANCELLED', stay_status = 'CANCELLED'
+         WHERE id = $1 AND status = 'BOOKED'
+         RETURNING *`,
+        [reservationId]
       );
-      if (!hasRows(availabilityRow)) {
-        throw new Error(`INVENTORY_INTEGRITY_ERROR: availability row missing for ${roomTypeIdent.roomTypeName} on ${date}`);
+      if (updated.rowCount !== 1) {
+        throw new Error(`CANCELLATION_INTEGRITY_ERROR: reservation ${reservationId} was not updated`);
       }
-      const reservedQty = Number(availabilityRow.rows[0].reserved_qty || 0);
-      if (reservedQty < releaseQuantity) {
-        throw new Error(`INVENTORY_INTEGRITY_ERROR: reserved_qty underflow for ${roomTypeIdent.roomTypeName} on ${date} (reserved_qty=${reservedQty}, release=${releaseQuantity})`);
-      }
+      cancelledReservation = updated.rows[0];
+      lockedChildren[targetIndex] = cancelledReservation;
+
       await client.query(
-        `UPDATE availability_dates ad
-         SET reserved_qty = ad.reserved_qty - $${filterParams.length + 1}
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-        [...filterParams, releaseQuantity, date]
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(cancelledReservation)), req.headers['x-correlation-id'] || null]
       );
+
+      const legacyAudit = buildLegacyPreLedgerCancellationAudit(inventoryPlan, currentStatus, 'CANCELLED');
+      if (legacyAudit) {
+        await client.query(
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            'PMS',
+            'LEGACY_PRE_LEDGER_CANCELLATION',
+            'RESERVATION',
+            reservationId,
+            JSON.stringify(legacyAudit),
+            req.headers['x-correlation-id'] || null
+          ]
+        );
+      }
     }
 
-    const updated = await client.query(
-      `UPDATE reservations
-       SET status = 'CANCELLED', stay_status = 'CANCELLED'
-       WHERE id = $1
-       RETURNING *`,
-      [reservationId]
-    );
+    const bookingStatusBefore = String(booking.booking_status || '').toUpperCase();
+    const childSummary = buildBookingChildStatusSummary(lockedChildren);
+    const derivedBookingStatus = deriveBookingLifecycleStatus(bookingStatusBefore, childSummary);
+    let bookingTransition: { status: string; booking: any; payload: any } | null = null;
+    if (derivedBookingStatus !== bookingStatusBefore) {
+      const updatedBooking = await client.query(
+        `UPDATE bookings
+         SET booking_status = $1, updated_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [derivedBookingStatus, bookingId]
+      );
+      if (updatedBooking.rowCount !== 1) {
+        throw new Error(`CANCELLATION_INTEGRITY_ERROR: booking ${bookingId} was not reconciled`);
+      }
 
-    await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify(updated.rows[0]), req.headers['x-correlation-id'] || null]
-    );
+      const bookingAuditPayload = derivedBookingStatus === 'COMPLETED'
+        ? buildBookingCompletionAuditPayload(
+            updatedBooking.rows[0],
+            bookingStatusBefore || 'ACTIVE',
+            derivedBookingStatus,
+            childSummary,
+            reservationId
+          )
+        : {
+            booking_id: bookingId,
+            bid: booking.bid,
+            previous_status: bookingStatusBefore,
+            new_status: derivedBookingStatus,
+            child_status_summary: childSummary,
+            trigger_reservation_id: reservationId
+          };
+
+      bookingTransition = {
+        status: derivedBookingStatus,
+        booking: updatedBooking.rows[0],
+        payload: bookingAuditPayload
+      };
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          'PMS',
+          derivedBookingStatus === 'CANCELLED' ? 'CANCEL' : 'COMPLETE',
+          'BOOKING',
+          bookingId,
+          JSON.stringify(bookingAuditPayload),
+          req.headers['x-correlation-id'] || null
+        ]
+      );
+    }
 
     await client.query('COMMIT');
-    broadcastEvent('ReservationCancelled', {
-      reservation_id: reservationId,
-      room_id: current.room_id,
-      guest_name: current.guest_name,
-      timestamp: new Date().toISOString()
-    });
+    if (!alreadyCancelled) {
+      broadcastEvent('ReservationCancelled', {
+        reservation_id: reservationId,
+        room_id: current.room_id,
+        guest_name: current.guest_name,
+        timestamp: new Date().toISOString()
+      });
+    }
+    if (bookingTransition?.status === 'COMPLETED') {
+      broadcastEvent('BookingCompleted', {
+        booking_id: bookingTransition.booking.id,
+        bid: bookingTransition.booking.bid,
+        trigger_reservation_id: reservationId,
+        timestamp: new Date().toISOString()
+      });
+    }
 
-    res.json({ status: 'SUCCESS', data: updated.rows[0] });
+    res.json({
+      status: 'SUCCESS',
+      data: withReservationHotelDates(cancelledReservation),
+      ...(alreadyCancelled ? { message: 'reservation already cancelled' } : {}),
+      meta: {
+        inventory_release_mode: inventoryPlan?.mode || 'NONE_ALREADY_CANCELLED',
+        legacy_no_ledger_dates: inventoryPlan?.legacyNoLedgerDates || []
+      }
+    });
   } catch (err: any) {
     await client.query('ROLLBACK');
     const message = String(err?.message || err);
     if (
-      message.includes('availability row missing') ||
-      message.includes('capacity exhausted') ||
-      message.includes('reserved_qty underflow') ||
-      message.includes('room not found')
+      message.includes('INVENTORY_INTEGRITY_ERROR') ||
+      message.includes('CANCELLATION_INTEGRITY_ERROR')
     ) {
       return res.status(409).json({ status: 'ERROR', message });
     }
@@ -2050,8 +2112,9 @@ app.post('/api/bookings', async (req, res) => {
     }
 
     const message = String(err?.message || err);
-    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') ? 409 : 500));
-    const responseObj = { status: responseStatusTextForCode(statusCode), message };
+    const statusCode = Number(err?.statusCode || (message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') ? 409 : 500));
+    const responseObj: any = { status: responseStatusTextForCode(statusCode), message };
+    if (err?.code) responseObj.code = err.code;
     await persistIdempotencyResult(req, res, statusCode, responseObj);
     return res.status(statusCode).json(responseObj);
   }
@@ -2093,7 +2156,7 @@ app.post('/api/reservations', async (req, res) => {
     }
 
     const message = String(err?.message || err);
-    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
+    const statusCode = Number(err?.statusCode || (message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
     const responseObj = { status: responseStatusTextForCode(statusCode), message };
     await persistIdempotencyResult(req, res, statusCode, responseObj);
     return res.status(statusCode).json(responseObj);
@@ -2146,54 +2209,85 @@ app.post('/api/reservations/upload', upload.fields([
     }
 
     const message = String(err?.message || err);
-    const statusCode = Number(err?.statusCode || (message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
+    const statusCode = Number(err?.statusCode || (message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') || message.includes('room not found') ? 409 : 500));
     const responseObj = { status: statusCode >= 500 ? 'ERROR' : 'FAILED', message };
     await persistIdempotencyResult(req, res, statusCode, responseObj);
     return res.status(statusCode).json(responseObj);
   }
 });
 
-// GET availability per room_type between date range
-// RM-1B: accepts canonical room_type_id (preferred) or legacy room_type name.
+// GET availability by canonical room type, with explicit NULL-ID legacy mode.
 app.get('/api/availability', async (req, res) => {
   const roomTypeIdRaw = req.query.room_type_id;
-  const room_type = String(req.query.room_type || 'Standard Room');
-  const start = String(req.query.start || new Date().toISOString().slice(0, 10));
-  const end = String(req.query.end || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10));
-
-  let identityClause = 'ad.room_type = $1';
-  const queryParams: any[] = [room_type];
-  if (roomTypeIdRaw !== undefined && String(roomTypeIdRaw).trim() !== '') {
-    const roomTypeId = Number(roomTypeIdRaw);
-    if (!Number.isFinite(roomTypeId) || roomTypeId <= 0) {
-      return res.status(400).json({ status: 'ERROR', message: 'invalid room_type_id' });
-    }
-    let canonicalName = room_type;
-    try {
-      const typeRow = await pool.query('SELECT name FROM room_types WHERE id = $1', [roomTypeId]);
-      if (hasRows(typeRow)) {
-        canonicalName = String(typeRow.rows[0].name);
-      }
-    } catch (_err) {
-      canonicalName = room_type;
-    }
-    const identityParams: any[] = [];
-    identityClause = appendAvailabilityIdentityFilter(toRoomTypeIdentity(roomTypeId, canonicalName), identityParams);
-    queryParams.length = 0;
-    queryParams.push(...identityParams);
+  const roomTypeName = String(req.query.room_type || '').trim();
+  const legacyCompatible = String(req.query.legacy_compatible || '').toLowerCase() === 'true';
+  const defaultStart = hotelDateFromInstant(new Date());
+  const start = normalizeHotelDate(req.query.start || defaultStart);
+  const end = normalizeHotelDate(req.query.end || addHotelDays(defaultStart, 7));
+  if (!start || !end || start >= end) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid hotel date range' });
   }
 
   try {
+    if (roomTypeIdRaw !== undefined && String(roomTypeIdRaw).trim() !== '') {
+      const roomTypeId = Number(roomTypeIdRaw);
+      if (!Number.isInteger(roomTypeId) || roomTypeId <= 0) {
+        return res.status(400).json({ status: 'ERROR', message: 'invalid room_type_id' });
+      }
+      const typeRow = await pool.query('SELECT id FROM room_types WHERE id = $1', [roomTypeId]);
+      if (typeRow.rowCount !== 1) {
+        return res.status(409).json({ status: 'ERROR', code: 'ROOM_TYPE_NOT_FOUND', message: `room_type_id ${roomTypeId} not found` });
+      }
+      const result = await pool.query(
+        `SELECT ad.date, ad.total_rooms, ad.reserved_qty,
+                (ad.total_rooms - ad.reserved_qty) AS sellable,
+                ad.room_type_id, ad.room_type
+         FROM availability_dates ad
+         WHERE ad.room_type_id = $1
+           AND ad.date >= $2::date AND ad.date < $3::date
+         ORDER BY ad.date`,
+        [roomTypeId, start, end]
+      );
+      const rows = result.rows.map((row: any) => ({ ...row, date: hotelDateKey(row.date) }));
+      const returnedDates = new Set(rows.map((row: any) => row.date));
+      const missingDates = enumerateHotelDates(start, end).filter(date => !returnedDates.has(date));
+      if (missingDates.length > 0) {
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'CANONICAL_AVAILABILITY_MISSING',
+          message: `canonical availability is missing for room_type_id ${roomTypeId}`,
+          missing_dates: missingDates,
+          data: rows
+        });
+      }
+      return res.json({ status: 'OK', identity_mode: 'CANONICAL', data: rows });
+    }
+
+    if (!legacyCompatible) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'CANONICAL_ROOM_TYPE_REQUIRED',
+        message: 'room_type_id is required unless legacy_compatible=true'
+      });
+    }
+    if (!roomTypeName) {
+      return res.status(400).json({ status: 'ERROR', message: 'room_type is required in legacy-compatible mode' });
+    }
     const result = await pool.query(
-      `SELECT ad.date, ad.total_rooms, ad.reserved_qty, (ad.total_rooms - ad.reserved_qty) as sellable,
+      `SELECT ad.date, ad.total_rooms, ad.reserved_qty,
+              (ad.total_rooms - ad.reserved_qty) AS sellable,
               ad.room_type_id, ad.room_type
        FROM availability_dates ad
-       WHERE ${identityClause} AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date >= $${queryParams.length + 1}::date AND (ad.date AT TIME ZONE 'Asia/Jakarta')::date < $${queryParams.length + 2}::date
+       WHERE ad.room_type_id IS NULL AND ad.room_type = $1
+         AND ad.date >= $2::date AND ad.date < $3::date
        ORDER BY ad.date`,
-      [...queryParams, start, end]
+      [roomTypeName, start, end]
     );
-
-    res.json({ status: 'OK', data: result.rows });
+    return res.json({
+      status: 'OK',
+      identity_mode: 'LEGACY_NULL_ID',
+      data: result.rows.map((row: any) => ({ ...row, date: hotelDateKey(row.date) }))
+    });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
@@ -2751,7 +2845,7 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
 
 app.post('/api/reservations/:id/extend', async (req, res) => {
   const reservationId = Number(req.params.id);
-  const requestedCheckOut = normalizeReservationDateKey(req.body?.new_check_out);
+  const requestedCheckOut = normalizeHotelDate(req.body?.new_check_out);
 
   if (!Number.isFinite(reservationId)) {
     return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
@@ -2766,6 +2860,22 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // C2C2: Initial plain read to discover room_id (NOT authoritative).
+    const initialRead = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    if (!hasRows(initialRead)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
+
+    const initialState = initialRead.rows[0];
+    const roomId = Number(initialState.room_id);
+    const initialRoomTypeId = initialState.room_type_id != null ? Number(initialState.room_type_id) : null;
+    const initialRoomTypeSnapshot = initialState.booked_room_type_id_snapshot != null ? Number(initialState.booked_room_type_id_snapshot) : initialRoomTypeId;
+
+    // C2C2: Canonical lock order — ROOM FOR UPDATE first.
+    await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
+
+    // C2C2: RESERVATION FOR UPDATE second, then revalidate.
     const reservationResult = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
     if (!hasRows(reservationResult)) {
       await client.query('ROLLBACK');
@@ -2773,6 +2883,25 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     }
 
     const reservation = reservationResult.rows[0];
+
+    // C2C2: Revalidate that authoritative state has not changed since initial plain read.
+    if (Number(reservation.room_id) !== roomId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation room changed during extend; retry' });
+    }
+    if (reservation.room_type_id != null && initialRoomTypeId !== null && Number(reservation.room_type_id) !== initialRoomTypeId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation room type changed during extend; retry' });
+    }
+    if (reservation.booked_room_type_id_snapshot != null && initialRoomTypeSnapshot !== null && Number(reservation.booked_room_type_id_snapshot) !== initialRoomTypeSnapshot) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation type snapshot changed during extend; retry' });
+    }
+    if (hotelDateKey(reservation.check_in) !== hotelDateKey(initialState.check_in) || hotelDateKey(reservation.check_out) !== hotelDateKey(initialState.check_out)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation dates changed during extend; retry' });
+    }
+
     const currentStatus = String(reservation.status || '').toUpperCase();
     if (currentStatus !== 'BOOKED' && currentStatus !== 'CHECKED_IN') {
       await client.query('ROLLBACK');
@@ -2782,8 +2911,8 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       });
     }
 
-    const oldCheckOut = toDateKey(reservation.check_out);
-    const checkIn = toDateKey(reservation.check_in);
+    const oldCheckOut = hotelDateKey(reservation.check_out);
+    const checkIn = hotelDateKey(reservation.check_in);
     if (!oldCheckOut || !checkIn) {
       await client.query('ROLLBACK');
       return res.status(409).json({ status: 'ERROR', message: 'reservation dates are invalid' });
@@ -2793,7 +2922,7 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       await client.query('COMMIT');
       return res.json({
         status: 'SUCCESS',
-        data: reservation,
+        data: withReservationHotelDates(reservation),
         meta: {
           operation: 'EXTEND',
           no_op: true,
@@ -2822,25 +2951,23 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       });
     }
 
-    const roomType = await resolveReservationRoomType(client, Number(reservation.room_id));
-    const deltaDates = enumerateDates(oldCheckOut, requestedCheckOut);
+    const roomType = await resolveReservationRoomType(client, roomId);
+    const deltaDates = enumerateHotelDates(oldCheckOut, requestedCheckOut);
 
-    const overlap = await findActiveRoomOverlap(client, Number(reservation.room_id), oldCheckOut, requestedCheckOut, reservationId);
+    const overlap = await findActiveRoomOverlap(client, roomId, oldCheckOut, requestedCheckOut, reservationId);
     if (hasRows(overlap)) {
       await client.query('ROLLBACK');
       return sendRoomOverlapConflict(res);
     }
 
-    await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'EXTEND');
+    const availabilityRows = await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'EXTEND');
+    const roomTypeId = requireCanonicalRoomTypeId(roomType, 'reservation extend');
 
     for (const date of deltaDates) {
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(roomType, filterParams);
-      await client.query(
-        `UPDATE availability_dates ad
-         SET reserved_qty = ad.reserved_qty + $${filterParams.length + 1}
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-        [...filterParams, 1, date]
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(canonicalAvailabilityKey(roomTypeId, date))!,
+        1
       );
     }
 
@@ -2883,7 +3010,7 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     await client.query('COMMIT');
     return res.json({
       status: 'SUCCESS',
-      data: updatedReservation.rows[0],
+      data: withReservationHotelDates(updatedReservation.rows[0]),
       meta: auditPayload
     });
   } catch (err: any) {
@@ -2894,6 +3021,7 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     const message = String(err?.message || err);
     if (
       message.includes('availability row missing') ||
+      message.includes('INVENTORY_INTEGRITY_ERROR') ||
       message.includes('capacity exhausted') ||
       message.includes('reserved_qty underflow') ||
       message.includes('room not found')
@@ -2908,7 +3036,7 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
 
 app.post('/api/reservations/:id/shorten', async (req, res) => {
   const reservationId = Number(req.params.id);
-  const requestedCheckOut = normalizeReservationDateKey(req.body?.new_check_out);
+  const requestedCheckOut = normalizeHotelDate(req.body?.new_check_out);
 
   if (!Number.isFinite(reservationId)) {
     return res.status(400).json({ status: 'ERROR', message: 'invalid reservation id' });
@@ -2939,8 +3067,8 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       });
     }
 
-    const oldCheckOut = toDateKey(reservation.check_out);
-    const checkIn = toDateKey(reservation.check_in);
+    const oldCheckOut = hotelDateKey(reservation.check_out);
+    const checkIn = hotelDateKey(reservation.check_in);
     if (!oldCheckOut || !checkIn) {
       await client.query('ROLLBACK');
       return res.status(409).json({ status: 'ERROR', message: 'reservation dates are invalid' });
@@ -2950,7 +3078,7 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       await client.query('COMMIT');
       return res.json({
         status: 'SUCCESS',
-        data: reservation,
+        data: withReservationHotelDates(reservation),
         meta: {
           operation: 'SHORTEN',
           no_op: true,
@@ -2980,18 +3108,16 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     }
 
     const roomType = await resolveReservationRoomType(client, Number(reservation.room_id));
-    const deltaDates = enumerateDates(requestedCheckOut, oldCheckOut);
+    const deltaDates = enumerateHotelDates(requestedCheckOut, oldCheckOut);
 
-    await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'SHORTEN');
+    const availabilityRows = await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'SHORTEN');
+    const roomTypeId = requireCanonicalRoomTypeId(roomType, 'reservation shorten');
 
     for (const date of deltaDates) {
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(roomType, filterParams);
-      await client.query(
-        `UPDATE availability_dates ad
-         SET reserved_qty = ad.reserved_qty - $${filterParams.length + 1}
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-        [...filterParams, 1, date]
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(canonicalAvailabilityKey(roomTypeId, date))!,
+        -1
       );
     }
 
@@ -3034,7 +3160,7 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     await client.query('COMMIT');
     return res.json({
       status: 'SUCCESS',
-      data: updatedReservation.rows[0],
+      data: withReservationHotelDates(updatedReservation.rows[0]),
       meta: auditPayload
     });
   } catch (err: any) {
@@ -3042,6 +3168,7 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     const message = String(err?.message || err);
     if (
       message.includes('availability row missing') ||
+      message.includes('INVENTORY_INTEGRITY_ERROR') ||
       message.includes('capacity exhausted') ||
       message.includes('reserved_qty underflow') ||
       message.includes('room not found')
@@ -3060,6 +3187,20 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
 
   try {
     await client.query('BEGIN');
+
+    // C2C2: Initial plain read to discover room_id (NOT authoritative).
+    const initialRead = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    if (!hasRows(initialRead)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
+    const initialState = initialRead.rows[0];
+    const roomId = Number(initialState.room_id);
+
+    // C2C2: Canonical lock order — ROOM FOR UPDATE first.
+    await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
+
+    // C2C2: RESERVATION FOR UPDATE second, then revalidate.
     const reservation = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
     if (!hasRows(reservation)) {
       await client.query('ROLLBACK');
@@ -3067,6 +3208,13 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     }
 
     const current = reservation.rows[0];
+
+    // C2C2: Revalidate that room_id has not changed since initial plain read.
+    if (Number(current.room_id) !== roomId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation room changed during checkin; retry' });
+    }
+
     const currentStatus = String(current.status || '').toUpperCase();
     if (currentStatus === 'CANCELLED' || currentStatus === 'CHECKED_OUT') {
       await client.query('ROLLBACK');
@@ -3075,7 +3223,9 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
         message: `reservation status ${currentStatus} cannot be checked in`
       });
     }
-    const overlap = await findActiveRoomOverlap(client, Number(current.room_id), current.check_in, current.check_out, reservationId);
+
+    // C2C2: Overlap check after ROOM + RESERVATION locks.
+    const overlap = await findActiveRoomOverlap(client, roomId, current.check_in, current.check_out, reservationId);
     if (hasRows(overlap)) {
       await client.query('ROLLBACK');
       return sendRoomOverlapConflict(res);
@@ -3091,25 +3241,25 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
 
     await client.query(
       'UPDATE rooms SET status = $1 WHERE id = $2',
-      ['OCCUPIED_CLEAN', current.room_id]
+      ['OCCUPIED_CLEAN', roomId]
     );
 
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify(updated.rows[0]), req.headers['x-correlation-id'] || null]
+      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null]
     );
 
     await client.query('COMMIT');
     broadcastEvent('ReservationCheckedIn', {
       reservation_id: reservationId,
-      room_id: current.room_id,
+      room_id: roomId,
       guest_name: current.guest_name,
       checked_in_at: new Date().toISOString(),
       timestamp: new Date().toISOString()
     });
 
-    res.json({ status: 'SUCCESS', data: updated.rows[0] });
+    res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated.rows[0]) });
   } catch (err: any) {
     await client.query('ROLLBACK');
     if (isRoomOverlapViolation(err)) {
@@ -3220,7 +3370,7 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(checkoutReservation), req.headers['x-correlation-id'] || null]
+        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(checkoutReservation)), req.headers['x-correlation-id'] || null]
       );
       lockedChildren[lockedChildren.findIndex((row: any) => Number(row.id) === targetReservationId)] = checkoutReservation;
     }
@@ -3278,10 +3428,11 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       });
     }
 
-    return res.json({ status: 'SUCCESS', data: checkoutReservation });
+    return res.json({ status: 'SUCCESS', data: withReservationHotelDates(checkoutReservation) });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const message = String(err?.message || err);
+    res.status(message.includes('INVENTORY_INTEGRITY_ERROR') ? 409 : 500).json({ status: 'ERROR', message });
   } finally {
     client.release();
   }
@@ -3330,7 +3481,7 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
     );
 
     await client.query('COMMIT');
-    res.json({ status: 'SUCCESS', data: { payment: payment.rows[0], reservation: updated.rows[0] } });
+    res.json({ status: 'SUCCESS', data: { payment: payment.rows[0], reservation: withReservationHotelDates(updated.rows[0]) } });
   } catch (err: any) {
     await client.query('ROLLBACK');
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -3363,7 +3514,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
     res.json({
       status: 'OK',
       data: {
-        reservation: reservation.rows[0],
+        reservation: withReservationHotelDates(reservation.rows[0]),
         payments: payments.rows,
         folio: folio.rows
       }
@@ -3373,12 +3524,10 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
   }
 });
 
-// POST availability lock (internal endpoint used by booking flow)
-// RM-1B: accepts canonical room_type_id (preferred) or legacy room_type name.
-// Dual-writes room_type_id + room_type onto availability_locks.
+// POST canonical temporary availability hold.
 app.post('/api/availability/lock', async (req, res) => {
-  const { reservation_id, room_type, room_type_id, start, end, qty, ttl_minutes } = req.body;
-  if ((!room_type && !room_type_id) || !start || !end || !qty) return res.status(400).json({ status: 'ERROR', message: 'missing parameters' });
+  const { reservation_id, room_type, room_type_id, start, end, qty, ttl_minutes, legacy_compatible } = req.body;
+  if (!start || !end || !qty) return res.status(400).json({ status: 'ERROR', message: 'missing parameters' });
   if (reservation_id !== null && reservation_id !== undefined && String(reservation_id).trim() !== '') {
     return res.status(400).json({ status: 'ERROR', message: 'reservation_id is not allowed for temporary hold endpoint' });
   }
@@ -3386,91 +3535,148 @@ app.post('/api/availability/lock', async (req, res) => {
   if (!Number.isInteger(holdQty) || holdQty <= 0) {
     return res.status(400).json({ status: 'ERROR', message: 'qty must be a positive integer' });
   }
+  const normalizedStart = normalizeHotelDate(start);
+  const normalizedEnd = normalizeHotelDate(end);
+  if (!normalizedStart || !normalizedEnd || normalizedStart >= normalizedEnd) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid hotel date range' });
+  }
 
-  let ident: RoomTypeIdentity;
+  let canonicalId: number;
+  let canonicalName: string;
   if (room_type_id !== null && room_type_id !== undefined && String(room_type_id).trim() !== '') {
-    const canonicalId = Number(room_type_id);
-    if (!Number.isFinite(canonicalId) || canonicalId <= 0) {
+    canonicalId = Number(room_type_id);
+    if (!Number.isInteger(canonicalId) || canonicalId <= 0) {
       return res.status(400).json({ status: 'ERROR', message: 'invalid room_type_id' });
     }
     const typeRow = await pool.query('SELECT name FROM room_types WHERE id = $1', [canonicalId]);
     if (!hasRows(typeRow)) {
       return res.status(409).json({ status: 'ERROR', message: `room_type_id ${canonicalId} not found` });
     }
-    ident = toRoomTypeIdentity(canonicalId, String(room_type || typeRow.rows[0].name));
+    canonicalName = String(typeRow.rows[0].name);
   } else {
-    const typeRow = await pool.query('SELECT id, name FROM room_types WHERE name = $1 ORDER BY id LIMIT 1', [String(room_type)]);
-    ident = toRoomTypeIdentity(hasRows(typeRow) ? Number(typeRow.rows[0].id) : null, String(room_type));
+    if (legacy_compatible !== true) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'CANONICAL_ROOM_TYPE_REQUIRED',
+        message: 'room_type_id is required for temporary availability holds'
+      });
+    }
+    canonicalName = String(room_type || '').trim();
+    if (!canonicalName) {
+      return res.status(400).json({ status: 'ERROR', message: 'room_type is required in legacy-compatible mode' });
+    }
+    const typeRows = await pool.query('SELECT id, name FROM room_types WHERE name = $1 ORDER BY id', [canonicalName]);
+    if (typeRows.rowCount !== 1) {
+      const code = typeRows.rowCount === 0 ? 'ROOM_TYPE_NAME_NOT_FOUND' : 'ROOM_TYPE_NAME_AMBIGUOUS';
+      return res.status(409).json({
+        status: 'ERROR',
+        code,
+        message: typeRows.rowCount === 0
+          ? `room_type ${canonicalName} not found`
+          : `room_type ${canonicalName} is ambiguous`
+      });
+    }
+    canonicalId = Number(typeRows.rows[0].id);
+    canonicalName = String(typeRows.rows[0].name);
   }
 
-  const dates = enumerateDates(start, end);
+  const dates = enumerateHotelDates(normalizedStart, normalizedEnd);
   const client = await pool.connect();
   const now = new Date();
-  const ttl = Number(ttl_minutes || 30);
+  const ttl = ttl_minutes === undefined || ttl_minutes === null || ttl_minutes === '' ? 30 : Number(ttl_minutes);
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    client.release();
+    return res.status(400).json({ status: 'ERROR', message: 'ttl_minutes must be greater than zero' });
+  }
   const expiresAt = new Date(now.getTime() + ttl * 60 * 1000);
 
   try {
     await client.query('BEGIN');
-
-    // For each date, lock the availability row and increment reserved_qty if possible
+    const availabilityRows = await lockCanonicalAvailabilityRows(
+      client,
+      dates.map(date => ({ roomTypeId: canonicalId, roomTypeName: canonicalName, date }))
+    );
     for (const date of dates) {
-      const filterParams: any[] = [];
-      const identityClause = appendAvailabilityIdentityFilter(ident, filterParams);
-      const sel = await client.query(
-        `SELECT ad.reserved_qty, ad.total_rooms
-         FROM availability_dates ad
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-         FOR UPDATE`,
-        [...filterParams, date]
-      );
-      if (!hasRows(sel)) {
-        throw new Error(`No availability record for ${ident.roomTypeName} on ${date}`);
-      }
-      const row = sel.rows[0];
-      const available = Number(row.total_rooms) - Number(row.reserved_qty);
+      const row = availabilityRows.get(canonicalAvailabilityKey(canonicalId, date))!;
+      const available = row.totalRooms - row.reservedQty;
       if (available < holdQty) {
-        throw new Error(`Not enough availability for ${ident.roomTypeName} on ${date} (available=${available}, requested=${holdQty})`);
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: capacity exhausted for ${canonicalName} on ${date} (available=${available}, requested=${holdQty})`);
       }
-      await client.query(
-        `UPDATE availability_dates ad
-         SET reserved_qty = ad.reserved_qty + $${filterParams.length + 1}
-         WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-        [...filterParams, holdQty, date]
+    }
+    for (const date of dates) {
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(canonicalAvailabilityKey(canonicalId, date))!,
+        holdQty
       );
-
       await client.query(
         'INSERT INTO availability_locks (reservation_id, room_type_id, room_type, date, qty_locked, lock_expires_at) VALUES ($1, $2, $3, $4, $5, $6)',
-        [null, ident.roomTypeId, ident.roomTypeName, date, holdQty, expiresAt.toISOString()]
+        [null, canonicalId, canonicalName, date, holdQty, expiresAt.toISOString()]
       );
     }
 
     await client.query('COMMIT');
-    res.json({ status: 'OK', message: 'locked', expires_at: expiresAt.toISOString(), room_type_id: ident.roomTypeId });
+    res.json({ status: 'OK', message: 'locked', expires_at: expiresAt.toISOString(), room_type_id: canonicalId });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const message = String(err?.message || err);
+    res.status(message.includes('INVENTORY_INTEGRITY_ERROR') ? 409 : 500).json({ status: 'ERROR', message });
   } finally {
     client.release();
   }
 });
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
+app.use('/api/room-categories', createRoomCategoriesRouter(pool));
 app.use('/api/room-types', createRoomTypesRouter(pool));
 app.use('/api/rooms', createRoomsRouter(pool));
 
 
 // GET tapechart: rooms × dates with reservations per cell
 app.get('/api/tapechart', async (req, res) => {
-  const start = String(req.query.start || new Date().toISOString().slice(0,10));
-  const end = String(req.query.end || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0,10));
+  const defaultStart = hotelDateFromInstant(new Date());
+  const start = normalizeHotelDate(req.query.start || defaultStart);
+  const end = normalizeHotelDate(req.query.end || addHotelDays(defaultStart, 7));
+  if (!start || !end || start >= end) {
+    return res.status(400).json({ status: 'ERROR', message: 'invalid hotel date range' });
+  }
+  // RM-2B.1: inactive Room Master entities are hidden from the operational
+  // grid by default; explicit opt-in keeps them reachable for future filters.
+  const includeInactive = ['1', 'true', 'yes'].includes(String(req.query.include_inactive || '').toLowerCase());
 
   try {
-    // fetch rooms
+    // fetch rooms (RM-2B.1: canonical Room Master fields + future commitment aggregate)
+    const activeClause = includeInactive ? '' : 'WHERE COALESCE(r.is_active, TRUE) AND COALESCE(rt.is_active, TRUE)';
     const roomsRes = await pool.query(`
-      SELECT r.id, r.room_number, COALESCE(rt.name, r.name, 'Standard Room') AS name,
-             r.room_type_id, rt.name AS canonical_room_type, r.status
+      SELECT r.id, r.room_number,
+             r.room_type_id, rt.code AS room_type_code,
+             COALESCE(rt.name, r.name, 'Standard Room') AS name,
+             rt.name AS canonical_room_type,
+             rt.display_order AS room_type_display_order,
+             rc.id AS room_category_id,
+             rc.code AS room_category_code,
+             rc.name AS room_category_name,
+             rc.display_order AS room_category_display_order,
+             rc.is_active AS room_category_is_active,
+             COALESCE(r.is_active, TRUE) AS room_is_active,
+             COALESCE(rt.is_active, TRUE) AS room_type_is_active,
+             r.floor,
+             r.status,
+             r.status AS operational_status,
+             f.future_count,
+             f.next_check_in
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+      LEFT JOIN room_categories rc
+        ON rc.id = rt.room_category_id AND rc.property_id = rt.property_id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS future_count, MIN(r2.check_in) AS next_check_in
+        FROM reservations r2
+        WHERE r2.room_id = r.id
+          AND r2.status = 'BOOKED'
+          AND r2.check_in > (now() AT TIME ZONE 'Asia/Jakarta')::date
+      ) f ON TRUE
+      ${activeClause}
       ORDER BY r.room_number
     `);
     const rooms = roomsRes.rows;
@@ -3494,7 +3700,7 @@ app.get('/api/tapechart', async (req, res) => {
     );
     const availability = availabilityRes.rows;
 
-    const dates = enumerateDates(start, end);
+    const dates = enumerateHotelDates(start, end);
 
     // Build map for quick lookup
     const reservationsByRoom: Record<string, any[]> = {};
@@ -3506,13 +3712,14 @@ app.get('/api/tapechart', async (req, res) => {
 
     const availabilityMap: Record<string, any> = {};
     for (const a of availability) {
-      const dateKey = (a.date && a.date.toISOString) ? a.date.toISOString().slice(0,10) : String(a.date);
+      const dateKey = hotelDateKey(a.date);
       // RM-1B: canonical id key preferred; legacy name key kept as fallback identity
-      const idKey = `id:${a.room_type_id ?? 'legacy'}|${a.room_type}|${dateKey}`;
+      const idKey = a.room_type_id == null ? null : `id:${a.room_type_id}|${dateKey}`;
       const nameKey = `name:${a.room_type}|${dateKey}`;
-      availabilityMap[idKey] = a;
+      const normalizedAvailability = { ...a, date: dateKey };
+      if (idKey) availabilityMap[idKey] = normalizedAvailability;
       if (!(nameKey in availabilityMap)) {
-        availabilityMap[nameKey] = a;
+        availabilityMap[nameKey] = normalizedAvailability;
       }
     }
 
@@ -3521,8 +3728,8 @@ app.get('/api/tapechart', async (req, res) => {
         const dateStr = d;
         // reservations for this room that cover this date
         const resForRoom = (reservationsByRoom[String(room.id)] || []).filter((r: any) => {
-          const ci = (new Date(r.check_in)).toISOString().slice(0,10);
-          const co = (new Date(r.check_out)).toISOString().slice(0,10);
+          const ci = hotelDateKey(r.check_in);
+          const co = hotelDateKey(r.check_out);
           // Nightly stay is inclusive on check-in and exclusive on check-out.
           // Example: 2026-08-20 -> 2026-08-21 blocks only 20; 2026-08-20 -> 2026-08-28 blocks 20..27.
           return dateStr >= ci && dateStr < co;
@@ -3533,19 +3740,61 @@ app.get('/api/tapechart', async (req, res) => {
           bid: r.bid,
           stay_sequence: r.stay_sequence,
           guest_name: r.guest_name,
+          guest_phone: r.guest_phone,
+          guest_segment: r.guest_segment,
+          booking_number: r.booking_number,
+          legacy_booking_number: r.legacy_booking_number,
+          booking_type: r.booking_type,
           payment_status: r.payment_status,
-          check_in: r.check_in,
-          check_out: r.check_out,
-          status: r.status || 'CONFIRMED'
+          check_in: hotelDateKey(r.check_in),
+          check_out: hotelDateKey(r.check_out),
+          booked_room_type_id_snapshot: r.booked_room_type_id_snapshot,
+          booked_room_type_code_snapshot: r.booked_room_type_code_snapshot,
+          booked_room_type_name_snapshot: r.booked_room_type_name_snapshot,
+          booked_room_category_id_snapshot: r.booked_room_category_id_snapshot,
+          booked_room_category_code_snapshot: r.booked_room_category_code_snapshot,
+          booked_room_category_name_snapshot: r.booked_room_category_name_snapshot,
+          classification_snapshot_source: r.classification_snapshot_source,
+          classification_snapshotted_at: r.classification_snapshotted_at,
+          // RM-2B.1: pass the raw lifecycle status through. Legacy rows with a
+          // NULL status are surfaced as null + legacy_status flag instead of a
+          // misleading 'CONFIRMED' label; the frontend owns compatibility mapping.
+          status: r.status ?? null,
+          legacy_status: r.status == null
         }));
 
-        // RM-1B: availability lookup prefers canonical room_type_id; falls back to legacy name
-        const availIdKey = `id:${room.room_type_id ?? 'legacy'}|${room.name}|${dateStr}`;
+        // Canonical rooms never fall through to a duplicate display name.
+        // Name lookup is compatibility-only for rooms without room_type_id.
+        const availIdKey = room.room_type_id == null ? null : `id:${room.room_type_id}|${dateStr}`;
         const availNameKey = `name:${room.name}|${dateStr}`;
-        const avail = availabilityMap[availIdKey] || availabilityMap[availNameKey] || null;
+        const avail = availIdKey
+          ? availabilityMap[availIdKey] || null
+          : availabilityMap[availNameKey] || null;
         return { date: dateStr, reservations: resForRoom, availability: avail };
       });
-      return { id: room.id, room_number: room.room_number, name: room.name, room_type_id: room.room_type_id, status: room.status, cells };
+      return {
+        id: room.id,
+        room_id: room.id,
+        room_number: room.room_number,
+        name: room.name,
+        room_type_id: room.room_type_id,
+        room_type_code: room.room_type_code ?? null,
+        room_type_name: room.canonical_room_type || room.name,
+        room_type_display_order: Number(room.room_type_display_order ?? 0),
+        room_category_id: room.room_category_id == null ? null : Number(room.room_category_id),
+        room_category_code: room.room_category_code ?? null,
+        room_category_name: room.room_category_name ?? null,
+        room_category_display_order: Number(room.room_category_display_order ?? 0),
+        room_category_is_active: room.room_category_is_active ?? null,
+        room_is_active: room.room_is_active,
+        room_type_is_active: room.room_type_is_active,
+        floor: room.floor ?? null,
+        status: room.status,
+        operational_status: room.operational_status ?? room.status,
+        future_reservation_count: Number(room.future_count || 0),
+        next_future_check_in: room.next_check_in ? hotelDateKey(room.next_check_in) : null,
+        cells
+      };
     });
 
     return res.json({ status: 'OK', start, end, rooms: resultRooms });
@@ -3564,6 +3813,24 @@ app.post('/api/reservations/:id/move', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // C2C2: Initial plain read to discover source room_id (NOT authoritative).
+    const initialRead = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    if (!hasRows(initialRead)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+    }
+    const initialState = initialRead.rows[0];
+    const sourceRoomId = Number(initialState.room_id);
+    const targetRoomId = Number(to_room_id);
+
+    // C2C2: Lock ALL ROOM rows in deterministic room_id ASC order.
+    const roomIds = Array.from(new Set([sourceRoomId, targetRoomId])).sort((a, b) => a - b);
+    for (const rid of roomIds) {
+      await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [rid]);
+    }
+
+    // C2C2: RESERVATION FOR UPDATE, then revalidate.
     const rRes = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
     if (!hasRows(rRes)) {
       await client.query('ROLLBACK');
@@ -3571,12 +3838,18 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     }
     const reservation = rRes.rows[0];
 
+    // C2C2: Revalidate source room has not changed.
+    if (Number(reservation.room_id) !== sourceRoomId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ status: 'ERROR', message: 'reservation room changed during move; retry' });
+    }
+
     const fromRoomRes = await client.query(`
       SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
       WHERE r.id = $1
-    `, [reservation.room_id]);
+    `, [sourceRoomId]);
     const toRoomRes = await client.query(`
       SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type,
              r.is_active AS room_is_active,
@@ -3584,7 +3857,7 @@ app.post('/api/reservations/:id/move', async (req, res) => {
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
       WHERE r.id = $1
-    `, [to_room_id]);
+    `, [targetRoomId]);
     if (!hasRows(toRoomRes)) throw new Error('target room not found');
     const moveTargetRow = toRoomRes.rows[0];
     if (moveTargetRow.room_is_active === false || moveTargetRow.room_type_is_active === false) {
@@ -3599,69 +3872,64 @@ app.post('/api/reservations/:id/move', async (req, res) => {
       ? toRoomTypeIdentity(fromRoomRes.rows[0].room_type_id, fromRoomRes.rows[0].room_type)
       : null;
     const toIdent = toRoomTypeIdentity(toRoomRes.rows[0].room_type_id, toRoomRes.rows[0].room_type);
+    if (!fromIdent) {
+      throw new Error(`INVENTORY_INTEGRITY_ERROR: source room missing for reservation ${reservationId}`);
+    }
+    const fromRoomTypeId = requireCanonicalRoomTypeId(fromIdent, 'reservation move source');
+    const toRoomTypeId = requireCanonicalRoomTypeId(toIdent, 'reservation move target');
     const currentStatus = String(reservation.status || '').toUpperCase();
     if (currentStatus === 'BOOKED' || currentStatus === 'CHECKED_IN') {
-      const overlap = await findActiveRoomOverlap(client, Number(to_room_id), reservation.check_in, reservation.check_out, reservationId);
+      const overlap = await findActiveRoomOverlap(client, targetRoomId, reservation.check_in, reservation.check_out, reservationId);
       if (hasRows(overlap)) {
         await client.query('ROLLBACK');
         return sendRoomOverlapConflict(res);
       }
     }
 
-    // RM-1B: identity change compares canonical ids first, legacy names as fallback.
-    // If room type changes, adjust availability per date.
-    const dates = enumerateDates(reservation.check_in, reservation.check_out);
-    const identityChanged = fromIdent === null
-      ? true
-      : (fromIdent.roomTypeId !== null && toIdent.roomTypeId !== null
-          ? fromIdent.roomTypeId !== toIdent.roomTypeId
-          : fromIdent.roomTypeName !== toIdent.roomTypeName);
+    // C2C2: Determine identity change and collect ALL availability identities.
+    const dates = enumerateHotelDates(reservation.check_in, reservation.check_out);
+    const identityChanged = fromRoomTypeId !== toRoomTypeId;
+
     if (identityChanged && toIdent.roomTypeName) {
-      // check availability on target type for each date
+      // C2C2: COLLECT all availability identities (source + target), then LOCK ALL deterministically.
+      const availKeys: AvailabilityLockKey[] = [];
       for (const date of dates) {
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(toIdent, filterParams);
-        const sel = await client.query(
-          `SELECT ad.reserved_qty, ad.total_rooms
-           FROM availability_dates ad
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-           FOR UPDATE`,
-          [...filterParams, date]
-        );
-        if (!hasRows(sel)) throw new Error(`No availability record for ${toIdent.roomTypeName} on ${date}`);
-        const row = sel.rows[0];
-        const available = Number(row.total_rooms) - Number(row.reserved_qty);
-        if (available < 1) throw new Error(`Not enough availability for ${toIdent.roomTypeName} on ${date}`);
+        availKeys.push({ roomTypeId: toRoomTypeId, roomTypeName: toIdent.roomTypeName, date });
+        availKeys.push({ roomTypeId: fromRoomTypeId, roomTypeName: fromIdent.roomTypeName, date });
       }
-      // decrement old and increment new
+      const availMap = await lockAvailabilityRows(client, availKeys);
+
+      // C2C2: VALIDATE ALL locked rows BEFORE any mutation.
       for (const date of dates) {
-        if (fromIdent) {
-          const decParams: any[] = [];
-          const decClause = appendAvailabilityIdentityFilter(fromIdent, decParams);
-          await client.query(
-            `UPDATE availability_dates ad
-             SET reserved_qty = GREATEST(0, ad.reserved_qty - $${decParams.length + 1})
-             WHERE ${decClause} AND ad.date = $${decParams.length + 2}`,
-            [...decParams, 1, date]
-          );
+        const toKey = availabilityMapKey(toIdent, date);
+        const toAvail = availMap.get(toKey);
+        if (!toAvail) throw new Error(`No availability record for ${toIdent.roomTypeName} on ${date}`);
+        const available = toAvail.totalRooms - toAvail.reservedQty;
+        if (available < 1) throw new Error(`Not enough availability for ${toIdent.roomTypeName} on ${date}`);
+
+        const srcKey = availabilityMapKey(fromIdent, date);
+        const srcAvail = availMap.get(srcKey);
+        if (!srcAvail) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: source availability row missing for ${fromIdent.roomTypeName} on ${date}`);
         }
-        const incParams: any[] = [];
-        const incClause = appendAvailabilityIdentityFilter(toIdent, incParams);
-        await client.query(
-          `UPDATE availability_dates ad
-           SET reserved_qty = ad.reserved_qty + $${incParams.length + 1}
-           WHERE ${incClause} AND ad.date = $${incParams.length + 2}`,
-          [...incParams, 1, date]
-        );
+        if (srcAvail.reservedQty < 1) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: source reserved_qty underflow for ${fromIdent.roomTypeName} on ${date} (reserved_qty=${srcAvail.reservedQty}, release=1)`);
+        }
+      }
+
+      // C2C2: MUTATE ALL — decrement source, increment target, same date order.
+      for (const date of dates) {
+        await mutateCanonicalAvailabilityRow(client, availMap.get(availabilityMapKey(fromIdent, date))!, -1);
+        await mutateCanonicalAvailabilityRow(client, availMap.get(availabilityMapKey(toIdent, date))!, 1);
       }
     }
 
     // update reservation room assignment
-    await client.query('UPDATE reservations SET room_id = $1 WHERE id = $2', [to_room_id, reservationId]);
+    await client.query('UPDATE reservations SET room_id = $1 WHERE id = $2', [targetRoomId, reservationId]);
 
     // Audit
     await client.query('INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id) VALUES ($1,$2,$3,$4,$5,$6)', [
-      'PMS','MOVE','RESERVATION', reservationId, JSON.stringify({ from_room: reservation.room_id, to_room: to_room_id }), req.headers['x-correlation-id'] || null
+      'PMS','MOVE','RESERVATION', reservationId, JSON.stringify({ from_room: sourceRoomId, to_room: targetRoomId }), req.headers['x-correlation-id'] || null
     ]);
 
     await client.query('COMMIT');
@@ -3669,10 +3937,10 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     try {
       broadcastEvent('ReservationMoved', {
         reservation_id: reservationId,
-        from_room: reservation.room_id,
-        to_room: to_room_id,
-        check_in: reservation.check_in,
-        check_out: reservation.check_out,
+        from_room: sourceRoomId,
+        to_room: targetRoomId,
+        check_in: hotelDateKey(reservation.check_in),
+        check_out: hotelDateKey(reservation.check_out),
         timestamp: new Date().toISOString()
       });
     } catch (e) {
@@ -3692,13 +3960,24 @@ app.post('/api/reservations/:id/move', async (req, res) => {
   }
 });
 
-// Background sweeper job: release expired locks and adjust reserved_qty
-async function sweepExpiredLocks() {
+// Release expired canonical temporary holds. NULL-ID holds remain classified
+// and untouched for explicit historical handling.
+export async function sweepExpiredLocks(now: Date = new Date()) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const now = new Date().toISOString();
-    const expired = await client.query('SELECT * FROM availability_locks WHERE lock_expires_at <= $1 FOR UPDATE', [now]);
+    const expired = await client.query(
+      `SELECT *
+       FROM availability_locks
+       WHERE lock_expires_at <= $1
+       ORDER BY room_type_id ASC NULLS LAST, date ASC, id ASC
+       FOR UPDATE`,
+      [now.toISOString()]
+    );
+    const canonicalReleases = new Map<string, { roomTypeId: number; roomTypeName: string; date: string; quantity: number; lockIds: number[] }>();
+    const reservationLocks: any[] = [];
+    let legacyLocksSkipped = 0;
+
     for (const row of expired.rows) {
       const lockId = Number(row.id);
       const lockQty = Number(row.qty_locked || 0);
@@ -3707,67 +3986,102 @@ async function sweepExpiredLocks() {
       }
 
       if (row.reservation_id === null || row.reservation_id === undefined) {
-        // RM-1B: decrement via canonical room_type_id, legacy name fallback for old rows
-        const lockIdent = toRoomTypeIdentity(row.room_type_id, row.room_type);
-        const filterParams: any[] = [];
-        const identityClause = appendAvailabilityIdentityFilter(lockIdent, filterParams);
-        const availabilityRow = await client.query(
-          `SELECT ad.reserved_qty
-           FROM availability_dates ad
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 1}
-           FOR UPDATE`,
-          [...filterParams, row.date]
-        );
-        if (!hasRows(availabilityRow)) {
-          throw new Error(`INVENTORY_INTEGRITY_ERROR: missing availability row for lock ${lockId} (${row.room_type} ${row.date})`);
+        if (row.room_type_id === null || row.room_type_id === undefined) {
+          legacyLocksSkipped += 1;
+          continue;
         }
-        const reservedQty = Number(availabilityRow.rows[0].reserved_qty || 0);
-        if (reservedQty < lockQty) {
-          throw new Error(`INVENTORY_INTEGRITY_ERROR: sweeper underflow for lock ${lockId} (${row.room_type} ${row.date}) reserved_qty=${reservedQty}, qty_locked=${lockQty}`);
+        const roomTypeId = Number(row.room_type_id);
+        if (!Number.isInteger(roomTypeId) || roomTypeId <= 0) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: invalid room_type_id on lock ${lockId}`);
         }
-        await client.query(
-          `UPDATE availability_dates ad
-           SET reserved_qty = ad.reserved_qty - $${filterParams.length + 1}
-           WHERE ${identityClause} AND ad.date = $${filterParams.length + 2}`,
-          [...filterParams, lockQty, row.date]
-        );
-        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
+        const date = hotelDateKey(row.date);
+        const key = canonicalAvailabilityKey(roomTypeId, date);
+        const current = canonicalReleases.get(key);
+        if (current) {
+          current.quantity += lockQty;
+          current.lockIds.push(lockId);
+        } else {
+          canonicalReleases.set(key, {
+            roomTypeId,
+            roomTypeName: String(row.room_type || ''),
+            date,
+            quantity: lockQty,
+            lockIds: [lockId]
+          });
+        }
         continue;
       }
+      reservationLocks.push(row);
+    }
 
-      const reservationId = Number(row.reservation_id);
-      const reservationResult = await client.query(
-        'SELECT status FROM reservations WHERE id = $1 FOR UPDATE',
-        [reservationId]
+    const releaseEntries = Array.from(canonicalReleases.values()).sort((a, b) =>
+      a.roomTypeId - b.roomTypeId || a.date.localeCompare(b.date)
+    );
+    const availabilityRows = await lockCanonicalAvailabilityRows(client, releaseEntries);
+    for (const release of releaseEntries) {
+      const availability = availabilityRows.get(canonicalAvailabilityKey(release.roomTypeId, release.date))!;
+      if (availability.reservedQty < release.quantity) {
+        throw new Error(
+          `INVENTORY_INTEGRITY_ERROR: sweeper underflow for room_type_id ${release.roomTypeId} on ${release.date} ` +
+          `(reserved_qty=${availability.reservedQty}, release=${release.quantity})`
+        );
+      }
+    }
+    for (const release of releaseEntries) {
+      await mutateCanonicalAvailabilityRow(
+        client,
+        availabilityRows.get(canonicalAvailabilityKey(release.roomTypeId, release.date))!,
+        -release.quantity
       );
-      if (!hasRows(reservationResult)) {
-        console.error(`Orphan expired lock ${lockId}: reservation ${reservationId} not found. Deleting lock without inventory decrement; reconciliation may be required.`);
-        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
-        continue;
+      for (const lockId of release.lockIds) {
+        const deleted = await client.query('DELETE FROM availability_locks WHERE id = $1 RETURNING id', [lockId]);
+        if (deleted.rowCount !== 1) {
+          throw new Error(`INVENTORY_INTEGRITY_ERROR: exact expired hold deletion failed for lock ${lockId}`);
+        }
       }
+    }
 
-      const reservationStatus = String(reservationResult.rows[0].status || '').toUpperCase();
-      if (['BOOKED', 'CHECKED_IN', 'CANCELLED', 'CHECKED_OUT'].includes(reservationStatus)) {
-        await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
-        continue;
+    const reservationIds = Array.from(new Set(reservationLocks.map(row => Number(row.reservation_id)))).sort((a, b) => a - b);
+    const reservations = reservationIds.length === 0
+      ? { rows: [] }
+      : await client.query(
+          'SELECT id, status FROM reservations WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE',
+          [reservationIds]
+        );
+    const reservationById = new Map<number, any>(
+      reservations.rows.map((row: any): [number, any] => [Number(row.id), row])
+    );
+    let orphanReservationLocksDeleted = 0;
+    for (const row of reservationLocks) {
+      const reservationId = Number(row.reservation_id);
+      if (!reservationById.has(reservationId)) orphanReservationLocksDeleted += 1;
+      const deleted = await client.query('DELETE FROM availability_locks WHERE id = $1 RETURNING id', [Number(row.id)]);
+      if (deleted.rowCount !== 1) {
+        throw new Error(`INVENTORY_INTEGRITY_ERROR: exact reservation lock deletion failed for lock ${row.id}`);
       }
-
-      console.error(`Expired lock ${lockId} references reservation ${reservationId} with unrecognized status ${reservationStatus}. Deleting lock without inventory decrement.`);
-      await client.query('DELETE FROM availability_locks WHERE id = $1', [lockId]);
     }
     await client.query('COMMIT');
+    return {
+      releasedCanonicalLocks: releaseEntries.reduce((sum, release) => sum + release.lockIds.length, 0),
+      releasedQuantity: releaseEntries.reduce((sum, release) => sum + release.quantity, 0),
+      legacyLocksSkipped,
+      reservationLocksDeleted: reservationLocks.length,
+      orphanReservationLocksDeleted
+    };
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Error sweeping locks:', err);
+    throw err;
   } finally {
     client.release();
   }
 }
 
 // run sweeper every minute
-setInterval(() => {
-  sweepExpiredLocks().catch((e) => console.error(e));
-}, 60 * 1000);
+if (require.main === module) {
+  setInterval(() => {
+    sweepExpiredLocks().catch((e) => console.error(e));
+  }, 60 * 1000);
+}
 
 // Sweeper for expired idempotency keys (cleanup)
 async function sweepExpiredIdempotency() {
@@ -3785,6 +4099,8 @@ async function sweepExpiredIdempotency() {
 }
 
 // run idempotency sweeper every hour
-setInterval(() => {
-  sweepExpiredIdempotency().catch((e) => console.error(e));
-}, 60 * 60 * 1000);
+if (require.main === module) {
+  setInterval(() => {
+    sweepExpiredIdempotency().catch((e) => console.error(e));
+  }, 60 * 60 * 1000);
+}

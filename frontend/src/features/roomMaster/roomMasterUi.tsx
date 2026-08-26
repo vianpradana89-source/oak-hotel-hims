@@ -53,6 +53,12 @@ export function EmptyState({ title, hint }: { title: string; hint?: ReactNode })
 }
 
 const KNOWN_ERROR_MESSAGES: Record<string, string> = {
+  ROOM_CATEGORY_CODE_EXISTS: 'Kode kategori kamar sudah dipakai di properti ini.',
+  ROOM_CATEGORY_NAME_EXISTS: 'Nama kategori kamar sudah dipakai di properti ini.',
+  ROOM_CATEGORY_INACTIVE: 'Kategori kamar sedang tidak aktif.',
+  ROOM_CATEGORY_HAS_ROOM_TYPES: 'Kategori masih digunakan oleh tipe / varian kamar.',
+  ROOM_CATEGORY_HAS_RESERVATION_HISTORY: 'Kategori tidak dapat dihapus karena sudah memiliki riwayat. Gunakan Nonaktifkan.',
+  ROOM_CATEGORY_REORDER_SET_MISMATCH: 'Daftar kategori sudah berubah. Muat ulang sebelum mengatur urutan kembali.',
   ROOM_TYPE_CODE_EXISTS: 'Kode tipe kamar sudah dipakai di properti ini.',
   CAPACITY_BELOW_RESERVED: 'Kapasitas tidak boleh di bawah jumlah kamar yang sudah direservasi.',
   TYPE_HAS_ACTIVE_ROOMS: 'Tipe masih memiliki kamar fisik aktif — nonaktifkan kamar terlebih dahulu.',

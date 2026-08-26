@@ -1,7 +1,11 @@
 import {
+  type ActiveRoomReservationDrilldown,
   type ApiEnvelope,
   type PhysicalRoom,
   type PhysicalRoomWritePayload,
+  type RoomCategory,
+  type RoomCategoryReorderPayload,
+  type RoomCategoryWritePayload,
   type RoomType,
   type RoomTypeWritePayload,
   RoomMasterApiError
@@ -51,6 +55,30 @@ function jsonInit(method: string, payload: unknown): RequestInit {
 }
 
 export const roomMasterApi = {
+  async listRoomCategories(active?: boolean): Promise<RoomCategory[]> {
+    const suffix = active === undefined ? '' : `?active=${active}`;
+    return request<RoomCategory[]>(`/api/room-categories${suffix}`);
+  },
+
+  async createRoomCategory(payload: RoomCategoryWritePayload): Promise<RoomCategory> {
+    return request<RoomCategory>('/api/room-categories', jsonInit('POST', payload));
+  },
+
+  async updateRoomCategory(
+    id: number,
+    payload: RoomCategoryWritePayload & { is_active?: boolean }
+  ): Promise<RoomCategory> {
+    return request<RoomCategory>(`/api/room-categories/${id}`, jsonInit('PATCH', payload));
+  },
+
+  async reorderRoomCategories(payload: RoomCategoryReorderPayload): Promise<RoomCategory[]> {
+    return request<RoomCategory[]>('/api/room-categories/reorder', jsonInit('PATCH', payload));
+  },
+
+  async deleteRoomCategory(id: number): Promise<void> {
+    await request<{ id: number }>(`/api/room-categories/${id}`, { method: 'DELETE' });
+  },
+
   async listRoomTypes(active?: boolean): Promise<RoomType[]> {
     const suffix = active === undefined ? '' : `?active=${active}`;
     return request<RoomType[]>(`/api/room-types${suffix}`);
@@ -70,6 +98,10 @@ export const roomMasterApi = {
     if (filter?.is_active !== undefined) params.set('is_active', String(filter.is_active));
     const query = params.toString();
     return request<PhysicalRoom[]>(`/api/rooms${query ? `?${query}` : ''}`);
+  },
+
+  async listActiveRoomReservations(roomId: number): Promise<ActiveRoomReservationDrilldown> {
+    return request<ActiveRoomReservationDrilldown>(`/api/rooms/${roomId}/active-reservations`);
   },
 
   async createRoom(payload: PhysicalRoomWritePayload): Promise<PhysicalRoom> {

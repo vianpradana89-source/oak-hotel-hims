@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { roomMasterApi } from './roomMasterApi';
 import { describeApiError, MasterStatusBadge, OperationalStatusBadge } from './roomMasterUi';
-import type { PhysicalRoom, RoomType } from './roomMasterTypes';
+import type { PhysicalRoom, RoomCategory, RoomType } from './roomMasterTypes';
 
 type Mode = 'create' | 'edit';
 
 interface Props {
   mode: Mode;
   room?: PhysicalRoom | null;
+  categories: RoomCategory[];
   roomTypes: RoomType[];
   onClose: (changed: boolean) => void;
 }
@@ -20,7 +21,7 @@ interface Draft {
   is_active: boolean;
 }
 
-export default function RoomModal({ mode, room, roomTypes, onClose }: Props) {
+export default function RoomModal({ mode, room, categories, roomTypes, onClose }: Props) {
   const [viewing, setViewing] = useState(mode === 'edit');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
@@ -49,6 +50,11 @@ export default function RoomModal({ mode, room, roomTypes, onClose }: Props) {
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
+
+  const selectedType = roomTypes.find((roomType) => String(roomType.id) === draft.room_type_id);
+  const selectedCategory = categories.find((category) => category.id === selectedType?.room_category_id);
+  const currentType = roomTypes.find((roomType) => roomType.id === room?.room_type_id);
+  const currentCategory = categories.find((category) => category.id === currentType?.room_category_id);
 
   async function handleSave() {
     if (!draft.room_number.trim()) {
@@ -142,12 +148,23 @@ export default function RoomModal({ mode, room, roomTypes, onClose }: Props) {
                   onChange={(e) => setField('room_type_id', e.target.value)}
                 >
                   <option value="">— pilih tipe —</option>
-                  {roomTypes.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.code} · {t.name}{t.is_active ? '' : ' (nonaktif)'}
-                    </option>
-                  ))}
+                  {roomTypes.map((t) => {
+                    const category = categories.find((item) => item.id === t.room_category_id);
+                    return (
+                      <option
+                        key={t.id}
+                        value={t.id}
+                        disabled={!t.is_active && !(mode === 'edit' && String(t.id) === draft.room_type_id)}
+                      >
+                        {category ? `${category.code} / ` : ''}
+                        {t.code} · {t.name}{t.is_active ? '' : ' (nonaktif)'}
+                      </option>
+                    );
+                  })}
                 </select>
+                <span className="rm-field-hint">
+                  Kategori: {selectedCategory?.name ?? 'Belum dikategorikan'}
+                </span>
               </div>
               <div className="rm-field">
                 <label htmlFor="rm-floor">Lantai</label>
@@ -189,6 +206,7 @@ export default function RoomModal({ mode, room, roomTypes, onClose }: Props) {
                 <dt>Tipe Kamar</dt>
                 <dd>{room?.room_type_code} · {room?.room_type_name || '—'}</dd>
               </div>
+              <div className="rm-detail-item"><dt>Kategori</dt><dd>{currentCategory?.name ?? 'Belum dikategorikan'}</dd></div>
               <div className="rm-detail-item"><dt>Lantai</dt><dd>{room?.floor || '—'}</dd></div>
               <div className="rm-detail-item"><dt>Status Operasional</dt><dd><OperationalStatusBadge status={room?.status ?? null} /></dd></div>
               <div className="rm-detail-item"><dt>Status Master</dt><dd><MasterStatusBadge active={Boolean(room?.is_active)} /></dd></div>

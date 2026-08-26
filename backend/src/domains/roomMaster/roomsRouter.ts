@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import {
   assertDeactivationInventorySafe,
   countActiveReservationsForRoom,
+  getActiveReservationsForRoom,
   getActivePhysicalCapacity,
   httpError,
   syncLedgerCapacityFromMaster,
@@ -18,6 +19,34 @@ function normalizeRoomNumber(raw: unknown): string | null {
 
 export function createRoomsRouter(pool: Pool) {
   const router = Router();
+
+  router.get('/:id/active-reservations', async (req: any, res: any) => {
+    const roomId = Number(req.params.id);
+    if (!Number.isInteger(roomId) || roomId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid room id' });
+    }
+    try {
+      const roomResult = await pool.query(
+        'SELECT id, room_number FROM rooms WHERE id = $1',
+        [roomId]
+      );
+      if ((roomResult.rowCount ?? 0) === 0) {
+        return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `room ${roomId} not found` });
+      }
+      const reservations = await getActiveReservationsForRoom(pool, roomId);
+      return res.json({
+        status: 'OK',
+        data: {
+          room_id: roomId,
+          room_number: String(roomResult.rows[0].room_number),
+          active_reservation_count: reservations.length,
+          reservations
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message });
+    }
+  });
 
   router.get('/:id', async (req: any, res: any) => {
     const roomId = Number(req.params.id);
@@ -167,7 +196,18 @@ export function createRoomsRouter(pool: Pool) {
         if (!Number.isInteger(targetTypeId) || targetTypeId <= 0) {
           throw httpError(400, 'VALIDATION_ERROR', 'room_type_id must be a positive integer');
         }
-        const targetTypeResult = await client.query('SELECT * FROM room_types WHERE id = $1 FOR UPDATE', [targetTypeId]);
+        const donorTypeId = current.room_type_id === null ? null : Number(current.room_type_id);
+
+        // C2C2: Lock BOTH room_types in canonical numeric ID ASC order.
+        const typeIdsToLock = Array.from(new Set(
+          [donorTypeId, targetTypeId].filter((id): id is number => id !== null)
+        )).sort((a, b) => a - b);
+
+        for (const typeId of typeIdsToLock) {
+          await client.query('SELECT * FROM room_types WHERE id = $1 FOR UPDATE', [typeId]);
+        }
+
+        const targetTypeResult = await client.query('SELECT * FROM room_types WHERE id = $1', [targetTypeId]);
         if ((targetTypeResult.rowCount ?? 0) === 0) {
           throw httpError(404, 'NOT_FOUND', `room type ${targetTypeId} not found`);
         }
@@ -175,13 +215,14 @@ export function createRoomsRouter(pool: Pool) {
         if (!targetType.is_active) {
           throw httpError(409, 'ROOM_TYPE_INACTIVE', `room type ${targetType.code} (${targetType.name}) is inactive`);
         }
+
+        // C2C2: Lock reservations deterministically (already sorted by status, check_in, id).
         const activeReservations = await countActiveReservationsForRoom(client, roomId);
         if (activeReservations > 0) {
           throw httpError(409, 'ROOM_HAS_ACTIVE_RESERVATIONS',
             `room ${current.room_number} has ${activeReservations} active reservation(s); cancel or complete them before changing the room type`);
         }
         // RM-1C.1: the donor type loses one active room; ensure its ledger stays safe.
-        const donorTypeId = current.room_type_id === null ? null : Number(current.room_type_id);
         if (donorTypeId !== null && Number(donorTypeId) !== Number(targetTypeId)) {
           const donorCapacity = await getActivePhysicalCapacity(client, donorTypeId);
           if (Number(current.is_active)) {

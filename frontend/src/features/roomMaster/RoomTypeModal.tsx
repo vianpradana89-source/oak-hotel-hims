@@ -1,19 +1,21 @@
 import { useEffect, useState } from 'react';
 import { roomMasterApi } from './roomMasterApi';
 import { describeApiError, MasterStatusBadge } from './roomMasterUi';
-import type { RoomType } from './roomMasterTypes';
+import type { RoomCategory, RoomType } from './roomMasterTypes';
 
 type Mode = 'create' | 'edit';
 
 interface Props {
   mode: Mode;
   roomType?: RoomType | null;
+  categories: RoomCategory[];
   onClose: (changed: boolean) => void;
 }
 
 interface TypeDraft {
   code: string;
   name: string;
+  room_category_id: string;
   description: string;
   capacity: number;
   max_adults: number;
@@ -26,6 +28,7 @@ interface TypeDraft {
 const EMPTY_DRAFT: TypeDraft = {
   code: '',
   name: '',
+  room_category_id: '',
   description: '',
   capacity: 2,
   max_adults: 2,
@@ -35,7 +38,7 @@ const EMPTY_DRAFT: TypeDraft = {
   is_active: true
 };
 
-export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
+export default function RoomTypeModal({ mode, roomType, categories, onClose }: Props) {
   const [viewing, setViewing] = useState(mode === 'edit');
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<TypeDraft>(() =>
@@ -43,6 +46,7 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
       ? {
           code: roomType.code,
           name: roomType.name,
+           room_category_id: roomType.room_category_id == null ? '' : String(roomType.room_category_id),
           description: roomType.description ?? '',
           capacity: Number(roomType.capacity ?? 2),
           max_adults: Number(roomType.max_adults ?? roomType.capacity ?? 2),
@@ -51,7 +55,10 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
           display_order: Number(roomType.display_order ?? 0),
           is_active: Boolean(roomType.is_active)
         }
-      : { ...EMPTY_DRAFT }
+      : {
+          ...EMPTY_DRAFT,
+           room_category_id: String(categories.find((category) => category.is_active)?.id ?? '')
+        }
   );
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
 
@@ -65,6 +72,10 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
   async function handleSave() {
     if (!draft.name.trim()) {
       setError({ code: 'VALIDATION_ERROR', message: 'Nama tipe wajib diisi.' });
+      return;
+    }
+    if (!draft.room_category_id) {
+      setError({ code: 'VALIDATION_ERROR', message: 'Kategori kamar wajib dipilih.' });
       return;
     }
     const nextCode = draft.code.trim().toUpperCase();
@@ -86,6 +97,7 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
         await roomMasterApi.createRoomType({
           code: nextCode,
           name: draft.name.trim(),
+          room_category_id: Number(draft.room_category_id),
           description: draft.description.trim() || null,
           capacity: Number(draft.capacity),
           max_adults: Number(draft.max_adults),
@@ -99,6 +111,9 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
           // label. Send it only when changed; backend guards duplicates.
           ...(nextCode !== roomType.code ? { code: nextCode } : {}),
           name: draft.name.trim(),
+          ...(String(roomType.room_category_id ?? '') !== draft.room_category_id
+            ? { room_category_id: Number(draft.room_category_id) }
+            : {}),
           description: draft.description.trim() || null,
           capacity: Number(draft.capacity),
           max_adults: Number(draft.max_adults),
@@ -164,6 +179,25 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
               <div className="rm-field">
                 <label htmlFor="rt-name">Nama Tipe</label>
                 <input id="rt-name" value={draft.name} onChange={(e) => setField('name', e.target.value)} />
+              </div>
+              <div className="rm-field">
+                <label htmlFor="rt-category">Kategori Kamar</label>
+                <select
+                  id="rt-category"
+                  value={draft.room_category_id}
+                  onChange={(e) => setField('room_category_id', e.target.value)}
+                >
+                  <option value="">- pilih kategori -</option>
+                  {categories.map((category) => (
+                    <option
+                      key={category.id}
+                      value={category.id}
+                      disabled={!category.is_active && String(category.id) !== draft.room_category_id}
+                    >
+                      {category.code} · {category.name}{category.is_active ? '' : ' (nonaktif)'}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="rm-field">
                 <label htmlFor="rt-capacity">Kapasitas</label>
@@ -243,6 +277,14 @@ export default function RoomTypeModal({ mode, roomType, onClose }: Props) {
             <dl className="rm-detail-list">
               <div className="rm-detail-item"><dt>Kode</dt><dd>{roomType?.code}</dd></div>
               <div className="rm-detail-item"><dt>Nama Tipe</dt><dd>{roomType?.name}</dd></div>
+              <div className="rm-detail-item">
+                <dt>Kategori</dt>
+                <dd>
+                  {categories.find((category) => category.id === roomType?.room_category_id)?.name
+                    ?? roomType?.room_category_name
+                    ?? 'Belum dikategorikan'}
+                </dd>
+              </div>
               <div className="rm-detail-item"><dt>Tipe Kasur</dt><dd>{roomType?.bed_type || '—'}</dd></div>
               <div className="rm-detail-item"><dt>Kapasitas</dt><dd>{roomType?.capacity ?? '—'}</dd></div>
               <div className="rm-detail-item"><dt>Maks. Dewasa</dt><dd>{roomType?.max_adults ?? '—'}</dd></div>

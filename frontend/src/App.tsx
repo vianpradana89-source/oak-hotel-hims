@@ -1,25 +1,44 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
+import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
+import CalendarFilters from './features/calendar/CalendarFilters';
+import ReservationBar from './features/calendar/ReservationBar';
+import RoomCategoryGroup from './features/calendar/RoomCategoryGroup';
+import RoomTypeGroup from './features/calendar/RoomTypeGroup';
+import { buildAvailabilityRequest, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
+import {
+  addHotelDays,
+  buildHotelDateWindow,
+  formatCompactHotelDate,
+  hotelDateFromInstant,
+  hotelDateToLocalDate,
+  hotelDateRangesOverlap,
+  hotelNightsBetween,
+  normalizeHotelDate,
+} from './features/calendar/calendarDates';
+import {
+  normalizeReservationLifecycle,
+  type CalendarOperationalFilter,
+  type RoomCategoryCalendarGroup,
+  type CalendarRoom,
+} from './features/calendar/calendarTypes';
+import {
+  additionalBookingChildOverrides,
+  canonicalBookingChildRoomId,
+  canonicalCalendarRoomBinding,
+  canonicalRoomClassification,
+  hasOverlappingPriorSiblingRoomSelection,
+  removeBookingChildById,
+  resolveBookingChildRoomId,
+  updateBookingChildById,
+} from './features/booking/bookingComposerState';
 
 function buildWeekDays(anchorDate = new Date(), todayIndex = 2, windowSize = 7) {
-  // Build a windowSize-day window where the anchorDate is positioned at index `todayIndex` (0-based)
-  // so that "today" appears at the requested column
-  const anchor = new Date(anchorDate);
-  anchor.setHours(0, 0, 0, 0);
-
-  const start = new Date(anchor);
-  start.setDate(anchor.getDate() - todayIndex);
-
+  const hotelDates = buildHotelDateWindow(hotelDateFromInstant(anchorDate), todayIndex, windowSize);
   const labelsByDay: Record<number,string> = { 0: 'MIN', 1: 'SEN', 2: 'SEL', 3: 'RAB', 4: 'KAM', 5: 'JUM', 6: 'SAB' };
 
-  return Array.from({ length: windowSize }, (_, index) => {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    // local YYYY-MM-DD
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    const iso = `${y}-${m}-${d}`;
+  return hotelDates.map((iso) => {
+    const date = hotelDateToLocalDate(iso) || new Date();
     const weekday = date.getDay();
     return {
       label: labelsByDay[weekday] || String(weekday),
@@ -31,12 +50,12 @@ function buildWeekDays(anchorDate = new Date(), todayIndex = 2, windowSize = 7) 
 
 function localDateISO(value: Date | string | undefined) {
   if (!value) return '';
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function App() {
@@ -60,6 +79,12 @@ function App() {
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<'Kalender' | 'Transaksi' | 'Laporan' | 'Produk & Inventori' | 'Pelanggan' | 'Pengaturan'>('Kalender');
   const [calendarSearch, setCalendarSearch] = useState('');
+  const [calendarRoomSearch, setCalendarRoomSearch] = useState('');
+  const [calendarRoomCategoryFilter, setCalendarRoomCategoryFilter] = useState('');
+  const [calendarRoomTypeFilter, setCalendarRoomTypeFilter] = useState('');
+  const [calendarOperationalFilter, setCalendarOperationalFilter] = useState<CalendarOperationalFilter>('');
+  const [calendarIncludeInactive, setCalendarIncludeInactive] = useState(false);
+  const [collapsedCalendarGroups, setCollapsedCalendarGroups] = useState<Set<string>>(() => new Set());
   const [reservationFilter, setReservationFilter] = useState<'all' | 'booked' | 'checked_in' | 'checked_out'>('all');
   const [reservationSearch, setReservationSearch] = useState('');
   const [reservationDateFrom, setReservationDateFrom] = useState('');
@@ -68,11 +93,13 @@ function App() {
     guestName: '',
     guestPhone: '',
     roomId: null as number | null,
+    roomTypeId: null as number | null,
     checkIn: '',
     checkOut: '',
-    roomVariant: 'Deluxe King'
+    roomVariant: ''
   });
   const [bookingComposerChildren, setBookingComposerChildren] = useState<any[]>([]);
+  const bookingComposerChildrenRef = useRef<any[]>([]);
   const [childRoomAvailability, setChildRoomAvailability] = useState<Record<string, any[]>>({});
   const [availabilityCache, setAvailabilityCache] = useState<Record<string, any[]>>({});
   const [bookingAvailabilityState, setBookingAvailabilityState] = useState<Record<string, 'idle' | 'loading' | 'success' | 'empty' | 'error'>>({});
@@ -80,13 +107,18 @@ function App() {
   const availabilityRequestVersionRef = useRef<Record<string, number>>({});
   const availabilityRequestPromiseRef = useRef<Record<string, Promise<void> | undefined>>({});
   const availabilityRequestFailedRef = useRef<Record<string, number>>({});
+  const availabilityRequestSequenceRef = useRef(0);
+
+  useEffect(() => {
+    bookingComposerChildrenRef.current = bookingComposerChildren;
+  }, [bookingComposerChildren]);
   // Anchor date for the grid window and handlers to shift the window
   const [anchorDate, setAnchorDate] = useState<Date>(new Date());
   const [windowSize, setWindowSize] = useState<number>(7);
   const [isMonthView, setIsMonthView] = useState<boolean>(false);
   const [calendarOpen, setCalendarOpen] = useState<boolean>(false);
   const [calendarViewDate, setCalendarViewDate] = useState<Date>(new Date());
-  const [calendarSelectedDate, setCalendarSelectedDate] = useState<string | null>(localDateISO(new Date()));
+  const [calendarSelectedDate, setCalendarSelectedDate] = useState<string | null>(hotelDateFromInstant(new Date()));
   const [selectedRange, setSelectedRange] = useState<{start?: string, end?: string}>({});
   const [createResOpen, setCreateResOpen] = useState<boolean>(false);
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState<boolean>(false);
@@ -121,16 +153,21 @@ function App() {
 
   const shiftDays = (delta: number) => {
     setAnchorDate((prev) => {
-      const d = new Date(prev);
-      d.setDate(d.getDate() + delta);
-      return d;
+      const shifted = addHotelDays(hotelDateFromInstant(prev), delta);
+      return hotelDateToLocalDate(shifted) || prev;
     });
   };
-  const goToday = () => setAnchorDate(new Date());
+  const goToday = () => {
+    setWindowSize(7);
+    setIsMonthView(false);
+    setAnchorDate(hotelDateToLocalDate(hotelDateFromInstant(new Date())) || new Date());
+  };
   const [reservationResizePreview, setReservationResizePreview] = useState<Record<string, string>>({});
   const [reservationResizeState, setReservationResizeState] = useState<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
   const reservationResizeRef = useRef<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
   const reservationResizePreviewRef = useRef<Record<string, string>>({});
+  const fetchDataRef = useRef<() => Promise<void>>(async () => undefined);
+  const tapechartRequestVersionRef = useRef(0);
 
   // drag preview using setDragImage + cleanup element
   const handleDragStart = (e: any, r: any, fromRoomId: any) => {
@@ -181,7 +218,7 @@ function App() {
       event.dataTransfer.dropEffect = 'none';
     }
 
-    const startCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : localDateISO(new Date());
+    const startCheckOut = normalizeHotelDate(reservation.check_out) || hotelDateFromInstant(new Date());
     const resizeState = {
       reservationId: Number(reservation.id),
       startX: event.clientX,
@@ -199,7 +236,7 @@ function App() {
     console.log('RESIZE_DOWN', {
       reservationId: Number(reservation.id),
       originalCheckOut: startCheckOut,
-      checkIn: reservation.check_in ? localDateISO(reservation.check_in) : null,
+      checkIn: normalizeHotelDate(reservation.check_in) || null,
       pointerId: event.pointerId,
       clientX: event.clientX
     });
@@ -224,16 +261,20 @@ function App() {
     const map: Record<string, Array<any>> = {};
 
     const getNightlySpan = (checkIn: string, checkOut: string) => {
-      const ci = localDateISO(checkIn);
-      const co = localDateISO(checkOut);
+      const ci = normalizeHotelDate(checkIn);
+      const co = normalizeHotelDate(checkOut);
       if (!ci || !co || ci === co) return null;
+
+      const firstVisibleDate = days[0]?.date;
+      const visibleRangeEnd = days.length > 0 ? addHotelDays(days[days.length - 1].date, 1) : '';
+      if (!firstVisibleDate || !visibleRangeEnd || co <= firstVisibleDate || ci >= visibleRangeEnd) return null;
 
       const startIndex = days.findIndex(d => d.date === ci);
       const endIndex = days.findIndex(d => d.date === co);
-      if (startIndex === -1 && endIndex === -1) return null;
 
-      const visibleStart = startIndex === -1 ? 0 : startIndex;
-      const visibleEnd = endIndex === -1 ? days.length : endIndex;
+      const visibleStart = startIndex === -1 && ci < firstVisibleDate ? 0 : startIndex;
+      const visibleEnd = endIndex === -1 && co >= visibleRangeEnd ? days.length : endIndex;
+      if (visibleStart < 0 || visibleEnd < 0 || visibleEnd <= visibleStart) return null;
       // Nightly stay is inclusive on check-in and exclusive on check-out.
       // Example: 20 -> 21 blocks only date 20; 20 -> 28 blocks 20..27.
       const span = Math.max(1, visibleEnd - visibleStart);
@@ -241,7 +282,7 @@ function App() {
     };
 
     for (const r of displayedReservations) {
-      const status = String(r?.status || '').toUpperCase();
+      const { status } = normalizeReservationLifecycle(r?.status);
       if (status === 'CHECKED_OUT' || status === 'CANCELLED') continue;
 
       const roomId = String(r.room_id);
@@ -300,47 +341,17 @@ function App() {
       return;
     }
 
-    const d = new Date(calendarSelectedDate);
-    const startDt = new Date(d);
-    startDt.setDate(d.getDate() - 2);
-    const startIso = localDateISO(startDt);
+    const d = hotelDateToLocalDate(calendarSelectedDate);
+    if (!d) {
+      setCalendarOpen(false);
+      return;
+    }
 
     setCalendarViewDate(d);
     setAnchorDate(d);
     setIsMonthView(false);
     setWindowSize(7);
     setCalendarOpen(false);
-
-    fetch(`/api/tapechart?start=${startIso}&days=7`)
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.rooms) {
-          setRooms(data.rooms || []);
-
-          const flat: any[] = [];
-          for (const r of data.rooms) {
-            for (const c of r.cells) {
-              for (const rv of c.reservations || []) {
-                flat.push({
-                  ...rv,
-                  room_id: r.id,
-                  room_number: r.room_number,
-                  room_name: r.name,
-                  room_status: r.status,
-                });
-              }
-            }
-          }
-          setReservations(flat);
-
-          const statusMap: Record<string, string> = {};
-          (data.rooms || []).forEach((r: any) => {
-            const normalized = normalizeRoomStatus(r.status);
-            statusMap[r.id] = normalized;
-          });
-          setRoomStatuses(statusMap);
-        }
-      }).catch(err => console.error('Error fetching tapechart', err));
   };
 
   const normalizeRoomStatus = (status: string | undefined) => {
@@ -354,20 +365,146 @@ function App() {
 
   const getRoomTypeName = (room: any) => String(room?.name || room?.room_type || 'Standard Room').trim() || 'Standard Room';
 
+  const calendarTypeOptions = useMemo(() => {
+    const options = new Map<number, { id: number; label: string; displayOrder: number }>();
+    for (const room of rooms as CalendarRoom[]) {
+      if (room.room_type_id == null) continue;
+      const id = Number(room.room_type_id);
+      const code = String(room.room_type_code || '').trim();
+      const name = String(room.room_type_name || room.name || '').trim();
+      options.set(id, {
+        id,
+        label: code && code !== name ? `${name} (${code})` : name,
+        displayOrder: Number(room.room_type_display_order || 0),
+      });
+    }
+    return Array.from(options.values()).sort((a, b) =>
+      a.displayOrder - b.displayOrder
+      || a.label.localeCompare(b.label, 'id-ID', { numeric: true })
+      || a.id - b.id
+    );
+  }, [rooms]);
+
+  const calendarCategoryOptions = useMemo(() => {
+    const options = new Map<number, { id: number; label: string; displayOrder: number }>();
+    for (const room of rooms as CalendarRoom[]) {
+      if (room.room_category_id == null) continue;
+      const id = Number(room.room_category_id);
+      const code = String(room.room_category_code || '').trim();
+      const name = String(room.room_category_name || '').trim();
+      options.set(id, {
+        id,
+        label: code && code !== name ? `${name} (${code})` : name,
+        displayOrder: Number(room.room_category_display_order || 0),
+      });
+    }
+    return Array.from(options.values()).sort((a, b) =>
+      a.displayOrder - b.displayOrder
+      || a.id - b.id
+    );
+  }, [rooms]);
+
+  const calendarFilterTypeOptions = useMemo(() => {
+    if (!calendarRoomCategoryFilter) return calendarTypeOptions;
+    const allowedTypeIds = new Set(
+      (rooms as CalendarRoom[])
+        .filter((room) => String(room.room_category_id ?? '') === calendarRoomCategoryFilter)
+        .map((room) => Number(room.room_type_id))
+        .filter((roomTypeId) => Number.isInteger(roomTypeId) && roomTypeId > 0)
+    );
+    return calendarTypeOptions.filter((option) => allowedTypeIds.has(option.id));
+  }, [calendarRoomCategoryFilter, calendarTypeOptions, rooms]);
+
+  const visibleCalendarRooms = useMemo(() => {
+    const roomQuery = calendarRoomSearch.trim().toLowerCase();
+    return (rooms as CalendarRoom[]).filter((room) => {
+      const masterActive = room.room_type_id !== null && room.room_is_active !== false && room.room_type_is_active !== false;
+      if (!calendarIncludeInactive && !masterActive) return false;
+      if (calendarRoomCategoryFilter && String(room.room_category_id ?? '') !== calendarRoomCategoryFilter) return false;
+      if (calendarRoomTypeFilter && String(room.room_type_id ?? '') !== calendarRoomTypeFilter) return false;
+      if (roomQuery && !String(room.room_number || '').toLowerCase().includes(roomQuery)) return false;
+      if (calendarOperationalFilter) {
+        const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.operational_status || room.status || undefined);
+        if (status !== calendarOperationalFilter) return false;
+      }
+      return true;
+    });
+  }, [rooms, calendarIncludeInactive, calendarRoomCategoryFilter, calendarRoomTypeFilter, calendarRoomSearch, calendarOperationalFilter, roomStatuses]);
+
+  const calendarCategoryGroups = useMemo(() => {
+    const grouped = new Map<string, RoomCategoryCalendarGroup>();
+    for (const room of visibleCalendarRooms) {
+      const categoryId = room.room_category_id == null ? null : Number(room.room_category_id);
+      const roomTypeId = room.room_type_id == null ? null : Number(room.room_type_id);
+      // Canonical groups are keyed only by ids. Null identities remain explicit
+      // unassigned buckets and never fall back to relational name matching.
+      const categoryKey = categoryId === null ? 'category:unassigned' : `category:${categoryId}`;
+      const category = grouped.get(categoryKey) || {
+        key: categoryKey,
+        categoryId,
+        code: String(room.room_category_code || '').trim(),
+        name: categoryId === null ? 'Tanpa Kategori Kamar' : String(room.room_category_name || '').trim(),
+        displayOrder: categoryId === null ? Number.MAX_SAFE_INTEGER : Number(room.room_category_display_order || 0),
+        active: room.room_category_is_active,
+        roomTypes: [],
+        roomCount: 0,
+      };
+
+      const typeKey = roomTypeId === null ? `${categoryKey}/type:unassigned` : `${categoryKey}/type:${roomTypeId}`;
+      let roomType = category.roomTypes.find((group) => group.key === typeKey);
+      if (!roomType) {
+        roomType = {
+          key: typeKey,
+          roomTypeId,
+          code: String(room.room_type_code || '').trim(),
+          name: roomTypeId === null ? 'Tanpa Tipe Kamar' : String(room.room_type_name || room.name || '').trim(),
+          displayOrder: roomTypeId === null ? Number.MAX_SAFE_INTEGER : Number(room.room_type_display_order || 0),
+          rooms: [],
+        };
+        category.roomTypes.push(roomType);
+      }
+      roomType.rooms.push(room);
+      category.roomCount += 1;
+      grouped.set(categoryKey, category);
+    }
+
+    for (const category of grouped.values()) {
+      for (const roomType of category.roomTypes) {
+        roomType.rooms.sort((a, b) =>
+          String(a.room_number).localeCompare(String(b.room_number), 'id-ID', { numeric: true })
+          || Number(a.id) - Number(b.id)
+        );
+      }
+      category.roomTypes.sort((a, b) =>
+        a.displayOrder - b.displayOrder
+        || (a.name || a.code).localeCompare(b.name || b.code, 'id-ID', { numeric: true })
+        || a.code.localeCompare(b.code, 'id-ID', { numeric: true })
+        || Number(a.roomTypeId ?? Number.MAX_SAFE_INTEGER) - Number(b.roomTypeId ?? Number.MAX_SAFE_INTEGER)
+      );
+    }
+
+    return Array.from(grouped.values()).sort((a, b) =>
+      a.displayOrder - b.displayOrder
+      || Number(a.categoryId ?? Number.MAX_SAFE_INTEGER) - Number(b.categoryId ?? Number.MAX_SAFE_INTEGER)
+    );
+  }, [visibleCalendarRooms]);
+
+  const toggleCalendarGroup = (key: string) => {
+    setCollapsedCalendarGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const dateRangesOverlap = (startA?: string, endA?: string, startB?: string, endB?: string) => {
     if (!startA || !endA || !startB || !endB) return false;
-    const leftStart = new Date(`${startA}T00:00:00`).getTime();
-    const leftEnd = new Date(`${endA}T00:00:00`).getTime();
-    const rightStart = new Date(`${startB}T00:00:00`).getTime();
-    const rightEnd = new Date(`${endB}T00:00:00`).getTime();
-    if (!Number.isFinite(leftStart) || !Number.isFinite(leftEnd) || !Number.isFinite(rightStart) || !Number.isFinite(rightEnd)) {
-      return false;
-    }
-    return leftStart < rightEnd && leftEnd > rightStart;
+    return hotelDateRangesOverlap(startA, endA, startB, endB);
   };
 
   // Isolated operational-date helper so it can be replaced by business date/Night Audit later.
-  const getOperationalDateKey = () => localDateISO(new Date());
+  const getOperationalDateKey = () => hotelDateFromInstant(new Date());
 
   const getGuestSegmentMeta = (segment: any) => {
     const value = String(segment || 'Reguler').trim();
@@ -445,9 +582,9 @@ function App() {
 
   const filteredReservations = useMemo(() => {
     const sorted = [...reservations].sort((a, b) => {
-      const aTime = new Date(a.check_in || 0).getTime();
-      const bTime = new Date(b.check_in || 0).getTime();
-      return bTime - aTime;
+      const aDate = normalizeHotelDate(a.check_in);
+      const bDate = normalizeHotelDate(b.check_in);
+      return bDate.localeCompare(aDate);
     });
 
     const query = reservationSearch.trim().toLowerCase();
@@ -511,8 +648,10 @@ function App() {
   }, [reservations, roomStatuses, rooms, calendarSearchQuery]);
 
   const openReservationEditor = (reservation: any) => {
-    const checkIn = reservation.check_in ? reservation.check_in.split('T')[0] : '';
-    const checkOut = reservation.check_out ? reservation.check_out.split('T')[0] : '';
+    const checkIn = normalizeHotelDate(reservation.check_in);
+    const checkOut = normalizeHotelDate(reservation.check_out);
+    const room = rooms.find((candidate: any) => Number(candidate.id) === Number(reservation.room_id));
+    const roomTypeId = Number(reservation.room_type_id ?? room?.room_type_id);
 
     setBookingType(reservation.booking_type || 'walkin');
     setGuestSegment((reservation.guest_segment || 'Reguler') as 'Reguler' | 'Group' | 'Corporate');
@@ -522,9 +661,10 @@ function App() {
       guestName: reservation.guest_name || '',
       guestPhone: reservation.guest_phone || '',
       roomId: Number(reservation.room_id),
+      roomTypeId: Number.isInteger(roomTypeId) && roomTypeId > 0 ? roomTypeId : null,
       checkIn,
       checkOut,
-      roomVariant: reservation.room_variant || 'Deluxe King'
+      roomVariant: reservation.room_type_name || room?.room_type_name || reservation.room_variant || ''
     });
     setCreateResOpen(true);
   };
@@ -561,7 +701,7 @@ function App() {
   };
 
   const getReservationCardStyle = (reservation: any) => {
-    const status = String(reservation?.status || '').toUpperCase();
+    const { status } = normalizeReservationLifecycle(reservation?.status);
     const paymentStatus = String(reservation?.payment_status || '').toUpperCase();
 
     if (status === 'CHECKED_IN') {
@@ -584,6 +724,16 @@ function App() {
       };
     }
 
+    if (status === 'CANCELLED') {
+      return {
+        cardClass: 'res-cancelled',
+        badge: 'CN',
+        badgeClass: 'badge cn',
+        paymentLabel: '',
+        segmentMeta: getGuestSegmentMeta(reservation?.guest_segment),
+      };
+    }
+
     return {
       cardClass: 'res-booked',
       badge: 'BO',
@@ -593,37 +743,42 @@ function App() {
     };
   };
 
-  const fetchData = () => {
+  const fetchData = async () => {
     // Determine date range from days array
-    const start = days.length ? days[0].date : localDateISO(new Date());
+    const start = days.length ? days[0].date : hotelDateFromInstant(new Date());
     // end should be exclusive - take day after last
-    const last = days.length ? days[days.length - 1].date : localDateISO(new Date());
-    const endDate = new Date(last);
-    endDate.setDate(endDate.getDate() + 1);
-    const end = localDateISO(endDate);
+    const last = days.length ? days[days.length - 1].date : hotelDateFromInstant(new Date());
+    const end = addHotelDays(last, 1);
 
-    fetch(`/api/tapechart?start=${start}&end=${end}`)
-      .then(res => res.json())
-      .then(data => {
+    const requestVersion = ++tapechartRequestVersionRef.current;
+    try {
+      const data = await fetchTapechart({ start, end, includeInactive: calendarIncludeInactive });
+        if (requestVersion !== tapechartRequestVersionRef.current) return;
         if (data && data.rooms) {
           setRooms(data.rooms || []);
 
-          // build reservations list from rooms.cells
-          const flat: any[] = [];
+          // A reservation is repeated in every occupied cell; flatten by id so
+          // summaries and spans count the stay once, not once per night.
+          const flat = new Map<string, any>();
           for (const r of data.rooms) {
             for (const c of r.cells) {
               for (const rv of c.reservations || []) {
-                flat.push({
+                const key = String(rv.id ?? rv.reservation_id);
+                if (flat.has(key)) continue;
+                flat.set(key, {
                   ...rv,
                   room_id: r.id,
                   room_number: r.room_number,
                   room_name: r.name,
+                  room_type_id: r.room_type_id,
+                  room_type_code: r.room_type_code,
+                  room_type_name: r.room_type_name,
                   room_status: r.status,
                 });
               }
             }
           }
-          setReservations(flat);
+          setReservations(Array.from(flat.values()));
 
           const statusMap: Record<string, string> = {};
           (data.rooms || []).forEach((r: any) => {
@@ -632,8 +787,15 @@ function App() {
           });
           setRoomStatuses(statusMap);
         }
-      }).catch(err => console.error('Error fetching tapechart', err));
+    } catch (err) {
+      console.error('Error fetching tapechart', err);
+    }
   };
+  fetchDataRef.current = fetchData;
+
+  useEffect(() => {
+    if (selectedMenu === 'Kalender') void fetchDataRef.current();
+  }, [days[0]?.date, days[days.length - 1]?.date, calendarIncludeInactive, selectedMenu]);
 
   const fetchOperationsData = async () => {
     try {
@@ -725,6 +887,22 @@ function App() {
     }
   };
 
+  const viewRoomMasterReservation = async (summary: ActiveRoomReservation) => {
+    try {
+      const response = await fetch(`/api/reservations/${summary.id}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message || 'Gagal memuat detail reservasi');
+      setSelectedRes({
+        ...summary,
+        ...(body.data || {}),
+        room_number: summary.room_number
+      });
+      await fetchReservationFolio(summary.id);
+    } catch (error) {
+      alert(`Gagal membuka reservasi: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
   const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout') => {
     try {
       const response = await fetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
@@ -747,7 +925,7 @@ function App() {
 
       if (action === 'checkout') {
         const checkoutReservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
-        const checkoutDate = checkoutReservation?.check_out ? localDateISO(checkoutReservation.check_out) : localDateISO(new Date());
+        const checkoutDate = normalizeHotelDate(checkoutReservation?.check_out) || hotelDateFromInstant(new Date());
 
         if (checkoutReservation?.room_id) {
           const roomIdKey = String(checkoutReservation.room_id);
@@ -794,15 +972,10 @@ function App() {
     setDirtyConfirmDate(null);
   };
 
-  const getCellStatus = (roomId: number | string, date: string) => {
-    if (date !== getOperationalDateKey()) return 'Ready';
-    return normalizeRoomStatus(roomStatuses[String(roomId)] || 'Ready');
-  };
-
   const confirmRoomCleaned = async () => {
     if (dirtyConfirmRoomId === null) return;
     const roomId = dirtyConfirmRoomId;
-    const cleanupDate = dirtyConfirmDate || localDateISO(new Date());
+    const cleanupDate = dirtyConfirmDate || hotelDateFromInstant(new Date());
     setDirtyConfirmOpen(false);
     setDirtyConfirmRoomId(null);
     setDirtyConfirmDate(null);
@@ -932,33 +1105,32 @@ function App() {
   }, [selectedRes?.bid]);
 
   useEffect(() => {
-    fetchData();
     fetchOperationsData();
 
     // connect to SSE for realtime updates
     let es: EventSource | null = null;
     try {
       es = new EventSource('/api/events');
-      es.addEventListener('ReservationCreated', (ev: any) => {
-        console.log('SSE ReservationCreated', ev.data);
-        fetchData();
-      });
-      es.addEventListener('ReservationMoved', (ev: any) => {
-        console.log('SSE ReservationMoved', ev.data);
-        fetchData();
-      });
-      es.addEventListener('ReservationCheckedIn', (ev: any) => {
-        console.log('SSE ReservationCheckedIn', ev.data);
-        fetchData();
-      });
-      es.addEventListener('ReservationCheckedOut', (ev: any) => {
-        console.log('SSE ReservationCheckedOut', ev.data);
-        fetchData();
-      });
+      const calendarEvents = [
+        'ReservationCreated',
+        'ReservationUpdated',
+        'ReservationMoved',
+        'ReservationCancelled',
+        'ReservationCheckedIn',
+        'ReservationCheckedOut',
+        'BookingCreated',
+        'BookingCompleted',
+      ];
+      for (const eventName of calendarEvents) {
+        es.addEventListener(eventName, (ev: any) => {
+          console.log(`SSE ${eventName}`, ev.data);
+          void fetchDataRef.current();
+        });
+      }
       es.addEventListener('RoomStatusUpdated', (ev: any) => {
         console.log('SSE RoomStatusUpdated', ev.data);
-        fetchData();
-        fetchOperationsData();
+        void fetchDataRef.current();
+        void fetchOperationsData();
       });
       es.onmessage = (m) => {
         // generic messages
@@ -1060,11 +1232,20 @@ function App() {
 
   const makeBookingChild = (overrides: Partial<any> = {}) => {
     const defaultStart = overrides.check_in || quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate);
-    const defaultEnd = overrides.check_out || quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
+    const defaultEnd = overrides.check_out || quickBooking.checkOut || selectedRange.end || addHotelDays(localDateISO(anchorDate), 1);
 
     return {
       id: overrides.id || `booking-child-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      room_id: overrides.room_id ?? quickBooking.roomId ?? prefillRoomId ?? null,
+      room_id: resolveBookingChildRoomId(overrides, quickBooking.roomId ?? prefillRoomId ?? null),
+      room_number: overrides.room_number ?? null,
+      room_type_id: overrides.room_type_id ?? quickBooking.roomTypeId ?? null,
+      room_type_code: overrides.room_type_code ?? null,
+      room_type_name: overrides.room_type_name ?? null,
+      room_type_display_order: overrides.room_type_display_order ?? null,
+      room_category_id: overrides.room_category_id ?? null,
+      room_category_code: overrides.room_category_code ?? null,
+      room_category_name: overrides.room_category_name ?? null,
+      room_category_display_order: overrides.room_category_display_order ?? null,
       check_in: defaultStart,
       check_out: defaultEnd,
       guest_name: overrides.guest_name ?? quickBooking.guestName ?? '',
@@ -1084,18 +1265,22 @@ function App() {
   };
 
   const getAvailabilityKey = (child: any) => {
+    const roomTypeId = Number(child?.room_type_id);
     const roomType = String(child?.room_variant || child?.room_type || '').trim();
     const checkIn = String(child?.check_in || '').trim();
     const checkOut = String(child?.check_out || '').trim();
-    if (!roomType || !checkIn || !checkOut) return '';
+    if (!checkIn || !checkOut) return '';
+    if (Number.isInteger(roomTypeId) && roomTypeId > 0) return `id:${roomTypeId}|${checkIn}|${checkOut}`;
+    if (!roomType) return '';
     return `${roomType}|${checkIn}|${checkOut}`;
   };
 
-  const getFilteredAvailabilityRooms = (rows: any[], key: string, child: any) => {
-    const [roomType, checkIn, checkOut] = String(key || '').split('|');
-    if (!roomType || !checkIn || !checkOut) {
+  const getFilteredAvailabilityRooms = (rows: any[], key: string, child: any, composerChildren = bookingComposerChildren) => {
+    const parsed = parseAvailabilityKey(key);
+    if (!parsed) {
       return [] as any[];
     }
+    const { roomTypeId, roomTypeName, checkIn, checkOut } = parsed;
 
     const hasCapacity = Array.isArray(rows) && rows.length > 0 && rows.every((row: any) => Number(row?.sellable ?? 0) > 0);
     if (!hasCapacity) {
@@ -1103,9 +1288,14 @@ function App() {
     }
 
     return rooms.filter((room: any) => {
-      if (getRoomTypeName(room) !== roomType) {
+      const sameType = roomTypeId !== null
+        ? Number(room.room_type_id) === roomTypeId
+        : getRoomTypeName(room) === roomTypeName;
+      if (!sameType) {
         return false;
       }
+
+      if (room.room_is_active === false || room.room_type_is_active === false) return false;
 
       const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
       if (status === 'Maintenance' || status === 'Kotor') {
@@ -1128,17 +1318,13 @@ function App() {
         return false;
       }
 
-      const hasSameBookingConflict = bookingComposerChildren.some((otherChild: any) => {
-        if (!otherChild || otherChild.id === child?.id) return false;
-        if (otherChild.room_id == null) return false;
-        if (Number(otherChild.room_id) !== roomId) return false;
-        return dateRangesOverlap(
-          String(otherChild.check_in || ''),
-          String(otherChild.check_out || ''),
-          checkIn,
-          checkOut
-        );
-      });
+      const hasSameBookingConflict = hasOverlappingPriorSiblingRoomSelection(
+        composerChildren,
+        String(child?.id || ''),
+        roomId,
+        checkIn,
+        checkOut,
+      );
       return !hasSameBookingConflict;
     });
   };
@@ -1148,9 +1334,10 @@ function App() {
       guestName: '',
       guestPhone: '',
       roomId: null,
+      roomTypeId: null,
       checkIn: '',
       checkOut: '',
-      roomVariant: 'Deluxe King'
+      roomVariant: ''
     });
     setBookingComposerChildren([]);
     setChildRoomAvailability({});
@@ -1186,25 +1373,19 @@ function App() {
 
     const applyAvailabilityResultForKey = (key: string, rows: any[], terminalState: 'success' | 'empty' | 'error') => {
       const resultRows = Array.isArray(rows) ? rows : [];
-      const availableRoomSet = new Set(
-        getFilteredRoomsForKey(resultRows, key).map((room: any) => Number(room.id))
-      );
-
       setChildRoomAvailability((prev) => {
         const next = { ...prev };
-        for (const child of bookingComposerChildren) {
+        for (const child of bookingComposerChildrenRef.current) {
           const childId = String(child?.id ?? '');
           if (!childId || getAvailabilityKey(child) !== key) continue;
-          next[childId] = Array.from(availableRoomSet).length
-            ? rooms.filter((room: any) => availableRoomSet.has(Number(room.id)))
-            : [];
+          next[childId] = getFilteredAvailabilityRooms(resultRows, key, child, bookingComposerChildrenRef.current);
         }
         return next;
       });
 
       setBookingAvailabilityState((prev) => {
         const next = { ...prev };
-        for (const child of bookingComposerChildren) {
+        for (const child of bookingComposerChildrenRef.current) {
           const childId = String(child?.id ?? '');
           if (!childId || getAvailabilityKey(child) !== key) continue;
           next[childId] = terminalState;
@@ -1217,7 +1398,8 @@ function App() {
         const updated = prev.map((child: any) => {
           if (String(child?.id ?? '') && getAvailabilityKey(child) === key && child.room_id != null) {
             const roomId = Number(child.room_id);
-            const hasRoom = availableRoomSet.has(roomId);
+            const hasRoom = getFilteredAvailabilityRooms(resultRows, key, child, prev)
+              .some((room: any) => Number(room.id) === roomId);
             if (!hasRoom && terminalState !== 'error') {
               changed = true;
               return { ...child, room_id: null };
@@ -1229,61 +1411,10 @@ function App() {
       });
     };
 
-    const getFilteredRoomsForKey = (rows: any[], key: string) => {
-      const [roomType, checkIn, checkOut] = String(key || '').split('|');
-      if (!roomType || !checkIn || !checkOut) {
-        return [] as any[];
-      }
-
-      const hasCapacity = Array.isArray(rows) && rows.length > 0 && rows.every((row: any) => Number(row?.sellable ?? 0) > 0);
-      if (!hasCapacity) {
-        return [] as any[];
-      }
-
-      return rooms.filter((room: any) => {
-        if (getRoomTypeName(room) !== roomType) {
-          return false;
-        }
-
-        const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
-        if (status === 'Maintenance' || status === 'Kotor') {
-          return false;
-        }
-
-        const roomId = Number(room.id);
-        const hasExistingReservationConflict = reservations.some((reservation: any) => {
-          if (Number(reservation?.room_id) !== roomId) return false;
-          const bookingStatus = String(reservation?.status || '').toUpperCase();
-          if (!['BOOKED', 'CHECKED_IN'].includes(bookingStatus)) return false;
-          return dateRangesOverlap(
-            String(reservation?.check_in || ''),
-            String(reservation?.check_out || ''),
-            checkIn,
-            checkOut
-          );
-        });
-        if (hasExistingReservationConflict) {
-          return false;
-        }
-
-        const hasSameBookingConflict = bookingComposerChildren.some((otherChild: any) => {
-          if (!otherChild || otherChild.room_id == null) return false;
-          if (Number(otherChild.room_id) !== roomId) return false;
-          return dateRangesOverlap(
-            String(otherChild.check_in || ''),
-            String(otherChild.check_out || ''),
-            checkIn,
-            checkOut
-          );
-        });
-        return !hasSameBookingConflict;
-      });
-    };
-
-    const fetchAvailabilityRows = async (key: string, roomType: string, checkIn: string, checkOut: string, version: number) => {
-      console.log('AVAIL_FETCH_START', { key, roomType, checkIn, checkOut, version });
+    const fetchAvailabilityRows = async (key: string, roomTypeId: number | null, roomTypeName: string, checkIn: string, checkOut: string, version: number) => {
+      console.log('AVAIL_FETCH_START', { key, roomTypeId, roomTypeName, checkIn, checkOut, version });
       try {
-        const response = await fetch(`/api/availability?room_type=${encodeURIComponent(roomType)}&start=${checkIn}&end=${checkOut}`);
+        const response = await fetch(buildAvailabilityRequest(roomTypeId, roomTypeName, checkIn, checkOut));
         if (!response.ok) {
           throw new Error(`availability request failed for ${key}`);
         }
@@ -1305,7 +1436,7 @@ function App() {
         delete availabilityRequestPromiseRef.current[key];
         setBookingAvailabilityState((prev) => {
           const next = { ...prev };
-          for (const child of bookingComposerChildren) {
+          for (const child of bookingComposerChildrenRef.current) {
             const childId = String(child?.id ?? '');
             if (!childId) continue;
             if (getAvailabilityKey(child) === key) {
@@ -1320,15 +1451,6 @@ function App() {
           }
           return { ...prev, [key]: rows };
         });
-        setChildRoomAvailability((prev) => {
-          const next = { ...prev };
-          for (const child of bookingComposerChildren) {
-            const childId = String(child?.id ?? '');
-            if (!childId || getAvailabilityKey(child) !== key) continue;
-            next[childId] = getFilteredRoomsForKey(rows, key);
-          }
-          return next;
-        });
         applyAvailabilityResultForKey(key, rows, rows.length > 0 ? 'success' : 'empty');
       } catch (error) {
         if (availabilityRequestVersionRef.current[key] !== version) {
@@ -1341,7 +1463,7 @@ function App() {
         delete availabilityRequestPromiseRef.current[key];
         setBookingAvailabilityState((prev) => {
           const next = { ...prev };
-          for (const child of bookingComposerChildren) {
+          for (const child of bookingComposerChildrenRef.current) {
             const childId = String(child?.id ?? '');
             if (!childId) continue;
             if (getAvailabilityKey(child) === key) {
@@ -1365,28 +1487,27 @@ function App() {
     const getFilteredRoomsForChild = (child: any, cachedRows: any[]) => {
       const checkIn = String(child?.check_in || '').trim();
       const checkOut = String(child?.check_out || '').trim();
-      const roomType = String(child?.room_variant || child?.room_type || '').trim();
+      const childRoomTypeId = Number(child?.room_type_id);
+      const hasCanonicalRoomTypeId = Number.isInteger(childRoomTypeId) && childRoomTypeId > 0;
+      const legacyRoomTypeName = String(child?.room_variant || child?.room_type || '').trim();
 
       const hasCapacity = Array.isArray(cachedRows) && cachedRows.length > 0 && cachedRows.every((row: any) => Number(row?.sellable ?? 0) > 0);
-      if (!hasCapacity || !roomType || !checkIn || !checkOut) {
+      if (!hasCapacity || (!hasCanonicalRoomTypeId && !legacyRoomTypeName) || !checkIn || !checkOut) {
         return [];
       }
-
-      const roomTypeIdByName = new Map<string, number | null>();
-      rooms.forEach((room: any) => {
-        const key = getRoomTypeName(room);
-        if (!roomTypeIdByName.has(key)) {
-          roomTypeIdByName.set(key, room?.room_type_id ?? null);
-        }
-      });
 
       return rooms.filter((room: any) => {
         const roomId = Number(room.id);
         const roomNumber = String(room.room_number || roomId);
-        const roomTypeId = room?.room_type_id ?? roomTypeIdByName.get(getRoomTypeName(room)) ?? null;
+        const roomTypeId = room?.room_type_id ?? null;
+        const roomMasterActive = room?.room_is_active !== false
+          && room?.is_active !== false
+          && room?.room_type_is_active !== false;
         const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
         const statusSellable = operationalStatus !== 'Maintenance' && operationalStatus !== 'Kotor';
-        const roomTypeMatches = getRoomTypeName(room) === roomType;
+        const roomTypeMatches = hasCanonicalRoomTypeId
+          ? Number(roomTypeId) === childRoomTypeId
+          : getRoomTypeName(room) === legacyRoomTypeName;
         const hasExistingReservationConflict = reservations.some((reservation: any) => {
           if (Number(reservation?.room_id) !== roomId) return false;
           const bookingStatus = String(reservation?.status || '').toUpperCase();
@@ -1398,31 +1519,29 @@ function App() {
             checkOut
           );
         });
-        const siblingConflict = bookingComposerChildren.some((otherChild: any) => {
-          if (!otherChild || otherChild.id === child.id) return false;
-          if (otherChild.room_id == null) return false;
-          if (Number(otherChild.room_id) !== roomId) return false;
-          return dateRangesOverlap(
-            String(otherChild.check_in || ''),
-            String(otherChild.check_out || ''),
-            checkIn,
-            checkOut
-          );
-        });
+        const siblingConflict = hasOverlappingPriorSiblingRoomSelection(
+          bookingComposerChildren,
+          String(child.id),
+          roomId,
+          checkIn,
+          checkOut,
+        );
 
         const capacityAvailable = hasCapacity;
-        const eligible = roomTypeMatches && statusSellable && !hasExistingReservationConflict && !siblingConflict && capacityAvailable;
+        const eligible = roomMasterActive && roomTypeMatches && statusSellable && !hasExistingReservationConflict && !siblingConflict && capacityAvailable;
         const exclusionReason = !roomTypeMatches
           ? 'ROOM_TYPE_MISMATCH'
+          : !roomMasterActive
+            ? 'INACTIVE_ROOM_MASTER'
           : !statusSellable
-            ? 'OPERATIONAL_STATUS'
-            : hasExistingReservationConflict
-              ? 'ACTIVE_OVERLAP'
-              : siblingConflict
-                ? 'SIBLING_CONFLICT'
-                : capacityAvailable
-                  ? ''
-                  : 'NO_CAPACITY';
+              ? 'OPERATIONAL_STATUS'
+              : hasExistingReservationConflict
+                ? 'ACTIVE_OVERLAP'
+                : siblingConflict
+                  ? 'SIBLING_CONFLICT'
+                  : capacityAvailable
+                    ? ''
+                    : 'NO_CAPACITY';
 
         console.log('AVAILABLE_ROOM_CANDIDATE_DEBUG', {
           roomId,
@@ -1469,13 +1588,19 @@ function App() {
       }
 
       if (!availabilityRequestPromiseRef.current[key]) {
-        const version = (availabilityRequestVersionRef.current[key] ?? 0) + 1;
+        const version = availabilityRequestSequenceRef.current + 1;
+        availabilityRequestSequenceRef.current = version;
         availabilityRequestVersionRef.current[key] = version;
-        const parts = key.split('|');
-        const roomType = parts[0] || '';
-        const checkIn = parts[1] || '';
-        const checkOut = parts[2] || '';
-        availabilityRequestPromiseRef.current[key] = fetchAvailabilityRows(key, roomType, checkIn, checkOut, version);
+        const parsed = parseAvailabilityKey(key);
+        if (!parsed) continue;
+        availabilityRequestPromiseRef.current[key] = fetchAvailabilityRows(
+          key,
+          parsed.roomTypeId,
+          parsed.roomTypeName,
+          parsed.checkIn,
+          parsed.checkOut,
+          version,
+        );
       }
 
       nextAvailability[childId] = [];
@@ -1502,48 +1627,39 @@ function App() {
   }, [availabilityCache, bookingComposerChildren, reservations, roomStatuses, rooms]);
 
   const updateBookingChild = (childId: string, updates: Partial<any>) => {
-    setBookingComposerChildren((prev) => prev.map((child) => child.id === childId ? { ...child, ...updates } : child));
+    setBookingComposerChildren((prev) => updateBookingChildById(prev, childId, updates));
   };
 
   const addBookingChild = () => {
-    const baseChild = bookingComposerChildren[0] || {
+    const fallbackChild = {
       check_in: quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate),
-      check_out: quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1))),
-      room_id: quickBooking.roomId ?? prefillRoomId ?? null,
+      check_out: quickBooking.checkOut || selectedRange.end || addHotelDays(localDateISO(anchorDate), 1),
+      room_type_id: quickBooking.roomTypeId ?? null,
+      room_variant: quickBooking.roomVariant ?? '',
     };
-    const nextStart = baseChild.check_in || quickBooking.checkIn || selectedRange.start || localDateISO(anchorDate);
-    const nextEnd = baseChild.check_out || quickBooking.checkOut || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
 
-    setBookingComposerChildren((prev) => [
-      ...prev,
-      makeBookingChild({
-        room_id: baseChild.room_id ?? quickBooking.roomId ?? prefillRoomId ?? null,
-        check_in: nextStart,
-        check_out: nextEnd,
-        total_price: 0,
-        subtotal_amount: 0,
-        discount_amount: 0,
-        discount_percent: 0,
-        amount_paid: 0,
-        payment_status: 'UNPAID',
-      })
-    ]);
+    setBookingComposerChildren((prev) => {
+      const baseChild = prev[0] || fallbackChild;
+      return [...prev, makeBookingChild(additionalBookingChildOverrides(baseChild, fallbackChild))];
+    });
   };
 
   const removeBookingChild = (childId: string) => {
-    setBookingComposerChildren((prev) => prev.length > 1 ? prev.filter((child) => child.id !== childId) : prev);
+    setBookingComposerChildren((prev) => removeBookingChildById(prev, childId));
   };
 
-  const openQuickBooking = (roomId: number, startDate?: string, endDate?: string) => {
+  const openQuickBooking = (room: CalendarRoom, startDate?: string, endDate?: string) => {
+    const roomBinding = canonicalCalendarRoomBinding(room);
+    const roomTypeName = String(room.room_type_name || room.name || '').trim();
     const defaultStart = startDate || localDateISO(anchorDate);
-    const defaultEnd = endDate || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)));
+    const defaultEnd = endDate || addHotelDays(defaultStart, 1);
     const initialChild = makeBookingChild({
-      room_id: roomId,
+      ...roomBinding,
       check_in: defaultStart,
       check_out: defaultEnd,
       guest_name: '',
       guest_phone: '',
-      room_variant: 'Deluxe King',
+      room_variant: roomTypeName,
       subtotal_amount: 0,
       total_price: 0,
       discount_amount: 0,
@@ -1555,22 +1671,34 @@ function App() {
     setGuestSegment('Reguler');
     setKtpFile(null);
     setBuktiBayarFile(null);
-    setPrefillRoomId(roomId);
+    setPrefillRoomId(roomBinding.room_id);
     setSelectedRange({ start: defaultStart, end: defaultEnd });
     setQuickBooking({
       guestName: '',
       guestPhone: '',
-      roomId,
+      roomId: roomBinding.room_id,
+      roomTypeId: roomBinding.room_type_id,
       checkIn: defaultStart,
       checkOut: defaultEnd,
-      roomVariant: 'Deluxe King'
+      roomVariant: roomTypeName
     });
     setBookingComposerChildren([initialChild]);
     setCreateResOpen(true);
   };
 
   const renderRoomStatusButton = (room: any) => {
-    const currentStatus = normalizeRoomStatus(roomStatuses[room.id] || room.status || 'Ready');
+    const rawStatus = String(room.operational_status || room.status || '').toUpperCase();
+    const currentStatus = normalizeRoomStatus(rawStatus);
+    const statusLabel: Record<string, string> = {
+      VACANT_CLEAN: 'Vacant Clean',
+      VACANT_DIRTY: 'Vacant Dirty',
+      OCCUPIED_CLEAN: 'Occupied Clean',
+      OCCUPIED_DIRTY: 'Occupied Dirty',
+      OUT_OF_ORDER: 'Out of Order',
+      OUT_OF_SERVICE: 'Out of Service',
+      CLEANING: 'Cleaning',
+      INSPECTED: 'Vacant Clean',
+    };
     const buttonClass = currentStatus === 'Kotor'
       ? 'bg-red-100 text-red-600 border-red-200'
       : currentStatus === 'Occupied'
@@ -1584,7 +1712,7 @@ function App() {
         onClick={() => toggleStatus(room.id)}
         className={`px-3 py-1 rounded border text-[10px] transition ${buttonClass}`}
       >
-        {currentStatus}
+        {statusLabel[rawStatus] || rawStatus || currentStatus}
       </button>
     );
   };
@@ -1613,20 +1741,16 @@ function App() {
   );
   const selectedNights = Math.max(
     1,
-    Math.floor(
-      (new Date(selectedRes?.check_out || selectedRes?.check_in || Date.now()).getTime() - new Date(selectedRes?.check_in || selectedRes?.check_out || Date.now()).getTime()) / (24 * 60 * 60 * 1000)
-    )
-  ) || 1;
+    hotelNightsBetween(normalizeHotelDate(selectedRes?.check_in), normalizeHotelDate(selectedRes?.check_out)) ?? 1
+  );
   const stayChangeNightsDelta = (() => {
     if (!stayChangeState.open || !stayChangeState.reservationId) return 0;
     const reservation = reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes;
     if (!reservation) return 0;
-    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : '';
+    const currentCheckOut = normalizeHotelDate(reservation.check_out);
     const nextCheckOut = stayChangeState.newCheckOut;
     if (!currentCheckOut || !nextCheckOut) return 0;
-    const currentMs = new Date(`${currentCheckOut}T00:00:00`).getTime();
-    const nextMs = new Date(`${nextCheckOut}T00:00:00`).getTime();
-    return Math.round((nextMs - currentMs) / (24 * 60 * 60 * 1000));
+    return hotelNightsBetween(currentCheckOut, nextCheckOut) ?? 0;
   })();
   const canCheckIn = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
   const canCheckOut = activeReservationStatus === 'CHECKED_IN';
@@ -1635,29 +1759,26 @@ function App() {
   const canExtend = activeReservationStatus === 'BOOKED' || activeReservationStatus === 'CHECKED_IN';
   const canShorten = activeReservationStatus === 'BOOKED';
 
-  const addDaysToIso = (value: string | Date | undefined, delta: number) => {
+  const addDaysToIso = (value: string | undefined, delta: number) => {
     if (!value) return '';
-    const base = value instanceof Date ? new Date(value) : new Date(value);
-    if (Number.isNaN(base.getTime())) return '';
-    base.setDate(base.getDate() + delta);
-    return localDateISO(base);
+    return addHotelDays(value, delta);
   };
 
   const validateStayChangeCandidate = (reservation: any, requestedCheckOut: string) => {
-    const currentCheckIn = reservation.check_in ? localDateISO(reservation.check_in) : '';
-    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : '';
-    const requestedDate = new Date(`${requestedCheckOut}T00:00:00`);
+    const currentCheckIn = normalizeHotelDate(reservation.check_in);
+    const currentCheckOut = normalizeHotelDate(reservation.check_out);
+    const requestedDate = normalizeHotelDate(requestedCheckOut);
 
     if (!requestedCheckOut) {
       return { valid: false, reason: 'Tanggal check-out baru wajib diisi.' };
     }
-    if (Number.isNaN(requestedDate.getTime())) {
+    if (!requestedDate) {
       return { valid: false, reason: 'Tanggal check-out baru tidak valid.' };
     }
     if (currentCheckOut && requestedCheckOut === currentCheckOut) {
       return { valid: false, reason: 'Tanggal check-out baru tidak berubah.' };
     }
-    if (currentCheckIn && requestedDate.getTime() <= new Date(`${currentCheckIn}T00:00:00`).getTime()) {
+    if (currentCheckIn && requestedDate <= currentCheckIn) {
       return { valid: false, reason: 'Check-out baru harus setelah check-in.' };
     }
 
@@ -1671,7 +1792,7 @@ function App() {
       return;
     }
 
-    const currentCheckOut = reservation.check_out ? localDateISO(reservation.check_out) : localDateISO(new Date());
+    const currentCheckOut = normalizeHotelDate(reservation.check_out) || hotelDateFromInstant(new Date());
     const suggestedCheckOut = type === 'extend' ? addDaysToIso(currentCheckOut, 1) : addDaysToIso(currentCheckOut, -1);
     const nextCheckOut = overrideNewCheckOut || suggestedCheckOut || currentCheckOut;
 
@@ -1731,12 +1852,10 @@ function App() {
       }
 
       const table = document.querySelector('.calendar-grid-shell table');
-      const sampleCell = table?.querySelector('tbody tr td');
+      const sampleCell = table?.querySelector('thead th.header-date-cell');
       const cellWidth = sampleCell ? sampleCell.getBoundingClientRect().width || 76 : 76;
       const deltaDays = Math.round((event.clientX - activeResize.startX) / cellWidth);
-      const previewDate = new Date(`${activeResize.startCheckOut}T00:00:00`);
-      previewDate.setDate(previewDate.getDate() + deltaDays);
-      const nextCheckOut = localDateISO(previewDate);
+      const nextCheckOut = addHotelDays(activeResize.startCheckOut, deltaDays);
       reservationResizePreviewRef.current = {
         ...reservationResizePreviewRef.current,
         [String(activeResize.reservationId)]: nextCheckOut
@@ -1771,7 +1890,7 @@ function App() {
       const reservationId = activeResize.reservationId;
       const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
       const previewCheckOut = reservationResizePreviewRef.current[String(reservationId)] || activeResize.startCheckOut;
-      const previousCheckOut = reservation?.check_out ? localDateISO(reservation.check_out) : activeResize.startCheckOut;
+      const previousCheckOut = normalizeHotelDate(reservation?.check_out) || activeResize.startCheckOut;
 
       console.log('RESIZE_UP', {
         pointerId: event?.pointerId ?? activeResize.pointerId,
@@ -1799,11 +1918,11 @@ function App() {
           alert(validation.reason);
           return;
         }
-        if (String(reservation.status || '').toUpperCase() === 'CHECKED_IN' && new Date(`${previewCheckOut}T00:00:00`).getTime() < new Date(`${previousCheckOut}T00:00:00`).getTime()) {
+        if (String(reservation.status || '').toUpperCase() === 'CHECKED_IN' && previewCheckOut < previousCheckOut) {
           alert('Masa inap tamu yang sudah check-in tidak dapat diperpendek melalui resize. Gunakan proses Early Checkout.');
           return;
         }
-        const type = new Date(`${previewCheckOut}T00:00:00`).getTime() > new Date(`${previousCheckOut}T00:00:00`).getTime() ? 'extend' : 'shorten';
+        const type = previewCheckOut > previousCheckOut ? 'extend' : 'shorten';
         openStayChangePrompt(type, reservationId, previewCheckOut);
       } else if (reservation && previousCheckOut === previewCheckOut) {
         console.log('RESIZE_NOOP', {
@@ -2010,7 +2129,7 @@ function App() {
                 <StatCard title="Check In" value={String(calendarSummary.checkedInReservations)} color="hotel-stat-card--checkedin" />
                 <StatCard title="Check Out" value={String(calendarSummary.checkedOutReservations)} color="hotel-stat-card--checkout" />
                 <StatCard title="Kamar Kotor" value={String(calendarSummary.dirtyRooms)} color="hotel-stat-card--dirty" />
-                <StatCard title="Kamar Ready" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" />
+                <StatCard title="Vacant Clean" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" />
               </div>
             </div>
 
@@ -2069,18 +2188,15 @@ function App() {
                   />
                 </div>
                 <div className="flex flex-wrap gap-2 items-center">
-                  <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm">
-                    <button onClick={() => shiftDays(-1)} className="px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded-sm">Kemarin</button>
-                    <button onClick={() => goToday()} className="px-3 py-1.5 text-sm bg-blue-600 text-white font-semibold rounded-sm shadow-sm">Hari Ini</button>
-                    <button onClick={() => shiftDays(1)} className="px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded-sm">Besok</button>
+                  <div className="calendar-date-nav" role="group" aria-label="Navigasi tanggal Tape Chart">
+                    <button type="button" onClick={() => shiftDays(-7)}>‹ 7 Hari</button>
+                    <button type="button" onClick={() => shiftDays(-1)}>‹ 1 Hari</button>
+                    <button type="button" className="calendar-date-nav__today" onClick={goToday}>Hari Ini</button>
+                    <button type="button" onClick={() => shiftDays(1)}>1 Hari ›</button>
+                    <button type="button" onClick={() => shiftDays(7)}>7 Hari ›</button>
                   </div>
 
-                  <div className="ml-2 flex items-center gap-2">
-                    <span className="text-[11px] text-gray-500">View:</span>
-                    <button onClick={() => setWindowSize(7)} className={`px-2 py-1 border rounded text-xs ${windowSize===7 ? 'bg-blue-50 text-blue-700 font-semibold border-blue-200' : 'bg-white text-gray-700 border-gray-300'}`}>7</button>
-                  </div>
-
-                  <button onClick={() => { setCalendarViewDate(anchorDate); setCalendarSelectedDate(localDateISO(anchorDate)); setCalendarOpen(true); }} className="ml-2 border border-gray-300 px-2.5 py-1.5 text-sm bg-white rounded-md flex items-center gap-2 shadow-sm hover:bg-gray-50">
+                  <button onClick={() => { setCalendarViewDate(anchorDate); setCalendarSelectedDate(localDateISO(anchorDate)); setCalendarOpen(true); }} className="calendar-month-picker">
                     <span className="text-base">📅</span>
                     <span>{new Date(anchorDate).toLocaleString('id-ID', { month: 'long' })}</span>
                   </button>
@@ -2092,13 +2208,31 @@ function App() {
                 )}
               </div>
 
+              <CalendarFilters
+                roomSearch={calendarRoomSearch}
+                roomCategoryId={calendarRoomCategoryFilter}
+                roomTypeId={calendarRoomTypeFilter}
+                operationalStatus={calendarOperationalFilter}
+                includeInactive={calendarIncludeInactive}
+                categoryOptions={calendarCategoryOptions}
+                typeOptions={calendarFilterTypeOptions}
+                onRoomSearch={setCalendarRoomSearch}
+                onRoomCategoryId={(value) => {
+                  setCalendarRoomCategoryFilter(value);
+                  setCalendarRoomTypeFilter('');
+                }}
+                onRoomTypeId={setCalendarRoomTypeFilter}
+                onOperationalStatus={setCalendarOperationalFilter}
+                onIncludeInactive={setCalendarIncludeInactive}
+              />
+
               <div className="overflow-x-auto calendar-grid-shell">
                 <table className="w-full border-collapse text-xs" style={{ tableLayout: 'fixed' }}>
                   <thead>
                     <tr className="bg-gray-100 border calendar-header-row">
                       <th className="p-3 border text-left calendar-sticky-corner" style={{ width: '220px', minWidth: '220px' }}>Kamar</th>
                       {days.map((d) => {
-                        const todayIso = localDateISO(new Date());
+                        const todayIso = hotelDateFromInstant(new Date());
                         const isToday = d.date === todayIso;
                         return (
                           <th
@@ -2113,138 +2247,157 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rooms.map(room => (
-                      <tr key={room.id} className="border">
-                        <td className="room-cell border font-medium bg-gray-50 text-[12px] text-gray-700 text-center align-middle calendar-sticky-column" style={{ width: '220px', minWidth: '220px' }}>
-                          <div className="room-cell-inner flex flex-col items-center justify-center text-center gap-1">
-                            <div className="room-name-wrap flex items-center justify-center text-center">
-                              <span className="room-dot"></span>
-                              <span className="room-name-text">{room.room_number} {room.name}</span>
-                            </div>
-                            <div className="room-status-wrap flex items-center justify-center text-center">{renderRoomStatusButton(room)}</div>
-                          </div>
-                        </td>
-                        {(() => {
-                          const spans = reservationSpans[String(room.id)] || [];
-                          const cells = [];
-                          let i = 0;
-                          while (i < days.length) {
-                            const spanAt = spans.find(s => s.startIndex === i);
-                            if (spanAt) {
-                              const r = spanAt.res;
-                              const reservationStyle = getReservationCardStyle(r);
-                              const density = getCalendarReservationDensity(spanAt.span);
-                              const identity = getCalendarReservationIdentity(r);
-                              const searchMatch = isCalendarReservationMatch(r);
-                              const previewCheckOut = reservationResizePreview[String(r.id)] || r.check_out;
-                              const nights = Math.max(1, Math.floor((new Date(previewCheckOut).getTime() - new Date(r.check_in).getTime())/(24*3600*1000)));
-                              cells.push(
-                                <td key={`${room.id}-${i}-${r.id}`} colSpan={spanAt.span} className="p-2 border align-middle h-14">
-                                  <div
-                                    draggable
-                                    onDragStart={(e: any) => handleDragStart(e, r, room.id)}
-                                    onDragEnd={(e: any) => handleDragEnd(e)}
-                                    onClick={() => {
-                                      setSelectedRes(r);
-                                      fetchReservationFolio(Number(r.id));
-                                    }}
-                                    className={`reservation-card ${reservationStyle.cardClass} reservation-card--${density} ${searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold`}
-                                  >
-                                    <div className="reservation-card-stack">
-                                      <div className="reservation-card-topline">
-                                        <div className="reservation-card-name">{r.guest_name}</div>
-                                        <span className={reservationStyle.badgeClass}>{reservationStyle.badge}</span>
-                                        <span className={reservationStyle.segmentMeta.className}>{reservationStyle.segmentMeta.label}</span>
-                                      </div>
-                                      <div className="reservation-card-identity">{identity}</div>
-                                      <div className="reservation-card-meta">
-                                        <span>{nights} malam</span>
-                                        <span>{getPaymentStatusLabel(r.payment_status)}</span>
-                                        <span>{r.status}</span>
-                                        {reservationStyle.paymentLabel && <span>{reservationStyle.paymentLabel}</span>}
-                                      </div>
+                    {calendarCategoryGroups.map((category) => (
+                      <Fragment key={category.key}>
+                        <RoomCategoryGroup
+                          group={category}
+                          collapsed={collapsedCalendarGroups.has(category.key)}
+                          columnCount={days.length + 1}
+                          onToggle={() => toggleCalendarGroup(category.key)}
+                        />
+                        {!collapsedCalendarGroups.has(category.key) && category.roomTypes.map((group) => (
+                          <Fragment key={group.key}>
+                            <RoomTypeGroup
+                              group={group}
+                              collapsed={collapsedCalendarGroups.has(group.key)}
+                              columnCount={days.length + 1}
+                              onToggle={() => toggleCalendarGroup(group.key)}
+                            />
+                            {!collapsedCalendarGroups.has(group.key) && group.rooms.map((room) => {
+                          const masterActive = room.room_type_id !== null && room.room_is_active !== false && room.room_type_is_active !== false;
+                          return (
+                            <tr key={room.id} className={`calendar-room-row border ${masterActive ? '' : 'calendar-room-row--inactive'}`}>
+                              <td className="room-cell border font-medium bg-gray-50 text-[12px] text-gray-700 text-center align-middle calendar-sticky-column" style={{ width: '220px', minWidth: '220px' }}>
+                                <div className="room-cell-inner calendar-room-identity">
+                                  <div className="room-name-wrap calendar-room-number-line">
+                                    <span className="room-dot"></span>
+                                    <span className="room-name-text">{room.room_number}</span>
+                                    {!masterActive && <span className="calendar-inactive-badge">Nonaktif</span>}
+                                  </div>
+                                  <div className="room-status-wrap calendar-room-status">{renderRoomStatusButton(room)}</div>
+                                  {room.future_reservation_count > 0 && (
+                                    <div className="calendar-future-hint">
+                                      {room.future_reservation_count} reservasi mendatang · mulai {formatCompactHotelDate(room.next_future_check_in)}
                                     </div>
-                                    {['BOOKED', 'CHECKED_IN'].includes(String(r.status || '').toUpperCase()) && (
-                                      <button
-                                        type="button"
-                                        draggable={false}
-                                        title="RESIZE HANDLE DEBUG"
-                                        className="reservation-card-resize-handle"
-                                        aria-label={`Resize ${r.guest_name}`}
-                                        onDragStart={(event) => {
-                                          event.preventDefault();
-                                          event.stopPropagation();
+                                  )}
+                                </div>
+                              </td>
+                              {(() => {
+                                const spans = reservationSpans[String(room.id)] || [];
+                                const cells = [];
+                                let i = 0;
+                                while (i < days.length) {
+                                  const spanAt = spans.find(s => s.startIndex === i);
+                                  if (spanAt) {
+                                    const r = spanAt.res;
+                                    const reservationStyle = getReservationCardStyle(r);
+                                    const lifecycle = normalizeReservationLifecycle(r.status);
+                                    const density = getCalendarReservationDensity(spanAt.span);
+                                    const identity = getCalendarReservationIdentity(r);
+                                    const searchMatch = isCalendarReservationMatch(r);
+                                    const previewCheckOut = reservationResizePreview[String(r.id)] || r.check_out;
+                                    const nights = Math.max(1, hotelNightsBetween(normalizeHotelDate(r.check_in), normalizeHotelDate(previewCheckOut)) ?? 1);
+                                    cells.push(
+                                      <ReservationBar
+                                        key={`${room.id}-${i}-${r.id}`}
+                                        reservation={r}
+                                        span={spanAt.span}
+                                        density={density}
+                                        cardClass={reservationStyle.cardClass}
+                                        badge={reservationStyle.badge}
+                                        badgeClass={reservationStyle.badgeClass}
+                                        paymentLabel={[getPaymentStatusLabel(r.payment_status), reservationStyle.paymentLabel].filter(Boolean).join(' · ')}
+                                        segmentMeta={reservationStyle.segmentMeta}
+                                        identity={identity}
+                                        statusLabel={lifecycle.status}
+                                        legacy={lifecycle.legacy || Boolean(r.legacy_status)}
+                                        resizable={['BOOKED', 'CHECKED_IN'].includes(String(r.status || '').toUpperCase())}
+                                        searchMatch={searchMatch}
+                                        nights={nights}
+                                        onDragStart={(event) => handleDragStart(event, r, room.id)}
+                                        onDragEnd={handleDragEnd}
+                                        onOpen={() => {
+                                          setSelectedRes(r);
+                                          fetchReservationFolio(Number(r.id));
                                         }}
-                                        onPointerDown={(event) => handleReservationResizeMouseDown(event, r)}
-                                        onClick={(event) => event.stopPropagation()}
+                                        onResize={(event) => handleReservationResizeMouseDown(event, r)}
                                       />
-                                    )}
-                                  </div>
-                                </td>
-                              );
-                              i += spanAt.span;
-                            } else {
-                              const day = days[i];
-                              const currentStatus = getCellStatus(room.id, day.date);
-                              const roomPhysicalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || 'Ready');
-                              const canCleanDirtyNow = day.date === getOperationalDateKey() && roomPhysicalStatus === 'Kotor';
-                              cells.push(
-                                <td key={`${room.id}-${day.date}`} className="p-2 border text-center h-14 align-middle">
-                                  <div
-                                    className={`status-cell-wrap ${currentStatus === 'Ready' || canCleanDirtyNow ? 'status-cell-wrap--clickable' : ''}`}
-                                    onDragOver={(e) => e.preventDefault()}
-                                    onDrop={async (e) => {
-                                      e.preventDefault();
-                                      const reservationId = e.dataTransfer.getData('reservation-id');
-                                      const fromRoomId = e.dataTransfer.getData('from-room-id');
-                                      const toRoomId = String(room.id);
-                                      if (!reservationId) return;
-                                      if (fromRoomId === toRoomId) return;
-                                      try {
-                                        const resp = await fetch(`/api/reservations/${reservationId}/move`, {
-                                          method: 'POST',
-                                          headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ to_room_id: toRoomId })
-                                        });
-                                        const data = await resp.json();
-                                        if (resp.ok) {
-                                          fetchData();
-                                          alert('Move berhasil');
-                                        } else {
-                                          alert('Move gagal: ' + (data.message || data.error || 'Unknown'));
-                                        }
-                                      } catch (err) {
-                                        console.error('Move error', err);
-                                        const message = err instanceof Error ? err.message : 'Unknown error';
-                                        alert('Move error: ' + message);
-                                      }
-                                    }}
-                                    onClick={() => {
-                                      if (currentStatus === 'Ready') {
-                                        const nextDay = new Date(day.raw);
-                                        nextDay.setDate(nextDay.getDate() + 1);
-                                        openQuickBooking(room.id, day.date, localDateISO(nextDay));
-                                      }
-                                      if (canCleanDirtyNow) {
-                                        setDirtyConfirmRoomId(Number(room.id));
-                                        setDirtyConfirmDate(day.date);
-                                        setDirtyConfirmOpen(true);
-                                      }
-                                    }}
-                                  >
-                                    {currentStatus === 'Ready' && <div className="status-ready-cell">Ready</div>}
-                                    {currentStatus === 'Maintenance' && <div className="status-maintenance-cell">Maintenance</div>}
-                                    {currentStatus === 'Occupied' && <div className="status-occupied-cell">Occupied</div>}
-                                    {currentStatus === 'Kotor' && <div className="status-kotor-cell">Dirty</div>}
-                                  </div>
-                                </td>
-                              );
-                              i += 1;
-                            }
-                          }
-                          return cells;
-                        })()}
-                      </tr>
+                                    );
+                                    i += spanAt.span;
+                                  } else {
+                                    const day = days[i];
+                                    const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.operational_status || room.status || undefined);
+                                    const isToday = day.date === getOperationalDateKey();
+                                    const cellState = !masterActive
+                                      ? 'Inactive'
+                                      : operationalStatus === 'Maintenance'
+                                        ? 'Maintenance'
+                                        : isToday && operationalStatus === 'Kotor'
+                                          ? 'Kotor'
+                                          : isToday && operationalStatus === 'Occupied'
+                                            ? 'Occupied'
+                                            : 'Available';
+                                    const canQuickBook = cellState === 'Available';
+                                    const canCleanDirtyNow = cellState === 'Kotor';
+                                    cells.push(
+                                      <td key={`${room.id}-${day.date}`} className="p-2 border text-center h-14 align-middle">
+                                        <div
+                                          className={`status-cell-wrap ${canQuickBook || canCleanDirtyNow ? 'status-cell-wrap--clickable' : ''}`}
+                                          onDragOver={(event) => { if (canQuickBook) event.preventDefault(); }}
+                                          onDrop={async (event) => {
+                                            if (!canQuickBook) return;
+                                            event.preventDefault();
+                                            const reservationId = event.dataTransfer.getData('reservation-id');
+                                            const fromRoomId = event.dataTransfer.getData('from-room-id');
+                                            const toRoomId = String(room.id);
+                                            if (!reservationId || fromRoomId === toRoomId) return;
+                                            try {
+                                              const response = await fetch(`/api/reservations/${reservationId}/move`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ to_room_id: toRoomId })
+                                              });
+                                              const data = await response.json();
+                                              if (response.ok) {
+                                                await fetchDataRef.current();
+                                                alert('Move berhasil');
+                                              } else {
+                                                alert('Move gagal: ' + (data.message || data.error || 'Unknown'));
+                                              }
+                                            } catch (err) {
+                                              console.error('Move error', err);
+                                              const message = err instanceof Error ? err.message : 'Unknown error';
+                                              alert('Move error: ' + message);
+                                            }
+                                          }}
+                                          onClick={() => {
+                                            if (canQuickBook) openQuickBooking(room, day.date, addHotelDays(day.date, 1));
+                                            if (canCleanDirtyNow) {
+                                              setDirtyConfirmRoomId(Number(room.id));
+                                              setDirtyConfirmDate(day.date);
+                                              setDirtyConfirmOpen(true);
+                                            }
+                                          }}
+                                        >
+                                          {cellState === 'Available' && <div className="status-available-cell">Tersedia</div>}
+                                          {cellState === 'Maintenance' && <div className="status-maintenance-cell">Maintenance</div>}
+                                          {cellState === 'Occupied' && <div className="status-occupied-cell">Occupied</div>}
+                                          {cellState === 'Kotor' && <div className="status-kotor-cell">Dirty</div>}
+                                          {cellState === 'Inactive' && <div className="status-inactive-cell">Nonaktif</div>}
+                                        </div>
+                                      </td>
+                                    );
+                                    i += 1;
+                                  }
+                                }
+                                return cells;
+                              })()}
+                            </tr>
+                          );
+                            })}
+                          </Fragment>
+                        ))}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
@@ -2400,7 +2553,15 @@ function App() {
                                   return (
                                   <select
                                     value={child.room_id ?? ''}
-                                    onChange={(e) => updateBookingChild(child.id, { room_id: e.target.value ? Number(e.target.value) : null })}
+                                    onChange={(e) => {
+                                      const roomId = e.target.value ? Number(e.target.value) : null;
+                                      const selectedRoom = roomId === null
+                                        ? null
+                                        : rooms.find((room: any) => Number(room.id) === roomId);
+                                      updateBookingChild(child.id, selectedRoom
+                                        ? canonicalCalendarRoomBinding(selectedRoom)
+                                        : { room_id: null, room_number: null });
+                                    }}
                                     disabled={isLoading}
                                   >
                                     <option value="">
@@ -2422,14 +2583,26 @@ function App() {
                                   })()}
                                 </div>
                                 <div className="booking-field">
-                                  <label>Varian Kamar *</label>
+                                  <label>Tipe Kamar *</label>
                                   <select
-                                    value={child.room_variant || quickBooking.roomVariant}
-                                    onChange={(e) => updateBookingChild(child.id, { room_variant: e.target.value })}
+                                    value={child.room_type_id ?? ''}
+                                    onChange={(e) => {
+                                      const roomTypeId = Number(e.target.value);
+                                       const representative = rooms.find((room: any) => Number(room.room_type_id) === roomTypeId);
+                                       updateBookingChild(child.id, {
+                                         ...(representative
+                                           ? canonicalRoomClassification(representative)
+                                           : { room_type_id: roomTypeId }),
+                                         room_variant: representative?.room_type_name || representative?.name || '',
+                                         room_id: null,
+                                         room_number: null,
+                                       });
+                                    }}
                                   >
-                                    <option value="Deluxe King">Deluxe King</option>
-                                    <option value="Superior Twin">Superior Twin</option>
-                                    <option value="Suite Family">Suite Family</option>
+                                    <option value="">Pilih tipe kamar</option>
+                                    {calendarTypeOptions.map((option) => (
+                                      <option key={option.id} value={option.id}>{option.label}</option>
+                                    ))}
                                   </select>
                                 </div>
                               </div>
@@ -2447,7 +2620,7 @@ function App() {
                                   <label>Check Out</label>
                                   <input
                                     type="date"
-                                    value={child.check_out || selectedRange.end || localDateISO(new Date(new Date(anchorDate).setDate(anchorDate.getDate() + 1)))}
+                                    value={child.check_out || selectedRange.end || addHotelDays(localDateISO(anchorDate), 1)}
                                     onChange={(e) => updateBookingChild(child.id, { check_out: e.target.value })}
                                   />
                                 </div>
@@ -2576,25 +2749,29 @@ function App() {
                     <button
                       disabled={bookingComposerChildren.length === 0 || bookingSubmitting}
                       onClick={async () => {
-                        if (bookingSubmitting) return;
-                        const name = quickBooking.guestName.trim() || 'Tamu';
-                        const phone = quickBooking.guestPhone.trim();
-                        const validChildren = bookingComposerChildren.filter((child) => child && child.room_id != null);
+                         if (bookingSubmitting) return;
+                         const name = quickBooking.guestName.trim() || 'Tamu';
+                         const phone = quickBooking.guestPhone.trim();
 
-                        if (validChildren.length === 0) { alert('Pilih setidaknya satu kamar'); return; }
-                        if (!phone) { alert('Nomor HP tamu wajib diisi'); return; }
+                         if (bookingComposerChildren.length === 0) { alert('Pilih setidaknya satu kamar'); return; }
+                         const incompleteChildIndex = bookingComposerChildren.findIndex((child) => canonicalBookingChildRoomId(child) === null);
+                         if (incompleteChildIndex !== -1) {
+                           alert(`Pilih ruangan untuk R${String(incompleteChildIndex + 1).padStart(2, '0')}`);
+                           return;
+                         }
+                         const validChildren = bookingComposerChildren;
+                         if (!phone) { alert('Nomor HP tamu wajib diisi'); return; }
 
-                        for (const child of validChildren) {
-                          const checkIn = child.check_in || '';
-                          const checkOut = child.check_out || '';
-                          if (!child.room_id) { alert(`Kamar belum dipilih pada ${child.id ? 'reservasi' : 'kamar'}`); return; }
-                          if (!checkIn || !checkOut) { alert('Isi check-in dan check-out untuk setiap kamar'); return; }
-                          if (new Date(checkOut) <= new Date(checkIn)) { alert(`Check-out harus setelah check-in pada kamar ${child.room_id}`); return; }
+                         for (const child of validChildren) {
+                           const checkIn = child.check_in || '';
+                           const checkOut = child.check_out || '';
+                           if (!checkIn || !checkOut) { alert('Isi check-in dan check-out untuk setiap kamar'); return; }
+                           if (new Date(checkOut) <= new Date(checkIn)) { alert(`Check-out harus setelah check-in pada kamar ${child.room_id}`); return; }
                         }
 
-                        const overlapMap = new Map<number, Array<{ start: string; end: string }>>();
-                        for (const child of validChildren) {
-                          const roomId = Number(child.room_id);
+                         const overlapMap = new Map<number, Array<{ start: string; end: string }>>();
+                         for (const child of validChildren) {
+                           const roomId = canonicalBookingChildRoomId(child)!;
                           const childPeriod = { start: child.check_in, end: child.check_out };
                           const existing = overlapMap.get(roomId) || [];
                           for (const existingPeriod of existing) {
@@ -2612,9 +2789,9 @@ function App() {
                           overlapMap.set(roomId, existing);
                         }
 
-                        const propertyId = (() => {
-                          const roomRef = validChildren.find((child) => child.room_id != null) || bookingComposerChildren[0];
-                          const roomInfo = roomRef && roomRef.room_id != null ? rooms.find((room) => Number(room.id) === Number(roomRef.room_id)) : null;
+                         const propertyId = (() => {
+                           const roomRef = validChildren[0];
+                           const roomInfo = rooms.find((room) => Number(room.id) === canonicalBookingChildRoomId(roomRef));
                           return Number(roomInfo?.property_id ?? rooms[0]?.property_id ?? 1);
                         })();
 
@@ -2636,9 +2813,9 @@ function App() {
                               : 0;
                             const amountPaid = Number(child.amount_paid || 0);
                             const totalPrice = Number(child.total_price ?? child.subtotal_amount ?? subtotal);
-                            const totalAfterDiscount = Math.max(totalPrice - (child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount), 0);
-                            return {
-                              room_id: Number(child.room_id),
+                             const totalAfterDiscount = Math.max(totalPrice - (child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount), 0);
+                             return {
+                               room_id: canonicalBookingChildRoomId(child)!,
                               guest_name: child.guest_name || name,
                               guest_phone: child.guest_phone || phone,
                               guest_segment: child.guest_segment || guestSegment,
@@ -2797,8 +2974,8 @@ function App() {
                           </td>
                           <td className="px-3 py-2">{res.room_number || res.room_id}</td>
                           <td className="px-3 py-2">
-                            <div>{res.check_in ? res.check_in.split('T')[0] : '-'}</div>
-                            <div className="text-slate-500">{res.check_out ? res.check_out.split('T')[0] : '-'}</div>
+                            <div>{normalizeHotelDate(res.check_in) || '-'}</div>
+                            <div className="text-slate-500">{normalizeHotelDate(res.check_out) || '-'}</div>
                           </td>
                           <td className="px-3 py-2">
                             <span className={`segment-badge segment-${(res.guest_segment || 'Reguler').toLowerCase()}`}>
@@ -2892,7 +3069,11 @@ function App() {
         )}
 
         {selectedMenu === 'Produk & Inventori' && (
-          <ProductInventorySection posMenuCount={posMenu.length} posOrderCount={posOrders.length} />
+          <ProductInventorySection
+            posMenuCount={posMenu.length}
+            posOrderCount={posOrders.length}
+            onViewReservation={viewRoomMasterReservation}
+          />
         )}
 
         {selectedMenu === 'Pelanggan' && (
@@ -3023,8 +3204,8 @@ function App() {
                           </div>
                           <div className="booking-child-item__meta">
                             <span>{child.room_variant || child.room_type || '—'}</span>
-                            <span>{child.check_in ? child.check_in.split('T')[0] : '—'}</span>
-                            <span>{child.check_out ? child.check_out.split('T')[0] : '—'}</span>
+                            <span>{normalizeHotelDate(child.check_in) || '—'}</span>
+                            <span>{normalizeHotelDate(child.check_out) || '—'}</span>
                           </div>
                         </button>
                       );
@@ -3057,11 +3238,11 @@ function App() {
                 <div className="detail-info-grid">
                   <div className="detail-info-card">
                     <div className="detail-card-label">Check-in</div>
-                    <div className="detail-card-value">{selectedRes.check_in ? selectedRes.check_in.split('T')[0] : '—'}</div>
+                    <div className="detail-card-value">{normalizeHotelDate(selectedRes.check_in) || '—'}</div>
                   </div>
                   <div className="detail-info-card">
                     <div className="detail-card-label">Check-out</div>
-                    <div className="detail-card-value">{selectedRes.check_out ? selectedRes.check_out.split('T')[0] : '—'}</div>
+                    <div className="detail-card-value">{normalizeHotelDate(selectedRes.check_out) || '—'}</div>
                   </div>
                   <div className="detail-info-card">
                     <div className="detail-card-label">Nights</div>
@@ -3307,7 +3488,7 @@ function App() {
               </div>
               <div className="text-xs text-slate-600 mb-2">
                 Check-out saat ini: <strong>{(() => {
-                return stayChangeReservation?.check_out ? localDateISO(stayChangeReservation.check_out) : '—';
+                return normalizeHotelDate(stayChangeReservation?.check_out) || '—';
                 })()}</strong>
               </div>
               <div className="text-xs text-slate-600 mb-2">

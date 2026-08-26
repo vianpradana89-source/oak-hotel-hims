@@ -16,6 +16,7 @@ export function httpError(statusCode: number, code: string, message: string): Ro
 }
 
 const TYPE_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,19}$/;
+const CATEGORY_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,19}$/;
 
 export function normalizeRoomTypeCode(raw: unknown): string | null {
   const value = String(raw ?? '').trim().toUpperCase();
@@ -54,6 +55,7 @@ function boundedText(raw: unknown, maxLength: number): string | null | undefined
 export type RoomTypeWriteModel = {
   code?: string;
   name?: string;
+  room_category_id?: number | null;
   description?: string | null;
   capacity?: number;
   max_adults?: number;
@@ -82,6 +84,19 @@ export function parseRoomTypePayload(body: any, mode: 'CREATE' | 'UPDATE'): Room
       errors.push('name is required');
     } else if (name !== undefined) {
       result.name = name as string;
+    }
+  }
+
+  if (body.room_category_id !== undefined) {
+    if (body.room_category_id === null) {
+      result.room_category_id = null;
+    } else {
+      const categoryId = toIntegerOrNull(body.room_category_id);
+      if (typeof body.room_category_id === 'boolean' || categoryId === null || categoryId <= 0) {
+        errors.push('room_category_id must be a positive integer or null');
+      } else {
+        result.room_category_id = categoryId;
+      }
     }
   }
 
@@ -150,6 +165,157 @@ export function parseRoomTypePayload(body: any, mode: 'CREATE' | 'UPDATE'): Room
   }
 
   return result;
+}
+
+export type RoomCategoryWriteModel = {
+  code?: string;
+  name?: string;
+  description?: string | null;
+  display_order?: number;
+  is_active?: boolean;
+};
+
+export function parseRoomCategoryPayload(body: any, mode: 'CREATE' | 'UPDATE'): RoomCategoryWriteModel {
+  const result: RoomCategoryWriteModel = {};
+  const errors: string[] = [];
+
+  if (mode === 'CREATE' || body.code !== undefined) {
+    const code = String(body.code ?? '').trim().toUpperCase();
+    if (!CATEGORY_CODE_PATTERN.test(code)) {
+      errors.push('code must match [A-Z0-9] followed by 1-19 characters of A-Z 0-9 _ -');
+    } else {
+      result.code = code;
+    }
+  }
+
+  if (mode === 'CREATE' || body.name !== undefined) {
+    const name = String(body.name ?? '').trim().replace(/\s+/g, ' ');
+    if (!name) {
+      errors.push('name is required');
+    } else if (name.length > 100) {
+      errors.push('name exceeds 100 characters');
+    } else {
+      result.name = name;
+    }
+  }
+
+  if (body.is_active !== undefined) {
+    if (typeof body.is_active !== 'boolean') {
+      errors.push('is_active must be a boolean');
+    } else {
+      result.is_active = body.is_active;
+    }
+  }
+
+  const description = boundedText(body.description, 500);
+  if (description !== undefined) {
+    result.description = description;
+  }
+
+  if (body.display_order !== undefined) {
+    const displayOrder = toIntegerOrNull(body.display_order);
+    if (displayOrder === null || displayOrder < 0) {
+      errors.push('display_order must be a non-negative integer');
+    } else {
+      result.display_order = displayOrder;
+    }
+  }
+
+  if (errors.length > 0) {
+    throw httpError(400, 'VALIDATION_ERROR', errors.join('; '));
+  }
+
+  return result;
+}
+
+export async function assertRoomCategoryUnique(
+  client: PoolClient | Pool,
+  propertyId: number,
+  code: string,
+  name: string,
+  excludeCategoryId?: number
+): Promise<void> {
+  const params: any[] = [propertyId, code, name];
+  let excludeSql = '';
+  if (excludeCategoryId !== undefined) {
+    params.push(excludeCategoryId);
+    excludeSql = ` AND id <> $${params.length}`;
+  }
+
+  const duplicate = await client.query(
+    `SELECT code
+     FROM room_categories
+     WHERE property_id = $1
+       AND (code = $2 OR LOWER(REGEXP_REPLACE(BTRIM(name), '[[:space:]]+', ' ', 'g')) = LOWER($3))
+       ${excludeSql}
+     ORDER BY CASE WHEN code = $2 THEN 0 ELSE 1 END
+     LIMIT 1`,
+    params
+  );
+  if ((duplicate.rowCount ?? 0) === 0) return;
+  if (duplicate.rows[0].code === code) {
+    throw httpError(409, 'ROOM_CATEGORY_CODE_EXISTS', `room category code ${code} already exists for this property`);
+  }
+  throw httpError(409, 'ROOM_CATEGORY_NAME_EXISTS', `room category name ${name} already exists for this property`);
+}
+
+export async function lockRoomCategoryForAssignment(
+  client: PoolClient,
+  categoryId: number,
+  propertyId: number | null,
+  rejectInactive: boolean
+): Promise<any> {
+  const result = await client.query('SELECT * FROM room_categories WHERE id = $1 FOR UPDATE', [categoryId]);
+  if ((result.rowCount ?? 0) === 0) {
+    throw httpError(404, 'ROOM_CATEGORY_NOT_FOUND', `room category ${categoryId} not found`);
+  }
+  const category = result.rows[0];
+  if (propertyId === null || propertyId === undefined || Number(category.property_id) !== Number(propertyId)) {
+    throw httpError(409, 'ROOM_CATEGORY_PROPERTY_MISMATCH', 'room category belongs to a different property');
+  }
+  if (rejectInactive && !category.is_active) {
+    throw httpError(409, 'ROOM_CATEGORY_INACTIVE', `room category ${category.code} (${category.name}) is inactive`);
+  }
+  return category;
+}
+
+export function roomMasterErrorResponse(err: unknown): {
+  statusCode: number;
+  body: { status: string; code: string; message: string };
+} {
+  const candidate = err as any;
+  if (candidate && typeof candidate.statusCode === 'number' && typeof candidate.code === 'string') {
+    return {
+      statusCode: candidate.statusCode,
+      body: {
+        status: candidate.statusCode === 409 ? 'CONFLICT' : 'ERROR',
+        code: candidate.code,
+        message: candidate.message
+      }
+    };
+  }
+
+  if (candidate?.code === '23505') {
+    const constraint = String(candidate.constraint ?? '').toLowerCase();
+    let code = 'ROOM_MASTER_DUPLICATE';
+    let message = 'a Room Master record with the same unique value already exists';
+    if (constraint.includes('room_categories') && constraint.includes('code')) {
+      code = 'ROOM_CATEGORY_CODE_EXISTS';
+      message = 'room category code already exists for this property';
+    } else if (constraint.includes('room_categories') && constraint.includes('name')) {
+      code = 'ROOM_CATEGORY_NAME_EXISTS';
+      message = 'room category name already exists for this property';
+    } else if (constraint.includes('room_types') && constraint.includes('code')) {
+      code = 'ROOM_TYPE_CODE_EXISTS';
+      message = 'room type code already exists for this property';
+    }
+    return { statusCode: 409, body: { status: 'CONFLICT', code, message } };
+  }
+
+  return {
+    statusCode: 500,
+    body: { status: 'ERROR', code: 'INTERNAL_ERROR', message: 'an unexpected Room Master error occurred' }
+  };
 }
 
 export async function assertRoomTypeCodeAvailable(
@@ -254,7 +420,8 @@ export async function assertDeactivationInventorySafe(
        AND (date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
        AND reserved_qty > $2
      ORDER BY date
-     LIMIT 5`,
+     LIMIT 5
+     FOR UPDATE`,
     [roomTypeId, resultingCapacity]
   );
   if ((conflicts.rowCount ?? 0) > 0) {
@@ -271,28 +438,53 @@ function jakartaDayKey(value: unknown): string {
   return new Date(date.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+export async function getActiveReservationsForRoom(
+  client: PoolClient | Pool,
+  roomId: number,
+  excludeReservationId?: number
+): Promise<any[]> {
+  const params: any[] = [roomId];
+  let exclusionSql = '';
+  if (excludeReservationId !== undefined) {
+    params.push(excludeReservationId);
+    exclusionSql = ` AND r.id <> $${params.length}`;
+  }
+  const result = await client.query(
+    `SELECT r.id, r.room_id, rm.room_number,
+            b.bid,
+            COALESCE(b.legacy_booking_number, r.booking_number) AS booking_number,
+            r.guest_name, r.status,
+            to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in,
+            to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out,
+            GREATEST(r.check_out::date - r.check_in::date, 0)::int AS nights,
+            CASE WHEN r.status = 'CHECKED_IN' THEN 'IN_HOUSE' ELSE 'UPCOMING' END AS classification
+     FROM reservations r
+     JOIN rooms rm ON rm.id = r.room_id
+     LEFT JOIN bookings b ON b.id = r.booking_id
+     WHERE r.room_id = $1
+       AND r.status IN ('BOOKED', 'CHECKED_IN')
+       ${exclusionSql}
+     ORDER BY CASE WHEN r.status = 'CHECKED_IN' THEN 0 ELSE 1 END,
+              r.check_in, r.id
+     FOR UPDATE OF r`,
+    params
+  );
+  return result.rows;
+}
+
 export async function countActiveReservationsForRoom(
   client: PoolClient | Pool,
   roomId: number,
   excludeReservationId?: number
 ): Promise<number> {
-  const params: any[] = [roomId];
-  let sql = `SELECT COUNT(*)::int AS active_count
-     FROM reservations
-     WHERE room_id = $1 AND status IN ('BOOKED', 'CHECKED_IN')`;
-  if (excludeReservationId !== undefined) {
-    params.push(excludeReservationId);
-    sql += ` AND id <> $${params.length}`;
-  }
-  const result = await client.query(sql, params);
-  return Number(result.rows[0]?.active_count || 0);
+  return (await getActiveReservationsForRoom(client, roomId, excludeReservationId)).length;
 }
 
 export async function writeRoomMasterAudit(
   client: PoolClient,
   entry: {
     action: string;
-    entity: 'ROOM_TYPE' | 'ROOM';
+    entity: 'ROOM_CATEGORY' | 'ROOM_TYPE' | 'ROOM';
     recordId: number | string;
     newValue: unknown;
   }

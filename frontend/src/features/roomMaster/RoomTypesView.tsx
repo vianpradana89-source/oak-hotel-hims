@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { roomMasterApi } from './roomMasterApi';
 import { describeApiError, EmptyState, ErrorState, LoadingState, MasterStatusBadge } from './roomMasterUi';
-import type { RoomType } from './roomMasterTypes';
+import type { RoomCategory, RoomType } from './roomMasterTypes';
 import RoomTypeModal from './RoomTypeModal';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 interface Props {
+  categories: RoomCategory[];
   roomTypes: RoomType[];
   loading: boolean;
   error: string | null;
@@ -17,6 +18,7 @@ interface Props {
 
 type ModalState = { kind: 'create' } | { kind: 'edit'; target: RoomType } | null;
 export default function RoomTypesView({
+  categories,
   roomTypes,
   loading,
   error,
@@ -30,17 +32,25 @@ export default function RoomTypesView({
   const [rowError, setRowError] = useState<{ code: string; message: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RoomType | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [categoryFilter, setCategoryFilter] = useState('all');
   const [search, setSearch] = useState('');
+
+  const categoryById = useMemo(
+    () => new Map(categories.map((category) => [category.id, category])),
+    [categories]
+  );
 
   const visibleTypes = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return roomTypes.filter((rt) => {
       if (statusFilter === 'active' && !rt.is_active) return false;
       if (statusFilter === 'inactive' && rt.is_active) return false;
-      if (needle && !`${rt.code} ${rt.name}`.toLowerCase().includes(needle)) return false;
+      if (categoryFilter !== 'all' && String(rt.room_category_id ?? '') !== categoryFilter) return false;
+      const category = rt.room_category_id == null ? null : categoryById.get(rt.room_category_id);
+      if (needle && !`${rt.code} ${rt.name} ${category?.code ?? ''} ${category?.name ?? ''}`.toLowerCase().includes(needle)) return false;
       return true;
     });
-  }, [roomTypes, statusFilter, search]);
+  }, [roomTypes, statusFilter, categoryFilter, categoryById, search]);
 
   async function toggleActive(roomType: RoomType) {
     setRowBusyId(roomType.id);
@@ -58,13 +68,26 @@ export default function RoomTypesView({
   return (
     <div className="rm-panel">
       <div className="rm-panel-toolbar">
-        <div className="rm-toolbar-title">Daftar Tipe Kamar</div>
+        <div className="rm-toolbar-title">Daftar Tipe / Varian Kamar</div>
         <button type="button" className="rm-btn rm-btn--primary" onClick={() => setModal({ kind: 'create' })}>
           + Tambah Tipe Kamar
         </button>
       </div>
 
-      <div className="rm-toolbar-filters" style={{ padding: '10px 14px', borderBottom: '1px solid var(--oak-divider)' }}>
+      <div className="rm-toolbar-filters rm-toolbar-filters--panel">
+        <select
+          className="rm-filter"
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          aria-label="Filter kategori kamar"
+        >
+          <option value="all">Semua Kategori</option>
+          {categories.map((category) => (
+            <option key={category.id} value={String(category.id)}>
+              {category.code} · {category.name}{category.is_active ? '' : ' (nonaktif)'}
+            </option>
+          ))}
+        </select>
         <select
           className="rm-filter"
           value={statusFilter}
@@ -76,14 +99,13 @@ export default function RoomTypesView({
           <option value="inactive">Nonaktif saja</option>
         </select>
         <input
-          className="rm-filter"
-          style={{ minWidth: 160 }}
+          className="rm-filter rm-filter--search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Cari kode / nama tipe…"
           aria-label="Cari tipe kamar"
         />
-        <span className="rm-cell-muted" style={{ fontSize: 11 }}>
+        <span className="rm-filter-count">
           {visibleTypes.length} / {roomTypes.length} tipe
         </span>
       </div>
@@ -120,6 +142,7 @@ export default function RoomTypesView({
               <tr>
                 <th>Kode</th>
                 <th>Nama Tipe</th>
+                <th>Kategori</th>
                 <th>Tipe Kasur</th>
                 <th>Okupansi</th>
                 <th>Kamar Aktif/Total</th>
@@ -130,6 +153,7 @@ export default function RoomTypesView({
             </thead>
             <tbody>
               {visibleTypes.map((rt) => {
+                const category = rt.room_category_id == null ? null : categoryById.get(rt.room_category_id);
                 const occupancy = [
                   rt.capacity != null ? `${rt.capacity} org` : null,
                   rt.max_adults != null || rt.max_children != null
@@ -142,6 +166,16 @@ export default function RoomTypesView({
                   <tr key={rt.id}>
                     <td className="rm-cell-strong">{rt.code}</td>
                     <td className="rm-type-name">{rt.name}</td>
+                    <td>
+                      {category ? (
+                        <>
+                          <span className="rm-type-name">{category.name}</span>{' '}
+                          <span className="rm-cell-muted">({category.code})</span>
+                        </>
+                      ) : (
+                        <span className="rm-cell-muted">Belum dikategorikan</span>
+                      )}
+                    </td>
                     <td className="rm-cell-muted">{rt.bed_type || '—'}</td>
                     <td>{occupancy || '—'}</td>
                     <td>
@@ -192,6 +226,7 @@ export default function RoomTypesView({
       {modal?.kind === 'create' && (
         <RoomTypeModal
           mode="create"
+          categories={categories}
           onClose={(changed) => {
             setModal(null);
             if (changed) onChanged('Tipe kamar baru dibuat.');
@@ -202,6 +237,7 @@ export default function RoomTypesView({
         <RoomTypeModal
           mode="edit"
           roomType={modal.target}
+          categories={categories}
           onClose={(changed) => {
             setModal(null);
             if (changed) onChanged(`Tipe ${modal.target.code} diperbarui.`);

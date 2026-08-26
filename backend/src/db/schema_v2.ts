@@ -199,6 +199,90 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS rm_1c_room_types_property_id_idx ON room_types (property_id);
   `);
 
+  // RM-2C.2: additive category/snapshot schema only. The approved production
+  // category seed and explicit room_type_id mapping live in the guarded SQL
+  // migration so normal startup never rewrites editable Room Master data.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS room_categories (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL,
+      code VARCHAR(20) NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      description VARCHAR(500),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    ALTER TABLE room_types ADD COLUMN IF NOT EXISTS room_category_id INTEGER;
+
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_type_id_snapshot INTEGER;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_type_code_snapshot VARCHAR(20);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_type_name_snapshot VARCHAR(100);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_category_id_snapshot INTEGER;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_category_code_snapshot VARCHAR(20);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booked_room_category_name_snapshot VARCHAR(100);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS classification_snapshot_source VARCHAR(30);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS classification_snapshotted_at TIMESTAMPTZ;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'room_categories'::regclass
+          AND conname = 'room_categories_property_id_fkey'
+      ) THEN
+        ALTER TABLE room_categories
+          ADD CONSTRAINT room_categories_property_id_fkey
+          FOREIGN KEY (property_id) REFERENCES properties(id)
+          ON UPDATE NO ACTION ON DELETE NO ACTION;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'room_types'::regclass
+          AND conname = 'room_types_room_category_property_check'
+      ) THEN
+        ALTER TABLE room_types
+          ADD CONSTRAINT room_types_room_category_property_check
+          CHECK (room_category_id IS NULL OR property_id IS NOT NULL);
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS room_categories_property_code_key
+      ON room_categories (property_id, code);
+    CREATE UNIQUE INDEX IF NOT EXISTS room_categories_property_normalized_name_key
+      ON room_categories (property_id, lower(regexp_replace(btrim(name), '[[:space:]]+', ' ', 'g')));
+    CREATE UNIQUE INDEX IF NOT EXISTS room_categories_property_id_id_key
+      ON room_categories (property_id, id);
+    CREATE INDEX IF NOT EXISTS room_categories_property_id_idx
+      ON room_categories (property_id);
+    CREATE INDEX IF NOT EXISTS room_categories_is_active_idx
+      ON room_categories (is_active);
+
+    CREATE INDEX IF NOT EXISTS room_types_room_category_id_idx
+      ON room_types (room_category_id);
+    CREATE INDEX IF NOT EXISTS room_types_property_room_category_id_idx
+      ON room_types (property_id, room_category_id);
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'room_types'::regclass
+          AND conname = 'room_types_property_room_category_fkey'
+      ) THEN
+        ALTER TABLE room_types
+          ADD CONSTRAINT room_types_property_room_category_fkey
+          FOREIGN KEY (property_id, room_category_id)
+          REFERENCES room_categories (property_id, id)
+          ON UPDATE NO ACTION ON DELETE NO ACTION;
+      END IF;
+    END $$;
+
+  `);
+
   // Migrasi kolom baru pada tabel yang sudah ada sebelumnya
   await pool.query(`
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_number VARCHAR(50);
@@ -263,11 +347,12 @@ export async function initializeDatabase(pool: Pool) {
 //   are irrelevant here and must never influence physical capacity.
 //
 // - Inactive room types are skipped so they cannot seed sellable future capacity.
-// - Existing rows are never rewritten: ON CONFLICT only adopts an unclaimed
-//   legacy row into canonical identity when the exact name matches
-//   (COALESCE keeps any existing non-null id). total_rooms and reserved_qty
-//   of existing rows stay untouched; safe today/future drift is owned by the
-//   RM-1C.1 reconciliation authority.
+// - Existing rows are never rewritten. Startup's RM-1B compatibility backfill
+//   adopts exact-name legacy rows; this seeder arbitrates only on canonical
+//   (room_type_id, date). total_rooms and reserved_qty of existing rows stay
+//   untouched; safe today/future drift is owned by RM-1C.1 reconciliation.
+// - Duplicate display names remain valid because they are not identity. Their
+//   new legacy text mirrors are disambiguated while canonical ids stay primary.
 // - Dates are derived from Asia/Jakarta hotel-date semantics.
 export async function seedAvailabilityDates(pool: Pool) {
   const todayResult = await pool.query(
@@ -277,7 +362,11 @@ export async function seedAvailabilityDates(pool: Pool) {
 
   const canonicalTypes = await pool.query(`
     SELECT rt.id AS room_type_id,
-           rt.name AS room_type,
+           CASE
+             WHEN COUNT(*) OVER (PARTITION BY rt.name) > 1
+               THEN LEFT(rt.name, 80) || ' [RT-' || rt.id || ']'
+             ELSE rt.name
+           END AS room_type,
            COUNT(r.id) FILTER (WHERE COALESCE(r.is_active, TRUE))::int AS active_rooms
     FROM room_types rt
     LEFT JOIN rooms r ON r.room_type_id = rt.id
@@ -293,8 +382,7 @@ export async function seedAvailabilityDates(pool: Pool) {
       await pool.query(
         `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
          VALUES ($1, $2, ($3::date + ($4 || ' days')::interval), $5, 0)
-         ON CONFLICT (room_type, date) DO UPDATE
-           SET room_type_id = COALESCE(availability_dates.room_type_id, EXCLUDED.room_type_id)`,
+         ON CONFLICT (room_type_id, date) WHERE room_type_id IS NOT NULL DO NOTHING`,
         [rt.room_type_id, rt.room_type, todayKey, String(i), totalRooms]
       );
     }

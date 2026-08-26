@@ -141,24 +141,23 @@ async function testRoomsExposeCanonicalIdentity() {
   passedScenarios += 1;
 }
 
-async function testAvailabilityByIdMatchesByName() {
+async function testAvailabilityCanonicalAndExplicitLegacyModes() {
   const room = await pickSellableRoom();
   const start = addDays(localDate(), 45);
   const end = addDays(start, 3);
-  const byName = await request('GET', `/api/availability?room_type=${encodeURIComponent(room.room_type)}&start=${start}&end=${end}`, null, correlationId('AVAIL-NAME'));
-  expect(byName.status === 200, `availability by name failed: ${byName.text}`);
   const byId = await request('GET', `/api/availability?room_type_id=${room.room_type_id}&start=${start}&end=${end}`, null, correlationId('AVAIL-ID'));
   expect(byId.status === 200, `availability by room_type_id failed: ${byId.text}`);
 
   expect(byId.json.data.length > 0, 'availability by id returned no rows');
-  expect(byName.json.data.length === byId.json.data.length, 'name-based and id-based availability row counts differ');
-  for (let i = 0; i < byId.json.data.length; i++) {
-    const a = byName.json.data[i];
-    const b = byId.json.data[i];
-    expect(String(a.date).slice(0, 10) === String(b.date).slice(0, 10), `date mismatch at index ${i}`);
-    expect(Number(a.sellable) === Number(b.sellable), `sellable mismatch on ${b.date}: name=${a.sellable} id=${b.sellable}`);
-    expect(b.room_type_id === room.room_type_id, `row missing canonical room_type_id on ${b.date}`);
+  for (const row of byId.json.data) {
+    expect(Number(row.room_type_id) === Number(room.room_type_id), `row missing canonical room_type_id on ${row.date}`);
   }
+
+  const implicitName = await request('GET', `/api/availability?room_type=${encodeURIComponent(room.room_type)}&start=${start}&end=${end}`, null, correlationId('AVAIL-NAME'));
+  expect(implicitName.status === 400, `implicit name-only availability should fail, got ${implicitName.status}`);
+  const explicitLegacy = await request('GET', `/api/availability?legacy_compatible=true&room_type=${encodeURIComponent(room.room_type)}&start=${start}&end=${end}`, null, correlationId('AVAIL-LEGACY'));
+  expect(explicitLegacy.status === 200, `explicit legacy availability failed: ${explicitLegacy.text}`);
+  expect(explicitLegacy.json.data.every((row) => row.room_type_id === null), 'legacy availability merged canonical rows');
 
   const bad = await request('GET', `/api/availability?room_type_id=abc&start=${start}&end=${end}`, null, correlationId('AVAIL-BAD'));
   expect(bad.status === 400, `invalid room_type_id should 400, got ${bad.status}`);
@@ -290,7 +289,6 @@ async function testCheckoutReleasesInventoryDriftFix() {
 async function testLockEndpointDualWrite() {
   const room = await pickSellableRoom();
   const holdAStart = addDays(localDate(), 65);
-  const holdBStart = addDays(localDate(), 66);
 
   const lock = await request('POST', '/api/availability/lock', {
     room_type_id: room.room_type_id,
@@ -309,47 +307,60 @@ async function testLockEndpointDualWrite() {
   expect(lockRows.rowCount > 0, 'lock row missing canonical room_type_id (dual-write broken)');
   expect(lockRows.rows[0].room_type === room.room_type, 'lock row legacy name mismatch');
 
-  const legacyLock = await request('POST', '/api/availability/lock', {
+  const implicitNameLock = await request('POST', '/api/availability/lock', {
     room_type: room.room_type,
-    start: holdBStart,
-    end: addDays(holdBStart, 1),
+    start: addDays(localDate(), 66),
+    end: addDays(localDate(), 67),
     qty: 1,
     ttl_minutes: 30
   }, correlationId('LOCK-NAME'));
-  expect(legacyLock.status === 200, `legacy name-only lock failed: ${legacyLock.text}`);
+  expect(implicitNameLock.status === 400, `implicit name-only lock should fail: ${implicitNameLock.text}`);
 
   await pool.query(
-    'DELETE FROM availability_locks WHERE room_type_id = $1 AND date IN ($2::date, $3::date)',
-    [room.room_type_id, holdAStart, holdBStart]
+    'DELETE FROM availability_locks WHERE room_type_id = $1 AND date = $2::date',
+    [room.room_type_id, holdAStart]
   );
-  await recomputeReserved(room.room_type, room.room_type_id, [holdAStart, holdBStart]);
+  await recomputeReserved(room.room_type, room.room_type_id, [holdAStart]);
   passedScenarios += 1;
 }
 
-async function testLegacyFallbackDualRead() {
+// C3C post-hardening: verify NULL room_type_id is DB-rejected, implicit
+// name-only requests are rejected, and canonical room_type_id is required.
+async function testC3CContractNullIdRejected() {
   const room = await pickSellableRoom();
   const probeDate = addDays(localDate(), 70);
 
-  // simulate a pre-migration legacy row with NULL canonical id
-  await pool.query(
-    'UPDATE availability_dates SET room_type_id = NULL WHERE room_type_id = $1 AND date = $2::date',
-    [room.room_type_id, probeDate]
-  );
-
+  // A. NULL room_type_id INSERT is DB-rejected (C3C NOT NULL enforcement)
+  let nullIdError = null;
   try {
-    const byName = await request('GET', `/api/availability?room_type=${encodeURIComponent(room.room_type)}&start=${probeDate}&end=${addDays(probeDate, 1)}`, null, correlationId('LEGACY-READ'));
-    expect(byName.status === 200, `legacy fallback read failed: ${byName.text}`);
-    expect(byName.json.data.length === 1, `legacy fallback should match by name (got ${byName.json.data.length} rows)`);
-
-    const byId = await request('GET', `/api/availability?room_type_id=${room.room_type_id}&start=${probeDate}&end=${addDays(probeDate, 1)}`, null, correlationId('LEGACY-READ-ID'));
-    expect(byId.status === 200, `id read over legacy row failed: ${byId.text}`);
-    expect(byId.json.data.length === 1, 'dual-read: id lookup must fall back to name when room_type_id IS NULL');
-  } finally {
     await pool.query(
-      'UPDATE availability_dates SET room_type_id = $1 WHERE room_type_id IS NULL AND room_type = $2 AND date = $3::date',
-      [room.room_type_id, room.room_type, probeDate]
+      `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+       VALUES (NULL, $1, $2::date, 1, 0)`,
+      [room.room_type, probeDate]
     );
-  }
+  } catch (error) { nullIdError = error; }
+  expect(nullIdError?.code === '23502', `A: NULL room_type_id insert was not rejected (code=${nullIdError?.code})`);
+
+  // B. Implicit name-only availability request is rejected (no room_type_id)
+  const implicitName = await request('GET', `/api/availability?room_type=${encodeURIComponent(room.room_type)}&start=${probeDate}&end=${addDays(probeDate, 1)}`, null, correlationId('IMPLICIT-NAME'));
+  expect(implicitName.status === 400, `B: implicit name-only request should fail, got ${implicitName.status}`);
+
+  // C. Explicit canonical room_type_id request succeeds
+  const canonicalRead = await request('GET', `/api/availability?room_type_id=${room.room_type_id}&start=${probeDate}&end=${addDays(probeDate, 1)}`, null, correlationId('CANONICAL-READ'));
+  expect(canonicalRead.status === 200, `C: canonical read failed: ${canonicalRead.text}`);
+  expect(canonicalRead.json.data.length === 1, `C: canonical read returned wrong row count (got ${canonicalRead.json.data.length})`);
+  expect(Number(canonicalRead.json.data[0].room_type_id) === Number(room.room_type_id), 'C: canonical read room_type_id mismatch');
+
+  // D. room_type text without canonical ID cannot substitute
+  const legacySubError = await request('GET', `/api/availability?legacy_compatible=true&room_type=${encodeURIComponent(room.room_type)}&start=${probeDate}&end=${addDays(probeDate, 1)}`, null, correlationId('LEGACY-SUB'));
+  expect(legacySubError.status === 200, `D: legacy-compatible read failed: ${legacySubError.text}`);
+  expect(legacySubError.json.data.every((row) => row.room_type_id === null || Number(row.room_type_id) === Number(room.room_type_id)),
+    'D: legacy read must not return rows with mismatched canonical id');
+
+  // E. Canonical inventory unchanged after all probes
+  const finalRow = await availabilityRow(room.room_type_id, probeDate);
+  expect(finalRow !== null, 'E: canonical availability row disappeared after probes');
+  expect(Number(finalRow.room_type_id) === Number(room.room_type_id), 'E: canonical row room_type_id changed');
   passedScenarios += 1;
 }
 
@@ -433,13 +444,13 @@ async function main() {
 
   try {
     await testRoomsExposeCanonicalIdentity();
-    await testAvailabilityByIdMatchesByName();
+    await testAvailabilityCanonicalAndExplicitLegacyModes();
     await testBookingCreateDualWritesCanonicalIdentity();
     await testExtendShortenUsesCanonicalIdentity();
     await testCancelReleasesUnderCanonicalIdentity();
     await testCheckoutReleasesInventoryDriftFix();
     await testLockEndpointDualWrite();
-    await testLegacyFallbackDualRead();
+    await testC3CContractNullIdRejected();
     await testTapechartExposesCanonicalIdentity();
   } finally {
     for (const cleanup of trackedCleanups) {

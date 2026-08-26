@@ -18,11 +18,38 @@ export class RoomMasterApiError extends Error {
   }
 }
 
+export interface RoomCategory {
+  id: number;
+  property_id?: number | null;
+  code: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+  display_order: number | null;
+  room_type_count?: number;
+  physical_room_count?: number;
+}
+
+export type RoomCategoryWritePayload = {
+  code?: string;
+  name?: string;
+  description?: string | null;
+};
+
+export type RoomCategoryReorderPayload = {
+  property_id: number;
+  category_ids: number[];
+};
+
 export interface RoomType {
   id: number;
   property_id?: number | null;
   code: string;
   name: string;
+  room_category_id: number | null;
+  room_category_code?: string | null;
+  room_category_name?: string | null;
+  room_category_is_active?: boolean | null;
   description: string | null;
   capacity: number | null;
   max_adults: number | null;
@@ -40,6 +67,7 @@ export interface RoomType {
 export type RoomTypeWritePayload = {
   code?: string;
   name?: string;
+  room_category_id?: number | null;
   description?: string | null;
   capacity?: number;
   max_adults?: number;
@@ -62,6 +90,27 @@ export interface PhysicalRoom {
   status: string | null;
   is_active: boolean;
   active_reservation_count?: number;
+}
+
+export interface ActiveRoomReservation {
+  id: number;
+  room_id: number;
+  room_number: string;
+  bid: string | null;
+  booking_number: string | null;
+  guest_name: string;
+  status: 'BOOKED' | 'CHECKED_IN';
+  check_in: string;
+  check_out: string;
+  nights: number;
+  classification: 'IN_HOUSE' | 'UPCOMING';
+}
+
+export interface ActiveRoomReservationDrilldown {
+  room_id: number;
+  room_number: string;
+  active_reservation_count: number;
+  reservations: ActiveRoomReservation[];
 }
 
 export type PhysicalRoomWritePayload = {
