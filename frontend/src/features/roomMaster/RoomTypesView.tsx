@@ -254,7 +254,11 @@ export default function RoomTypesView({
         <ConfirmDeleteModal
           title={`Hapus Tipe Kamar ${deleteTarget.code}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika tipe kamar belum memiliki riwayat."
-          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoomType(deleteTarget.id, propertyId)}
+          onConfirm={async () => {
+            if (propertyId !== null) {
+              await roomMasterApi.deleteRoomType(deleteTarget.id, propertyId);
+            }
+          }}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

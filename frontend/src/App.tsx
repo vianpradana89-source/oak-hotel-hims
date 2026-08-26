@@ -820,12 +820,17 @@ function App() {
   }, [days[0]?.date, days[days.length - 1]?.date, calendarIncludeInactive, selectedMenu, propertyId]);
 
   const fetchOperationsData = async () => {
-    if (propertyId === null) return;
+    if (propertyId === null) {
+      setPosMenu([]);
+      return;
+    }
+    const targetPropertyId = propertyId;
+    setPosMenu([]);
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, guestsRes, employeesRes, payrollRes] = await Promise.all([
-        fetch(`/api/housekeeping/tasks?property_id=${propertyId}`),
-        fetch(`/api/maintenance/tasks?property_id=${propertyId}`),
-        fetch('/api/pos/menu'),
+        fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
+        fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
+        fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
         fetch('/api/pos/orders'),
         fetch('/api/accounting/summary'),
         fetch('/api/guest-profiles'),
@@ -842,6 +847,7 @@ function App() {
       const employeesData = await employeesRes.json();
       const payrollData = await payrollRes.json();
 
+      if (targetPropertyId !== propertyId) return;
       if (housekeepingData?.status === 'OK') setHousekeepingTasks(housekeepingData.data || []);
       if (maintenanceData?.status === 'OK') setMaintenanceTasks(maintenanceData.data || []);
       if (posMenuData?.status === 'OK') setPosMenu(posMenuData.data?.items || []);

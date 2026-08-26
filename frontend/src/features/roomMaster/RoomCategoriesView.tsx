@@ -403,7 +403,11 @@ export default function RoomCategoriesView({
         <ConfirmDeleteModal
           title={`Hapus Kategori ${deleteTarget.code}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika kategori tidak digunakan oleh tipe / varian atau snapshot reservasi."
-          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoomCategory(deleteTarget.id, propertyId)}
+          onConfirm={async () => {
+            if (propertyId !== null) {
+              await roomMasterApi.deleteRoomCategory(deleteTarget.id, propertyId);
+            }
+          }}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

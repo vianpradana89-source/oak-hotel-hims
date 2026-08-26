@@ -425,7 +425,11 @@ export default function PhysicalRoomsView({
         <ConfirmDeleteModal
           title={`Hapus Kamar ${deleteTarget.room_number}?`}
           description="Penghapusan permanen hanya dapat dilakukan jika kamar belum memiliki riwayat operasional."
-          onConfirm={() => propertyId !== null && roomMasterApi.deleteRoom(deleteTarget.id, propertyId)}
+          onConfirm={async () => {
+            if (propertyId !== null) {
+              await roomMasterApi.deleteRoom(deleteTarget.id, propertyId);
+            }
+          }}
           onCancelled={() => setDeleteTarget(null)}
           onDeleted={() => {
             setDeleteTarget(null);

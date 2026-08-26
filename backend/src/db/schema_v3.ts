@@ -66,12 +66,14 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS pos_menu_categories (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       name VARCHAR(100) NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS pos_menu_items (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       category_id INTEGER REFERENCES pos_menu_categories(id),
       item_code VARCHAR(50),
       name VARCHAR(100) NOT NULL,
@@ -324,29 +326,88 @@ export async function initializeDatabase(pool: Pool) {
   `);
 
   // Housekeeping and maintenance seed data removed — property_id required
+  // POS menu seed data removed — property_id required
 
-  const categoryCount = await pool.query('SELECT COUNT(*) AS total FROM pos_menu_categories');
-  if (Number(categoryCount.rows[0].total) === 0) {
-    const categoryInsert = await pool.query(`
-      INSERT INTO pos_menu_categories (name)
-      VALUES ('Makanan'), ('Minuman'), ('Snack'), ('Room Service')
-      RETURNING id, name`);
+  // POS menu property isolation (idempotent for existing DBs)
+  await pool.query(`
+    ALTER TABLE pos_menu_categories ADD COLUMN IF NOT EXISTS property_id INTEGER;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS property_id INTEGER;
 
-    const categories = categoryInsert.rows;
-    const categoryMap: Record<string, number> = {};
-    for (const c of categories) categoryMap[c.name] = c.id;
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='pos_menu_categories' AND column_name='property_id' AND is_nullable='YES') THEN
+        UPDATE pos_menu_categories pmc
+        SET property_id = p.id
+        FROM properties p
+        WHERE pmc.property_id IS NULL
+          AND (
+            p.property_code = 'LWG'
+            OR p.name = 'OAK Lawang'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM properties p2
+            WHERE p2.id <> p.id
+              AND (p2.property_code = 'LWG' OR p2.name = 'OAK Lawang')
+          );
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='pos_menu_items' AND column_name='property_id' AND is_nullable='YES') THEN
+        UPDATE pos_menu_items pmi
+        SET property_id = p.id
+        FROM properties p
+        WHERE pmi.property_id IS NULL
+          AND (
+            p.property_code = 'LWG'
+            OR p.name = 'OAK Lawang'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM properties p2
+            WHERE p2.id <> p.id
+              AND (p2.property_code = 'LWG' OR p2.name = 'OAK Lawang')
+          );
+      END IF;
+    END $$;
 
-    await pool.query(`
-      INSERT INTO pos_menu_items (category_id, item_code, name, description, price)
-      VALUES
-        ($1, 'FO-001', 'Nasi Goreng Spesial', 'Nasi goreng dengan telur, ayam, dan sayur', 35000),
-        ($1, 'FO-002', 'Ayam Bakar Rica', 'Ayam bakar bumbu rica', 45000),
-        ($2, 'DR-001', 'Es Teh Manis', 'Minuman dingin segar', 8000),
-        ($2, 'DR-002', 'Cappuccino', 'Kopi khas dengan susu foam', 25000),
-        ($3, 'SN-001', 'Kentang Goreng', 'Kentang goreng renyah', 18000),
-        ($4, 'RS-001', 'Breakfast Set', 'Paket sarapan room service', 42000)
-    `, [categoryMap['Makanan'], categoryMap['Minuman'], categoryMap['Snack'], categoryMap['Room Service']]);
-  }
+    ALTER TABLE pos_menu_categories ALTER COLUMN property_id SET NOT NULL;
+    ALTER TABLE pos_menu_items ALTER COLUMN property_id SET NOT NULL;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_pmc_property') THEN
+        ALTER TABLE pos_menu_categories ADD CONSTRAINT fk_pmc_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_pmi_property') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT fk_pmi_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pmc_property_name ON pos_menu_categories(property_id, name);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_code ON pos_menu_items(property_id, item_code) WHERE item_code IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pmc_property ON pos_menu_categories(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pmi_property ON pos_menu_items(property_id);
+
+    CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.category_id IS NOT NULL THEN
+        IF (SELECT property_id FROM pos_menu_categories WHERE id = NEW.category_id) IS DISTINCT FROM NEW.property_id THEN
+          RAISE EXCEPTION 'POS menu item property_id must match its category property_id';
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'pos_menu_items_enforce_property_scope') THEN
+        CREATE TRIGGER pos_menu_items_enforce_property_scope
+        BEFORE INSERT OR UPDATE OF property_id, category_id ON pos_menu_items
+        FOR EACH ROW
+        EXECUTE FUNCTION pos_menu_items_enforce_property_scope();
+      END IF;
+    END $$;
+  `);
 
   const accountCount = await pool.query('SELECT COUNT(*) AS total FROM accounting_gl_accounts');
   if (Number(accountCount.rows[0].total) === 0) {

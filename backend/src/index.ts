@@ -2680,14 +2680,27 @@ app.patch('/api/maintenance/tasks/:id/status', async (req, res) => {
 
 app.get('/api/pos/menu', async (req, res) => {
   try {
-    const categories = await pool.query('SELECT * FROM pos_menu_categories ORDER BY id');
+    const propertyIdRaw = req.query.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    const categories = await pool.query('SELECT * FROM pos_menu_categories WHERE property_id = $1 ORDER BY id', [propertyId]);
     const items = await pool.query(`
       SELECT mi.*, pmc.name AS category_name
       FROM pos_menu_items mi
       LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
-      WHERE mi.is_active = TRUE
+      WHERE mi.is_active = TRUE AND mi.property_id = $1
       ORDER BY mi.id
-    `);
+    `, [propertyId]);
 
     res.json({ status: 'OK', data: { categories: categories.rows, items: items.rows } });
   } catch (err: any) {
