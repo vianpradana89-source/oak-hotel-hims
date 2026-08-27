@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { TransactionReservationList } from './features/transactions/TransactionReservationList.tsx';
+import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
@@ -78,7 +79,6 @@ function App() {
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
   const [financeSummary, setFinanceSummary] = useState<any>(null);
-  const [guestProfiles, setGuestProfiles] = useState<any[]>([]);
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<'Kalender' | 'Transaksi' | 'Laporan' | 'Produk & Inventori' | 'Pelanggan' | 'Pengaturan'>('Kalender');
@@ -795,13 +795,12 @@ function App() {
     setPosOrders([]);
     setFinanceSummary(null);
     try {
-      const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, guestsRes, employeesRes, payrollRes] = await Promise.all([
+      const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes] = await Promise.all([
         fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
         fetch('/api/pos/orders?property_id=' + targetPropertyId),
         fetch('/api/accounting/summary?property_id=' + targetPropertyId),
-        fetch('/api/guest-profiles'),
         fetch('/api/hr/employees'),
         fetch('/api/hr/payroll')
       ]);
@@ -811,7 +810,6 @@ function App() {
       const posMenuData = await posMenuRes.json();
       const posOrderData = await posOrderRes.json();
       const financeData = await financeRes.json();
-      const guestsData = await guestsRes.json();
       const employeesData = await employeesRes.json();
       const payrollData = await payrollRes.json();
 
@@ -821,7 +819,6 @@ function App() {
       if (posMenuData?.status === 'OK') setPosMenu(posMenuData.data?.items || []);
       if (posOrderData?.status === 'OK') setPosOrders(posOrderData.data || []);
       if (financeData?.status === 'OK') setFinanceSummary(financeData.data || null);
-      if (guestsData?.status === 'OK') setGuestProfiles(guestsData.data || []);
       if (employeesData?.status === 'OK') setEmployees(employeesData.data || []);
       if (payrollData?.status === 'OK') setPayroll(payrollData.data || []);
     } catch (error) {
@@ -3253,21 +3250,7 @@ function App() {
         )}
 
         {selectedMenu === 'Pelanggan' && (
-          <div className="bg-white border rounded shadow-sm p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-lg">Guest CRM</h3>
-              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">{guestProfiles.length}</span>
-            </div>
-            <div className="space-y-2">
-              {guestProfiles.map((guest: any) => (
-                <div key={guest.id} className="border rounded p-3 text-sm">
-                  <div className="font-semibold">{guest.full_name}</div>
-                  <div className="text-gray-600">{guest.email || guest.phone || '-'}</div>
-                  <div className="text-gray-500">Tier: {guest.loyalty_tier}</div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <GuestCrmWorkspace propertyId={propertyId} />
         )}
 
         {selectedMenu === 'Pengaturan' && (

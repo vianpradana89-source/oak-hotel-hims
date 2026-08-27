@@ -1,9 +1,12 @@
 import type { Pool, PoolClient } from 'pg';
 import type {
+  DuplicateCandidateCluster,
   Guest,
+  GuestCrmSummary,
   GuestCreateInput,
   GuestRole,
   GuestUpdateInput,
+  GuestWithStats,
   MatchClassification,
   ReservationGuest,
   ReservationGuestCreateInput,
@@ -184,8 +187,9 @@ export async function searchGuests(
   propertyId: number,
   search?: string,
   limit = 50,
-  offset = 0
-): Promise<{ guests: Guest[]; total: number }> {
+  offset = 0,
+  vipStatus?: string
+): Promise<{ guests: GuestWithStats[]; total: number }> {
   await assertPropertyExists(pool, propertyId);
 
   const safeLimit = Math.max(1, Math.min(limit, 100));
@@ -204,56 +208,400 @@ export async function searchGuests(
     )
   `;
 
+  const conditions: string[] = [baseFilter];
+  const params: any[] = [propertyId];
+
   if (search && search.trim()) {
     const term = search.trim();
-    const searchPattern = `%${term}%`;
-    const countRes = await pool.query(
-      `SELECT COUNT(DISTINCT g.id)::int as total
-       FROM guests g
-       WHERE ${baseFilter}
-         AND (
-           g.full_name ILIKE $2
-           OR g.phone ILIKE $2
-           OR g.email ILIKE $2
-         )`,
-      [propertyId, searchPattern]
-    );
-    const total = countRes.rows[0]?.total || 0;
-
-    const res = await pool.query(
-      `SELECT g.*
-       FROM guests g
-       WHERE ${baseFilter}
-         AND (
-           g.full_name ILIKE $2
-           OR g.phone ILIKE $2
-           OR g.email ILIKE $2
-         )
-       ORDER BY g.updated_at DESC, g.id DESC
-       LIMIT $3 OFFSET $4`,
-      [propertyId, searchPattern, safeLimit, safeOffset]
-    );
-    return { guests: res.rows, total };
+    params.push(`%${term}%`);
+    conditions.push(`(
+      g.full_name ILIKE $${params.length}
+      OR g.phone ILIKE $${params.length}
+      OR g.email ILIKE $${params.length}
+    )`);
   }
 
-  // Without search query: list guests belonging to this property
+  if (vipStatus && ['STANDARD', 'VIP', 'VVIP'].includes(vipStatus.trim().toUpperCase())) {
+    params.push(vipStatus.trim().toUpperCase());
+    conditions.push(`g.vip_status = $${params.length}`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
   const countRes = await pool.query(
     `SELECT COUNT(DISTINCT g.id)::int as total
      FROM guests g
-     WHERE ${baseFilter}`,
-    [propertyId]
+     WHERE ${whereClause}`,
+    params
   );
   const total = countRes.rows[0]?.total || 0;
 
+  params.push(safeLimit);
+  const limitParam = `$${params.length}`;
+  params.push(safeOffset);
+  const offsetParam = `$${params.length}`;
+
   const res = await pool.query(
-    `SELECT g.*
+    `SELECT
+       g.*,
+       COALESCE(stats.visit_count, 0)::int AS visit_count,
+       COALESCE(stats.room_nights, 0)::int AS room_nights,
+       stats.first_stay,
+       stats.last_stay
      FROM guests g
-     WHERE ${baseFilter}
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         COALESCE(SUM(r.check_out::date - r.check_in::date), 0)::int AS room_nights,
+         TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
+         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE rg.guest_id = g.id
+         AND b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+     ) stats ON true
+     WHERE ${whereClause}
      ORDER BY g.updated_at DESC, g.id DESC
-     LIMIT $2 OFFSET $3`,
-    [propertyId, safeLimit, safeOffset]
+     LIMIT ${limitParam} OFFSET ${offsetParam}`,
+    params
   );
+
   return { guests: res.rows, total };
+}
+
+export async function getCrmSummary(
+  pool: Pool,
+  propertyId: number,
+  hotelDateInput?: string
+): Promise<GuestCrmSummary> {
+  await assertPropertyExists(pool, propertyId);
+
+  const hotelDate = hotelDateInput && /^\d{4}-\d{2}-\d{2}$/.test(hotelDateInput.trim())
+    ? hotelDateInput.trim()
+    : new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+
+  // 1. Core Summary Metrics Aggregation
+  const summaryRes = await pool.query(
+    `WITH property_guests AS (
+       SELECT g.id, g.birth_date, g.full_name, g.phone, g.email, g.vip_status
+       FROM guests g
+       WHERE (
+         g.created_property_id = $1
+         OR EXISTS (
+           SELECT 1
+           FROM reservation_guests rg
+           JOIN reservations r ON rg.reservation_id = r.id
+           JOIN bookings b ON r.booking_id = b.id
+           WHERE rg.guest_id = g.id AND b.property_id = $1
+         )
+       )
+     ),
+     guest_stats AS (
+       SELECT
+         pg.id AS guest_id,
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         MIN(r.check_in::date) AS first_stay_date,
+         MAX(r.check_out::date) AS last_stay_date
+       FROM property_guests pg
+       JOIN reservation_guests rg ON rg.guest_id = pg.id
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+       GROUP BY pg.id
+     )
+     SELECT
+       (SELECT COUNT(*)::int FROM property_guests) AS total_guests,
+       (SELECT COUNT(*)::int FROM guest_stats WHERE visit_count >= 1) AS guests_with_qualifying_stay,
+       (SELECT COUNT(*)::int FROM guest_stats WHERE visit_count >= 2) AS repeat_guests,
+       (SELECT COUNT(*)::int FROM guest_stats WHERE first_stay_date >= ($2::date - INTERVAL '30 days')) AS new_guests_last_30d,
+       (SELECT COUNT(*)::int FROM guest_stats WHERE last_stay_date <= ($2::date - INTERVAL '90 days')) AS dormant_guests_90d`,
+    [propertyId, hotelDate]
+  );
+
+  const summaryRow = summaryRes.rows[0] || {};
+  const totalGuests = Number(summaryRow.total_guests || 0);
+  const guestsWithQualifyingStay = Number(summaryRow.guests_with_qualifying_stay || 0);
+  const repeatGuests = Number(summaryRow.repeat_guests || 0);
+  const newGuestsLast30d = Number(summaryRow.new_guests_last_30d || 0);
+  const dormantGuests90d = Number(summaryRow.dormant_guests_90d || 0);
+  const repeatRate = guestsWithQualifyingStay > 0
+    ? Number(((repeatGuests / guestsWithQualifyingStay) * 100).toFixed(1))
+    : 0;
+
+  // 2. Birthdays This Month (Strictly property-scoped)
+  const birthdaysRes = await pool.query(
+    `SELECT
+       g.id,
+       g.full_name,
+       g.phone,
+       g.email,
+       TO_CHAR(g.birth_date, 'YYYY-MM-DD') AS birth_date,
+       EXTRACT(DAY FROM g.birth_date)::int AS birth_day,
+       EXTRACT(MONTH FROM g.birth_date)::int AS birth_month,
+       g.vip_status
+     FROM guests g
+     WHERE (
+       g.created_property_id = $1
+       OR EXISTS (
+         SELECT 1
+         FROM reservation_guests rg
+         JOIN reservations r ON rg.reservation_id = r.id
+         JOIN bookings b ON r.booking_id = b.id
+         WHERE rg.guest_id = g.id AND b.property_id = $1
+       )
+     )
+     AND g.birth_date IS NOT NULL
+     AND EXTRACT(MONTH FROM g.birth_date) = EXTRACT(MONTH FROM $2::date)
+     ORDER BY EXTRACT(DAY FROM g.birth_date) ASC, g.full_name ASC
+     LIMIT 50`,
+    [propertyId, hotelDate]
+  );
+
+  // 3. Follow Up / Dormant Candidates (Stays >= 90 days ago at this property)
+  const followUpRes = await pool.query(
+    `SELECT
+       g.id,
+       g.full_name,
+       g.phone,
+       g.email,
+       g.vip_status,
+       TO_CHAR(stats.last_stay_date, 'YYYY-MM-DD') AS last_stay,
+       ($2::date - stats.last_stay_date)::int AS days_since_last_stay,
+       stats.visit_count
+     FROM guests g
+     JOIN (
+       SELECT
+         rg.guest_id,
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         MAX(r.check_out::date) AS last_stay_date
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+       GROUP BY rg.guest_id
+     ) stats ON g.id = stats.guest_id
+     WHERE (
+       g.created_property_id = $1
+       OR EXISTS (
+         SELECT 1
+         FROM reservation_guests rg2
+         JOIN reservations r2 ON rg2.reservation_id = r2.id
+         JOIN bookings b2 ON r2.booking_id = b2.id
+         WHERE rg2.guest_id = g.id AND b2.property_id = $1
+       )
+     )
+     AND stats.last_stay_date <= ($2::date - INTERVAL '90 days')
+     ORDER BY stats.last_stay_date ASC
+     LIMIT 50`,
+    [propertyId, hotelDate]
+  );
+
+  return {
+    property_id: propertyId,
+    hotel_date: hotelDate,
+    total_guests: totalGuests,
+    guests_with_qualifying_stay: guestsWithQualifyingStay,
+    repeat_guests: repeatGuests,
+    repeat_rate: repeatRate,
+    new_guests_last_30d: newGuestsLast30d,
+    dormant_guests_90d: dormantGuests90d,
+    birthdays_this_month: birthdaysRes.rows,
+    follow_up_candidates: followUpRes.rows
+  };
+}
+
+export async function getDuplicateCandidates(
+  pool: Pool,
+  propertyId: number
+): Promise<DuplicateCandidateCluster[]> {
+  await assertPropertyExists(pool, propertyId);
+
+  const baseFilter = `
+    (
+      g.created_property_id = $1
+      OR EXISTS (
+        SELECT 1
+        FROM reservation_guests rg
+        JOIN reservations r ON rg.reservation_id = r.id
+        JOIN bookings b ON r.booking_id = b.id
+        WHERE rg.guest_id = g.id AND b.property_id = $1
+      )
+    )
+  `;
+
+  // 1. Matching Phone Candidates
+  const phoneRes = await pool.query(
+    `WITH visible_guests AS (
+       SELECT g.*
+       FROM guests g
+       WHERE ${baseFilter}
+         AND g.phone IS NOT NULL
+         AND TRIM(g.phone) != ''
+     ),
+     matched_keys AS (
+       SELECT TRIM(phone) AS phone_key
+       FROM visible_guests
+       GROUP BY TRIM(phone)
+       HAVING COUNT(*) >= 2
+     )
+     SELECT
+       vg.*,
+       COALESCE(stats.visit_count, 0)::int AS visit_count,
+       COALESCE(stats.room_nights, 0)::int AS room_nights,
+       stats.first_stay,
+       stats.last_stay
+     FROM visible_guests vg
+     JOIN matched_keys mk ON TRIM(vg.phone) = mk.phone_key
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         COALESCE(SUM(r.check_out::date - r.check_in::date), 0)::int AS room_nights,
+         TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
+         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE rg.guest_id = vg.id
+         AND b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+     ) stats ON true
+     ORDER BY TRIM(vg.phone), vg.id ASC`,
+    [propertyId]
+  );
+
+  // 2. Matching Email Candidates
+  const emailRes = await pool.query(
+    `WITH visible_guests AS (
+       SELECT g.*
+       FROM guests g
+       WHERE ${baseFilter}
+         AND g.email IS NOT NULL
+         AND TRIM(g.email) != ''
+     ),
+     matched_keys AS (
+       SELECT LOWER(TRIM(email)) AS email_key
+       FROM visible_guests
+       GROUP BY LOWER(TRIM(email))
+       HAVING COUNT(*) >= 2
+     )
+     SELECT
+       vg.*,
+       COALESCE(stats.visit_count, 0)::int AS visit_count,
+       COALESCE(stats.room_nights, 0)::int AS room_nights,
+       stats.first_stay,
+       stats.last_stay
+     FROM visible_guests vg
+     JOIN matched_keys mk ON LOWER(TRIM(vg.email)) = mk.email_key
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         COALESCE(SUM(r.check_out::date - r.check_in::date), 0)::int AS room_nights,
+         TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
+         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE rg.guest_id = vg.id
+         AND b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+     ) stats ON true
+     ORDER BY LOWER(TRIM(vg.email)), vg.id ASC`,
+    [propertyId]
+  );
+
+  // 3. Matching Name + DOB Candidates
+  const nameDobRes = await pool.query(
+    `WITH visible_guests AS (
+       SELECT g.*
+       FROM guests g
+       WHERE ${baseFilter}
+         AND g.birth_date IS NOT NULL
+         AND g.full_name IS NOT NULL
+         AND TRIM(g.full_name) != ''
+     ),
+     matched_keys AS (
+       SELECT LOWER(TRIM(full_name)) AS name_key, birth_date AS dob_key
+       FROM visible_guests
+       GROUP BY LOWER(TRIM(full_name)), birth_date
+       HAVING COUNT(*) >= 2
+     )
+     SELECT
+       vg.*,
+       COALESCE(stats.visit_count, 0)::int AS visit_count,
+       COALESCE(stats.room_nights, 0)::int AS room_nights,
+       stats.first_stay,
+       stats.last_stay
+     FROM visible_guests vg
+     JOIN matched_keys mk ON LOWER(TRIM(vg.full_name)) = mk.name_key AND vg.birth_date = mk.dob_key
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         COALESCE(SUM(r.check_out::date - r.check_in::date), 0)::int AS room_nights,
+         TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
+         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE rg.guest_id = vg.id
+         AND b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+     ) stats ON true
+     ORDER BY LOWER(TRIM(vg.full_name)), vg.birth_date, vg.id ASC`,
+    [propertyId]
+  );
+
+  const clusters: DuplicateCandidateCluster[] = [];
+
+  // Group Phone matches
+  const phoneGroups = new Map<string, GuestWithStats[]>();
+  for (const row of phoneRes.rows) {
+    const key = String(row.phone || '').trim();
+    if (!phoneGroups.has(key)) phoneGroups.set(key, []);
+    phoneGroups.get(key)!.push(row);
+  }
+  for (const [key, guests] of phoneGroups.entries()) {
+    clusters.push({
+      match_reason: 'PHONE',
+      match_key: key,
+      guests
+    });
+  }
+
+  // Group Email matches
+  const emailGroups = new Map<string, GuestWithStats[]>();
+  for (const row of emailRes.rows) {
+    const key = String(row.email || '').trim().toLowerCase();
+    if (!emailGroups.has(key)) emailGroups.set(key, []);
+    emailGroups.get(key)!.push(row);
+  }
+  for (const [key, guests] of emailGroups.entries()) {
+    clusters.push({
+      match_reason: 'EMAIL',
+      match_key: key,
+      guests
+    });
+  }
+
+  // Group Name + DOB matches
+  const nameDobGroups = new Map<string, GuestWithStats[]>();
+  for (const row of nameDobRes.rows) {
+    const key = `${String(row.full_name || '').trim().toLowerCase()} | ${row.birth_date ? new Date(row.birth_date).toISOString().slice(0, 10) : ''}`;
+    if (!nameDobGroups.has(key)) nameDobGroups.set(key, []);
+    nameDobGroups.get(key)!.push(row);
+  }
+  for (const [key, guests] of nameDobGroups.entries()) {
+    clusters.push({
+      match_reason: 'NAME_AND_DOB',
+      match_key: key,
+      guests
+    });
+  }
+
+  return clusters;
 }
 
 export async function getGuestById(
@@ -278,6 +626,7 @@ export async function getGuestById(
        rg.role,
        rg.relationship,
        rg.is_staying,
+       rg.is_legacy_inferred,
        rg.identity_verified,
        rg.relation_source
      FROM reservation_guests rg

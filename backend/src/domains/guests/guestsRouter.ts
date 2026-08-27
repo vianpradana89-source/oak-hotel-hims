@@ -4,6 +4,8 @@ import {
   addReservationGuest,
   createGuest,
   deleteReservationGuest,
+  getCrmSummary,
+  getDuplicateCandidates,
   getGuestById,
   httpError,
   listReservationGuests,
@@ -36,15 +38,45 @@ function handleRouterError(err: any, res: any) {
 export function createGuestsRouter(pool: Pool) {
   const router = Router();
 
-  // GET /api/guests?property_id=X&search=...&limit=...&offset=...
+  // GET /api/guests/crm-summary?property_id=X&hotel_date=YYYY-MM-DD
+  router.get('/crm-summary', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      const hotelDate = typeof req.query.hotel_date === 'string' ? req.query.hotel_date : undefined;
+      const summary = await getCrmSummary(pool, propertyId, hotelDate);
+      return res.json({
+        status: 'SUCCESS',
+        data: summary
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // GET /api/guests/duplicate-candidates?property_id=X
+  router.get('/duplicate-candidates', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      const clusters = await getDuplicateCandidates(pool, propertyId);
+      return res.json({
+        status: 'SUCCESS',
+        data: clusters
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // GET /api/guests?property_id=X&search=...&limit=...&offset=...&vip_status=...
   router.get('/', async (req: any, res: any) => {
     try {
       const propertyId = parsePropertyId(req.query.property_id, 'property_id');
       const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+      const vipStatus = typeof req.query.vip_status === 'string' ? req.query.vip_status : undefined;
       const limit = req.query.limit !== undefined ? Number(req.query.limit) : 50;
       const offset = req.query.offset !== undefined ? Number(req.query.offset) : 0;
 
-      const result = await searchGuests(pool, propertyId, search, limit, offset);
+      const result = await searchGuests(pool, propertyId, search, limit, offset, vipStatus);
       return res.json({
         status: 'SUCCESS',
         data: result.guests,

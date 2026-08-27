@@ -104,3 +104,53 @@ export interface ReservationGuestUpdateInput {
   is_staying?: boolean;
   identity_verified?: boolean;
 }
+
+export interface GuestStayStatistics {
+  visit_count: number;
+  room_nights: number;
+  first_stay: string | null;
+  last_stay: string | null;
+}
+
+export interface GuestWithStats extends Guest, GuestStayStatistics {}
+
+export interface GuestCrmBirthdayItem {
+  id: number;
+  full_name: string;
+  phone: string | null;
+  email: string | null;
+  birth_date: string;
+  birth_day: number;
+  birth_month: number;
+  vip_status: VipStatus;
+}
+
+export interface GuestCrmFollowUpItem {
+  id: number;
+  full_name: string;
+  phone: string | null;
+  email: string | null;
+  vip_status: VipStatus;
+  last_stay: string;
+  days_since_last_stay: number;
+  visit_count: number;
+}
+
+export interface GuestCrmSummary {
+  property_id: number;
+  hotel_date: string;
+  total_guests: number;
+  guests_with_qualifying_stay: number;
+  repeat_guests: number;
+  repeat_rate: number;
+  new_guests_last_30d: number;
+  dormant_guests_90d: number;
+  birthdays_this_month: GuestCrmBirthdayItem[];
+  follow_up_candidates: GuestCrmFollowUpItem[];
+}
+
+export interface DuplicateCandidateCluster {
+  match_reason: 'PHONE' | 'EMAIL' | 'NAME_AND_DOB';
+  match_key: string;
+  guests: GuestWithStats[];
+}
