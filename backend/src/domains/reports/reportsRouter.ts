@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate';
+import { calculateOccupancy } from './occupancyService';
 
 function parsePositiveInt(value: any): number | null {
   const n = Number(value);
@@ -178,6 +179,62 @@ export function createReportsRouter(pool: Pool): Router {
       console.error('Error in /api/reports/daily-operations:', err);
       return res.status(500).json({
         status: 'ERROR',
+        message: err.message || 'Internal server error'
+      });
+    }
+  });
+
+  /**
+   * GET /api/reports/occupancy
+   * Query params:
+   *   - property_id (required, positive integer)
+   *   - start_date (optional, YYYY-MM-DD)
+   *   - end_date (optional, YYYY-MM-DD)
+   *   - date (optional, YYYY-MM-DD)
+   *   - include_room_types (optional boolean, default true)
+   *   - include_daily (optional boolean, default true)
+   */
+  router.get('/occupancy', async (req: Request, res: Response) => {
+    try {
+      const rawPropId = req.query.property_id;
+      const propertyId = parsePositiveInt(rawPropId);
+      if (propertyId === null) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id is required and must be a positive integer'
+        });
+      }
+
+      const includeRoomTypes = req.query.include_room_types !== 'false';
+      const includeDaily = req.query.include_daily !== 'false';
+
+      const result = await calculateOccupancy(pool, {
+        property_id: propertyId,
+        start_date: req.query.start_date as string | undefined,
+        end_date: req.query.end_date as string | undefined,
+        date: req.query.date as string | undefined,
+        include_room_types: includeRoomTypes,
+        include_daily: includeDaily
+      });
+
+      return res.json({
+        status: 'SUCCESS',
+        data: result
+      });
+    } catch (err: any) {
+      if (err.statusCode && err.code) {
+        return res.status(err.statusCode).json({
+          status: 'ERROR',
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {})
+        });
+      }
+      console.error('Error in /api/reports/occupancy:', err);
+      return res.status(500).json({
+        status: 'ERROR',
+        code: 'INTERNAL_ERROR',
         message: err.message || 'Internal server error'
       });
     }
