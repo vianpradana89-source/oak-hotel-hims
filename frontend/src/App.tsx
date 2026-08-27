@@ -95,6 +95,7 @@ function App() {
 
   const [transactionReservations, setTransactionReservations] = useState<any[]>([]);
   const [transactionLoading, setTransactionLoading] = useState<boolean>(false);
+  const [transactionError, setTransactionError] = useState<string | null>(null);
   const transactionRequestVersionRef = useRef(0);
 
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
@@ -883,24 +884,29 @@ function App() {
     const propId = targetPropId !== undefined ? targetPropId : propertyId;
     if (propId === null || propId === undefined) {
       setTransactionReservations([]);
+      setTransactionError(null);
       setTransactionLoading(false);
       return;
     }
     const requestVersion = ++transactionRequestVersionRef.current;
     setTransactionLoading(true);
+    setTransactionError(null);
     try {
       const res = await fetch(`/api/reservations?property_id=${propId}`);
-      const json = await res.json();
+      const json = await res.json().catch(() => null);
       if (requestVersion !== transactionRequestVersionRef.current) return;
-      if (json.status === 'OK' && Array.isArray(json.data)) {
+      if (res.ok && (json?.status === 'SUCCESS' || json?.status === 'OK') && Array.isArray(json?.data)) {
         setTransactionReservations(json.data);
+        setTransactionError(null);
       } else {
         setTransactionReservations([]);
+        setTransactionError(json?.message || 'Gagal memuat data reservasi');
       }
-    } catch (err) {
+    } catch (err: any) {
       if (requestVersion !== transactionRequestVersionRef.current) return;
       console.error('Error fetching transaction reservations', err);
       setTransactionReservations([]);
+      setTransactionError(err?.message || 'Gagal terhubung ke server');
     } finally {
       if (requestVersion === transactionRequestVersionRef.current) {
         setTransactionLoading(false);
@@ -944,6 +950,7 @@ function App() {
   useEffect(() => {
     if (propertyId === null) {
       setTransactionReservations([]);
+      setTransactionError(null);
       setDailyOperations(null);
       return;
     }
@@ -2262,6 +2269,7 @@ function App() {
                    const val = Number(e.target.value);
                    if (Number.isInteger(val) && val > 0) {
                      setTransactionReservations([]);
+                     setTransactionError(null);
                      setDailyOperations(null);
                      transactionRequestVersionRef.current++;
                      dailyOperationsRequestVersionRef.current++;
@@ -3119,6 +3127,11 @@ function App() {
               {transactionLoading ? (
                 <div className="p-8 text-center text-slate-500">
                   <div className="text-sm font-semibold">Memuat data reservasi...</div>
+                </div>
+              ) : transactionError ? (
+                <div className="p-6 text-center text-rose-700 bg-rose-50 border border-rose-200 rounded-xl">
+                  <div className="text-sm font-semibold mb-1">⚠️ Gagal Memuat Data Reservasi</div>
+                  <div className="text-xs text-rose-600">{transactionError}</div>
                 </div>
               ) : filteredReservations.length === 0 ? (
                 <div className="p-8 text-center text-slate-400">
