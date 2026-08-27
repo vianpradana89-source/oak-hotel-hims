@@ -89,7 +89,7 @@ async function main() {
       'room_types', 'room_categories',
       'bookings',
       'idempotency_keys', 'payment_transactions', 'folio_entries',
-      'housekeeping_tasks', 'maintenance_tasks',
+      'housekeeping_tasks', 'maintenance_tasks', 'room_operational_blocks',
       'pos_menu_categories', 'pos_menu_items', 'pos_orders', 'pos_order_items',
       'accounting_gl_accounts', 'accounting_journal_entries', 'accounting_journal_lines',
       'vendor_payables', 'guest_receivables', 'guest_profiles', 'guest_profile_history',
@@ -147,6 +147,10 @@ async function main() {
       "SELECT 1 FROM schema_migrations WHERE version = 'b4b_historical_audit_backfill'"
     );
     assert(markerCheck.rowCount === 1, 'L7. b4b_historical_audit_backfill migration marker exists');
+    var markerCheckBlocks = await testPool.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'b4c2_1_room_operational_blocks'"
+    );
+    assert(markerCheckBlocks.rowCount === 1, 'L8. b4c2_1_room_operational_blocks migration marker exists');
 
     assert(await countRows('properties') === 0, 'M. zero properties is valid');
     assert(await countRows('rooms') === 0, 'N. zero rooms is valid');

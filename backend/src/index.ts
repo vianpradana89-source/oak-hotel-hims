@@ -12,6 +12,7 @@ import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesR
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
+import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
   applyCancellationInventoryPlan,
@@ -480,7 +481,9 @@ async function lockAndValidateAvailabilityDates(
     const reservedQty = availability.reservedQty;
     const totalRooms = availability.totalRooms;
     if (mode === 'EXTEND') {
-      if (reservedQty >= totalRooms) {
+      const blockedCount = await getBlockedRoomsCountForTypeAndDate(client, roomTypeId, date);
+      const sellableCapacity = totalRooms - blockedCount;
+      if (reservedQty >= sellableCapacity) {
         throw new Error(`capacity exhausted for ${roomType.roomTypeName} on ${date}`);
       }
     } else if (reservedQty < 1) {
@@ -674,6 +677,44 @@ async function findActiveRoomOverlap(
      FOR UPDATE OF existing`,
     [targetRoomId, requestedCheckOut, requestedCheckIn, excludeReservationId]
   );
+}
+
+async function findActiveOperationalBlockOverlap(
+  client: any,
+  targetRoomId: number,
+  requestedCheckIn: string | Date,
+  requestedCheckOut: string | Date,
+  excludeBlockId: number | null = null
+) {
+  return client.query(
+    `SELECT id, block_type, start_date, end_date
+     FROM room_operational_blocks
+     WHERE room_id = $1
+       AND status IN ('ACTIVE', 'RELEASED')
+       AND start_date < $2::date
+       AND end_date > $3::date
+       AND ($4::int IS NULL OR id <> $4)
+     LIMIT 1
+     FOR UPDATE`,
+    [targetRoomId, requestedCheckOut, requestedCheckIn, excludeBlockId]
+  );
+}
+
+async function getBlockedRoomsCountForTypeAndDate(
+  client: any,
+  roomTypeId: number,
+  date: string
+): Promise<number> {
+  const res = await client.query(
+    `SELECT COUNT(*)::int AS blocked_count
+     FROM room_operational_blocks
+     WHERE room_type_id = $1
+       AND status IN ('ACTIVE', 'RELEASED')
+       AND start_date <= $2::date
+       AND end_date > $2::date`,
+    [roomTypeId, date]
+  );
+  return Number(res.rows[0]?.blocked_count || 0);
 }
 
 function normalizeBookingSourceValue(value: any): 'OTA' | 'WALKIN' {
@@ -1134,6 +1175,10 @@ async function createCanonicalBooking(
           code: ROOM_OVERLAP_SQLSTATE
         });
       }
+      const blockOverlap = await findActiveOperationalBlockOverlap(client, child.roomId, child.checkIn, child.checkOut);
+      if (hasRows(blockOverlap)) {
+        throw createHttpError(409, `room is out of order or out of service during requested stay`);
+      }
     }
 
     // C2C2: LOCK AVAILABILITY after RESERVATION, using deterministic helper.
@@ -1152,10 +1197,17 @@ async function createCanonicalBooking(
         throw createHttpError(409, `availability row missing for ${key.ident.roomTypeName} on ${key.date}`);
       }
 
-      if (availability.reservedQty + key.delta > availability.totalRooms) {
+      const blockedCount = await getBlockedRoomsCountForTypeAndDate(
+        client,
+        requireCanonicalRoomTypeId(key.ident, `booking availability on ${key.date}`),
+        key.date
+      );
+      const sellableCapacity = availability.totalRooms - blockedCount;
+
+      if (availability.reservedQty + key.delta > sellableCapacity) {
         throw createHttpError(
           409,
-          `Not enough availability for ${key.ident.roomTypeName} on ${key.date} (available=${availability.totalRooms - availability.reservedQty}, requested=${key.delta})`
+          `Not enough availability for ${key.ident.roomTypeName} on ${key.date} (available=${Math.max(0, sellableCapacity - availability.reservedQty)}, requested=${key.delta})`
         );
       }
     }
@@ -2619,7 +2671,10 @@ app.get('/api/rooms', async (req, res) => {
              COALESCE(r.name, rt.name) AS legacy_name, r.status,
              COALESCE(r.is_active, TRUE) AS is_active,
              r.floor, r.notes,
-             COALESCE(ar.active_reservations, 0) AS active_reservation_count
+             COALESCE(ar.active_reservations, 0) AS active_reservation_count,
+             cur_block.block_type AS operational_block_type,
+             cur_block.active_block_id AS operational_block_id,
+             cur_block.reason AS operational_block_reason
       FROM rooms r
       LEFT JOIN room_types rt ON rt.id = r.room_type_id
       LEFT JOIN (
@@ -2628,6 +2683,14 @@ app.get('/api/rooms', async (req, res) => {
         WHERE res.status IN ('BOOKED', 'CHECKED_IN')
         GROUP BY res.room_id
       ) ar ON ar.room_id = r.id
+      LEFT JOIN (
+        SELECT room_id, block_type, reason, id AS active_block_id
+        FROM room_operational_blocks
+        WHERE property_id = $1
+          AND status = 'ACTIVE'
+          AND start_date <= ((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date
+          AND end_date > ((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date
+      ) cur_block ON cur_block.room_id = r.id
       ${whereClause}
       ORDER BY r.room_number
     `, params);
@@ -3509,6 +3572,15 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       await client.query('ROLLBACK');
       return sendRoomOverlapConflict(res);
     }
+    const blockOverlap = await findActiveOperationalBlockOverlap(client, roomId, oldCheckOut, requestedCheckOut);
+    if (hasRows(blockOverlap)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'CONFLICT',
+        code: 'ROOM_OUT_OF_SERVICE',
+        message: 'room is out of order or out of service during requested extension'
+      });
+    }
 
     const availabilityRows = await lockAndValidateAvailabilityDates(client, roomType, deltaDates, 'EXTEND');
     const roomTypeId = requireCanonicalRoomTypeId(roomType, 'reservation extend');
@@ -3793,6 +3865,15 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     if (hasRows(overlap)) {
       await client.query('ROLLBACK');
       return sendRoomOverlapConflict(res);
+    }
+    const blockOverlap = await findActiveOperationalBlockOverlap(client, roomId, current.check_in, current.check_out);
+    if (hasRows(blockOverlap)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'CONFLICT',
+        code: 'ROOM_OUT_OF_SERVICE',
+        message: 'room is out of order or out of service during requested stay'
+      });
     }
     const nextStatus = current.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'CHECKED_IN';
     const updated = await client.query(
@@ -4287,6 +4368,7 @@ app.use('/api/room-categories', createRoomCategoriesRouter(pool));
 app.use('/api/room-types', createRoomTypesRouter(pool));
 app.use('/api/rooms', createRoomsRouter(pool));
 app.use('/api/reports', createReportsRouter(pool));
+app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
 
 
 // GET tapechart: rooms × dates with reservations per cell
@@ -4568,6 +4650,15 @@ app.post('/api/reservations/:id/move', async (req, res) => {
         await client.query('ROLLBACK');
         return sendRoomOverlapConflict(res);
       }
+      const blockOverlap = await findActiveOperationalBlockOverlap(client, targetRoomId, reservation.check_in, reservation.check_out);
+      if (hasRows(blockOverlap)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'CONFLICT',
+          code: 'ROOM_OUT_OF_SERVICE',
+          message: 'target room is out of order or out of service during requested stay'
+        });
+      }
     }
 
     // C2C2: Determine identity change and collect ALL availability identities.
@@ -4588,7 +4679,9 @@ app.post('/api/reservations/:id/move', async (req, res) => {
         const toKey = availabilityMapKey(toIdent, date);
         const toAvail = availMap.get(toKey);
         if (!toAvail) throw new Error(`No availability record for ${toIdent.roomTypeName} on ${date}`);
-        const available = toAvail.totalRooms - toAvail.reservedQty;
+        const toBlockedCount = await getBlockedRoomsCountForTypeAndDate(client, toRoomTypeId, date);
+        const toSellableCapacity = toAvail.totalRooms - toBlockedCount;
+        const available = toSellableCapacity - toAvail.reservedQty;
         if (available < 1) throw new Error(`Not enough availability for ${toIdent.roomTypeName} on ${date}`);
 
         const srcKey = availabilityMapKey(fromIdent, date);

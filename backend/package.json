@@ -26,6 +26,8 @@
     "test:rm2e1-category-reorder": "npm run build && node test/rm2e1_room_category_reorder_test.js",
     "test:concurrency": "node test/concurrency_test.js",
     "test:idempotency": "node test/idempotency_test.js",
+    "test:room-operational-blocks": "node test/property_scoped_room_operational_blocks_test.js",
+    "test:room-blocks-migration": "node test/room_blocks_migration_sealing_test.js",
     "test:booking-invariants": "node scripts/booking_invariants.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
