@@ -3868,19 +3868,60 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
 
 app.post('/api/reservations/:id/payments', async (req, res) => {
   const reservationId = Number(req.params.id);
-  const { amount, payment_method, reference_code, transaction_type } = req.body;
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+
+  const { property_id: propertyIdRaw, amount, payment_method, reference_code, transaction_type } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   if (!amount || Number(amount) <= 0) {
-    return res.status(400).json({ status: 'ERROR', message: 'amount must be greater than zero' });
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be greater than zero' });
   }
 
   const client = await pool.connect();
   try {
+    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
     await client.query('BEGIN');
-    const reservation = await client.query('SELECT id, total_price, amount_paid, payment_status FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
+    const reservation = await client.query(`
+      SELECT
+        r.id,
+        r.total_price,
+        r.amount_paid,
+        r.payment_status,
+        r.booking_id,
+        b.property_id AS booking_property_id
+      FROM reservations r
+      LEFT JOIN bookings b ON b.id = r.booking_id
+      WHERE r.id = $1
+      FOR UPDATE OF r
+    `, [reservationId]);
+
     if (!hasRows(reservation)) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+      return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: 'reservation not found' });
+    }
+
+    const bookingPropertyId = reservation.rows[0].booking_property_id;
+    if (bookingPropertyId === null || bookingPropertyId === undefined) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
+    }
+
+    if (Number(bookingPropertyId) !== propertyId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
     }
 
     const paymentAmount = Number(amount);
@@ -3911,7 +3952,7 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
     await client.query('COMMIT');
     res.json({ status: 'SUCCESS', data: { payment: payment.rows[0], reservation: withReservationHotelDates(updated.rows[0]) } });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     res.status(500).json({ status: 'ERROR', message: err.message });
   } finally {
     client.release();
@@ -3920,20 +3961,49 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
 
 app.get('/api/reservations/:id/folio', async (req, res) => {
   const reservationId = Number(req.params.id);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
   try {
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
     const reservation = await pool.query(`
       SELECT 
         r.*,
         r.id as reservation_id,
         r.booking_number as legacy_booking_number,
         b.bid,
-        b.id as booking_id_value
+        b.id as booking_id_value,
+        b.property_id as booking_property_id
       FROM reservations r
       LEFT JOIN bookings b ON b.id = r.booking_id
       WHERE r.id = $1
     `, [reservationId]);
+
     if (!hasRows(reservation)) {
-      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
+      return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: 'reservation not found' });
+    }
+
+    const bookingPropertyId = reservation.rows[0].booking_property_id;
+    if (bookingPropertyId === null || bookingPropertyId === undefined) {
+      return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
+    }
+
+    if (Number(bookingPropertyId) !== propertyId) {
+      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
     }
 
     const payments = await pool.query('SELECT * FROM payment_transactions WHERE reservation_id = $1 ORDER BY created_at DESC', [reservationId]);

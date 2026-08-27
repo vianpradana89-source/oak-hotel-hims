@@ -908,8 +908,12 @@ function App() {
   };
 
   const fetchReservationFolio = async (reservationId: number) => {
+    if (propertyId === null) {
+      setSelectedFolio(null);
+      return;
+    }
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/folio`);
+      const response = await fetch(`/api/reservations/${reservationId}/folio?property_id=${propertyId}`);
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Failed to load folio');
@@ -1060,12 +1064,21 @@ function App() {
       alert('Masukkan nominal pembayaran terlebih dahulu');
       return;
     }
+    if (propertyId === null) {
+      alert('Property belum dipilih');
+      return;
+    }
 
     try {
       const response = await fetch(`/api/reservations/${selectedRes.id}/payments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: Number(paymentDraft), payment_method: 'CASH', reference_code: `PMT-${Date.now()}` })
+        body: JSON.stringify({
+          property_id: propertyId,
+          amount: Number(paymentDraft),
+          payment_method: 'CASH',
+          reference_code: `PMT-${Date.now()}`
+        })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'Failed to record payment');
@@ -1079,6 +1092,12 @@ function App() {
       alert(`Gagal menyimpan pembayaran: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
+
+  useEffect(() => {
+    setSelectedRes(null);
+    setSelectedFolio(null);
+    setPaymentDraft('');
+  }, [propertyId]);
 
   useEffect(() => {
     if (selectedRes) {
