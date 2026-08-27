@@ -13,6 +13,7 @@ import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
 import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
+import { createGuestsRouter, createReservationGuestsRouter } from './domains/guests/guestsRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
   applyCancellationInventoryPlan,
@@ -1561,7 +1562,7 @@ app.get('/api/reservations/:id', async (req, res) => {
     await assertReservationBelongsToProperty(pool, reservationId, propertyId);
 
     const result = await pool.query(`
-      SELECT 
+      SELECT
         r.*,
         r.id as reservation_id,
         r.booking_number as legacy_booking_number,
@@ -1589,13 +1590,13 @@ app.get('/api/bookings/:bid', async (req, res) => {
   if (!bidParam) {
     return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
   }
-  
+
   try {
     const propertyId = parsePropertyId(req.query.property_id, 'property_id');
     await assertPropertyExists(pool, propertyId);
 
     const result = await pool.query(
-      `SELECT 
+      `SELECT
         id as booking_id,
         bid,
         property_id,
@@ -1612,7 +1613,7 @@ app.get('/api/bookings/:bid', async (req, res) => {
       WHERE UPPER(bid) = $1`,
       [bidParam]
     );
-    
+
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
     }
@@ -1621,7 +1622,7 @@ app.get('/api/bookings/:bid', async (req, res) => {
     if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
       return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
     }
-    
+
     res.json({ status: 'OK', data: result.rows[0] });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -1634,7 +1635,7 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
   if (!bidParam) {
     return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
   }
-  
+
   try {
     const propertyId = parsePropertyId(req.query.property_id, 'property_id');
     await assertPropertyExists(pool, propertyId);
@@ -1644,7 +1645,7 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
       `SELECT id, property_id FROM bookings WHERE UPPER(bid) = $1`,
       [bidParam]
     );
-    
+
     if (!hasRows(bookingResult)) {
       return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
     }
@@ -1653,12 +1654,12 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
     if (booking.property_id != null && Number(booking.property_id) !== propertyId) {
       return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'booking does not belong to this property' });
     }
-    
+
     const bookingId = booking.id;
-    
+
     // Then get all reservations for this booking
     const reservationsResult = await pool.query(
-      `SELECT 
+      `SELECT
         r.*,
         r.id as reservation_id,
         r.booking_number as legacy_booking_number,
@@ -1670,7 +1671,7 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
       ORDER BY r.stay_sequence ASC`,
       [bookingId]
     );
-    
+
     res.json({ status: 'OK', data: reservationsResult.rows.map(withReservationHotelDates) });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -4208,7 +4209,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
     }
 
     const reservation = await pool.query(`
-      SELECT 
+      SELECT
         r.*,
         r.id as reservation_id,
         r.booking_number as legacy_booking_number,
@@ -4369,6 +4370,8 @@ app.use('/api/room-types', createRoomTypesRouter(pool));
 app.use('/api/rooms', createRoomsRouter(pool));
 app.use('/api/reports', createReportsRouter(pool));
 app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
+app.use('/api/guests', createGuestsRouter(pool));
+app.use('/api/reservations', createReservationGuestsRouter(pool));
 
 
 // GET tapechart: rooms × dates with reservations per cell

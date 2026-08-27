@@ -189,6 +189,7 @@ export async function initializeDatabase(pool: Pool) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- @deprecated: Legacy unlinked guest_profiles table superseded by canonical guests & reservation_guests tables (Phase GO-LIVE-GUEST-B1)
     CREATE TABLE IF NOT EXISTS guest_profiles (
       id SERIAL PRIMARY KEY,
       full_name VARCHAR(150) NOT NULL,
@@ -205,6 +206,72 @@ export async function initializeDatabase(pool: Pool) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Phase GO-LIVE-GUEST-B1: Canonical Guest Master table
+    CREATE TABLE IF NOT EXISTS guests (
+      id SERIAL PRIMARY KEY,
+      full_name VARCHAR(255) NOT NULL,
+      preferred_name VARCHAR(100),
+      gender VARCHAR(20),
+      birth_place VARCHAR(100),
+      birth_date DATE,
+      nationality VARCHAR(100) DEFAULT 'ID',
+      phone VARCHAR(50),
+      email VARCHAR(255),
+      address TEXT,
+      city VARCHAR(100),
+      province VARCHAR(100),
+      country VARCHAR(100) DEFAULT 'Indonesia',
+      vip_status VARCHAR(50) NOT NULL DEFAULT 'STANDARD',
+      is_blacklisted BOOLEAN NOT NULL DEFAULT FALSE,
+      blacklist_reason TEXT,
+      notes TEXT,
+      created_property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      created_by VARCHAR(100),
+      CONSTRAINT chk_guests_vip_status CHECK (vip_status IN ('STANDARD', 'VIP', 'VVIP')),
+      CONSTRAINT chk_guests_gender CHECK (gender IS NULL OR gender IN ('MALE', 'FEMALE', 'OTHER'))
+    );
+
+    ALTER TABLE guests ADD COLUMN IF NOT EXISTS created_property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL;
+    UPDATE guests SET created_property_id = 1 WHERE created_property_id IS NULL AND created_by = 'MIGRATION_GUEST_B1';
+
+    CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests (phone);
+    CREATE INDEX IF NOT EXISTS idx_guests_email ON guests (email);
+    CREATE INDEX IF NOT EXISTS idx_guests_full_name_lower ON guests (LOWER(full_name));
+    CREATE INDEX IF NOT EXISTS idx_guests_created_property_id ON guests (created_property_id);
+
+    -- Phase GO-LIVE-GUEST-B1: Reservation-Guest Relational Bridge
+    CREATE TABLE IF NOT EXISTS reservation_guests (
+      id SERIAL PRIMARY KEY,
+      reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+      guest_id INTEGER NOT NULL REFERENCES guests(id) ON DELETE RESTRICT,
+      role VARCHAR(50) NOT NULL,
+      relationship VARCHAR(100),
+      is_staying BOOLEAN NOT NULL DEFAULT TRUE,
+      identity_verified BOOLEAN NOT NULL DEFAULT FALSE,
+      relation_source VARCHAR(100) NOT NULL DEFAULT 'MANUAL_ENTRY',
+      is_legacy_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+      checked_in_at TIMESTAMP WITH TIME ZONE,
+      checked_out_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_reservation_guests_role CHECK (role IN ('BOOKER', 'PRIMARY_GUEST', 'ADDITIONAL_GUEST'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_single_primary_guest
+      ON reservation_guests (reservation_id)
+      WHERE role = 'PRIMARY_GUEST';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_guest_role
+      ON reservation_guests (reservation_id, guest_id, role);
+
+    CREATE INDEX IF NOT EXISTS idx_reservation_guests_reservation_id
+      ON reservation_guests (reservation_id);
+
+    CREATE INDEX IF NOT EXISTS idx_reservation_guests_guest_id
+      ON reservation_guests (guest_id);
 
     CREATE TABLE IF NOT EXISTS guest_profile_history (
       id SERIAL PRIMARY KEY,
@@ -795,6 +862,152 @@ export async function initializeDatabase(pool: Pool) {
       ON CONFLICT (version) DO NOTHING;
     `);
 
+    // Phase GO-LIVE-GUEST-B1: Guest Master & Reservation-Guest Relational Foundation
+    const guestMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'guest_b1_relational_foundation'"
+    );
+    const guestMarkerExists = (guestMarkerCheck.rowCount ?? 0) > 0;
+
+    await auditMigrationClient.query(`
+      CREATE TABLE IF NOT EXISTS guests (
+        id SERIAL PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        preferred_name VARCHAR(100),
+        gender VARCHAR(20),
+        birth_place VARCHAR(100),
+        birth_date DATE,
+        nationality VARCHAR(100) DEFAULT 'ID',
+        phone VARCHAR(50),
+        email VARCHAR(255),
+        address TEXT,
+        city VARCHAR(100),
+        province VARCHAR(100),
+        country VARCHAR(100) DEFAULT 'Indonesia',
+        vip_status VARCHAR(50) NOT NULL DEFAULT 'STANDARD',
+        is_blacklisted BOOLEAN NOT NULL DEFAULT FALSE,
+        blacklist_reason TEXT,
+        notes TEXT,
+        created_property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by VARCHAR(100),
+        CONSTRAINT chk_guests_vip_status CHECK (vip_status IN ('STANDARD', 'VIP', 'VVIP')),
+        CONSTRAINT chk_guests_gender CHECK (gender IS NULL OR gender IN ('MALE', 'FEMALE', 'OTHER'))
+      );
+
+      ALTER TABLE guests ADD COLUMN IF NOT EXISTS created_property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL;
+      UPDATE guests SET created_property_id = 1 WHERE created_property_id IS NULL AND created_by = 'MIGRATION_GUEST_B1';
+
+      CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests (phone);
+      CREATE INDEX IF NOT EXISTS idx_guests_email ON guests (email);
+      CREATE INDEX IF NOT EXISTS idx_guests_full_name_lower ON guests (LOWER(full_name));
+      CREATE INDEX IF NOT EXISTS idx_guests_created_property_id ON guests (created_property_id);
+
+      CREATE TABLE IF NOT EXISTS reservation_guests (
+        id SERIAL PRIMARY KEY,
+        reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+        guest_id INTEGER NOT NULL REFERENCES guests(id) ON DELETE RESTRICT,
+        role VARCHAR(50) NOT NULL,
+        relationship VARCHAR(100),
+        is_staying BOOLEAN NOT NULL DEFAULT TRUE,
+        identity_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        relation_source VARCHAR(100) NOT NULL DEFAULT 'MANUAL_ENTRY',
+        is_legacy_inferred BOOLEAN NOT NULL DEFAULT FALSE,
+        checked_in_at TIMESTAMP WITH TIME ZONE,
+        checked_out_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT chk_reservation_guests_role CHECK (role IN ('BOOKER', 'PRIMARY_GUEST', 'ADDITIONAL_GUEST'))
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_single_primary_guest
+        ON reservation_guests (reservation_id)
+        WHERE role = 'PRIMARY_GUEST';
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_guest_role
+        ON reservation_guests (reservation_id, guest_id, role);
+
+      CREATE INDEX IF NOT EXISTS idx_reservation_guests_reservation_id
+        ON reservation_guests (reservation_id);
+
+      CREATE INDEX IF NOT EXISTS idx_reservation_guests_guest_id
+        ON reservation_guests (guest_id);
+    `);
+
+    if (!guestMarkerExists) {
+      // Deterministic legacy migration: link existing reservations to guest master
+      await auditMigrationClient.query(`
+        WITH distinct_legacy_guests AS (
+          SELECT
+            MIN(TRIM(guest_name)) AS full_name,
+            NULLIF(TRIM(guest_phone), '') AS phone
+          FROM reservations
+          WHERE guest_name IS NOT NULL AND TRIM(guest_name) != ''
+          GROUP BY LOWER(TRIM(guest_name)), NULLIF(TRIM(guest_phone), '')
+        )
+        INSERT INTO guests (full_name, phone, vip_status, is_blacklisted, created_at, updated_at, created_by)
+        SELECT
+          full_name,
+          phone,
+          'STANDARD',
+          false,
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP,
+          'MIGRATION_GUEST_B1'
+        FROM distinct_legacy_guests
+        ON CONFLICT DO NOTHING;
+
+        WITH res_mapping AS (
+          SELECT
+            r.id AS reservation_id,
+            g.id AS guest_id,
+            r.checked_in_at,
+            r.checked_out_at
+          FROM reservations r
+          JOIN guests g ON
+            LOWER(TRIM(r.guest_name)) = LOWER(TRIM(g.full_name))
+            AND (
+              (NULLIF(TRIM(r.guest_phone), '') IS NULL AND g.phone IS NULL)
+              OR
+              (NULLIF(TRIM(r.guest_phone), '') = g.phone)
+            )
+        )
+        INSERT INTO reservation_guests (
+          reservation_id,
+          guest_id,
+          role,
+          relationship,
+          is_staying,
+          identity_verified,
+          relation_source,
+          is_legacy_inferred,
+          checked_in_at,
+          checked_out_at,
+          created_at,
+          updated_at
+        )
+        SELECT
+          reservation_id,
+          guest_id,
+          'PRIMARY_GUEST',
+          'SELF',
+          true,
+          false,
+          'LEGACY_RESERVATION_SNAPSHOT',
+          true,
+          checked_in_at,
+          checked_out_at,
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
+        FROM res_mapping
+        ON CONFLICT (reservation_id, guest_id, role) DO NOTHING;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('guest_b1_relational_foundation')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});
@@ -803,17 +1016,7 @@ export async function initializeDatabase(pool: Pool) {
     auditMigrationClient.release();
   }
 
-  // GL accounts seed removed — fresh DB must remain data-neutral (property_id required)
-
-  const guestCount = await pool.query('SELECT COUNT(*) AS total FROM guest_profiles');
-  if (Number(guestCount.rows[0].total) === 0) {
-    await pool.query(`
-      INSERT INTO guest_profiles (full_name, email, phone, id_number, nationality, preferences, loyalty_tier, notes)
-      VALUES
-        ('Budi Santoso', 'budi@example.com', '081234567890', '3201010101010001', 'Indonesia', '{"room":"high_floor","smoking":false}', 'GOLD', 'Member loyal sejak 2023'),
-        ('Siti Aminah', 'siti@example.com', '081298765432', '3201010101010002', 'Indonesia', '{"room":"garden_view","smoking":false}', 'SILVER', 'Prefer room near elevator')
-    `);
-  }
+  // GL accounts & guest seeds removed — fresh DB must remain data-neutral (Rule 11)
 
   const employeeCount = await pool.query('SELECT COUNT(*) AS total FROM hr_employees');
   if (Number(employeeCount.rows[0].total) === 0) {
