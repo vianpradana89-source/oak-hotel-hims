@@ -1242,6 +1242,7 @@ button, input, select {
 }
 
 .reservation-card {
+  position: relative;
   min-height: 58px;
   border-radius: 8px;
   padding: 6px 7px;

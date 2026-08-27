@@ -30,7 +30,7 @@ export default function ReservationBar(props: Props) {
         onDragStart={props.onDragStart}
         onDragEnd={props.onDragEnd}
         onClick={props.onOpen}
-        className={`reservation-card ${props.cardClass} reservation-card--${props.density} ${props.searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold`}
+        className={`reservation-card relative overflow-hidden ${props.cardClass} reservation-card--${props.density} ${props.searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold`}
       >
         <div className="reservation-card-stack">
           <div className="reservation-card-topline">
@@ -49,7 +49,7 @@ export default function ReservationBar(props: Props) {
           <button
             type="button"
             draggable={false}
-            className="reservation-card-resize-handle"
+            className="reservation-card-resize-handle absolute right-0 top-0 bottom-0"
             aria-label={`Resize ${reservation.guest_name}`}
             onDragStart={(event) => {
               event.preventDefault();
