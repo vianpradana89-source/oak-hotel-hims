@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
 import CalendarFilters from './features/calendar/CalendarFilters';
@@ -99,6 +100,7 @@ function App() {
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
   const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
+  const [occupancyRefreshTrigger, setOccupancyRefreshTrigger] = useState<number>(0);
   const selectedMenuRef = useRef(selectedMenu);
   selectedMenuRef.current = selectedMenu;
   const [quickBooking, setQuickBooking] = useState({
@@ -3244,7 +3246,10 @@ function App() {
               </div>
               <button
                 type="button"
-                onClick={() => fetchDailyOperations(propertyId)}
+                onClick={() => {
+                  fetchDailyOperations(propertyId);
+                  setOccupancyRefreshTrigger((prev) => prev + 1);
+                }}
                 className="hotel-action-btn text-xs font-semibold px-3 py-1.5"
               >
                 {dailyOperationsLoading ? 'Memuat...' : '⟳ Segarkan'}
@@ -3342,6 +3347,14 @@ function App() {
                   <div className="text-2xl font-bold text-red-900 mt-1">{dailyOperations?.rooms?.out_of_order_or_service ?? 0}</div>
                 </div>
               </div>
+            </div>
+
+            {/* Section: Kinerja Kamar (Occupancy Engine) */}
+            <div className="border-t border-slate-200 pt-2">
+              <OccupancySection
+                propertyId={propertyId}
+                refreshTrigger={occupancyRefreshTrigger}
+              />
             </div>
 
             {/* Section 4: Akuntansi Ringkasan */}
