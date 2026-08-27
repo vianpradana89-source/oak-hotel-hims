@@ -118,7 +118,8 @@ export function createRoomCategoriesRouter(pool: Pool) {
         action: 'CREATE',
         entity: 'ROOM_CATEGORY',
         recordId: created.id,
-        newValue: created
+        newValue: created,
+        propertyId
       });
       await client.query('COMMIT');
       return res.status(201).json({ status: 'OK', data: created });
@@ -200,7 +201,8 @@ export function createRoomCategoriesRouter(pool: Pool) {
             property_id: propertyId,
             before: { display_order: beforeOrder.get(Number(row.id)) },
             after: { display_order: Number(row.display_order) }
-          }
+          },
+          propertyId
         });
       }
 
@@ -286,7 +288,8 @@ export function createRoomCategoriesRouter(pool: Pool) {
             is_active: row.is_active
           },
           fields: Object.keys(payload)
-        }
+        },
+        propertyId
       });
       await client.query('COMMIT');
       return res.json({
@@ -342,7 +345,8 @@ export function createRoomCategoriesRouter(pool: Pool) {
         action: 'DELETE',
         entity: 'ROOM_CATEGORY',
         recordId: categoryId,
-        newValue: { code: current.code, name: current.name, property_id: current.property_id }
+        newValue: { code: current.code, name: current.name, property_id: current.property_id },
+        propertyId
       });
       await client.query('COMMIT');
       return res.json({ status: 'OK', data: { id: categoryId } });

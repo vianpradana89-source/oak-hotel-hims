@@ -580,11 +580,12 @@ export async function writeRoomMasterAudit(
     entity: 'ROOM_CATEGORY' | 'ROOM_TYPE' | 'ROOM';
     recordId: number | string;
     newValue: unknown;
+    propertyId: number;
   }
 ): Promise<void> {
   await client.query(
-    `INSERT INTO audit_logs (module, action, entity, record_id, new_value)
-     VALUES ('ROOM_MASTER', $1, $2, $3, $4)`,
-    [entry.action, entry.entity, String(entry.recordId), JSON.stringify(entry.newValue)]
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('ROOM_MASTER', $1, $2, $3, $4, $5)`,
+    [entry.action, entry.entity, String(entry.recordId), JSON.stringify(entry.newValue), entry.propertyId]
   );
 }

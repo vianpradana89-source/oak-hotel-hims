@@ -262,6 +262,7 @@ async function cleanupReservation(reservationId, roomStatusBaseline) {
       if (reservation.booking_id) {
         const siblings = await client.query('SELECT 1 FROM reservations WHERE booking_id = $1 LIMIT 1', [reservation.booking_id]);
         if (!hasRows(siblings)) {
+          await client.query('DELETE FROM audit_logs WHERE entity = $1 AND record_id = $2::text', ['BOOKING', String(reservation.booking_id)]);
           await client.query('DELETE FROM bookings WHERE id = $1', [reservation.booking_id]);
         }
       }

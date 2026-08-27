@@ -149,7 +149,8 @@ export function createRoomsRouter(pool: Pool) {
         action: 'CREATE',
         entity: 'ROOM',
         recordId: created.id,
-        newValue: created
+        newValue: created,
+        propertyId
       });
       // RM-1C.1: physical capacity grew by one; align today/future ledger rows.
       await syncLedgerCapacityFromMaster(client, typeId);
@@ -326,7 +327,8 @@ export function createRoomsRouter(pool: Pool) {
           before: { room_type_id: current.room_type_id, is_active: current.is_active },
           after: { room_type_id: row.room_type_id, is_active: row.is_active, room_number: row.room_number },
           fields: Object.keys(body)
-        }
+        },
+        propertyId: Number(current.property_id)
       });
       await client.query('COMMIT');
       return res.json({
@@ -426,7 +428,8 @@ export function createRoomsRouter(pool: Pool) {
         action: 'DELETE',
         entity: 'ROOM',
         recordId: roomId,
-        newValue: { room_number: current.room_number, room_type_id: current.room_type_id }
+        newValue: { room_number: current.room_number, room_type_id: current.room_type_id },
+        propertyId
       });
       await client.query('COMMIT');
       return res.json({

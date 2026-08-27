@@ -1208,8 +1208,8 @@ async function createCanonicalBooking(
     }
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         'PMS',
         'CREATE',
@@ -1225,14 +1225,15 @@ async function createCanonicalBooking(
           reservation_count: insertedChildren.length,
           correlation_id: correlationId
         }),
-        correlationId
+        correlationId,
+        bookingPropertyId
       ]
     );
 
     for (const reservation of insertedChildren) {
       await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           'PMS',
           'CREATE',
@@ -1249,7 +1250,8 @@ async function createCanonicalBooking(
             status: reservation.status,
             correlation_id: correlationId
           }),
-          correlationId
+          correlationId,
+          bookingPropertyId
         ]
       );
     }
@@ -1732,9 +1734,9 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
       }
 
       await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ['PMS', 'CANCEL', 'RESERVATION', reservation.id, JSON.stringify(updatedReservation.rows[0]), correlationId]
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['PMS', 'CANCEL', 'RESERVATION', reservation.id, JSON.stringify(updatedReservation.rows[0]), correlationId, booking.property_id]
       );
     }
 
@@ -1750,9 +1752,9 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
     const updatedBooking = updatedBookingResult.rows[0];
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CANCEL', 'BOOKING', booking.id, JSON.stringify(updatedBooking), correlationId]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'CANCEL', 'BOOKING', booking.id, JSON.stringify(updatedBooking), correlationId, booking.property_id]
     );
 
     await client.query('COMMIT');
@@ -1782,10 +1784,10 @@ app.get('/api/reservations/:id/audit', async (req, res) => {
 
     const result = await pool.query(
       `SELECT * FROM audit_logs
-       WHERE entity = 'RESERVATION' AND record_id = $1
+       WHERE entity = 'RESERVATION' AND record_id = $1 AND property_id = $2
        ORDER BY timestamp DESC, audit_id DESC
        LIMIT 20`,
-      [String(reservationId)]
+      [String(reservationId), propertyId]
     );
     res.json({ status: 'OK', data: result.rows });
   } catch (err: any) {
@@ -1805,13 +1807,16 @@ app.get('/api/rooms/:id/audit', async (req, res) => {
 
     const result = await pool.query(
       `SELECT * FROM audit_logs
-       WHERE entity = 'ROOM' AND record_id = $1
+       WHERE entity = 'ROOM' AND record_id = $1 AND property_id = $2
        ORDER BY timestamp DESC, audit_id DESC
        LIMIT 20`,
-      [String(roomId)]
+      [String(roomId), propertyId]
     );
     res.json({ status: 'OK', data: result.rows });
   } catch (err: any) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
 });
@@ -1851,6 +1856,8 @@ app.patch('/api/reservations/:id', async (req, res) => {
     }
 
     const existing = current.rows[0];
+    const bookingRes = await client.query('SELECT property_id FROM bookings WHERE id = $1', [existing.booking_id]);
+    const reservationPropertyId = bookingRes.rows[0]?.property_id ?? null;
     const guestName = Object.prototype.hasOwnProperty.call(payload, 'guest_name') ? payload.guest_name : existing.guest_name;
     const guestPhone = Object.prototype.hasOwnProperty.call(payload, 'guest_phone') ? payload.guest_phone : existing.guest_phone;
     const guestSegmentValue = Object.prototype.hasOwnProperty.call(payload, 'guest_segment') ? payload.guest_segment : existing.guest_segment;
@@ -1923,9 +1930,9 @@ app.patch('/api/reservations/:id', async (req, res) => {
     );
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'UPDATE', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'UPDATE', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null, reservationPropertyId]
     );
 
     await client.query('COMMIT');
@@ -2048,23 +2055,24 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
       lockedChildren[targetIndex] = cancelledReservation;
 
       await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(cancelledReservation)), req.headers['x-correlation-id'] || null]
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(cancelledReservation)), req.headers['x-correlation-id'] || null, propertyId]
       );
 
       const legacyAudit = buildLegacyPreLedgerCancellationAudit(inventoryPlan, currentStatus, 'CANCELLED');
       if (legacyAudit) {
         await client.query(
-          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             'PMS',
             'LEGACY_PRE_LEDGER_CANCELLATION',
             'RESERVATION',
             reservationId,
             JSON.stringify(legacyAudit),
-            req.headers['x-correlation-id'] || null
+            req.headers['x-correlation-id'] || null,
+            propertyId
           ]
         );
       }
@@ -2109,15 +2117,16 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
         payload: bookingAuditPayload
       };
       await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           'PMS',
           derivedBookingStatus === 'CANCELLED' ? 'CANCEL' : 'COMPLETE',
           'BOOKING',
           bookingId,
           JSON.stringify(bookingAuditPayload),
-          req.headers['x-correlation-id'] || null
+          req.headers['x-correlation-id'] || null,
+          propertyId
         ]
       );
     }
@@ -3227,9 +3236,9 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
     }
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'UPDATE_STATUS', 'ROOM', roomId, JSON.stringify({ input_status: status, status: mappedStatus }), req.headers['x-correlation-id'] || null]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'UPDATE_STATUS', 'ROOM', roomId, JSON.stringify({ input_status: status, status: mappedStatus }), req.headers['x-correlation-id'] || null, propertyId]
     );
 
     await client.query('COMMIT');
@@ -3406,9 +3415,9 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     };
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'EXTEND', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'EXTEND', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null, propertyId]
     );
 
     await client.query('COMMIT');
@@ -3563,9 +3572,9 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     };
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'SHORTEN', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'SHORTEN', 'RESERVATION', reservationId, JSON.stringify(auditPayload), req.headers['x-correlation-id'] || null, propertyId]
     );
 
     await client.query('COMMIT');
@@ -3663,9 +3672,9 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     );
 
     await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null]
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null, propertyId]
     );
 
     await client.query('COMMIT');
@@ -3793,9 +3802,9 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(checkoutReservation)), req.headers['x-correlation-id'] || null]
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(checkoutReservation)), req.headers['x-correlation-id'] || null, propertyId]
       );
       lockedChildren[lockedChildren.findIndex((row: any) => Number(row.id) === targetReservationId)] = checkoutReservation;
     }
@@ -3825,9 +3834,9 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
           reservationId
         );
         await client.query(
-          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          ['PMS', 'COMPLETE', 'BOOKING', bookingRecord.id, JSON.stringify(bookingCompletionAuditPayload), req.headers['x-correlation-id'] || null]
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          ['PMS', 'COMPLETE', 'BOOKING', bookingRecord.id, JSON.stringify(bookingCompletionAuditPayload), req.headers['x-correlation-id'] || null, propertyId]
         );
       }
     }
@@ -4465,8 +4474,8 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     await client.query('UPDATE reservations SET room_id = $1 WHERE id = $2', [targetRoomId, reservationId]);
 
     // Audit
-    await client.query('INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id) VALUES ($1,$2,$3,$4,$5,$6)', [
-      'PMS','MOVE','RESERVATION', reservationId, JSON.stringify({ from_room: sourceRoomId, to_room: targetRoomId }), req.headers['x-correlation-id'] || null
+    await client.query('INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
+      'PMS','MOVE','RESERVATION', reservationId, JSON.stringify({ from_room: sourceRoomId, to_room: targetRoomId }), req.headers['x-correlation-id'] || null, propertyId
     ]);
 
     await client.query('COMMIT');

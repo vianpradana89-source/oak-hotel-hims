@@ -603,6 +603,77 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_guest_receivables_property ON guest_receivables(property_id);
     CREATE INDEX IF NOT EXISTS idx_guest_receivables_property_status ON guest_receivables(property_id, status);
+
+    -- 5. Audit logs property_id column, indexes, and deterministic backfill
+    ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS property_id INTEGER;
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_property'
+      ) THEN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'audit_logs_property_id_fkey'
+        ) THEN
+          ALTER TABLE audit_logs DROP CONSTRAINT audit_logs_property_id_fkey;
+        END IF;
+        ALTER TABLE audit_logs ADD CONSTRAINT fk_audit_logs_property FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE RESTRICT;
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_property_entity_record ON audit_logs (property_id, entity, record_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_property_timestamp ON audit_logs (property_id, timestamp DESC);
+
+    -- Priority 1: Relational Deterministic Backfill
+    UPDATE audit_logs a
+    SET property_id = b.property_id
+    FROM bookings b
+    WHERE a.property_id IS NULL
+      AND a.entity = 'BOOKING'
+      AND a.record_id ~ '^[0-9]+$'
+      AND b.id = a.record_id::bigint;
+
+    UPDATE audit_logs a
+    SET property_id = b.property_id
+    FROM reservations r
+    JOIN bookings b ON b.id = r.booking_id
+    WHERE a.property_id IS NULL
+      AND a.entity = 'RESERVATION'
+      AND a.record_id ~ '^[0-9]+$'
+      AND r.id = a.record_id::integer;
+
+    UPDATE audit_logs a
+    SET property_id = rm.property_id
+    FROM rooms rm
+    WHERE a.property_id IS NULL
+      AND a.entity = 'ROOM'
+      AND a.record_id ~ '^[0-9]+$'
+      AND rm.id = a.record_id::integer;
+
+    UPDATE audit_logs a
+    SET property_id = rt.property_id
+    FROM room_types rt
+    WHERE a.property_id IS NULL
+      AND a.entity = 'ROOM_TYPE'
+      AND a.record_id ~ '^[0-9]+$'
+      AND rt.id = a.record_id::integer;
+
+    UPDATE audit_logs a
+    SET property_id = rc.property_id
+    FROM room_categories rc
+    WHERE a.property_id IS NULL
+      AND a.entity = 'ROOM_CATEGORY'
+      AND a.record_id ~ '^[0-9]+$'
+      AND rc.id = a.record_id::integer;
+
+    -- Priority 2: Payload Deterministic Backfill (crash-safe regex extraction, zero JSON casting failure)
+    UPDATE audit_logs a
+    SET property_id = p.id
+    FROM properties p
+    WHERE a.property_id IS NULL
+      AND a.new_value IS NOT NULL
+      AND (
+        COALESCE(SUBSTRING(a.new_value FROM '"property_id"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
+        OR
+        COALESCE(SUBSTRING(a.new_value FROM '"propertyId"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
+      );
   `);
 
   // GL accounts seed removed — fresh DB must remain data-neutral (property_id required)

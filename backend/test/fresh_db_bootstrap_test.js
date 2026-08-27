@@ -130,6 +130,18 @@ async function main() {
     var guestReceivablesPropNotNull = await columnIsNotNull('guest_receivables', 'property_id');
     assert(guestReceivablesPropNotNull, 'L2. guest_receivables.property_id is NOT NULL');
 
+    assert(await columnExists('audit_logs', 'property_id'), 'L3. audit_logs has property_id column');
+
+    var auditIndexCheck1 = await testPool.query(
+      "SELECT 1 FROM pg_indexes WHERE tablename = 'audit_logs' AND indexname = 'idx_audit_logs_property_entity_record'"
+    );
+    assert(auditIndexCheck1.rowCount > 0, 'L4. idx_audit_logs_property_entity_record index exists');
+
+    var auditIndexCheck2 = await testPool.query(
+      "SELECT 1 FROM pg_indexes WHERE tablename = 'audit_logs' AND indexname = 'idx_audit_logs_property_timestamp'"
+    );
+    assert(auditIndexCheck2.rowCount > 0, 'L5. idx_audit_logs_property_timestamp index exists');
+
     assert(await countRows('properties') === 0, 'M. zero properties is valid');
     assert(await countRows('rooms') === 0, 'N. zero rooms is valid');
     assert(await countRows('room_types') === 0, 'O. zero room_types is valid');
@@ -143,6 +155,7 @@ async function main() {
     assert(await countRows('accounting_journal_lines') === 0, 'W. zero accounting_journal_lines is valid');
     assert(await countRows('vendor_payables') === 0, 'W1. zero vendor_payables is valid');
     assert(await countRows('guest_receivables') === 0, 'W2. zero guest_receivables is valid');
+    assert(await countRows('audit_logs') === 0, 'W3. zero audit_logs is valid');
 
     var secondBootError = null;
     try {
@@ -169,7 +182,8 @@ async function main() {
       await countRows('accounting_journal_entries'),
       await countRows('accounting_journal_lines'),
       await countRows('vendor_payables'),
-      await countRows('guest_receivables')
+      await countRows('guest_receivables'),
+      await countRows('audit_logs')
     ];
     var hasNoResidue = residueCounts.every(function(c) { return c === 0; });
     assert(hasNoResidue, 'Y. no fixture residue (all counts=0)');
