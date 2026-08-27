@@ -29,6 +29,25 @@ import {
 } from './domains/inventory/canonicalAvailability';
 import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
+import {
+  PaymentEvidenceType,
+  PaymentEvidenceMetadata,
+  toEvidenceMetadata
+} from './domains/payments/paymentEvidenceTypes';
+import {
+  createEvidenceReadStream,
+  saveEvidenceFile,
+  deleteEvidenceFile,
+  validateEvidenceUpload
+} from './domains/payments/evidenceStorageService';
+import {
+  uploadPaymentEvidence,
+  getPaymentEvidences,
+  getEvidenceRowById,
+  deactivateEvidence,
+  recordEvidenceAccessAudit
+} from './domains/payments/paymentEvidenceService';
+import { createPaymentCore } from './domains/payments/paymentDomainService';
 
 const app: any = express();
 app.use(cors());
@@ -37,6 +56,31 @@ app.use(express.json());
 const uploadDir = path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 app.use('/uploads', express.static(uploadDir));
+
+const memoryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+const handlePaymentUpload = (req: any, res: any, next: any) => {
+  memoryUpload.single('file')(req, res, (err: any) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'FILE_TOO_LARGE',
+          message: 'Ukuran file melebihi batas maksimum 10 MB'
+        });
+      }
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'UPLOAD_ERROR',
+        message: err.message || 'Error saat memproses file unggahan'
+      });
+    }
+    next();
+  });
+};
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -54,6 +98,7 @@ const upload = multer({
     cb(new Error('Unsupported file type'));
   }
 });
+
 
 const hasRows = (result: { rowCount?: number | null } | null | undefined): boolean => Number(result?.rowCount ?? 0) > 0;
 
@@ -4094,13 +4139,13 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
   }
 });
 
-app.post('/api/reservations/:id/payments', async (req, res) => {
+app.post('/api/reservations/:id/payments', handlePaymentUpload, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   if (!Number.isInteger(reservationId) || reservationId <= 0) {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
   }
 
-  const { property_id: propertyIdRaw, amount, payment_method, reference_code, transaction_type } = req.body;
+  const { property_id: propertyIdRaw, amount, payment_method, reference_code, transaction_type, evidence_type, evidence_note } = req.body;
 
   if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
@@ -4118,125 +4163,59 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be an integer (IDR currency does not support decimal amounts)' });
   }
 
-  const client = await pool.connect();
+  // Front Office HTTP endpoint unconditionally requires evidence:
+  // External callers cannot bypass this via any body parameter, header, or query parameter.
+  if (!req.file) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'PAYMENT_EVIDENCE_REQUIRED',
+      message: 'Bukti pembayaran wajib dilampirkan untuk penerimaan pembayaran Front Office'
+    });
+  }
+
   try {
-    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
-    if ((propCheck.rowCount ?? 0) === 0) {
-      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
-    }
-
-    await client.query('BEGIN');
-    const reservation = await client.query(`
-      SELECT
-        r.id,
-        r.total_price,
-        r.amount_paid,
-        r.payment_status,
-        r.booking_id,
-        b.property_id AS booking_property_id
-      FROM reservations r
-      LEFT JOIN bookings b ON b.id = r.booking_id
-      WHERE r.id = $1
-      FOR UPDATE OF r
-    `, [reservationId]);
-
-    if (!hasRows(reservation)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: 'reservation not found' });
-    }
-
-    const bookingPropertyId = reservation.rows[0].booking_property_id;
-    if (bookingPropertyId === null || bookingPropertyId === undefined) {
-      await client.query('ROLLBACK');
-      return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
-    }
-
-    if (Number(bookingPropertyId) !== propertyId) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
-    }
-
-    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
-    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
-    const currentRemaining = Math.max(totalPrice - currentPaid, 0);
-
-    if (paymentAmount > currentRemaining) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        status: 'ERROR',
-        code: 'OVERPAYMENT_NOT_ALLOWED',
-        message: 'Nominal pembayaran melebihi sisa tagihan',
-        details: {
-          payment_amount: paymentAmount,
-          remaining_balance: currentRemaining,
-          total_price: totalPrice,
-          amount_paid: currentPaid
-        }
-      });
-    }
-
-    const updatedAmountPaid = currentPaid + paymentAmount;
-    const updatedRemaining = totalPrice - updatedAmountPaid;
-    const updatedPaymentStatus = updatedAmountPaid <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
-
-    const actorName = req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null;
-    const actorId = req.body.actor_user_id || req.body.actor_id || null;
-    const actorRole = req.body.actor_role_snapshot || req.body.actor_role || null;
-    const corrId = req.body.correlation_id || req.headers['x-correlation-id'] || `corr_pay_${Date.now()}`;
-
-    const payment = await client.query(
-      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, reference_code, status, created_by, correction_group_id)
-       VALUES ($1, $2, $3, $4, $5, 'SUCCESS', $6, $7)
-       RETURNING *`,
-      [reservationId, transaction_type || 'PAYMENT', paymentAmount, payment_method || 'CASH', reference_code || `TXN-${Date.now()}`, actorName, corrId]
-    );
-
-    await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, $2, $3, $4, 'CREDIT')`,
-      [reservationId, transaction_type || 'PAYMENT', 'Pembayaran tamu', paymentAmount]
-    );
-
-    const updated = await client.query(
-      `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
-      [updatedAmountPaid, updatedRemaining, updatedPaymentStatus, reservationId]
-    );
-
-    const paymentAuditPayload = {
-      event: 'PAYMENT_CREATED',
-      payment_transaction_id: payment.rows[0].id,
-      payment_id: payment.rows[0].id,
-      reservation_id: reservationId,
+    const result = await createPaymentCore(pool, {
+      propertyId,
+      reservationId,
       amount: paymentAmount,
-      payment_method: payment_method || 'CASH',
-      actor_user_id: actorId,
-      actor_id: actorId,
-      actor_name_snapshot: actorName,
-      actor_name: actorName,
-      actor_role_snapshot: actorRole,
-      actor_role: actorRole,
-      property_id: propertyId,
-      correlation_id: corrId,
-      created_at: new Date().toISOString(),
-      timestamp: new Date().toISOString()
-    };
-    await client.query(
-      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
-       VALUES ('PAYMENT', 'PAYMENT_CREATED', 'RESERVATION', $1, $2, $3, $4)`,
-      [String(reservationId), JSON.stringify(paymentAuditPayload), corrId, propertyId]
-    );
+      paymentMethod: payment_method || 'CASH',
+      referenceCode: reference_code || `TXN-${Date.now()}`,
+      transactionType: transaction_type || 'PAYMENT',
+      requireEvidence: true,
+      file: req.file ? {
+        buffer: req.file.buffer,
+        mimetype: req.file.mimetype,
+        originalname: req.file.originalname,
+        size: req.file.size
+      } : null,
+      evidenceType: evidence_type,
+      evidenceNote: evidence_note || req.body.note || null,
+      actorUserId: req.body.actor_user_id || req.body.actor_id || null,
+      actorNameSnapshot: req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null,
+      actorRoleSnapshot: req.body.actor_role_snapshot || req.body.actor_role || null,
+      correlationId: req.body.correlation_id || req.headers['x-correlation-id'] || null
+    });
 
-    await client.query('COMMIT');
-    res.json({ status: 'SUCCESS', data: { payment: payment.rows[0], reservation: withReservationHotelDates(updated.rows[0]) } });
+    return res.status(200).json({
+      status: 'SUCCESS',
+      data: {
+        payment: result.payment,
+        reservation: withReservationHotelDates(result.reservation),
+        evidence: result.evidence
+      }
+    });
   } catch (err: any) {
-    await client.query('ROLLBACK').catch(() => {});
-    res.status(500).json({ status: 'ERROR', message: err.message });
-  } finally {
-    client.release();
+    if (err?.statusCode) {
+      const resp: any = { status: 'ERROR', code: err.code, message: err.message };
+      if (err.details) resp.details = err.details;
+      return res.status(err.statusCode).json(resp);
+    }
+    const message = String(err?.message || err);
+    return res.status(500).json({ status: 'ERROR', message });
   }
 });
 
-app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) => {
+app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUpload, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   const paymentId = Number(req.params.paymentId);
   if (!Number.isInteger(reservationId) || reservationId <= 0) {
@@ -4246,7 +4225,7 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
   }
 
-  const { property_id: propertyIdRaw, amount, payment_method, reason_code, reason_text, actor_name, actor_id, actor_role } = req.body;
+  const { property_id: propertyIdRaw, amount, payment_method, reason_code, reason_text, evidence_type, evidence_note } = req.body;
 
   if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
@@ -4281,11 +4260,32 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
     });
   }
 
+  // Mandatory replacement evidence gate on Front Office correction:
+  // A replacement money-in transaction MUST be accompanied by a fresh evidence file.
+  // External clients cannot bypass this via any body parameter, header, or query parameter.
+  if (!req.file) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'PAYMENT_EVIDENCE_REQUIRED',
+      message: 'Bukti pembayaran baru wajib dilampirkan untuk koreksi pembayaran Front Office'
+    });
+  }
+
+  const fileValidation = validateEvidenceUpload(req.file);
+  if (!fileValidation.valid) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: fileValidation.code || 'INVALID_FILE',
+      message: fileValidation.error || 'File bukti pembayaran tidak valid'
+    });
+  }
+
   const actor = req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null;
   const actorId = req.body.actor_user_id || req.body.actor_id || null;
   const role = req.body.actor_role_snapshot || req.body.actor_role || null;
   const correlationId = req.body.correlation_id || req.headers['x-correlation-id'] || `corr_pay_corr_${paymentId}_${Date.now()}`;
 
+  let savedStorageKey: string | null = null;
   const client = await pool.connect();
   try {
     const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
@@ -4418,8 +4418,62 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
         actor
       ]
     );
+    const replacementRow = replacement.rows[0];
 
-    // 4. Folio entries (reversal DEBIT + replacement CREDIT)
+    // 4. Save replacement evidence file to private storage and insert evidence record
+    const savedEvidence = await saveEvidenceFile(propertyId, req.file);
+    savedStorageKey = savedEvidence.storageKey;
+
+    const defaultEvType = chosenMethod === 'BANK_TRANSFER' ? 'BANK_TRANSFER' : chosenMethod === 'QRIS' ? 'QRIS_RECEIPT' : chosenMethod === 'CARD' ? 'EDC_SLIP' : 'CASH_RECEIPT';
+    const evType = evidence_type || defaultEvType;
+    const evInsert = await client.query(
+      `INSERT INTO payment_evidences (
+         property_id, reservation_id, payment_transaction_id,
+         evidence_type, storage_key, original_filename,
+         mime_type, file_size_bytes, note, is_active,
+         uploaded_by_user_id, uploaded_by_name_snapshot, uploaded_by_role_snapshot, uploaded_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12, CURRENT_TIMESTAMP)
+       RETURNING *`,
+      [
+        propertyId,
+        reservationId,
+        replacementRow.id,
+        evType,
+        savedEvidence.storageKey,
+        req.file.originalname,
+        req.file.mimetype,
+        savedEvidence.fileSizeBytes,
+        evidence_note || req.body.note || `Bukti pembayaran koreksi #${paymentId}`,
+        actorId,
+        actor,
+        role
+      ]
+    );
+    const replacementEvidenceRow = evInsert.rows[0];
+
+    const evidenceAuditPayload = {
+      event: 'PAYMENT_EVIDENCE_UPLOADED',
+      evidence_id: replacementEvidenceRow.id,
+      payment_transaction_id: replacementRow.id,
+      reservation_id: reservationId,
+      property_id: propertyId,
+      evidence_type: evType,
+      original_filename: req.file.originalname,
+      mime_type: req.file.mimetype,
+      file_size_bytes: savedEvidence.fileSizeBytes,
+      actor_user_id: actorId,
+      actor_name_snapshot: actor,
+      actor_role_snapshot: role,
+      correlation_id: correlationId,
+      timestamp: new Date().toISOString()
+    };
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ('PAYMENT', 'PAYMENT_EVIDENCE_UPLOADED', 'RESERVATION', $1, $2, $3, $4)`,
+      [String(reservationId), JSON.stringify(evidenceAuditPayload), correlationId, propertyId]
+    );
+
+    // 5. Folio entries (reversal DEBIT + replacement CREDIT)
     await client.query(
       `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
        VALUES ($1, 'PAYMENT_REVERSAL', $2, $3, 'DEBIT')`,
@@ -4432,13 +4486,13 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
       [reservationId, `Pembayaran pengganti (koreksi #${paymentId})`, correctedAmount]
     );
 
-    // 5. Update reservation
+    // 6. Update reservation
     const updated = await client.query(
       `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
       [resultingPaid, resultingRemaining, resultingPaymentStatus, reservationId]
     );
 
-    // 6. Audit log
+    // 7. Audit log
     const auditPayload = {
       event: 'PAYMENT_CORRECTED',
       property_id: propertyId,
@@ -4446,7 +4500,7 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
       payment_id: paymentId,
       original_payment_id: paymentId,
       reversal_payment_id: reversal.rows[0].id,
-      replacement_payment_id: replacement.rows[0].id,
+      replacement_payment_id: replacementRow.id,
       old_amount: oldAmount,
       new_amount: correctedAmount,
       old_payment_method: originalPayment.payment_method,
@@ -4460,6 +4514,8 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
       actor_role_snapshot: role,
       actor_role: role,
       correlation_id: correlationId,
+      has_replacement_evidence: !!replacementEvidenceRow,
+      replacement_evidence_id: replacementEvidenceRow ? replacementEvidenceRow.id : null,
       created_at: new Date().toISOString(),
       timestamp: new Date().toISOString()
     };
@@ -4475,12 +4531,16 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) =
       data: {
         original_payment_id: paymentId,
         reversal: reversal.rows[0],
-        replacement: replacement.rows[0],
-        reservation: withReservationHotelDates(updated.rows[0])
+        replacement: replacementRow,
+        reservation: withReservationHotelDates(updated.rows[0]),
+        replacement_evidence: replacementEvidenceRow ? toEvidenceMetadata(replacementEvidenceRow) : null
       }
     });
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+    if (savedStorageKey) {
+      await deleteEvidenceFile(savedStorageKey).catch(() => {});
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   } finally {
     client.release();
@@ -4731,17 +4791,312 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
 
     const payments = await pool.query('SELECT * FROM payment_transactions WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
     const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
+    const evidences = await pool.query(
+      'SELECT * FROM payment_evidences WHERE reservation_id = $1 AND property_id = $2 ORDER BY id DESC',
+      [reservationId, propertyId]
+    );
 
     res.json({
       status: 'OK',
       data: {
         reservation: withReservationHotelDates(reservation.rows[0]),
         payments: payments.rows,
-        folio: folio.rows
+        folio: folio.rows,
+        evidences: evidences.rows.map(toEvidenceMetadata)
       }
     });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// ─── PAYMENT EVIDENCE ENDPOINTS ───────────────────────────────────────────────
+
+app.post(
+  '/api/reservations/:id/payments/:paymentId/evidences',
+  (req: any, res: any, next: any) => {
+    memoryUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'FILE_TOO_LARGE',
+            message: 'Ukuran file melebihi batas maksimum 10 MB'
+          });
+        }
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'UPLOAD_ERROR',
+          message: err.message || 'Error saat memproses file unggahan'
+        });
+      }
+      next();
+    });
+  },
+  async (req: any, res: any) => {
+    const reservationId = Number(req.params.id);
+    const paymentId = Number(req.params.paymentId);
+    if (!Number.isInteger(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+    }
+    if (!Number.isInteger(paymentId) || paymentId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+    }
+
+    const propertyIdRaw = req.body?.property_id ?? req.query?.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ status: 'ERROR', code: 'FILE_REQUIRED', message: 'File bukti pembayaran wajib diunggah' });
+    }
+
+    const evidenceType = (req.body?.evidence_type || 'BANK_TRANSFER') as PaymentEvidenceType;
+    const note = req.body?.note || null;
+    const actorName = req.body?.actor_name_snapshot || req.body?.actor_name || req.body?.created_by || null;
+    const actorId = req.body?.actor_user_id || req.body?.actor_id || null;
+    const actorRole = req.body?.actor_role_snapshot || req.body?.actor_role || null;
+    const corrId = req.body?.correlation_id || req.headers['x-correlation-id'] || `corr_evid_${Date.now()}`;
+
+    try {
+      const evidence = await uploadPaymentEvidence(pool, {
+        propertyId,
+        reservationId,
+        paymentId,
+        evidenceType,
+        note,
+        file: {
+          mimetype: file.mimetype,
+          size: file.size,
+          originalname: file.originalname || 'evidence',
+          buffer: file.buffer
+        },
+        actorUserId: actorId,
+        actorNameSnapshot: actorName,
+        actorRoleSnapshot: actorRole,
+        correlationId: corrId
+      });
+
+      return res.status(201).json({
+        status: 'SUCCESS',
+        data: { evidence }
+      });
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message
+      });
+    }
+  }
+);
+
+app.get('/api/reservations/:id/payments/:paymentId/evidences', async (req: any, res: any) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const includeInactive = req.query.include_inactive !== 'false';
+
+  try {
+    const evidences = await getPaymentEvidences(pool, propertyId, reservationId, paymentId, includeInactive);
+    return res.json({
+      status: 'OK',
+      data: evidences
+    });
+  } catch (err: any) {
+    const statusCode = err.statusCode || 500;
+    return res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: err.message
+    });
+  }
+});
+
+app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId', async (req: any, res: any) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  const evidenceId = Number(req.params.evidenceId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+  if (!Number.isInteger(evidenceId) || evidenceId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid evidence id' });
+  }
+
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  try {
+    const row = await getEvidenceRowById(pool, propertyId, reservationId, paymentId, evidenceId);
+    return res.json({
+      status: 'OK',
+      data: toEvidenceMetadata(row)
+    });
+  } catch (err: any) {
+    const statusCode = err.statusCode || 500;
+    return res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: err.message
+    });
+  }
+});
+
+app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content', async (req: any, res: any) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  const evidenceId = Number(req.params.evidenceId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+  if (!Number.isInteger(evidenceId) || evidenceId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid evidence id' });
+  }
+
+  const propertyIdRaw = req.query.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const isDownload = req.query.download === '1' || req.query.download === 'true';
+  const actorName = req.query.actor_name_snapshot || req.query.actor_name || null;
+  const actorId = req.query.actor_user_id || req.query.actor_id || null;
+  const actorRole = req.query.actor_role_snapshot || req.query.actor_role || null;
+  const corrId = req.query.correlation_id || req.headers['x-correlation-id'] || `corr_view_${Date.now()}`;
+
+  try {
+    const row = await getEvidenceRowById(pool, propertyId, reservationId, paymentId, evidenceId);
+
+    // Audit log
+    await recordEvidenceAccessAudit(pool, {
+      propertyId,
+      reservationId,
+      paymentId,
+      evidenceId,
+      action: isDownload ? 'PAYMENT_EVIDENCE_DOWNLOADED' : 'PAYMENT_EVIDENCE_VIEWED',
+      actorUserId: actorId,
+      actorNameSnapshot: actorName,
+      actorRoleSnapshot: actorRole,
+      correlationId: corrId
+    });
+
+    const disposition = isDownload
+      ? `attachment; filename="${encodeURIComponent(row.original_filename)}"`
+      : `inline; filename="${encodeURIComponent(row.original_filename)}"`;
+
+    res.setHeader('Content-Type', row.mime_type);
+    res.setHeader('Content-Disposition', disposition);
+    res.setHeader('Content-Length', row.file_size_bytes);
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+
+    const stream = createEvidenceReadStream(row.storage_key);
+    stream.pipe(res);
+  } catch (err: any) {
+    const statusCode = err.statusCode || 500;
+    return res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: err.message
+    });
+  }
+});
+
+app.post('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/deactivate', async (req: any, res: any) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  const evidenceId = Number(req.params.evidenceId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+  if (!Number.isInteger(evidenceId) || evidenceId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid evidence id' });
+  }
+
+  const propertyIdRaw = req.body?.property_id ?? req.query?.property_id;
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const { reason, actor_name, actor_id, actor_role, correlation_id } = req.body || {};
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ status: 'ERROR', code: 'DEACTIVATION_REASON_REQUIRED', message: 'Alasan penonaktifan bukti pembayaran wajib diisi' });
+  }
+
+  const actorName = req.body?.actor_name_snapshot || actor_name || req.body?.created_by || null;
+  const actorUserId = req.body?.actor_user_id || actor_id || null;
+  const actorRole = req.body?.actor_role_snapshot || actor_role || null;
+  const corrId = correlation_id || req.headers['x-correlation-id'] || `corr_deact_${Date.now()}`;
+
+  try {
+    const updated = await deactivateEvidence(pool, {
+      propertyId,
+      reservationId,
+      paymentId,
+      evidenceId,
+      reason: String(reason).trim(),
+      actorUserId,
+      actorNameSnapshot: actorName,
+      actorRoleSnapshot: actorRole,
+      correlationId: corrId
+    });
+
+    return res.status(200).json({
+      status: 'SUCCESS',
+      data: { evidence: updated }
+    });
+  } catch (err: any) {
+    const statusCode = err.statusCode || 500;
+    return res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: err.message
+    });
   }
 });
 

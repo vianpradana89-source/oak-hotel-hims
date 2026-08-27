@@ -18,6 +18,25 @@ import {
   PAYMENT_CORRECTION_REASONS,
   type PaymentTransactionItem,
 } from './features/transactions/paymentCorrectionHelpers.ts';
+import {
+  PaymentEvidenceUploader,
+  type PaymentEvidenceFormState
+} from './features/transactions/PaymentEvidenceUploader.tsx';
+import {
+  PaymentEvidencePreviewModal
+} from './features/transactions/PaymentEvidencePreviewModal.tsx';
+import {
+  getPaymentEvidenceStatus,
+  getActiveEvidences,
+  getInactiveEvidences,
+  formatEvidenceType,
+  formatEvidenceFileSize,
+  formatEvidenceDate,
+} from './features/transactions/paymentEvidenceHelpers.ts';
+import type {
+  PaymentEvidenceItem,
+  PaymentEvidenceType
+} from './features/transactions/paymentEvidenceTypes.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
@@ -133,6 +152,43 @@ function App() {
     reasonText: '',
     submitting: false,
     error: null,
+  });
+  const [paymentEvidenceForm, setPaymentEvidenceForm] = useState<PaymentEvidenceFormState>({
+    file: null,
+    evidenceType: 'BANK_TRANSFER',
+    note: ''
+  });
+  const [paymentCorrectionEvidenceForm, setPaymentCorrectionEvidenceForm] = useState<PaymentEvidenceFormState>({
+    file: null,
+    evidenceType: 'CASH_RECEIPT',
+    note: ''
+  });
+  const [previewEvidence, setPreviewEvidence] = useState<PaymentEvidenceItem | null>(null);
+  const [deactivateEvidenceModal, setDeactivateEvidenceModal] = useState<{
+    open: boolean;
+    evidence: PaymentEvidenceItem | null;
+    reason: string;
+    submitting: boolean;
+    error: string | null;
+  }>({
+    open: false,
+    evidence: null,
+    reason: '',
+    submitting: false,
+    error: null
+  });
+  const [uploadExtraEvidenceModal, setUploadExtraEvidenceModal] = useState<{
+    open: boolean;
+    paymentId: number | null;
+    form: PaymentEvidenceFormState;
+    submitting: boolean;
+    error: string | null;
+  }>({
+    open: false,
+    paymentId: null,
+    form: { file: null, evidenceType: 'BANK_TRANSFER', note: '' },
+    submitting: false,
+    error: null
   });
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
@@ -1205,19 +1261,31 @@ function App() {
       return;
     }
 
+    if (!paymentEvidenceForm.file) {
+      setPaymentFeedback({ type: 'error', message: 'Bukti pembayaran wajib dilampirkan sebelum memproses pembayaran' });
+      return;
+    }
+
     setPaymentSubmitting(true);
     setPaymentFeedback(null);
 
     try {
+      const chosenMethod = paymentEvidenceForm.evidenceType === 'BANK_TRANSFER' ? 'BANK_TRANSFER' : paymentEvidenceForm.evidenceType === 'QRIS_RECEIPT' ? 'QRIS' : paymentEvidenceForm.evidenceType === 'EDC_SLIP' ? 'CARD' : 'CASH';
+
+      const formData = new FormData();
+      formData.append('property_id', String(propertyId));
+      formData.append('amount', String(rawAmount));
+      formData.append('payment_method', chosenMethod);
+      formData.append('reference_code', `PMT-${Date.now()}`);
+      formData.append('evidence_type', paymentEvidenceForm.evidenceType);
+      if (paymentEvidenceForm.note) {
+        formData.append('evidence_note', paymentEvidenceForm.note);
+      }
+      formData.append('file', paymentEvidenceForm.file);
+
       const response = await fetch(`/api/reservations/${selectedRes.id}/payments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: propertyId,
-          amount: rawAmount,
-          payment_method: 'CASH',
-          reference_code: `PMT-${Date.now()}`
-        })
+        body: formData
       });
       const data = await response.json();
       if (!response.ok || (data.status !== 'SUCCESS' && data.status !== 'OK')) {
@@ -1265,6 +1333,8 @@ function App() {
         );
       }
 
+      setPaymentEvidenceForm({ file: null, evidenceType: 'BANK_TRANSFER', note: '' });
+
       // 4. Authoritatively refresh Folio snapshot and payment ledger
       await fetchReservationFolio(Number(selectedRes.id));
 
@@ -1299,6 +1369,21 @@ function App() {
 
   const openPaymentCorrectionModal = (payment: PaymentTransactionItem) => {
     setActivePaymentMenuId(null);
+    const defaultEvType: PaymentEvidenceType =
+      payment.payment_method === 'TRANSFER'
+        ? 'BANK_TRANSFER'
+        : payment.payment_method === 'QRIS'
+        ? 'QRIS_RECEIPT'
+        : payment.payment_method === 'DEBIT' || payment.payment_method === 'CREDIT_CARD'
+        ? 'EDC_SLIP'
+        : 'CASH_RECEIPT';
+
+    setPaymentCorrectionEvidenceForm({
+      file: null,
+      evidenceType: defaultEvType,
+      note: `Bukti koreksi transaksi #${payment.id}`,
+    });
+
     setPaymentCorrectionModal({
       open: true,
       payment,
@@ -1321,6 +1406,79 @@ function App() {
       submitting: false,
       error: null,
     });
+  };
+
+  const handleDeactivateEvidence = async () => {
+    if (!deactivateEvidenceModal.evidence || !selectedRes || propertyId === null || deactivateEvidenceModal.submitting) return;
+
+    if (!deactivateEvidenceModal.reason.trim()) {
+      setDeactivateEvidenceModal(prev => ({ ...prev, error: 'Alasan penonaktifan bukti wajib diisi' }));
+      return;
+    }
+
+    setDeactivateEvidenceModal(prev => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const evid = deactivateEvidenceModal.evidence;
+      const res = await fetch(`/api/reservations/${selectedRes.id}/payments/${evid.payment_transaction_id}/evidences/${evid.id}/deactivate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          reason: deactivateEvidenceModal.reason.trim()
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'SUCCESS') {
+        throw new Error(data.message || 'Gagal menonaktifkan bukti');
+      }
+
+      await fetchReservationFolio(Number(selectedRes.id));
+      setDeactivateEvidenceModal({ open: false, evidence: null, reason: '', submitting: false, error: null });
+    } catch (err: any) {
+      setDeactivateEvidenceModal(prev => ({ ...prev, submitting: false, error: err.message || 'Terjadi kesalahan' }));
+    }
+  };
+
+  const handleUploadExtraEvidence = async () => {
+    if (!uploadExtraEvidenceModal.paymentId || !selectedRes || propertyId === null || uploadExtraEvidenceModal.submitting) return;
+
+    if (!uploadExtraEvidenceModal.form.file) {
+      setUploadExtraEvidenceModal(prev => ({ ...prev, error: 'File bukti pembayaran wajib dipilih' }));
+      return;
+    }
+
+    setUploadExtraEvidenceModal(prev => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadExtraEvidenceModal.form.file);
+      formData.append('property_id', String(propertyId));
+      formData.append('evidence_type', uploadExtraEvidenceModal.form.evidenceType);
+      if (uploadExtraEvidenceModal.form.note) {
+        formData.append('note', uploadExtraEvidenceModal.form.note);
+      }
+
+      const res = await fetch(`/api/reservations/${selectedRes.id}/payments/${uploadExtraEvidenceModal.paymentId}/evidences`, {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'SUCCESS') {
+        throw new Error(data.message || 'Gagal mengunggah bukti');
+      }
+
+      await fetchReservationFolio(Number(selectedRes.id));
+      setUploadExtraEvidenceModal({
+        open: false,
+        paymentId: null,
+        form: { file: null, evidenceType: 'BANK_TRANSFER', note: '' },
+        submitting: false,
+        error: null
+      });
+    } catch (err: any) {
+      setUploadExtraEvidenceModal(prev => ({ ...prev, submitting: false, error: err.message || 'Terjadi kesalahan' }));
+    }
   };
 
   const submitPaymentCorrection = async () => {
@@ -1351,21 +1509,33 @@ function App() {
       return;
     }
 
+    if (!paymentCorrectionEvidenceForm.file) {
+      setPaymentCorrectionModal((prev) => ({ ...prev, error: 'Bukti pembayaran baru wajib dilampirkan untuk koreksi pembayaran' }));
+      return;
+    }
+
     setPaymentCorrectionModal((prev) => ({ ...prev, submitting: true, error: null }));
 
     try {
+      const formData = new FormData();
+      formData.append('property_id', String(propertyId));
+      formData.append('amount', String(newAmount));
+      formData.append('payment_method', paymentCorrectionModal.paymentMethod);
+      formData.append('reason_code', paymentCorrectionModal.reasonCode);
+      if (paymentCorrectionModal.reasonText.trim()) {
+        formData.append('reason_text', paymentCorrectionModal.reasonText.trim());
+      }
+      formData.append('evidence_type', paymentCorrectionEvidenceForm.evidenceType);
+      if (paymentCorrectionEvidenceForm.note.trim()) {
+        formData.append('evidence_note', paymentCorrectionEvidenceForm.note.trim());
+      }
+      formData.append('file', paymentCorrectionEvidenceForm.file);
+
       const response = await fetch(
         `/api/reservations/${selectedRes.id}/payments/${paymentCorrectionModal.payment.id}/correct`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            property_id: propertyId,
-            amount: newAmount,
-            payment_method: paymentCorrectionModal.paymentMethod,
-            reason_code: paymentCorrectionModal.reasonCode,
-            reason_text: paymentCorrectionModal.reasonText.trim() || undefined,
-          }),
+          body: formData,
         }
       );
       const data = await response.json();
@@ -1417,6 +1587,12 @@ function App() {
       if (fetchTransactionReservationsRef.current) {
         fetchTransactionReservationsRef.current(propertyId);
       }
+
+      setPaymentCorrectionEvidenceForm({
+        file: null,
+        evidenceType: 'CASH_RECEIPT',
+        note: ''
+      });
 
       setPaymentCorrectionModal({
         open: false,
@@ -3991,9 +4167,9 @@ function App() {
                           <button
                             type="button"
                             onClick={handlePayment}
-                            disabled={paymentSubmitting || !validation.isValid}
+                            disabled={paymentSubmitting || !validation.isValid || !paymentEvidenceForm.file}
                             className={`px-4 py-2 rounded-lg text-sm font-bold text-white transition-all shadow-sm ${
-                              paymentSubmitting || !validation.isValid
+                              paymentSubmitting || !validation.isValid || !paymentEvidenceForm.file
                                 ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
                                 : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
                             }`}
@@ -4001,6 +4177,20 @@ function App() {
                             {paymentSubmitting ? 'Memproses...' : 'Bayar'}
                           </button>
                         </div>
+
+                        {/* Integrated Payment Evidence Uploader */}
+                        <PaymentEvidenceUploader
+                          state={paymentEvidenceForm}
+                          onChange={setPaymentEvidenceForm}
+                          disabled={paymentSubmitting}
+                          isRequired={true}
+                        />
+
+                        {!paymentEvidenceForm.file && !paymentFeedback && (
+                          <p className="text-[11px] text-slate-500 italic">
+                            * Bukti pembayaran wajib dilampirkan sebelum memproses transaksi.
+                          </p>
+                        )}
 
                         {validation.isValid && (
                           <div className="text-xs flex items-center justify-between px-3 py-2 bg-white rounded-lg border border-slate-200 text-slate-600">
@@ -4046,6 +4236,7 @@ function App() {
                         const visual = getPaymentStatusVisual(p.status, p.transaction_type);
                         const eligible = isPaymentEligibleForCorrection(p);
                         const isMenuOpen = activePaymentMenuId === Number(p.id);
+                        const evidenceBadge = getPaymentEvidenceStatus(selectedFolio?.evidences, Number(p.id));
 
                         return (
                           <div
@@ -4062,6 +4253,9 @@ function App() {
                                 </span>
                                 <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded border ${visual.bgColor} ${visual.textColor} ${visual.borderColor}`}>
                                   {visual.label}
+                                </span>
+                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${evidenceBadge.badgeClass}`}>
+                                  📎 {evidenceBadge.label}
                                 </span>
                               </div>
                               <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
@@ -4344,6 +4538,141 @@ function App() {
                     <span className="text-slate-500">Dibuat Oleh</span>
                     <strong className="text-slate-800">{formatActorName(p.created_by)}</strong>
                   </div>
+
+                  {/* BUKTI PEMBAYARAN */}
+                  <div className="pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-slate-700 font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                        <span>📎</span> Bukti Pembayaran
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUploadExtraEvidenceModal({
+                            open: true,
+                            paymentId: Number(p.id),
+                            form: { file: null, evidenceType: 'BANK_TRANSFER', note: '' },
+                            submitting: false,
+                            error: null
+                          });
+                        }}
+                        className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded transition"
+                      >
+                        ➕ Tambah Bukti
+                      </button>
+                    </div>
+
+                    {(() => {
+                      const activeList = getActiveEvidences(selectedFolio?.evidences, Number(p.id));
+                      const inactiveList = getInactiveEvidences(selectedFolio?.evidences, Number(p.id));
+
+                      return (
+                        <div className="space-y-2">
+                          {activeList.length === 0 ? (
+                            <div className="bg-amber-50 border border-amber-200 text-amber-800 p-2.5 rounded-lg text-[11px] flex items-center justify-between">
+                              <span>Belum ada bukti pembayaran aktif yang terlampir.</span>
+                            </div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {activeList.map((ev) => (
+                                <div
+                                  key={ev.id}
+                                  className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 flex items-center justify-between gap-2 shadow-xs"
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="font-bold text-slate-800 truncate max-w-[180px]">
+                                        {ev.original_filename}
+                                      </span>
+                                      <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                        {formatEvidenceType(ev.evidence_type)}
+                                      </span>
+                                      <span className="text-[10px] text-slate-400">
+                                        {formatEvidenceFileSize(ev.file_size_bytes)}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 mt-0.5">
+                                      {formatEvidenceDate(ev.uploaded_at)} • {formatActorName(ev.uploaded_by_name_snapshot)}
+                                      {ev.note && <span className="ml-1 text-slate-600">({ev.note})</span>}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPreviewEvidence(ev)}
+                                      className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded text-[11px] font-semibold transition"
+                                      title="Lihat Bukti"
+                                    >
+                                      👁️ Lihat
+                                    </button>
+                                    <a
+                                      href={`/api/reservations/${ev.reservation_id}/payments/${ev.payment_transaction_id}/evidences/${ev.id}/content?property_id=${propertyId}&download=1`}
+                                      download={ev.original_filename}
+                                      className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded text-[11px] font-semibold transition inline-block"
+                                      title="Unduh Bukti"
+                                    >
+                                      📥 Unduh
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeactivateEvidenceModal({
+                                          open: true,
+                                          evidence: ev,
+                                          reason: '',
+                                          submitting: false,
+                                          error: null
+                                        });
+                                      }}
+                                      className="px-1.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded text-[11px] font-semibold transition"
+                                      title="Nonaktifkan Bukti"
+                                    >
+                                      🚫
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {inactiveList.length > 0 && (
+                            <details className="pt-1 text-[11px]">
+                              <summary className="cursor-pointer text-slate-500 hover:text-slate-700 font-semibold select-none">
+                                Riwayat Bukti Dinonaktifkan ({inactiveList.length})
+                              </summary>
+                              <div className="mt-1.5 space-y-1.5 pl-2 border-l-2 border-slate-200">
+                                {inactiveList.map((iev) => (
+                                  <div
+                                    key={iev.id}
+                                    className="p-2 bg-slate-100/70 border border-slate-200 rounded text-slate-500 flex items-center justify-between gap-2"
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-semibold line-through text-slate-500 truncate">
+                                        {iev.original_filename}
+                                      </div>
+                                      <div className="text-[10px] text-rose-600">
+                                        Alasan: {iev.deactivation_reason || '-'} ({formatActorName(iev.deactivated_by_name_snapshot)})
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => setPreviewEvidence(iev)}
+                                        className="px-2 py-0.5 bg-white border border-slate-200 rounded text-[10px] text-slate-600"
+                                      >
+                                        Lihat
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
                 </div>
               );
             })()}
@@ -4398,7 +4727,7 @@ function App() {
               return (
                 <div className="space-y-3.5 text-xs">
                   <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-[11px] leading-relaxed">
-                    <strong>💡 Prinsip Immutabilitas Finansial:</strong> Pembayaran asli tidak akan dihapus. Sistem akan otomatis menerbitkan transaksi <strong>REVERSAL (-Rp {formatCurrency(origAmount)})</strong> dan <strong>PEMBAYARAN PENGGANTI</strong>.
+                    <strong>💡 Prinsip Immutabilitas Finansial:</strong> Pembayaran asli tidak akan dihapus. Sistem akan otomatis menerbitkan transaksi <strong>REVERSAL (-Rp {formatCurrency(origAmount)})</strong> dan <strong>PEMBAYARAN PENGGANTI</strong>. Bukti pembayaran lama tetap disimpan sebagai riwayat dan tidak akan dihapus.
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
@@ -4481,6 +4810,22 @@ function App() {
                     />
                   </div>
 
+                  {/* Mandatory Replacement Evidence Uploader */}
+                  <div className="pt-2 border-t border-slate-100">
+                    <label className="block text-slate-700 font-bold mb-1">Bukti Pembayaran Baru *</label>
+                    <PaymentEvidenceUploader
+                      state={paymentCorrectionEvidenceForm}
+                      onChange={setPaymentCorrectionEvidenceForm}
+                      disabled={paymentCorrectionModal.submitting}
+                      isRequired={true}
+                    />
+                    {!paymentCorrectionEvidenceForm.file && (
+                      <p className="text-[11px] text-amber-700 italic mt-1">
+                        * Bukti pembayaran pengganti wajib dilampirkan untuk memproses koreksi.
+                      </p>
+                    )}
+                  </div>
+
                   {(paymentCorrectionModal.error || (!val.valid && (val.errors.amount || val.errors.reasonCode || val.errors.reasonText))) && (
                     <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-medium text-xs">
                       {paymentCorrectionModal.error || val.errors.amount || val.errors.reasonCode || val.errors.reasonText}
@@ -4499,9 +4844,9 @@ function App() {
                     <button
                       type="button"
                       onClick={submitPaymentCorrection}
-                      disabled={paymentCorrectionModal.submitting || !val.valid}
+                      disabled={paymentCorrectionModal.submitting || !val.valid || !paymentCorrectionEvidenceForm.file}
                       className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all ${
-                        paymentCorrectionModal.submitting || !val.valid
+                        paymentCorrectionModal.submitting || !val.valid || !paymentCorrectionEvidenceForm.file
                           ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
                           : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
                       }`}
@@ -4545,7 +4890,7 @@ function App() {
               return (
                 <div className="space-y-3 text-xs">
                   <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-lg p-3 text-[11px] leading-relaxed">
-                    <strong>⚠️ Peringatan Pembatalan:</strong> Pembayaran asli tidak akan dihapus dari histori. Sistem akan menandai transaksi sebagai <strong>DIBATALKAN</strong> dan membuat transaksi reversal pembalik saldo sebesar <strong>-Rp {formatCurrency(Number(p.amount || 0))}</strong>.
+                    <strong>⚠️ Peringatan Pembatalan:</strong> Pembayaran asli tidak akan dihapus dari histori. Sistem akan menandai transaksi sebagai <strong>DIBATALKAN</strong> dan membuat transaksi reversal pembalik saldo sebesar <strong>-Rp {formatCurrency(Number(p.amount || 0))}</strong>. Bukti pembayaran lama tetap disimpan sebagai riwayat dan tidak akan dihapus.
                   </div>
 
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5">
@@ -4620,6 +4965,144 @@ function App() {
                 </div>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {/* Payment Evidence Modals */}
+      <PaymentEvidencePreviewModal
+        isOpen={previewEvidence !== null}
+        onClose={() => setPreviewEvidence(null)}
+        evidence={previewEvidence}
+        propertyId={propertyId ?? 1}
+      />
+
+      {deactivateEvidenceModal.open && deactivateEvidenceModal.evidence && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Nonaktifkan Bukti Pembayaran</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Bukti #{deactivateEvidenceModal.evidence.id} ({deactivateEvidenceModal.evidence.original_filename})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeactivateEvidenceModal({ open: false, evidence: null, reason: '', submitting: false, error: null })}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-lg p-3 text-[11px] leading-relaxed">
+                <strong>⚠️ Kebijakan Audit:</strong> File bukti tidak dihapus dari penyimpanan. Bukti akan ditandai nonaktif dalam riwayat audit dan tidak lagi dianggap sebagai bukti aktif.
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Alasan Penonaktifan *
+                </label>
+                <textarea
+                  rows={3}
+                  value={deactivateEvidenceModal.reason}
+                  onChange={(e) => setDeactivateEvidenceModal(prev => ({ ...prev, reason: e.target.value, error: null }))}
+                  placeholder="Contoh: Bukti buram, salah upload dokumen, atau transfer dibatalkan..."
+                  className="w-full bg-white border border-slate-300 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-500"
+                />
+              </div>
+
+              {deactivateEvidenceModal.error && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-medium text-xs">
+                  {deactivateEvidenceModal.error}
+                </div>
+              )}
+
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeactivateEvidenceModal({ open: false, evidence: null, reason: '', submitting: false, error: null })}
+                  disabled={deactivateEvidenceModal.submitting}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeactivateEvidence}
+                  disabled={deactivateEvidenceModal.submitting || !deactivateEvidenceModal.reason.trim()}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all ${
+                    deactivateEvidenceModal.submitting || !deactivateEvidenceModal.reason.trim()
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-rose-600 hover:bg-rose-700 active:bg-rose-800 cursor-pointer'
+                  }`}
+                >
+                  {deactivateEvidenceModal.submitting ? 'Menonaktifkan...' : 'Konfirmasi Nonaktifkan'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {uploadExtraEvidenceModal.open && uploadExtraEvidenceModal.paymentId && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Tambah Bukti Pembayaran</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Lampirkan bukti tambahan untuk transaksi #{uploadExtraEvidenceModal.paymentId}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUploadExtraEvidenceModal({ open: false, paymentId: null, form: { file: null, evidenceType: 'BANK_TRANSFER', note: '' }, submitting: false, error: null })}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <PaymentEvidenceUploader
+                state={uploadExtraEvidenceModal.form}
+                onChange={(form) => setUploadExtraEvidenceModal(prev => ({ ...prev, form, error: null }))}
+                disabled={uploadExtraEvidenceModal.submitting}
+                isRequired
+              />
+
+              {uploadExtraEvidenceModal.error && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-medium text-xs">
+                  {uploadExtraEvidenceModal.error}
+                </div>
+              )}
+
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setUploadExtraEvidenceModal({ open: false, paymentId: null, form: { file: null, evidenceType: 'BANK_TRANSFER', note: '' }, submitting: false, error: null })}
+                  disabled={uploadExtraEvidenceModal.submitting}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUploadExtraEvidence}
+                  disabled={uploadExtraEvidenceModal.submitting || !uploadExtraEvidenceModal.form.file}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all ${
+                    uploadExtraEvidenceModal.submitting || !uploadExtraEvidenceModal.form.file
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
+                  }`}
+                >
+                  {uploadExtraEvidenceModal.submitting ? 'Mengunggah...' : 'Unggah Bukti'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

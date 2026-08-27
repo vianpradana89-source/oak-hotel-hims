@@ -84,11 +84,21 @@ export function formatIdrInput(value: string | number | null | undefined): strin
   const strippedPrefix = str.replace(/^(rp\.?|idr)\s*/i, '').trim();
   if (!strippedPrefix) return '';
 
-  // Check if it's an ambiguous decimal like 1.5 or 1000.50 (single dot not followed by exactly 3 digits)
+  // Check if it's an ambiguous decimal like 1.5 or 1000.50 (single dot followed by 0-2 digits)
   if (strippedPrefix.includes('.')) {
     const validThousandGroupPattern = /^\d{1,3}(\.\d{3})+$/;
     if (!validThousandGroupPattern.test(strippedPrefix)) {
-      return str;
+      // Check if it's an ambiguous decimal like "1.5", "100.50", "100." (dot followed by 0-2 digits at end)
+      if (/\.\d{0,2}$/.test(strippedPrefix)) {
+        return str;
+      }
+      const parts = strippedPrefix.split('.');
+      // If any internal part before the last part has length !== 3 (e.g. "1.2.0000"), it's malformed
+      for (let i = 1; i < parts.length - 1; i++) {
+        if (parts[i].length !== 3) {
+          return str;
+        }
+      }
     }
   }
 

@@ -12,6 +12,7 @@
     "test:guest-crm": "node test/guest_crm_helpers_test.ts",
     "test:payment-idr": "node test/payment_idr_helpers_test.ts",
     "test:payment-correction": "node test/payment_correction_helpers_test.ts",
+    "test:payment-evidence": "node test/payment_evidence_helpers_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

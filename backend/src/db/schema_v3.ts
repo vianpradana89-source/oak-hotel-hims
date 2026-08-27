@@ -43,6 +43,38 @@ export async function initializeDatabase(pool: Pool) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS payment_evidences (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+      reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+      payment_transaction_id INTEGER NOT NULL REFERENCES payment_transactions(id) ON DELETE RESTRICT,
+      evidence_type VARCHAR(50) NOT NULL,
+      storage_key VARCHAR(500) NOT NULL,
+      original_filename VARCHAR(255) NOT NULL,
+      mime_type VARCHAR(100) NOT NULL,
+      file_size_bytes BIGINT NOT NULL,
+      note TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      uploaded_by_user_id VARCHAR(100),
+      uploaded_by_name_snapshot VARCHAR(150),
+      uploaded_by_role_snapshot VARCHAR(100),
+      uploaded_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      deactivated_by_user_id VARCHAR(100),
+      deactivated_by_name_snapshot VARCHAR(150),
+      deactivated_by_role_snapshot VARCHAR(100),
+      deactivated_at TIMESTAMP WITHOUT TIME ZONE,
+      deactivation_reason TEXT,
+      created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_payment_evidences_payment ON payment_evidences (payment_transaction_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_evidences_reservation ON payment_evidences (reservation_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_evidences_property ON payment_evidences (property_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_evidences_uploaded_at ON payment_evidences (uploaded_at);
+    CREATE INDEX IF NOT EXISTS idx_payment_evidences_active ON payment_evidences (is_active);
+
+
     CREATE TABLE IF NOT EXISTS housekeeping_tasks (
       id SERIAL PRIMARY KEY,
       property_id INTEGER NOT NULL REFERENCES properties(id),
@@ -1031,6 +1063,49 @@ export async function initializeDatabase(pool: Pool) {
 
         INSERT INTO schema_migrations (version)
         VALUES ('payment_correction_void_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // 8. Payment evidence schema migration
+    const paymentEvidenceMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'payment_evidence_schema_v1'"
+    );
+    if ((paymentEvidenceMarkerCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS payment_evidences (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          payment_transaction_id INTEGER NOT NULL REFERENCES payment_transactions(id) ON DELETE RESTRICT,
+          evidence_type VARCHAR(50) NOT NULL,
+          storage_key VARCHAR(500) NOT NULL,
+          original_filename VARCHAR(255) NOT NULL,
+          mime_type VARCHAR(100) NOT NULL,
+          file_size_bytes BIGINT NOT NULL,
+          note TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          uploaded_by_user_id VARCHAR(100),
+          uploaded_by_name_snapshot VARCHAR(150),
+          uploaded_by_role_snapshot VARCHAR(100),
+          uploaded_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          deactivated_by_user_id VARCHAR(100),
+          deactivated_by_name_snapshot VARCHAR(150),
+          deactivated_by_role_snapshot VARCHAR(100),
+          deactivated_at TIMESTAMP WITHOUT TIME ZONE,
+          deactivation_reason TEXT,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_payment_evidences_payment ON payment_evidences (payment_transaction_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_evidences_reservation ON payment_evidences (reservation_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_evidences_property ON payment_evidences (property_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_evidences_uploaded_at ON payment_evidences (uploaded_at);
+        CREATE INDEX IF NOT EXISTS idx_payment_evidences_active ON payment_evidences (is_active);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('payment_evidence_schema_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }

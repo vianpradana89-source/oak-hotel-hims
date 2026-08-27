@@ -2,6 +2,8 @@
 
 require('dotenv').config({ path: 'E:/oak-hotel-hims/backend/.env' });
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { once } = require('events');
 const { app, pool } = require('../dist/index');
 const { initializeDatabase } = require('../dist/db/schema_v3');
@@ -21,9 +23,28 @@ function expect(condition, msg) {
   }
 }
 
-async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body && method !== 'GET') opts.body = JSON.stringify(body);
+async function api(method, path, body, customHeaders = {}) {
+  const opts = {
+    method,
+    headers: {
+      ...customHeaders
+    }
+  };
+  if (body instanceof FormData) {
+    opts.body = body;
+  } else if (body && method !== 'GET') {
+    if ((path.match(/\/api\/reservations\/\d+\/payments$/) || path.includes('/correct')) && method === 'POST') {
+      const fd = new FormData();
+      for (const [k, v] of Object.entries(body)) {
+        if (v !== undefined && v !== null) fd.append(k, String(v));
+      }
+      fd.append('file', new Blob([Buffer.from('TEST_PAYMENT_PROOF_JPEG_DATA')], { type: 'image/jpeg' }), 'proof.jpg');
+      opts.body = fd;
+    } else {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+  }
   const res = await fetch(baseUrl + path, opts);
   const json = await res.json().catch(() => null);
   return { status: res.status, json };
@@ -154,8 +175,12 @@ async function cleanupFixtures() {
   try {
     await client.query('BEGIN');
 
-    // 1. Audit logs
+    // 1. Audit logs & Payment Evidences
     if (propIdA || propIdB) {
+      await client.query(
+        'DELETE FROM payment_evidences WHERE property_id IN ($1, $2) OR reservation_id IN ($3, $4)',
+        [propIdA || 0, propIdB || 0, resIdA || 0, resIdB || 0]
+      );
       await client.query(
         'DELETE FROM audit_logs WHERE property_id IN ($1, $2) OR record_id IN ($3, $4)',
         [propIdA || 0, propIdB || 0, String(resIdA || 0), String(resIdB || 0)]
@@ -188,6 +213,14 @@ async function cleanupFixtures() {
     }
 
     await client.query('COMMIT');
+
+    const storageDir = path.resolve(__dirname, '..', 'storage', 'payment-evidence');
+    if (propIdA && fs.existsSync(path.join(storageDir, String(propIdA)))) {
+      fs.rmSync(path.join(storageDir, String(propIdA)), { recursive: true, force: true });
+    }
+    if (propIdB && fs.existsSync(path.join(storageDir, String(propIdB)))) {
+      fs.rmSync(path.join(storageDir, String(propIdB)), { recursive: true, force: true });
+    }
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Cleanup error:', err);

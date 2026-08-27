@@ -15,3 +15,6 @@ backend/src/move_handler_temp.txt
 
 # Local AI/code-review configuration (for now)
 .coderabbit.yaml
+
+# Private evidence storage (multi-property runtime files)
+backend/storage/
