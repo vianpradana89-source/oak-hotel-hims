@@ -2828,6 +2828,10 @@ function App() {
                       disabled={bookingComposerChildren.length === 0 || bookingSubmitting}
                       onClick={async () => {
                          if (bookingSubmitting) return;
+                         if (propertyId === null) {
+                           alert('Pilih properti terlebih dahulu');
+                           return;
+                         }
                          const name = quickBooking.guestName.trim() || 'Tamu';
                          const phone = quickBooking.guestPhone.trim();
 
@@ -2866,12 +2870,6 @@ function App() {
                           existing.push(childPeriod);
                           overlapMap.set(roomId, existing);
                         }
-
-                         const propertyId = (() => {
-                           const roomRef = validChildren[0];
-                           const roomInfo = rooms.find((room) => Number(room.id) === canonicalBookingChildRoomId(roomRef));
-                          return Number(roomInfo?.property_id ?? rooms[0]?.property_id);
-                        })();
 
                         const payload = {
                           property_id: propertyId,
