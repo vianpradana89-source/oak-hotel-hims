@@ -109,21 +109,25 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS accounting_gl_accounts (
       id SERIAL PRIMARY KEY,
-      code VARCHAR(50) NOT NULL UNIQUE,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      code VARCHAR(50) NOT NULL,
       name VARCHAR(150) NOT NULL,
       account_type VARCHAR(40) NOT NULL,
       is_active BOOLEAN DEFAULT TRUE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_accounting_gl_accounts_code_per_property UNIQUE (property_id, code)
     );
 
     CREATE TABLE IF NOT EXISTS accounting_journal_entries (
       id SERIAL PRIMARY KEY,
-      entry_number VARCHAR(50) UNIQUE,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      entry_number VARCHAR(50),
       entry_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       description VARCHAR(200),
       source_module VARCHAR(50),
       source_ref VARCHAR(100),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_journal_entries_number_per_property UNIQUE (property_id, entry_number)
     );
 
     CREATE TABLE IF NOT EXISTS accounting_journal_lines (
@@ -461,19 +465,77 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property_status ON pos_orders(property_id, status);
   `);
 
-  const accountCount = await pool.query('SELECT COUNT(*) AS total FROM accounting_gl_accounts');
-  if (Number(accountCount.rows[0].total) === 0) {
-    await pool.query(`
-      INSERT INTO accounting_gl_accounts (code, name, account_type)
-      VALUES
-        ('101', 'Kas', 'ASSET'),
-        ('110', 'Piutang Tamu', 'ASSET'),
-        ('201', 'Hutang Usaha', 'LIABILITY'),
-        ('301', 'Pendapatan Hotel', 'REVENUE'),
-        ('401', 'Beban Operasional', 'EXPENSE'),
-        ('501', 'Modal Pemilik', 'EQUITY')
-    `);
-  }
+  // GL accounts and journal property isolation (idempotent for existing DBs)
+  await pool.query(`
+    -- 1. GL Accounts column & guarded historical backfill
+    ALTER TABLE accounting_gl_accounts ADD COLUMN IF NOT EXISTS property_id INTEGER;
+
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='accounting_gl_accounts' AND column_name='property_id' AND is_nullable='YES') THEN
+        UPDATE accounting_gl_accounts aga
+        SET property_id = p.id
+        FROM properties p
+        WHERE aga.property_id IS NULL
+          AND (
+            p.property_code = 'LWG'
+            OR p.name = 'OAK Lawang'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM properties p2
+            WHERE p2.id <> p.id
+              AND (p2.property_code = 'LWG' OR p2.name = 'OAK Lawang')
+          );
+      END IF;
+    END $$;
+
+    -- Drop legacy global unique constraint on code if present
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'accounting_gl_accounts_code_key') THEN
+        ALTER TABLE accounting_gl_accounts DROP CONSTRAINT accounting_gl_accounts_code_key;
+      END IF;
+    END $$;
+
+    ALTER TABLE accounting_gl_accounts ALTER COLUMN property_id SET NOT NULL;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_aga_property') THEN
+        ALTER TABLE accounting_gl_accounts ADD CONSTRAINT fk_aga_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_accounting_gl_accounts_code_per_property') THEN
+        ALTER TABLE accounting_gl_accounts ADD CONSTRAINT uq_accounting_gl_accounts_code_per_property UNIQUE (property_id, code);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_accounting_gl_accounts_property ON accounting_gl_accounts(property_id);
+
+    -- 2. Journal entries column
+    ALTER TABLE accounting_journal_entries ADD COLUMN IF NOT EXISTS property_id INTEGER;
+
+    -- Drop legacy global unique constraint on entry_number if present
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'accounting_journal_entries_entry_number_key') THEN
+        ALTER TABLE accounting_journal_entries DROP CONSTRAINT accounting_journal_entries_entry_number_key;
+      END IF;
+    END $$;
+
+    ALTER TABLE accounting_journal_entries ALTER COLUMN property_id SET NOT NULL;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_aje_property') THEN
+        ALTER TABLE accounting_journal_entries ADD CONSTRAINT fk_aje_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_journal_entries_number_per_property') THEN
+        ALTER TABLE accounting_journal_entries ADD CONSTRAINT uq_journal_entries_number_per_property UNIQUE (property_id, entry_number);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_journal_entries_property ON accounting_journal_entries(property_id);
+    CREATE INDEX IF NOT EXISTS idx_journal_entries_property_date ON accounting_journal_entries(property_id, entry_date);
+  `);
+
+  // GL accounts seed removed — fresh DB must remain data-neutral (property_id required)
 
   const guestCount = await pool.query('SELECT COUNT(*) AS total FROM guest_profiles');
   if (Number(guestCount.rows[0].total) === 0) {

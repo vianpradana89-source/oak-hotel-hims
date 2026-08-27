@@ -2897,27 +2897,44 @@ app.patch('/api/pos/orders/:id/status', async (req, res) => {
 
 app.get('/api/accounting/summary', async (req, res) => {
   try {
-    const accounts = await pool.query('SELECT * FROM accounting_gl_accounts ORDER BY code');
+    const propertyIdRaw = req.query.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    const accounts = await pool.query(
+      'SELECT * FROM accounting_gl_accounts WHERE property_id = $1 ORDER BY code',
+      [propertyId]
+    );
+
     const entries = await pool.query(`
       SELECT j.id, j.entry_number, j.description, j.entry_date, j.source_module,
              COALESCE(SUM(CASE WHEN jl.debit > 0 THEN jl.debit ELSE 0 END), 0) AS total_debit,
              COALESCE(SUM(CASE WHEN jl.credit > 0 THEN jl.credit ELSE 0 END), 0) AS total_credit
       FROM accounting_journal_entries j
       LEFT JOIN accounting_journal_lines jl ON jl.journal_entry_id = j.id
+      WHERE j.property_id = $1
       GROUP BY j.id, j.entry_number, j.description, j.entry_date, j.source_module
       ORDER BY j.entry_date DESC
-    `);
+    `, [propertyId]);
 
-    const payable = await pool.query('SELECT SUM(amount) AS total FROM vendor_payables WHERE status != $1', ['PAID']);
-    const receivable = await pool.query('SELECT SUM(total_amount - paid_amount) AS total FROM guest_receivables WHERE status != $1', ['PAID']);
-
+    // Note: vendor_payables and guest_receivables are scoped in B3B2.
+    // Return 0 for un-isolated AP/AR in B3B1 to prevent cross-property data exposure.
     res.json({
       status: 'OK',
       data: {
         accounts: accounts.rows,
         entries: entries.rows,
-        total_payable: Number(payable.rows[0]?.total || 0),
-        total_receivable: Number(receivable.rows[0]?.total || 0)
+        total_payable: 0,
+        total_receivable: 0
       }
     });
   } catch (err: any) {
@@ -2997,7 +3014,15 @@ app.post('/api/hr/payroll', async (req, res) => {
 });
 
 app.post('/api/accounting/journal', async (req, res) => {
-  const { description, source_module, source_ref, lines } = req.body;
+  const { property_id: propertyIdRaw, description, source_module, source_ref, lines } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   if (!Array.isArray(lines) || lines.length === 0) {
     return res.status(400).json({ status: 'ERROR', message: 'journal lines required' });
@@ -3006,20 +3031,36 @@ app.post('/api/accounting/journal', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Validate property exists
+    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    // Validate all GL accounts belong to this property
+    for (const line of lines) {
+      const account = await client.query('SELECT id, property_id FROM accounting_gl_accounts WHERE id = $1', [line.account_id]);
+      if (!hasRows(account)) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ status: 'ERROR', message: `GL account ${line.account_id} not found` });
+      }
+      if (Number(account.rows[0].property_id) !== propertyId) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_ACCOUNT', message: `GL account ${line.account_id} belongs to a different property` });
+      }
+    }
+
     const entryNumber = `JRN-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Date.now().toString().slice(-6)}`;
     const entry = await client.query(
-      `INSERT INTO accounting_journal_entries (entry_number, description, source_module, source_ref)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO accounting_journal_entries (property_id, entry_number, description, source_module, source_ref)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [entryNumber, description || 'Manual journal', source_module || 'PMS', source_ref || null]
+      [propertyId, entryNumber, description || 'Manual journal', source_module || 'PMS', source_ref || null]
     );
 
     for (const line of lines) {
-      const account = await client.query('SELECT id FROM accounting_gl_accounts WHERE id = $1', [line.account_id]);
-      if (!hasRows(account)) {
-        throw new Error(`GL account ${line.account_id} not found`);
-      }
-
       await client.query(
         `INSERT INTO accounting_journal_lines (journal_entry_id, account_id, debit, credit, description)
          VALUES ($1, $2, $3, $4, $5)`,

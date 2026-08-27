@@ -118,14 +118,23 @@ async function main() {
     var posOrdersPropNotNull = await columnIsNotNull('pos_orders', 'property_id');
     assert(posOrdersPropNotNull, 'J. pos_orders.property_id is NOT NULL');
 
-    assert(await countRows('properties') === 0, 'K. zero properties is valid');
-    assert(await countRows('rooms') === 0, 'L. zero rooms is valid');
-    assert(await countRows('room_types') === 0, 'M. zero room_types is valid');
-    assert(await countRows('availability_dates') === 0, 'N. zero availability_dates is valid');
-    assert(await countRows('pos_menu_categories') === 0, 'O. zero pos_menu_categories is valid');
-    assert(await countRows('pos_menu_items') === 0, 'P. zero pos_menu_items is valid');
-    assert(await countRows('pos_orders') === 0, 'Q. zero pos_orders is valid');
-    assert(await countRows('pos_order_items') === 0, 'R. zero pos_order_items is valid');
+    var glAccountsPropNotNull = await columnIsNotNull('accounting_gl_accounts', 'property_id');
+    assert(glAccountsPropNotNull, 'K. accounting_gl_accounts.property_id is NOT NULL');
+
+    var journalEntriesPropNotNull = await columnIsNotNull('accounting_journal_entries', 'property_id');
+    assert(journalEntriesPropNotNull, 'L. accounting_journal_entries.property_id is NOT NULL');
+
+    assert(await countRows('properties') === 0, 'M. zero properties is valid');
+    assert(await countRows('rooms') === 0, 'N. zero rooms is valid');
+    assert(await countRows('room_types') === 0, 'O. zero room_types is valid');
+    assert(await countRows('availability_dates') === 0, 'P. zero availability_dates is valid');
+    assert(await countRows('pos_menu_categories') === 0, 'Q. zero pos_menu_categories is valid');
+    assert(await countRows('pos_menu_items') === 0, 'R. zero pos_menu_items is valid');
+    assert(await countRows('pos_orders') === 0, 'S. zero pos_orders is valid');
+    assert(await countRows('pos_order_items') === 0, 'T. zero pos_order_items is valid');
+    assert(await countRows('accounting_gl_accounts') === 0, 'U. zero accounting_gl_accounts is valid');
+    assert(await countRows('accounting_journal_entries') === 0, 'V. zero accounting_journal_entries is valid');
+    assert(await countRows('accounting_journal_lines') === 0, 'W. zero accounting_journal_lines is valid');
 
     var secondBootError = null;
     try {
@@ -133,7 +142,7 @@ async function main() {
     } catch (e) {
       secondBootError = e;
     }
-    assert(secondBootError === null, 'S. second initializeDatabase() succeeds' + (secondBootError ? ': ' + secondBootError.message : ''));
+    assert(secondBootError === null, 'X. second initializeDatabase() succeeds' + (secondBootError ? ': ' + secondBootError.message : ''));
 
     var residueCounts = [
       await countRows('properties'),
@@ -147,10 +156,13 @@ async function main() {
       await countRows('pos_menu_categories'),
       await countRows('pos_menu_items'),
       await countRows('pos_orders'),
-      await countRows('pos_order_items')
+      await countRows('pos_order_items'),
+      await countRows('accounting_gl_accounts'),
+      await countRows('accounting_journal_entries'),
+      await countRows('accounting_journal_lines')
     ];
     var hasNoResidue = residueCounts.every(function(c) { return c === 0; });
-    assert(hasNoResidue, 'T. no fixture residue (all counts=0)');
+    assert(hasNoResidue, 'Y. no fixture residue (all counts=0)');
 
   } finally {
     await testPool.end();

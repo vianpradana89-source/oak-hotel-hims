@@ -823,18 +823,20 @@ function App() {
     if (propertyId === null) {
       setPosMenu([]);
       setPosOrders([]);
+      setFinanceSummary(null);
       return;
     }
     const targetPropertyId = propertyId;
     setPosMenu([]);
     setPosOrders([]);
+    setFinanceSummary(null);
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, guestsRes, employeesRes, payrollRes] = await Promise.all([
         fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
         fetch('/api/pos/orders?property_id=' + targetPropertyId),
-        fetch('/api/accounting/summary'),
+        fetch('/api/accounting/summary?property_id=' + targetPropertyId),
         fetch('/api/guest-profiles'),
         fetch('/api/hr/employees'),
         fetch('/api/hr/payroll')
