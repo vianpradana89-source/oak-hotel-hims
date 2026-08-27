@@ -11,6 +11,7 @@ import { initializeDatabase } from './db/schema_v3';
 import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
+import { createReportsRouter } from './domains/reports/reportsRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
   applyCancellationInventoryPlan,
@@ -1363,6 +1364,142 @@ async function createReservationRecord(req: any, payload: any) {
     canonical: canonicalResult
   };
 }
+
+// Authoritative property-scoped reservation listing
+app.get('/api/reservations', async (req, res) => {
+  try {
+    const propertyId = assertPropertyId(req.query);
+    await assertPropertyExists(pool, propertyId);
+
+    const conditions: string[] = ['b.property_id = $1'];
+    const params: any[] = [propertyId];
+    let paramIndex = 2;
+
+    // Date range filter: stay-overlap [check_in, check_out)
+    const startDateRaw = req.query.start_date || req.query.start;
+    const endDateRaw = req.query.end_date || req.query.end;
+    const dateRaw = req.query.date;
+
+    if (startDateRaw && endDateRaw) {
+      const startDate = normalizeHotelDate(startDateRaw);
+      const endDate = normalizeHotelDate(endDateRaw);
+      if (!startDate || !endDate || startDate >= endDate) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'invalid hotel date range: start_date must be before end_date'
+        });
+      }
+      // Stay overlap query: r.check_in < end_date AND r.check_out > start_date
+      conditions.push(`r.check_in::date < $${paramIndex}::date AND r.check_out::date > $${paramIndex + 1}::date`);
+      params.push(endDate, startDate);
+      paramIndex += 2;
+    } else if (startDateRaw) {
+      const startDate = normalizeHotelDate(startDateRaw);
+      if (!startDate) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid start_date format' });
+      }
+      conditions.push(`r.check_out::date > $${paramIndex}::date`);
+      params.push(startDate);
+      paramIndex++;
+    } else if (endDateRaw) {
+      const endDate = normalizeHotelDate(endDateRaw);
+      if (!endDate) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid end_date format' });
+      }
+      conditions.push(`r.check_in::date < $${paramIndex}::date`);
+      params.push(endDate);
+      paramIndex++;
+    } else if (dateRaw) {
+      const date = normalizeHotelDate(dateRaw);
+      if (!date) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid date format' });
+      }
+      // Single date occupied: r.check_in <= date AND r.check_out > date
+      conditions.push(`r.check_in::date <= $${paramIndex}::date AND r.check_out::date > $${paramIndex}::date`);
+      params.push(date);
+      paramIndex++;
+    }
+
+    // Status filter
+    if (req.query.status) {
+      const statusParam = String(req.query.status).trim().toUpperCase();
+      conditions.push(`UPPER(r.status) = $${paramIndex}`);
+      params.push(statusParam);
+      paramIndex++;
+    }
+
+    // Search filter
+    if (req.query.search) {
+      const searchPattern = `%${String(req.query.search).trim()}%`;
+      conditions.push(`(
+        r.guest_name ILIKE $${paramIndex} OR
+        r.guest_phone ILIKE $${paramIndex} OR
+        b.bid ILIKE $${paramIndex} OR
+        ro.room_number ILIKE $${paramIndex} OR
+        r.id::text ILIKE $${paramIndex}
+      )`);
+      params.push(searchPattern);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.join(' AND ');
+
+    const result = await pool.query(`
+      SELECT
+        r.id AS reservation_id,
+        r.id,
+        r.booking_id,
+        b.bid,
+        r.guest_name,
+        r.guest_phone,
+        r.guest_segment,
+        r.room_id,
+        ro.room_number,
+        COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
+        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code,
+        r.check_in,
+        r.check_out,
+        r.status,
+        r.status AS reservation_status,
+        COALESCE(b.booking_source, 'WALKIN') AS booking_source,
+        COALESCE(b.channel, 'FRONT_DESK') AS channel,
+        r.total_price,
+        r.amount_paid,
+        r.remaining_balance,
+        r.payment_status,
+        r.stay_sequence,
+        r.created_at
+      FROM reservations r
+      JOIN bookings b ON b.id = r.booking_id
+      LEFT JOIN rooms ro ON ro.id = r.room_id
+      LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+      WHERE ${whereClause}
+      ORDER BY r.check_in DESC, r.id DESC
+    `, params);
+
+    const formattedRows = result.rows.map((row: any) => ({
+      ...row,
+      check_in: hotelDateKey(row.check_in),
+      check_out: hotelDateKey(row.check_out),
+      total_price: Number(row.total_price || 0),
+      amount_paid: Number(row.amount_paid || 0),
+      remaining_balance: Number(row.remaining_balance || 0),
+    }));
+
+    return res.json({
+      status: 'SUCCESS',
+      data: formattedRows
+    });
+  } catch (err: any) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
+    }
+    console.error('Error in GET /api/reservations:', err);
+    return res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
 
 app.get('/api/reservations/:id', async (req, res) => {
   const reservationId = Number(req.params.id);
@@ -4149,6 +4286,7 @@ app.get('/api/properties', async (req, res) => {
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
 app.use('/api/room-types', createRoomTypesRouter(pool));
 app.use('/api/rooms', createRoomsRouter(pool));
+app.use('/api/reports', createReportsRouter(pool));
 
 
 // GET tapechart: rooms × dates with reservations per cell

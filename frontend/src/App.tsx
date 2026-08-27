@@ -91,6 +91,16 @@ function App() {
   const [reservationSearch, setReservationSearch] = useState('');
   const [reservationDateFrom, setReservationDateFrom] = useState('');
   const [reservationDateTo, setReservationDateTo] = useState('');
+
+  const [transactionReservations, setTransactionReservations] = useState<any[]>([]);
+  const [transactionLoading, setTransactionLoading] = useState<boolean>(false);
+  const transactionRequestVersionRef = useRef(0);
+
+  const [dailyOperations, setDailyOperations] = useState<any | null>(null);
+  const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
+  const dailyOperationsRequestVersionRef = useRef(0);
+  const selectedMenuRef = useRef(selectedMenu);
+  selectedMenuRef.current = selectedMenu;
   const [quickBooking, setQuickBooking] = useState({
     guestName: '',
     guestPhone: '',
@@ -601,7 +611,7 @@ function App() {
   };
 
   const filteredReservations = useMemo(() => {
-    const sorted = [...reservations].sort((a, b) => {
+    const sorted = [...transactionReservations].sort((a, b) => {
       const aDate = normalizeHotelDate(a.check_in);
       const bDate = normalizeHotelDate(b.check_in);
       return bDate.localeCompare(aDate);
@@ -616,6 +626,8 @@ function App() {
         reservation?.guest_phone,
         reservation?.room_number,
         reservation?.room_id,
+        reservation?.bid,
+        reservation?.room_type,
         reservation?.guest_segment,
       ].join(' ').toLowerCase();
       return haystack.includes(query);
@@ -645,7 +657,7 @@ function App() {
     }
 
     return list;
-  }, [reservations, reservationFilter, reservationSearch, reservationDateFrom, reservationDateTo]);
+  }, [transactionReservations, reservationFilter, reservationSearch, reservationDateFrom, reservationDateTo]);
 
   const calendarSummary = useMemo(() => {
     const reservationsInRange = reservations.filter(isCalendarReservationMatch);
@@ -864,6 +876,81 @@ function App() {
       console.error('Error fetching operations tasks', error);
     }
   };
+
+  const fetchTransactionReservations = async (targetPropId?: number | null) => {
+    const propId = targetPropId !== undefined ? targetPropId : propertyId;
+    if (propId === null || propId === undefined) {
+      setTransactionReservations([]);
+      setTransactionLoading(false);
+      return;
+    }
+    const requestVersion = ++transactionRequestVersionRef.current;
+    setTransactionLoading(true);
+    try {
+      const res = await fetch(`/api/reservations?property_id=${propId}`);
+      const json = await res.json();
+      if (requestVersion !== transactionRequestVersionRef.current) return;
+      if (json.status === 'OK' && Array.isArray(json.data)) {
+        setTransactionReservations(json.data);
+      } else {
+        setTransactionReservations([]);
+      }
+    } catch (err) {
+      if (requestVersion !== transactionRequestVersionRef.current) return;
+      console.error('Error fetching transaction reservations', err);
+      setTransactionReservations([]);
+    } finally {
+      if (requestVersion === transactionRequestVersionRef.current) {
+        setTransactionLoading(false);
+      }
+    }
+  };
+  const fetchTransactionReservationsRef = useRef(fetchTransactionReservations);
+  fetchTransactionReservationsRef.current = fetchTransactionReservations;
+
+  const fetchDailyOperations = async (targetPropId?: number | null) => {
+    const propId = targetPropId !== undefined ? targetPropId : propertyId;
+    if (propId === null || propId === undefined || selectedMenuRef.current !== 'Laporan') {
+      setDailyOperations(null);
+      setDailyOperationsLoading(false);
+      return;
+    }
+    const requestVersion = ++dailyOperationsRequestVersionRef.current;
+    setDailyOperationsLoading(true);
+    try {
+      const res = await fetch(`/api/reports/daily-operations?property_id=${propId}`);
+      const json = await res.json();
+      if (requestVersion !== dailyOperationsRequestVersionRef.current) return;
+      if (json.status === 'SUCCESS' && json.data) {
+        setDailyOperations(json.data);
+      } else {
+        setDailyOperations(null);
+      }
+    } catch (err) {
+      if (requestVersion !== dailyOperationsRequestVersionRef.current) return;
+      console.error('Error fetching daily operations', err);
+      setDailyOperations(null);
+    } finally {
+      if (requestVersion === dailyOperationsRequestVersionRef.current) {
+        setDailyOperationsLoading(false);
+      }
+    }
+  };
+  const fetchDailyOperationsRef = useRef(fetchDailyOperations);
+  fetchDailyOperationsRef.current = fetchDailyOperations;
+
+  useEffect(() => {
+    if (propertyId === null) {
+      setTransactionReservations([]);
+      setDailyOperations(null);
+      return;
+    }
+    if (selectedMenu === 'Transaksi') {
+      void fetchTransactionReservations(propertyId);
+    } else if (selectedMenu === 'Laporan') {
+      void fetchDailyOperations(propertyId);
+    }
+  }, [propertyId, selectedMenu]);
 
   const fetchReservationAudit = async (reservationId: number) => {
     try {
@@ -1179,12 +1266,16 @@ function App() {
         es.addEventListener(eventName, (ev: any) => {
           console.log(`SSE ${eventName}`, ev.data);
           void fetchDataRef.current();
+          void fetchTransactionReservationsRef.current();
+          void fetchDailyOperationsRef.current();
         });
       }
       es.addEventListener('RoomStatusUpdated', (ev: any) => {
         console.log('SSE RoomStatusUpdated', ev.data);
         void fetchDataRef.current();
         void fetchOperationsData();
+        void fetchTransactionReservationsRef.current();
+        void fetchDailyOperationsRef.current();
       });
       es.onmessage = (m) => {
         // generic messages
@@ -2167,7 +2258,13 @@ function App() {
                  value={propertyId ?? ''}
                  onChange={(e) => {
                    const val = Number(e.target.value);
-                   if (Number.isInteger(val) && val > 0) setPropertyId(val);
+                   if (Number.isInteger(val) && val > 0) {
+                     setTransactionReservations([]);
+                     setDailyOperations(null);
+                     transactionRequestVersionRef.current++;
+                     dailyOperationsRequestVersionRef.current++;
+                     setPropertyId(val);
+                   }
                  }}
                  style={{ marginRight: 8 }}
                >
@@ -3005,10 +3102,10 @@ function App() {
 
               <div className="grid grid-cols-4 gap-3 mb-4">
                 {[
-                  { label: 'Semua', value: reservations.length, cls: 'bg-slate-100 text-slate-700' },
-                  { label: 'Booked', value: reservations.filter((r) => String(r.status || '').toUpperCase() !== 'CHECKED_IN' && String(r.status || '').toUpperCase() !== 'CHECKED_OUT' && String(r.status || '').toUpperCase() !== 'CANCELLED').length, cls: 'bg-amber-100 text-amber-700' },
-                  { label: 'Check-in', value: reservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_IN').length, cls: 'bg-emerald-100 text-emerald-700' },
-                  { label: 'Check-out', value: reservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_OUT').length, cls: 'bg-slate-200 text-slate-700' },
+                  { label: 'Semua', value: transactionReservations.length, cls: 'bg-slate-100 text-slate-700' },
+                  { label: 'Booked', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() !== 'CHECKED_IN' && String(r.status || '').toUpperCase() !== 'CHECKED_OUT' && String(r.status || '').toUpperCase() !== 'CANCELLED').length, cls: 'bg-amber-100 text-amber-700' },
+                  { label: 'Check-in', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_IN').length, cls: 'bg-emerald-100 text-emerald-700' },
+                  { label: 'Check-out', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_OUT').length, cls: 'bg-slate-200 text-slate-700' },
                 ].map((meta) => (
                   <div key={meta.label} className={`rounded-xl p-3 ${meta.cls}`}>
                     <div className="text-[10px] uppercase font-bold tracking-wide opacity-80">{meta.label}</div>
@@ -3017,70 +3114,80 @@ function App() {
                 ))}
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-xs booking-list-table">
-                  <thead>
-                    <tr className="bg-slate-100 text-left text-slate-600">
-                      <th className="px-3 py-2 font-semibold">Tamu</th>
-                      <th className="px-3 py-2 font-semibold">Kamar</th>
-                      <th className="px-3 py-2 font-semibold">Check-in / Out</th>
-                      <th className="px-3 py-2 font-semibold">Segment</th>
-                      <th className="px-3 py-2 font-semibold">Pembayaran</th>
-                      <th className="px-3 py-2 font-semibold">Tagihan</th>
-                      <th className="px-3 py-2 font-semibold text-right">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(filteredReservations || []).slice(0, 12).map((res: any) => {
-                      const paymentStatus = getPaymentStatusLabel(res.payment_status);
-                      const statusClass = getPaymentBadgeClass(res.payment_status);
-                      const rowStatus = String(res.status || '').toUpperCase();
-                      return (
-                        <tr
-                          key={res.id}
-                          className="booking-list-row"
-                          onClick={() => {
-                            setSelectedRes(res);
-                            fetchReservationFolio(Number(res.id));
-                          }}
-                        >
-                          <td className="px-3 py-2">
-                            <div className="font-semibold text-slate-800">{res.guest_name}</div>
-                            <div className="text-slate-500">{res.guest_phone || '-'}</div>
-                          </td>
-                          <td className="px-3 py-2">{res.room_number || res.room_id}</td>
-                          <td className="px-3 py-2">
-                            <div>{normalizeHotelDate(res.check_in) || '-'}</div>
-                            <div className="text-slate-500">{normalizeHotelDate(res.check_out) || '-'}</div>
-                          </td>
-                          <td className="px-3 py-2">
-                            <span className={`segment-badge segment-${(res.guest_segment || 'Reguler').toLowerCase()}`}>
-                              {res.guest_segment || 'Reguler'}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2">
-                            <span className={`segment-badge ${statusClass}`}>
-                              {paymentStatus}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 font-semibold text-slate-700">
-                            {formatCurrency(Number(res.total_price || res.subtotal_amount || 0))}
-                          </td>
-                          <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-                            <div className="booking-list-actions">
-                              <button type="button" className="booking-action-btn booking-action-btn--edit" onClick={() => openReservationEditor(res)}>Edit</button>
-                              <button type="button" className="booking-action-btn booking-action-btn--cancel" onClick={() => handleReservationCancel(Number(res.id))}>Cancel</button>
-                              {rowStatus !== 'CHECKED_IN' && rowStatus !== 'CANCELLED' && (
-                                <button type="button" className="booking-action-btn booking-action-btn--checkin" onClick={() => handleReservationAction(Number(res.id), 'checkin')}>Check In</button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              {transactionLoading ? (
+                <div className="p-8 text-center text-slate-500">
+                  <div className="text-sm font-semibold">Memuat data reservasi...</div>
+                </div>
+              ) : filteredReservations.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  <div className="text-sm font-semibold">Tidak ada reservasi yang sesuai kriteria.</div>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-xs booking-list-table">
+                    <thead>
+                      <tr className="bg-slate-100 text-left text-slate-600">
+                        <th className="px-3 py-2 font-semibold">Tamu</th>
+                        <th className="px-3 py-2 font-semibold">Kamar</th>
+                        <th className="px-3 py-2 font-semibold">Check-in / Out</th>
+                        <th className="px-3 py-2 font-semibold">Segment</th>
+                        <th className="px-3 py-2 font-semibold">Pembayaran</th>
+                        <th className="px-3 py-2 font-semibold">Tagihan</th>
+                        <th className="px-3 py-2 font-semibold text-right">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredReservations.map((res: any) => {
+                        const paymentStatus = getPaymentStatusLabel(res.payment_status);
+                        const statusClass = getPaymentBadgeClass(res.payment_status);
+                        const rowStatus = String(res.status || '').toUpperCase();
+                        return (
+                          <tr
+                            key={res.id}
+                            className="booking-list-row"
+                            onClick={() => {
+                              setSelectedRes(res);
+                              fetchReservationFolio(Number(res.id));
+                            }}
+                          >
+                            <td className="px-3 py-2">
+                              <div className="font-semibold text-slate-800">{res.guest_name}</div>
+                              <div className="text-slate-500">{res.guest_phone || '-'}</div>
+                            </td>
+                            <td className="px-3 py-2">{res.room_number || res.room_id || '-'}</td>
+                            <td className="px-3 py-2">
+                              <div>{normalizeHotelDate(res.check_in) || '-'}</div>
+                              <div className="text-slate-500">{normalizeHotelDate(res.check_out) || '-'}</div>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`segment-badge segment-${(res.guest_segment || 'Reguler').toLowerCase()}`}>
+                                {res.guest_segment || 'Reguler'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`segment-badge ${statusClass}`}>
+                                {paymentStatus}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-slate-700">
+                              {formatCurrency(Number(res.total_price || res.subtotal_amount || 0))}
+                            </td>
+                            <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                              <div className="booking-list-actions">
+                                <button type="button" className="booking-action-btn booking-action-btn--edit" onClick={() => openReservationEditor(res)}>Edit</button>
+                                <button type="button" className="booking-action-btn booking-action-btn--cancel" onClick={() => handleReservationCancel(Number(res.id))}>Cancel</button>
+                                {rowStatus !== 'CHECKED_IN' && rowStatus !== 'CANCELLED' && (
+                                  <button type="button" className="booking-action-btn booking-action-btn--checkin" onClick={() => handleReservationAction(Number(res.id), 'checkin')}>Check In</button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -3128,18 +3235,132 @@ function App() {
         )}
 
         {selectedMenu === 'Laporan' && (
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-white border rounded shadow-sm p-4">
-              <div className="text-xs uppercase text-gray-500">Hutang Vendor</div>
-              <div className="text-2xl font-bold mt-2">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs uppercase tracking-wider text-emerald-800 font-bold">Laporan & Analitik Operasional</div>
+                <h3 className="text-xl font-bold text-gray-900 mt-0.5">Ringkasan Operasional Harian</h3>
+                <p className="text-xs text-gray-500 mt-1">Tanggal Hotel: <span className="font-semibold text-slate-700">{dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}</span> (Asia/Jakarta)</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchDailyOperations(propertyId)}
+                className="hotel-action-btn text-xs font-semibold px-3 py-1.5"
+              >
+                {dailyOperationsLoading ? 'Memuat...' : '⟳ Segarkan'}
+              </button>
             </div>
-            <div className="bg-white border rounded shadow-sm p-4">
-              <div className="text-xs uppercase text-gray-500">Piutang Tamu</div>
-              <div className="text-2xl font-bold mt-2">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
+
+            {/* Section 1: Metrik Berdasarkan Tanggal Operasional */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                Operasional Tanggal {dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="bg-white border rounded-xl p-4 shadow-sm">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kedatangan (Arrivals)</div>
+                  <div className="text-2xl font-bold text-blue-700 mt-1">
+                    {dailyOperations?.business_date_metrics?.arrivals ?? dailyOperations?.lifecycle?.arrivals_today ?? 0}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Check-in pada tanggal ini</div>
+                </div>
+                <div className="bg-white border rounded-xl p-4 shadow-sm">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Keberangkatan (Departures)</div>
+                  <div className="text-2xl font-bold text-amber-700 mt-1">
+                    {dailyOperations?.business_date_metrics?.departures ?? dailyOperations?.lifecycle?.departures_today ?? 0}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Check-out pada tanggal ini</div>
+                </div>
+                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-emerald-600">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kas Masuk Tanggal Ini</div>
+                  <div className="text-2xl font-bold text-emerald-800 mt-1">
+                    {formatCurrency(dailyOperations?.business_date_metrics?.cash_collected ?? dailyOperations?.financials?.cash_collected_today ?? 0)}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Pembayaran sukses WIB</div>
+                </div>
+              </div>
             </div>
-            <div className="bg-white border rounded shadow-sm p-4">
-              <div className="text-xs uppercase text-gray-500">Jumlah Jurnal</div>
-              <div className="text-2xl font-bold mt-2">{financeSummary?.entries?.length || 0}</div>
+
+            {/* Section 2: Status Operasional Saat Ini (Live Snapshot) */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                Status Operasional Saat Ini (Live Snapshot)
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="bg-white border rounded-xl p-4 shadow-sm">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Tamu In-House Saat Ini</div>
+                  <div className="text-2xl font-bold text-emerald-700 mt-1">
+                    {dailyOperations?.live_snapshot?.in_house_current ?? dailyOperations?.lifecycle?.in_house ?? 0}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Kamar aktif berstatus Checked-In</div>
+                </div>
+                <div className="bg-white border rounded-xl p-4 shadow-sm">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Booking Aktif Berjalan</div>
+                  <div className="text-2xl font-bold text-slate-800 mt-1">
+                    {dailyOperations?.live_snapshot?.booked_active ?? dailyOperations?.lifecycle?.booked_future_or_today ?? 0}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Reservasi berstatus Booked</div>
+                </div>
+                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-amber-500">
+                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Piutang Tamu Berjalan</div>
+                  <div className="text-2xl font-bold text-amber-800 mt-1">
+                    {formatCurrency(dailyOperations?.live_snapshot?.outstanding_guest_balance_current ?? dailyOperations?.financials?.outstanding_guest_balance ?? 0)}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Sisa tagihan reservasi non-cancelled</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3: Room Status Real-Time */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                Status Kamar Real-Time ({dailyOperations?.live_snapshot?.total_active_rooms ?? dailyOperations?.rooms?.total_active_rooms ?? 0} Kamar Aktif)
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wide">Siap Huni (Ready)</div>
+                  <div className="text-2xl font-bold text-emerald-900 mt-1">{dailyOperations?.rooms?.vacant_ready ?? 0}</div>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-amber-800 tracking-wide">Kotor (Dirty)</div>
+                  <div className="text-2xl font-bold text-amber-900 mt-1">{dailyOperations?.rooms?.vacant_dirty ?? 0}</div>
+                </div>
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-blue-800 tracking-wide">Pembersihan</div>
+                  <div className="text-2xl font-bold text-blue-900 mt-1">{dailyOperations?.rooms?.cleaning ?? 0}</div>
+                </div>
+                <div className="bg-purple-50 border border-purple-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-purple-800 tracking-wide">Inspeksi</div>
+                  <div className="text-2xl font-bold text-purple-900 mt-1">{dailyOperations?.rooms?.waiting_inspection ?? 0}</div>
+                </div>
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-indigo-800 tracking-wide">Terisi (Occupied)</div>
+                  <div className="text-2xl font-bold text-indigo-900 mt-1">{dailyOperations?.rooms?.occupied ?? 0}</div>
+                </div>
+                <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 shadow-sm">
+                  <div className="text-[10px] uppercase font-bold text-red-800 tracking-wide">Out of Order / Svc</div>
+                  <div className="text-2xl font-bold text-red-900 mt-1">{dailyOperations?.rooms?.out_of_order_or_service ?? 0}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 4: Akuntansi Ringkasan */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Ringkasan Buku Besar Akuntansi</div>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="bg-white border rounded shadow-sm p-4">
+                  <div className="text-xs uppercase text-gray-500 font-semibold">Hutang Vendor</div>
+                  <div className="text-2xl font-bold mt-2 text-slate-800">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
+                </div>
+                <div className="bg-white border rounded shadow-sm p-4">
+                  <div className="text-xs uppercase text-gray-500 font-semibold">Piutang Tamu (Buku Besar)</div>
+                  <div className="text-2xl font-bold mt-2 text-slate-800">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
+                </div>
+                <div className="bg-white border rounded shadow-sm p-4">
+                  <div className="text-xs uppercase text-gray-500 font-semibold">Jumlah Jurnal</div>
+                  <div className="text-2xl font-bold mt-2 text-slate-800">{financeSummary?.entries?.length || 0}</div>
+                </div>
+              </div>
             </div>
           </div>
         )}
