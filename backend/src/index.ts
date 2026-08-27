@@ -2950,15 +2950,22 @@ app.get('/api/accounting/summary', async (req, res) => {
       ORDER BY j.entry_date DESC
     `, [propertyId]);
 
-    // Note: vendor_payables and guest_receivables are scoped in B3B2.
-    // Return 0 for un-isolated AP/AR in B3B1 to prevent cross-property data exposure.
+    const payable = await pool.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total FROM vendor_payables WHERE property_id = $1 AND status != $2',
+      [propertyId, 'PAID']
+    );
+    const receivable = await pool.query(
+      'SELECT COALESCE(SUM(total_amount - paid_amount), 0) AS total FROM guest_receivables WHERE property_id = $1 AND status != $2',
+      [propertyId, 'PAID']
+    );
+
     res.json({
       status: 'OK',
       data: {
         accounts: accounts.rows,
         entries: entries.rows,
-        total_payable: 0,
-        total_receivable: 0
+        total_payable: Number(payable.rows[0]?.total || 0),
+        total_receivable: Number(receivable.rows[0]?.total || 0)
       }
     });
   } catch (err: any) {
@@ -3103,14 +3110,55 @@ app.post('/api/accounting/journal', async (req, res) => {
 });
 
 app.post('/api/accounting/receivables', async (req, res) => {
-  const { reservation_id, guest_name, total_amount, paid_amount, status } = req.body;
+  const { property_id: propertyIdRaw, reservation_id, guest_name, total_amount, paid_amount, status } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   try {
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    let effectiveReservationId: number | null = null;
+    if (reservation_id !== undefined && reservation_id !== null && String(reservation_id).trim() !== '') {
+      effectiveReservationId = Number(reservation_id);
+      if (!Number.isInteger(effectiveReservationId) || effectiveReservationId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation_id' });
+      }
+
+      const resCheck = await pool.query(`
+        SELECT r.id, r.booking_id, b.property_id AS booking_property_id
+        FROM reservations r
+        LEFT JOIN bookings b ON b.id = r.booking_id
+        WHERE r.id = $1
+      `, [effectiveReservationId]);
+
+      if ((resCheck.rowCount ?? 0) === 0) {
+        return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: `reservation ${effectiveReservationId} not found` });
+      }
+
+      const bookingPropertyId = resCheck.rows[0].booking_property_id;
+      if (bookingPropertyId === null || bookingPropertyId === undefined) {
+        return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
+      }
+
+      if (Number(bookingPropertyId) !== propertyId) {
+        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
+      }
+    }
+
     const result = await pool.query(
-      `INSERT INTO guest_receivables (reservation_id, guest_name, total_amount, paid_amount, status)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO guest_receivables (property_id, reservation_id, guest_name, total_amount, paid_amount, status)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [reservation_id || null, guest_name || 'Guest', Number(total_amount || 0), Number(paid_amount || 0), status || 'OPEN']
+      [propertyId, effectiveReservationId, guest_name || 'Guest', Number(total_amount || 0), Number(paid_amount || 0), status || 'OPEN']
     );
 
     res.status(201).json({ status: 'SUCCESS', data: result.rows[0] });
@@ -3120,14 +3168,27 @@ app.post('/api/accounting/receivables', async (req, res) => {
 });
 
 app.post('/api/accounting/payables', async (req, res) => {
-  const { vendor_name, invoice_number, due_date, amount, status } = req.body;
+  const { property_id: propertyIdRaw, vendor_name, invoice_number, due_date, amount, status } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
 
   try {
+    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
     const result = await pool.query(
-      `INSERT INTO vendor_payables (vendor_name, invoice_number, due_date, amount, status)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO vendor_payables (property_id, vendor_name, invoice_number, due_date, amount, status)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [vendor_name || 'Vendor', invoice_number || null, due_date || null, Number(amount || 0), status || 'OPEN']
+      [propertyId, vendor_name || 'Vendor', invoice_number || null, due_date || null, Number(amount || 0), status || 'OPEN']
     );
 
     res.status(201).json({ status: 'SUCCESS', data: result.rows[0] });

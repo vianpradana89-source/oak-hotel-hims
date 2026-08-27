@@ -124,6 +124,12 @@ async function main() {
     var journalEntriesPropNotNull = await columnIsNotNull('accounting_journal_entries', 'property_id');
     assert(journalEntriesPropNotNull, 'L. accounting_journal_entries.property_id is NOT NULL');
 
+    var vendorPayablesPropNotNull = await columnIsNotNull('vendor_payables', 'property_id');
+    assert(vendorPayablesPropNotNull, 'L1. vendor_payables.property_id is NOT NULL');
+
+    var guestReceivablesPropNotNull = await columnIsNotNull('guest_receivables', 'property_id');
+    assert(guestReceivablesPropNotNull, 'L2. guest_receivables.property_id is NOT NULL');
+
     assert(await countRows('properties') === 0, 'M. zero properties is valid');
     assert(await countRows('rooms') === 0, 'N. zero rooms is valid');
     assert(await countRows('room_types') === 0, 'O. zero room_types is valid');
@@ -135,6 +141,8 @@ async function main() {
     assert(await countRows('accounting_gl_accounts') === 0, 'U. zero accounting_gl_accounts is valid');
     assert(await countRows('accounting_journal_entries') === 0, 'V. zero accounting_journal_entries is valid');
     assert(await countRows('accounting_journal_lines') === 0, 'W. zero accounting_journal_lines is valid');
+    assert(await countRows('vendor_payables') === 0, 'W1. zero vendor_payables is valid');
+    assert(await countRows('guest_receivables') === 0, 'W2. zero guest_receivables is valid');
 
     var secondBootError = null;
     try {
@@ -159,7 +167,9 @@ async function main() {
       await countRows('pos_order_items'),
       await countRows('accounting_gl_accounts'),
       await countRows('accounting_journal_entries'),
-      await countRows('accounting_journal_lines')
+      await countRows('accounting_journal_lines'),
+      await countRows('vendor_payables'),
+      await countRows('guest_receivables')
     ];
     var hasNoResidue = residueCounts.every(function(c) { return c === 0; });
     assert(hasNoResidue, 'Y. no fixture residue (all counts=0)');

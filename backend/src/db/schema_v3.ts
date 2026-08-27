@@ -142,6 +142,7 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS vendor_payables (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       vendor_name VARCHAR(150) NOT NULL,
       invoice_number VARCHAR(100),
       due_date TIMESTAMP,
@@ -152,6 +153,7 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS guest_receivables (
       id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
       reservation_id INTEGER REFERENCES reservations(id),
       guest_name VARCHAR(150),
       total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -533,6 +535,74 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_journal_entries_property ON accounting_journal_entries(property_id);
     CREATE INDEX IF NOT EXISTS idx_journal_entries_property_date ON accounting_journal_entries(property_id, entry_date);
+
+    -- 3. Vendor payables column & indexes
+    ALTER TABLE vendor_payables ADD COLUMN IF NOT EXISTS property_id INTEGER;
+
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='vendor_payables' AND column_name='property_id' AND is_nullable='YES') THEN
+        UPDATE vendor_payables vp
+        SET property_id = p.id
+        FROM properties p
+        WHERE vp.property_id IS NULL
+          AND (
+            p.property_code = 'LWG'
+            OR p.name = 'OAK Lawang'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM properties p2
+            WHERE p2.id <> p.id
+              AND (p2.property_code = 'LWG' OR p2.name = 'OAK Lawang')
+          );
+      END IF;
+    END $$;
+
+    ALTER TABLE vendor_payables ALTER COLUMN property_id SET NOT NULL;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_vp_property') THEN
+        ALTER TABLE vendor_payables ADD CONSTRAINT fk_vp_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_vendor_payables_property ON vendor_payables(property_id);
+    CREATE INDEX IF NOT EXISTS idx_vendor_payables_property_status ON vendor_payables(property_id, status);
+
+    -- 4. Guest receivables column & indexes
+    ALTER TABLE guest_receivables ADD COLUMN IF NOT EXISTS property_id INTEGER;
+
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='guest_receivables' AND column_name='property_id' AND is_nullable='YES') THEN
+        UPDATE guest_receivables gr
+        SET property_id = p.id
+        FROM properties p
+        WHERE gr.property_id IS NULL
+          AND (
+            p.property_code = 'LWG'
+            OR p.name = 'OAK Lawang'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM properties p2
+            WHERE p2.id <> p.id
+              AND (p2.property_code = 'LWG' OR p2.name = 'OAK Lawang')
+          );
+      END IF;
+    END $$;
+
+    ALTER TABLE guest_receivables ALTER COLUMN property_id SET NOT NULL;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_gr_property') THEN
+        ALTER TABLE guest_receivables ADD CONSTRAINT fk_gr_property FOREIGN KEY (property_id) REFERENCES properties(id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_guest_receivables_property ON guest_receivables(property_id);
+    CREATE INDEX IF NOT EXISTS idx_guest_receivables_property_status ON guest_receivables(property_id, status);
   `);
 
   // GL accounts seed removed — fresh DB must remain data-neutral (property_id required)
