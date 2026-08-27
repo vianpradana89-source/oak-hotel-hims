@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:booking-composer-binding": "node test/booking_composer_room_binding_test.ts",
     "test:occupancy-helpers": "node test/occupancy_reporting_date_helpers_test.ts",
+    "test:transaction-ux": "node test/transaction_ux_helpers_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

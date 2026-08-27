@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { TransactionReservationList } from './features/transactions/TransactionReservationList.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
@@ -88,15 +89,12 @@ function App() {
   const [calendarOperationalFilter, setCalendarOperationalFilter] = useState<CalendarOperationalFilter>('');
   const [calendarIncludeInactive, setCalendarIncludeInactive] = useState(false);
   const [collapsedCalendarGroups, setCollapsedCalendarGroups] = useState<Set<string>>(() => new Set());
-  const [reservationFilter, setReservationFilter] = useState<'all' | 'booked' | 'checked_in' | 'checked_out'>('all');
-  const [reservationSearch, setReservationSearch] = useState('');
-  const [reservationDateFrom, setReservationDateFrom] = useState('');
-  const [reservationDateTo, setReservationDateTo] = useState('');
 
   const [transactionReservations, setTransactionReservations] = useState<any[]>([]);
   const [transactionLoading, setTransactionLoading] = useState<boolean>(false);
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const transactionRequestVersionRef = useRef(0);
+  const transactionPeriodRangeRef = useRef<{ startDate: string; endDateExclusive: string } | null>(null);
 
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
   const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
@@ -613,55 +611,6 @@ function App() {
     return 'compact';
   };
 
-  const filteredReservations = useMemo(() => {
-    const sorted = [...transactionReservations].sort((a, b) => {
-      const aDate = normalizeHotelDate(a.check_in);
-      const bDate = normalizeHotelDate(b.check_in);
-      return bDate.localeCompare(aDate);
-    });
-
-    const query = reservationSearch.trim().toLowerCase();
-
-    let list = sorted.filter((reservation) => {
-      if (!query) return true;
-      const haystack = [
-        reservation?.guest_name,
-        reservation?.guest_phone,
-        reservation?.room_number,
-        reservation?.room_id,
-        reservation?.bid,
-        reservation?.room_type,
-        reservation?.guest_segment,
-      ].join(' ').toLowerCase();
-      return haystack.includes(query);
-    });
-
-    if (reservationDateFrom) {
-      list = list.filter((reservation) => !reservation?.check_in || reservation.check_in >= reservationDateFrom);
-    }
-
-    if (reservationDateTo) {
-      list = list.filter((reservation) => !reservation?.check_out || reservation.check_out <= reservationDateTo);
-    }
-
-    if (reservationFilter === 'booked') {
-      return list.filter((reservation) => {
-        const status = String(reservation?.status || '').toUpperCase();
-        return status !== 'CHECKED_IN' && status !== 'CHECKED_OUT' && status !== 'CANCELLED';
-      });
-    }
-
-    if (reservationFilter === 'checked_in') {
-      return list.filter((reservation) => String(reservation?.status || '').toUpperCase() === 'CHECKED_IN');
-    }
-
-    if (reservationFilter === 'checked_out') {
-      return list.filter((reservation) => String(reservation?.status || '').toUpperCase() === 'CHECKED_OUT');
-    }
-
-    return list;
-  }, [transactionReservations, reservationFilter, reservationSearch, reservationDateFrom, reservationDateTo]);
-
   const calendarSummary = useMemo(() => {
     const reservationsInRange = reservations.filter(isCalendarReservationMatch);
     const byStatus = (status: string) => reservationsInRange.filter((reservation) => String(reservation?.status || '').toUpperCase() === status).length;
@@ -880,7 +829,7 @@ function App() {
     }
   };
 
-  const fetchTransactionReservations = async (targetPropId?: number | null) => {
+  const fetchTransactionReservations = async (targetPropId?: number | null, startDate?: string, endDate?: string) => {
     const propId = targetPropId !== undefined ? targetPropId : propertyId;
     if (propId === null || propId === undefined) {
       setTransactionReservations([]);
@@ -888,11 +837,21 @@ function App() {
       setTransactionLoading(false);
       return;
     }
+
+    if (startDate && endDate) {
+      transactionPeriodRangeRef.current = { startDate, endDateExclusive: endDate };
+    }
+
+    const range = transactionPeriodRangeRef.current;
     const requestVersion = ++transactionRequestVersionRef.current;
     setTransactionLoading(true);
     setTransactionError(null);
     try {
-      const res = await fetch(`/api/reservations?property_id=${propId}`);
+      let url = `/api/reservations?property_id=${propId}`;
+      if (range?.startDate && range?.endDateExclusive) {
+        url += `&start_date=${encodeURIComponent(range.startDate)}&end_date=${encodeURIComponent(range.endDateExclusive)}`;
+      }
+      const res = await fetch(url);
       const json = await res.json().catch(() => null);
       if (requestVersion !== transactionRequestVersionRef.current) return;
       if (res.ok && (json?.status === 'SUCCESS' || json?.status === 'OK') && Array.isArray(json?.data)) {
@@ -3065,145 +3024,38 @@ function App() {
 
         {selectedMenu === 'Transaksi' && (
           <div className="space-y-4">
-            <div className="bg-white border rounded shadow-sm p-4">
-              <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-                <h3 className="font-bold text-sm">Reservasi Terbaru</h3>
-                <div className="booking-list-filter">
-                  {[
-                    { key: 'all', label: 'Semua' },
-                    { key: 'booked', label: 'Booked' },
-                    { key: 'checked_in', label: 'Check-in' },
-                    { key: 'checked_out', label: 'Check-out' },
-                  ].map((filter) => (
-                    <button
-                      key={filter.key}
-                      type="button"
-                      className={`booking-list-chip ${reservationFilter === filter.key ? 'active' : ''}`}
-                      onClick={() => setReservationFilter(filter.key as any)}
-                    >
-                      {filter.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="booking-list-toolbar">
-                <div className="booking-list-search-wrap">
-                  <span className="booking-list-search-icon">⌕</span>
-                  <input
-                    type="text"
-                    value={reservationSearch}
-                    onChange={(e) => setReservationSearch(e.target.value)}
-                    placeholder="Cari tamu / kamar / HP..."
-                    className="booking-list-search-input"
-                  />
-                </div>
-                <div className="booking-list-date-range">
-                  <label>
-                    <span>Dari</span>
-                    <input type="date" value={reservationDateFrom} onChange={(e) => setReservationDateFrom(e.target.value)} />
-                  </label>
-                  <label>
-                    <span>Sampai</span>
-                    <input type="date" value={reservationDateTo} onChange={(e) => setReservationDateTo(e.target.value)} />
-                  </label>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-4 gap-3 mb-4">
-                {[
-                  { label: 'Semua', value: transactionReservations.length, cls: 'bg-slate-100 text-slate-700' },
-                  { label: 'Booked', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() !== 'CHECKED_IN' && String(r.status || '').toUpperCase() !== 'CHECKED_OUT' && String(r.status || '').toUpperCase() !== 'CANCELLED').length, cls: 'bg-amber-100 text-amber-700' },
-                  { label: 'Check-in', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_IN').length, cls: 'bg-emerald-100 text-emerald-700' },
-                  { label: 'Check-out', value: transactionReservations.filter((r) => String(r.status || '').toUpperCase() === 'CHECKED_OUT').length, cls: 'bg-slate-200 text-slate-700' },
-                ].map((meta) => (
-                  <div key={meta.label} className={`rounded-xl p-3 ${meta.cls}`}>
-                    <div className="text-[10px] uppercase font-bold tracking-wide opacity-80">{meta.label}</div>
-                    <div className="text-xl font-bold mt-1">{meta.value}</div>
-                  </div>
-                ))}
-              </div>
-
-              {transactionLoading ? (
-                <div className="p-8 text-center text-slate-500">
-                  <div className="text-sm font-semibold">Memuat data reservasi...</div>
-                </div>
-              ) : transactionError ? (
-                <div className="p-6 text-center text-rose-700 bg-rose-50 border border-rose-200 rounded-xl">
-                  <div className="text-sm font-semibold mb-1">⚠️ Gagal Memuat Data Reservasi</div>
-                  <div className="text-xs text-rose-600">{transactionError}</div>
-                </div>
-              ) : filteredReservations.length === 0 ? (
-                <div className="p-8 text-center text-slate-400">
-                  <div className="text-sm font-semibold">Tidak ada reservasi yang sesuai kriteria.</div>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-xs booking-list-table">
-                    <thead>
-                      <tr className="bg-slate-100 text-left text-slate-600">
-                        <th className="px-3 py-2 font-semibold">Tamu</th>
-                        <th className="px-3 py-2 font-semibold">Kamar</th>
-                        <th className="px-3 py-2 font-semibold">Check-in / Out</th>
-                        <th className="px-3 py-2 font-semibold">Segment</th>
-                        <th className="px-3 py-2 font-semibold">Pembayaran</th>
-                        <th className="px-3 py-2 font-semibold">Tagihan</th>
-                        <th className="px-3 py-2 font-semibold text-right">Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredReservations.map((res: any) => {
-                        const paymentStatus = getPaymentStatusLabel(res.payment_status);
-                        const statusClass = getPaymentBadgeClass(res.payment_status);
-                        const rowStatus = String(res.status || '').toUpperCase();
-                        return (
-                          <tr
-                            key={res.id}
-                            className="booking-list-row"
-                            onClick={() => {
-                              setSelectedRes(res);
-                              fetchReservationFolio(Number(res.id));
-                            }}
-                          >
-                            <td className="px-3 py-2">
-                              <div className="font-semibold text-slate-800">{res.guest_name}</div>
-                              <div className="text-slate-500">{res.guest_phone || '-'}</div>
-                            </td>
-                            <td className="px-3 py-2">{res.room_number || res.room_id || '-'}</td>
-                            <td className="px-3 py-2">
-                              <div>{normalizeHotelDate(res.check_in) || '-'}</div>
-                              <div className="text-slate-500">{normalizeHotelDate(res.check_out) || '-'}</div>
-                            </td>
-                            <td className="px-3 py-2">
-                              <span className={`segment-badge segment-${(res.guest_segment || 'Reguler').toLowerCase()}`}>
-                                {res.guest_segment || 'Reguler'}
-                              </span>
-                            </td>
-                            <td className="px-3 py-2">
-                              <span className={`segment-badge ${statusClass}`}>
-                                {paymentStatus}
-                              </span>
-                            </td>
-                            <td className="px-3 py-2 font-semibold text-slate-700">
-                              {formatCurrency(Number(res.total_price || res.subtotal_amount || 0))}
-                            </td>
-                            <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-                              <div className="booking-list-actions">
-                                <button type="button" className="booking-action-btn booking-action-btn--edit" onClick={() => openReservationEditor(res)}>Edit</button>
-                                <button type="button" className="booking-action-btn booking-action-btn--cancel" onClick={() => handleReservationCancel(Number(res.id))}>Cancel</button>
-                                {rowStatus !== 'CHECKED_IN' && rowStatus !== 'CANCELLED' && (
-                                  <button type="button" className="booking-action-btn booking-action-btn--checkin" onClick={() => handleReservationAction(Number(res.id), 'checkin')}>Check In</button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            <TransactionReservationList
+              propertyId={propertyId}
+              todayHotelDate={hotelDateFromInstant(new Date())}
+              reservations={transactionReservations}
+              isLoading={transactionLoading}
+              error={transactionError}
+              onRefresh={(start, end) => fetchTransactionReservations(propertyId, start, end)}
+              onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin')}
+              onCheckout={(res) => openCheckoutConfirmation(Number(res.id))}
+              onOpenDetail={(res) => {
+                setSelectedRes(res);
+                fetchReservationFolio(Number(res.id));
+              }}
+              onEdit={(res) => openReservationEditor(res)}
+              onMove={(res) => openReservationEditor(res)}
+              onExtend={(res) => {
+                setSelectedRes(res);
+                openStayChangePrompt('extend', Number(res.id));
+              }}
+              onCancel={(res) => handleReservationCancel(Number(res.id))}
+              onViewFolio={(res) => {
+                setSelectedRes(res);
+                fetchReservationFolio(Number(res.id));
+              }}
+              onViewAudit={(res) => {
+                setSelectedRes(res);
+                fetchReservationAudit(Number(res.id));
+              }}
+              formatCurrency={formatCurrency}
+              getPaymentStatusLabel={getPaymentStatusLabel}
+              getPaymentBadgeClass={getPaymentBadgeClass}
+            />
 
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white border rounded shadow-sm p-4">
