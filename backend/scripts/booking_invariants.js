@@ -68,8 +68,21 @@ async function main() {
     },
     {
       name: 'cancelled_reservations_without_booking_cancelled',
-      label: 'Cancelled reservations whose parent booking is still active',
-      sql: `SELECT COUNT(*)::int AS count FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE r.status = 'CANCELLED' AND b.booking_status IS DISTINCT FROM 'CANCELLED';`,
+      label: 'All-cancelled bookings whose parent booking is not cancelled',
+      sql: `SELECT COUNT(*)::int AS count
+            FROM bookings b
+            WHERE b.booking_status <> 'CANCELLED'
+              AND EXISTS (
+                SELECT 1
+                FROM reservations r
+                WHERE r.booking_id = b.id
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM reservations r
+                WHERE r.booking_id = b.id
+                  AND r.status <> 'CANCELLED'
+              );`,
     },
     {
       name: 'active_booking_eligible_for_completion',

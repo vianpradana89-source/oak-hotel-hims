@@ -172,7 +172,31 @@ app.use(async (req, res, next) => {
 
     // Insert a placeholder to mark in-progress
     const expiresAt = new Date(Date.now() + (Number(process.env.IDEMPOTENCY_TTL_MINUTES || 1440) * 60 * 1000));
-    await pool.query('INSERT INTO idempotency_keys (key, request_hash, expires_at) VALUES ($1, $2, $3)', [idKey, reqHash, expiresAt.toISOString()]);
+    try {
+      await pool.query('INSERT INTO idempotency_keys (key, request_hash, expires_at) VALUES ($1, $2, $3)', [idKey, reqHash, expiresAt.toISOString()]);
+    } catch (insertErr: any) {
+      if (insertErr.code === '23505') {
+        const waitSeconds = Number(process.env.IDEMPOTENCY_WAIT_SECONDS || 10);
+        const intervalMs = 500;
+        const maxIter = Math.ceil((waitSeconds * 1000) / intervalMs);
+        for (let i = 0; i < maxIter; i++) {
+          await new Promise((r) => setTimeout(r, intervalMs));
+          const check = await pool.query('SELECT response_body, status_code, expires_at, request_hash FROM idempotency_keys WHERE key = $1', [idKey]);
+          if (hasRows(check)) {
+            const cr = check.rows[0];
+            if (cr.request_hash !== reqHash) {
+              return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
+            }
+            if (cr.response_body) {
+              res.setHeader('X-Idempotency', 'HIT');
+              return res.status(cr.status_code || 200).send(cr.response_body);
+            }
+          }
+        }
+        return res.status(202).json({ status: 'IN_PROGRESS' });
+      }
+      throw insertErr;
+    }
     // Attach idempotency key to request for later saving
     (req as any)._idempotency_key = idKey;
     (req as any)._request_hash = reqHash;
