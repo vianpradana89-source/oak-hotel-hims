@@ -301,7 +301,7 @@ async function main() {
       const reservation = await createReservation(context.room.id, window.start, window.end, 'extend-one');
       const before = await getAvailabilityMap(context.room.roomType, window.dates.concat([addDays(window.end, 0)]));
       const auditBefore = await countReservationAudits(reservation.id);
-      const response = await request('POST', `/api/reservations/${reservation.id}/extend`, { new_check_out: addDays(window.end, 1) }, 'extend-one');
+      const response = await request('POST', `/api/reservations/${reservation.id}/extend`, { property_id: context.room.propertyId, new_check_out: addDays(window.end, 1) }, 'extend-one');
       expect(response.status === 200, `extend one-night failed: ${response.status} ${response.text}`);
       expect(String(response.json?.meta?.operation) === 'EXTEND', 'extend meta missing');
       const extendedRow = await pool.query('SELECT check_out FROM reservations WHERE id = $1', [reservation.id]);
@@ -326,7 +326,7 @@ async function main() {
       const extensionEnd = addDays(window.end, 3);
       const beforeDates = enumerateDates(window.start, extensionEnd);
       const before = await getAvailabilityMap(context.room.roomType, beforeDates);
-      const response = await request('POST', `/api/reservations/${reservation.id}/extend`, { new_check_out: extensionEnd }, 'extend-multi');
+      const response = await request('POST', `/api/reservations/${reservation.id}/extend`, { property_id: context.room.propertyId, new_check_out: extensionEnd }, 'extend-multi');
       expect(response.status === 200, `extend multi-night failed: ${response.status} ${response.text}`);
       const afterDates = await getAvailabilityMap(context.room.roomType, beforeDates);
       const addedDates = enumerateDates(window.end, extensionEnd);
@@ -344,14 +344,14 @@ async function main() {
       const reservation = await createReservation(context.room.id, window.start, window.end, 'extend-noop');
       const before = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
       const auditBefore = await countReservationAudits(reservation.id);
-      const noOp = await request('POST', `/api/reservations/${reservation.id}/extend`, { new_check_out: window.end }, 'extend-noop');
+      const noOp = await request('POST', `/api/reservations/${reservation.id}/extend`, { property_id: context.room.propertyId, new_check_out: window.end }, 'extend-noop');
       expect(noOp.status === 200, `extend no-op failed: ${noOp.status} ${noOp.text}`);
       expect(noOp.json?.meta?.no_op === true, 'extend no-op flag missing');
       const after = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
       expect(JSON.stringify([...before.entries()]) === JSON.stringify([...after.entries()]), 'extend no-op mutated inventory');
       expect(await countReservationAudits(reservation.id) === auditBefore, 'extend no-op wrote an audit unexpectedly');
 
-      const earlier = await request('POST', `/api/reservations/${reservation.id}/extend`, { new_check_out: addDays(window.end, -1) }, 'extend-earlier');
+      const earlier = await request('POST', `/api/reservations/${reservation.id}/extend`, { property_id: context.room.propertyId, new_check_out: addDays(window.end, -1) }, 'extend-earlier');
       expect(earlier.status === 409, `extend earlier-date guard failed: ${earlier.status} ${earlier.text}`);
       await expectReservationUnchanged(reservation.id, {
         check_in: `${window.start}T00:00:00.000Z`,
@@ -369,7 +369,7 @@ async function main() {
       const window = context.window;
       const base = await createReservation(context.room.id, window.start, window.end, 'extend-overlap-a');
       const conflict = await createReservation(context.room.id, window.end, addDays(window.end, 2), 'extend-overlap-b');
-      const overlap = await request('POST', `/api/reservations/${base.id}/extend`, { new_check_out: addDays(window.end, 2) }, 'extend-overlap');
+      const overlap = await request('POST', `/api/reservations/${base.id}/extend`, { property_id: context.room.propertyId, new_check_out: addDays(window.end, 2) }, 'extend-overlap');
       expect(overlap.status === 409, `extend overlap guard failed: ${overlap.status} ${overlap.text}`);
       await cleanupReservation(base.id, roomStatusBaseline);
       await cleanupReservation(conflict.id, roomStatusBaseline);
@@ -378,12 +378,12 @@ async function main() {
       await ensureRoomStatusBaseline(checkedInContext.room.id, roomStatusBaseline);
       const checkedInWindow = checkedInContext.window;
       const checkedIn = await createReservation(checkedInContext.room.id, checkedInWindow.start, checkedInWindow.end, 'extend-checkedin');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, null, 'extend-checkedin-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'extend-checkedin-checkin');
       expect(checkinResponse.status === 200, `checkin setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const before = await getAvailabilityMap(checkedInContext.room.roomType, enumerateDates(checkedInWindow.start, addDays(checkedInWindow.end, 1)));
       const auditBefore = await countReservationAudits(checkedIn.id);
       const nextCheckOut = addDays(checkedInWindow.end, 1);
-      const response = await request('POST', `/api/reservations/${checkedIn.id}/extend`, { new_check_out: nextCheckOut }, 'extend-checkedin');
+      const response = await request('POST', `/api/reservations/${checkedIn.id}/extend`, { property_id: checkedInContext.room.propertyId, new_check_out: nextCheckOut }, 'extend-checkedin');
       expect(response.status === 200, `checked-in extend failed: ${response.status} ${response.text}`);
       expect(String(response.json?.meta?.operation) === 'EXTEND', 'checked-in extend meta missing');
       const checkedInUpdated = await fetchReservationRow(checkedIn.id);
@@ -413,7 +413,7 @@ async function main() {
       const before = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
       const auditBefore = await countReservationAudits(reservation.id);
       const shorterEnd = addDays(window.end, -1);
-      const response = await request('POST', `/api/reservations/${reservation.id}/shorten`, { new_check_out: shorterEnd }, 'shorten-one');
+      const response = await request('POST', `/api/reservations/${reservation.id}/shorten`, { property_id: context.room.propertyId, new_check_out: shorterEnd }, 'shorten-one');
       expect(response.status === 200, `shorten one-night failed: ${response.status} ${response.text}`);
       expect(String(response.json?.meta?.operation) === 'SHORTEN', 'shorten meta missing');
       const after = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
@@ -431,7 +431,7 @@ async function main() {
       const beforeDates = enumerateDates(window.start, window.end);
       const before = await getAvailabilityMap(context.room.roomType, beforeDates);
       const shorterEnd = addDays(window.end, -3);
-      const response = await request('POST', `/api/reservations/${reservation.id}/shorten`, { new_check_out: shorterEnd }, 'shorten-multi');
+      const response = await request('POST', `/api/reservations/${reservation.id}/shorten`, { property_id: context.room.propertyId, new_check_out: shorterEnd }, 'shorten-multi');
       expect(response.status === 200, `shorten multi-night failed: ${response.status} ${response.text}`);
       const after = await getAvailabilityMap(context.room.roomType, beforeDates);
       const removedDates = enumerateDates(shorterEnd, window.end);
@@ -449,14 +449,14 @@ async function main() {
       const reservation = await createReservation(context.room.id, window.start, window.end, 'shorten-noop');
       const before = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
       const auditBefore = await countReservationAudits(reservation.id);
-      const noOp = await request('POST', `/api/reservations/${reservation.id}/shorten`, { new_check_out: window.end }, 'shorten-noop');
+      const noOp = await request('POST', `/api/reservations/${reservation.id}/shorten`, { property_id: context.room.propertyId, new_check_out: window.end }, 'shorten-noop');
       expect(noOp.status === 200, `shorten no-op failed: ${noOp.status} ${noOp.text}`);
       expect(noOp.json?.meta?.no_op === true, 'shorten no-op flag missing');
       const after = await getAvailabilityMap(context.room.roomType, enumerateDates(window.start, window.end));
       expect(JSON.stringify([...before.entries()]) === JSON.stringify([...after.entries()]), 'shorten no-op mutated inventory');
       expect(await countReservationAudits(reservation.id) === auditBefore, 'shorten no-op wrote an audit unexpectedly');
 
-      const later = await request('POST', `/api/reservations/${reservation.id}/shorten`, { new_check_out: addDays(window.end, 1) }, 'shorten-later');
+      const later = await request('POST', `/api/reservations/${reservation.id}/shorten`, { property_id: context.room.propertyId, new_check_out: addDays(window.end, 1) }, 'shorten-later');
       expect(later.status === 409, `shorten later-date guard failed: ${later.status} ${later.text}`);
       await cleanupReservation(reservation.id, roomStatusBaseline);
 
@@ -464,9 +464,9 @@ async function main() {
       await ensureRoomStatusBaseline(checkedInContext.room.id, roomStatusBaseline);
       const checkedInWindow = checkedInContext.window;
       const checkedIn = await createReservation(checkedInContext.room.id, checkedInWindow.start, checkedInWindow.end, 'shorten-checkedin');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, null, 'shorten-checkedin-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'shorten-checkedin-checkin');
       expect(checkinResponse.status === 200, `checkin setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
-      const rejected = await request('POST', `/api/reservations/${checkedIn.id}/shorten`, { new_check_out: addDays(checkedInWindow.end, -1) }, 'shorten-checkedin');
+      const rejected = await request('POST', `/api/reservations/${checkedIn.id}/shorten`, { property_id: checkedInContext.room.propertyId, new_check_out: addDays(checkedInWindow.end, -1) }, 'shorten-checkedin');
       expect(rejected.status === 409, `checked-in shorten should fail 409: ${rejected.status} ${rejected.text}`);
       await cleanupReservation(checkedIn.id, roomStatusBaseline);
     }
@@ -482,13 +482,13 @@ async function main() {
       // The adjacent conflict reservation must be created while the physical
       // room is still sellable (the check-in below flips it to OCCUPIED_CLEAN).
       const overlapConflict = await createReservation(checkedInContext.room.id, checkedInWindow.end, addDays(checkedInWindow.end, 1), 'checkedin-overlap-conflict');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/checkin`, null, 'checkedin-guards-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'checkedin-guards-checkin');
       expect(checkinResponse.status === 200, `checked-in setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const checkedInBaseline = await fetchReservationRow(checkedInReservation.id);
 
       const overlapBefore = await getAvailabilityMap(checkedInContext.room.roomType, enumerateDates(checkedInWindow.start, addDays(checkedInWindow.end, 1)));
       const overlapAuditBefore = await countReservationAudits(checkedInReservation.id);
-      const overlapResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/extend`, { new_check_out: addDays(checkedInWindow.end, 1) }, 'checkedin-overlap');
+      const overlapResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/extend`, { property_id: checkedInContext.room.propertyId, new_check_out: addDays(checkedInWindow.end, 1) }, 'checkedin-overlap');
       expect(overlapResponse.status === 409, `checked-in overlap should fail 409: ${overlapResponse.status} ${overlapResponse.text}`);
       const overlapAfter = await getAvailabilityMap(checkedInContext.room.roomType, enumerateDates(checkedInWindow.start, addDays(checkedInWindow.end, 1)));
       expect(JSON.stringify([...overlapBefore.entries()]) === JSON.stringify([...overlapAfter.entries()]), 'checked-in overlap request mutated inventory');
@@ -501,7 +501,7 @@ async function main() {
       await ensureRoomStatusBaseline(capacityContext.room.id, roomStatusBaseline);
       const capacityWindow = capacityContext.window;
       const capacityReservation = await createReservation(capacityContext.room.id, capacityWindow.start, capacityWindow.end, 'checkedin-capacity');
-      const capacityCheckin = await request('POST', `/api/reservations/${capacityReservation.id}/checkin`, null, 'checkedin-capacity-checkin');
+      const capacityCheckin = await request('POST', `/api/reservations/${capacityReservation.id}/checkin`, { property_id: capacityContext.room.propertyId }, 'checkedin-capacity-checkin');
       expect(capacityCheckin.status === 200, `checked-in capacity setup failed: ${capacityCheckin.status} ${capacityCheckin.text}`);
       const capacityBaseline = await fetchReservationRow(capacityReservation.id);
       const capacityAddedDate = capacityWindow.end;
@@ -519,7 +519,7 @@ async function main() {
         'UPDATE availability_dates SET reserved_qty = total_rooms WHERE room_type = $1 AND date = $2',
         [capacityContext.room.roomType, capacityAddedDate]
       );
-      const capacityResponse = await request('POST', `/api/reservations/${capacityReservation.id}/extend`, { new_check_out: addDays(capacityWindow.end, 1) }, 'checkedin-capacity');
+      const capacityResponse = await request('POST', `/api/reservations/${capacityReservation.id}/extend`, { property_id: capacityContext.room.propertyId, new_check_out: addDays(capacityWindow.end, 1) }, 'checkedin-capacity');
       expect(capacityResponse.status === 409, `checked-in capacity should fail 409: ${capacityResponse.status} ${capacityResponse.text}`);
       await pool.query(
         'UPDATE availability_dates SET reserved_qty = $1 WHERE room_type = $2 AND date = $3',
@@ -535,13 +535,13 @@ async function main() {
       await ensureRoomStatusBaseline(missingContext.room.id, roomStatusBaseline);
       const missingWindow = missingContext.window;
       const missingReservation = await createReservation(missingContext.room.id, missingWindow.start, missingWindow.end, 'checkedin-missing-row');
-      const missingCheckin = await request('POST', `/api/reservations/${missingReservation.id}/checkin`, null, 'checkedin-missing-row-checkin');
+      const missingCheckin = await request('POST', `/api/reservations/${missingReservation.id}/checkin`, { property_id: missingContext.room.propertyId }, 'checkedin-missing-row-checkin');
       expect(missingCheckin.status === 200, `checked-in missing-row setup failed: ${missingCheckin.status} ${missingCheckin.text}`);
       const missingBaseline = await fetchReservationRow(missingReservation.id);
       const missingAddedDate = missingWindow.end;
       const missingBefore = await getAvailabilityMap(missingContext.room.roomType, enumerateDates(missingWindow.start, addDays(missingWindow.end, 1)));
       const missingRow = await pool.query(
-        `SELECT room_type, date, total_rooms, reserved_qty
+        `SELECT room_type, room_type_id, date, total_rooms, reserved_qty
          FROM availability_dates
          WHERE room_type = $1 AND date = $2`,
         [missingContext.room.roomType, missingAddedDate]
@@ -552,11 +552,11 @@ async function main() {
         'DELETE FROM availability_dates WHERE room_type = $1 AND date = $2',
         [missingContext.room.roomType, missingAddedDate]
       );
-      const missingResponse = await request('POST', `/api/reservations/${missingReservation.id}/extend`, { new_check_out: addDays(missingWindow.end, 1) }, 'checkedin-missing-row');
+      const missingResponse = await request('POST', `/api/reservations/${missingReservation.id}/extend`, { property_id: missingContext.room.propertyId, new_check_out: addDays(missingWindow.end, 1) }, 'checkedin-missing-row');
       expect(missingResponse.status === 409, `checked-in missing row should fail 409: ${missingResponse.status} ${missingResponse.text}`);
       await pool.query(
-        'INSERT INTO availability_dates (room_type, date, total_rooms, reserved_qty) VALUES ($1, $2, $3, $4)',
-        [missingSnapshot.room_type, missingSnapshot.date, missingSnapshot.total_rooms, missingSnapshot.reserved_qty]
+        'INSERT INTO availability_dates (room_type, room_type_id, date, total_rooms, reserved_qty) VALUES ($1, $2, $3, $4, $5)',
+        [missingSnapshot.room_type, missingSnapshot.room_type_id, missingSnapshot.date, missingSnapshot.total_rooms, missingSnapshot.reserved_qty]
       );
       const missingAfter = await getAvailabilityMap(missingContext.room.roomType, enumerateDates(missingWindow.start, addDays(missingWindow.end, 1)));
       expect(JSON.stringify([...missingBefore.entries()]) === JSON.stringify([...missingAfter.entries()]), 'checked-in missing-row request mutated inventory');
@@ -567,9 +567,9 @@ async function main() {
       const checkedOutContext = await findSafeReservationContext(2, 120, 1);
       await ensureRoomStatusBaseline(checkedOutContext.room.id, roomStatusBaseline);
       const checkedOutReservation = await createReservation(checkedOutContext.room.id, checkedOutContext.window.start, checkedOutContext.window.end, 'checkedout-guard');
-      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkin`, null, 'checkedout-guard-checkin')).status === 200, 'checked-out guard setup check-in failed');
-      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkout`, null, 'checkedout-guard-checkout')).status === 200, 'checked-out guard checkout failed');
-      const checkedOutResponse = await request('POST', `/api/reservations/${checkedOutReservation.id}/extend`, { new_check_out: addDays(checkedOutContext.window.end, 1) }, 'checkedout-guard');
+      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkin`, { property_id: checkedOutContext.room.propertyId }, 'checkedout-guard-checkin')).status === 200, 'checked-out guard setup check-in failed');
+      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkout`, { property_id: checkedOutContext.room.propertyId }, 'checkedout-guard-checkout')).status === 200, 'checked-out guard checkout failed');
+      const checkedOutResponse = await request('POST', `/api/reservations/${checkedOutReservation.id}/extend`, { property_id: checkedOutContext.room.propertyId, new_check_out: addDays(checkedOutContext.window.end, 1) }, 'checkedout-guard');
       expect(checkedOutResponse.status === 409, `checked-out extend should fail 409: ${checkedOutResponse.status} ${checkedOutResponse.text}`);
       await cleanupReservation(checkedOutReservation.id, roomStatusBaseline);
 
@@ -577,8 +577,8 @@ async function main() {
       const cancelledContext = await findSafeReservationContext(2, 130, 1);
       await ensureRoomStatusBaseline(cancelledContext.room.id, roomStatusBaseline);
       const cancelledReservation = await createReservation(cancelledContext.room.id, cancelledContext.window.start, cancelledContext.window.end, 'cancelled-guard');
-      expect((await request('POST', `/api/reservations/${cancelledReservation.id}/cancel`, null, 'cancelled-guard-cancel')).status === 200, 'cancelled guard cancel failed');
-      const cancelledResponse = await request('POST', `/api/reservations/${cancelledReservation.id}/extend`, { new_check_out: addDays(cancelledContext.window.end, 1) }, 'cancelled-guard');
+      expect((await request('POST', `/api/reservations/${cancelledReservation.id}/cancel`, { property_id: cancelledContext.room.propertyId }, 'cancelled-guard-cancel')).status === 200, 'cancelled guard cancel failed');
+      const cancelledResponse = await request('POST', `/api/reservations/${cancelledReservation.id}/extend`, { property_id: cancelledContext.room.propertyId, new_check_out: addDays(cancelledContext.window.end, 1) }, 'cancelled-guard');
       expect(cancelledResponse.status === 409, `cancelled extend should fail 409: ${cancelledResponse.status} ${cancelledResponse.text}`);
       await cleanupReservation(cancelledReservation.id, roomStatusBaseline);
 
@@ -633,8 +633,8 @@ async function main() {
       createdReservationIds.add(siblingTargetId);
       createdReservationIds.add(siblingOtherId);
       const siblingBaseline = await fetchReservationRow(siblingOtherId);
-      expect((await request('POST', `/api/reservations/${siblingTargetId}/checkin`, null, 'sibling-target-checkin')).status === 200, 'sibling target check-in failed');
-      const siblingExtendResponse = await request('POST', `/api/reservations/${siblingTargetId}/extend`, { new_check_out: addDays(siblingPrimary.window.end, 1) }, 'sibling-target-extend');
+      expect((await request('POST', `/api/reservations/${siblingTargetId}/checkin`, { property_id: siblingPrimary.room.propertyId }, 'sibling-target-checkin')).status === 200, 'sibling target check-in failed');
+      const siblingExtendResponse = await request('POST', `/api/reservations/${siblingTargetId}/extend`, { property_id: siblingPrimary.room.propertyId, new_check_out: addDays(siblingPrimary.window.end, 1) }, 'sibling-target-extend');
       expect(siblingExtendResponse.status === 200, `sibling target extend failed: ${siblingExtendResponse.status} ${siblingExtendResponse.text}`);
       const siblingAfter = await fetchReservationRow(siblingOtherId);
       expect(toDateKey(siblingAfter.check_in) === toDateKey(siblingBaseline.check_in), 'sibling check_in changed unexpectedly');

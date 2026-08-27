@@ -11,6 +11,14 @@ const pool = new Pool({
 
 const fetchFn = globalThis.fetch || require('node-fetch');
 
+let propertyId = null;
+
+async function discoverProperty() {
+  const result = await pool.query('SELECT id FROM properties ORDER BY id LIMIT 1');
+  expect(result.rows.length >= 1, 'No properties found');
+  propertyId = Number(result.rows[0].id);
+}
+
 const runCorrelationPrefix = `AVAILREG-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const issuedCorrelationIds = new Set();
 
@@ -62,10 +70,18 @@ function request(method, path, body, correlationIdSuffix = '') {
   const correlationId = `${runCorrelationPrefix}${correlationIdSuffix ? `-${correlationIdSuffix}` : ''}`;
   headers['X-Correlation-Id'] = correlationId;
   issuedCorrelationIds.add(correlationId);
+  let effectiveBody = body;
+  if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object' && propertyId) {
+    if (!effectiveBody.property_id) {
+      effectiveBody = { ...effectiveBody, property_id: propertyId };
+    }
+  } else if (method === 'POST' && (effectiveBody === null || effectiveBody === undefined) && propertyId) {
+    effectiveBody = { property_id: propertyId };
+  }
   return fetchFn(`${baseUrl}${path}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined
+    body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   }).then(async (response) => {
     const text = await response.text();
     let json = null;
@@ -145,18 +161,19 @@ async function roomHasActiveOverlap(roomId, start, end) {
 
 async function pickReadyRoom(start, end) {
   const candidates = await pool.query(`
-    SELECT r.id, r.status, COALESCE(rt.name, r.name) AS room_type, r.room_number
+    SELECT r.id, r.status, COALESCE(rt.name, r.name) AS room_type, r.room_number, r.property_id, r.room_type_id
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
     WHERE UPPER(r.status) IN ('READY', 'VACANT_CLEAN', 'INSPECTED')
+      AND ($1::int IS NULL OR r.property_id = $1)
     ORDER BY r.id
-  `);
+  `, [propertyId]);
   expect(candidates.rowCount > 0, 'No ready room available for availability regression tests');
   for (const candidate of candidates.rows) {
     if (await roomHasActiveOverlap(candidate.id, start, end)) {
       continue;
     }
-    const rows = await getAvailabilityForType(candidate.room_type, start, end);
+    const rows = await getAvailabilityForType(candidate.room_type, start, end, candidate.room_type_id);
     if (!Array.isArray(rows) || rows.length === 0) {
       continue;
     }
@@ -172,8 +189,10 @@ async function setRoomStatus(roomId, status) {
   await pool.query('UPDATE rooms SET status = $1 WHERE id = $2', [status, roomId]);
 }
 
-async function getAvailabilityForType(roomType, start, end) {
-  const response = await request('GET', `/api/availability?room_type=${encodeURIComponent(roomType)}&start=${start}&end=${end}`);
+async function getAvailabilityForType(roomType, start, end, roomTypeId) {
+  const propParam = propertyId ? `&property_id=${propertyId}` : '';
+  const typeParam = roomTypeId ? `&room_type_id=${roomTypeId}` : `&room_type=${encodeURIComponent(roomType)}&legacy_compatible=true`;
+  const response = await request('GET', `/api/availability?start=${start}&end=${end}${typeParam}${propParam}`);
   expect(response.status === 200, `Availability fetch failed for ${roomType}: ${response.text}`);
   return response.json?.data || [];
 }
@@ -187,7 +206,7 @@ async function testAvailableRoomReturned() {
   const start = addDays(localDate(), 8);
   const end = addDays(start, 2);
   const room = await pickReadyRoom(start, end);
-  const rows = await getAvailabilityForType(room.room_type, start, end);
+  const rows = await getAvailabilityForType(room.room_type, start, end, room.room_type_id);
   expect(Array.isArray(rows) && rows.length > 0, `Expected availability rows for ${room.room_type}`);
   expect(rows.some((row) => Number(row.sellable || 0) > 0), `No sellable night found for ${room.room_type}`);
 }
@@ -462,14 +481,15 @@ async function testTimezoneDateBehavior() {
   const start = addDays(jakartaDateKey(), -1);
   const end = jakartaDateKey();
   const roomResult = await pool.query(`
-    SELECT COALESCE(rt.name, r.name) AS room_type
+    SELECT r.room_type_id, COALESCE(rt.name, r.name) AS room_type
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
+    WHERE ($1::int IS NULL OR r.property_id = $1)
     ORDER BY r.id
     LIMIT 1
-  `);
+  `, [propertyId]);
   expect(roomResult.rowCount === 1, 'No rooms configured for timezone behavior test');
-  const rows = await getAvailabilityForType(roomResult.rows[0].room_type, start, end);
+  const rows = await getAvailabilityForType(roomResult.rows[0].room_type, start, end, roomResult.rows[0].room_type_id);
   expect(
     Array.isArray(rows) && rows.some((row) => jakartaDateKey(row.date) === start),
     `Asia/Jakarta date should include ${start} in the local availability window`
@@ -483,7 +503,7 @@ async function testR01SelectedRoomExcludedFromOverlappingR02() {
   const payload = {
     guest_name: 'Booking Multi Room Overlap',
     guest_phone: '081212000015',
-    property_id: 1,
+    property_id: propertyId,
     reservations: [
       { room_id: room.id, check_in: checkIn, check_out: checkOut, guest_name: 'R01', guest_phone: '081212000015', total_price: 500000, qty: 1 },
       { room_id: room.id, check_in: checkIn, check_out: checkOut, guest_name: 'R02', guest_phone: '081212000016', total_price: 500000, qty: 1 }
@@ -500,7 +520,7 @@ async function testBackendBookingCreateRejectsStaleDoubleBookingAttempt() {
   const payload = {
     guest_name: 'Stale Booking Guard',
     guest_phone: '081212000017',
-    property_id: 1,
+    property_id: propertyId,
     reservations: [{ room_id: room.id, guest_name: 'Stale Guard Guest', guest_phone: '081212000017', check_in: checkIn, check_out: checkOut, total_price: 600000, qty: 1 }]
   };
   const first = await request('POST', '/api/bookings', payload, 'STALE-BOOKING-1');
@@ -514,9 +534,10 @@ async function testBackendBookingCreateRejectsStaleDoubleBookingAttempt() {
 
 async function main() {
   await pool.query('SELECT 1');
+  await discoverProperty();
   let response = null;
   try {
-    response = await fetchFn(`${baseUrl}/api/rooms`);
+    response = await fetchFn(`${baseUrl}/api/rooms?property_id=${propertyId}`);
   } catch (_error) {
     throw new Error(`Backend server is not reachable at ${baseUrl}. Start the backend before running these tests.`);
   }

@@ -116,13 +116,26 @@ function ledgerKey(typeId, dateKey) {
 }
 
 async function request(method, requestPath, body, correlationSuffix = 'API') {
-  const response = await fetchFn(`${baseUrl}${requestPath}`, {
+  let effectiveBody = body;
+  if ((method === 'POST' || method === 'PATCH' || method === 'PUT') && effectiveBody && typeof effectiveBody === 'object' && sourceProperty?.id) {
+    if (effectiveBody.property_id === undefined) {
+      effectiveBody = { ...effectiveBody, property_id: sourceProperty.id };
+    }
+  }
+  let effectivePath = requestPath;
+  if (sourceProperty?.id && (effectivePath.startsWith('/api/room-categories') || effectivePath.startsWith('/api/room-types') || effectivePath.startsWith('/api/rooms'))) {
+    if (!effectivePath.includes('property_id=')) {
+      const sep = effectivePath.includes('?') ? '&' : '?';
+      effectivePath = `${effectivePath}${sep}property_id=${sourceProperty.id}`;
+    }
+  }
+  const response = await fetchFn(`${baseUrl}${effectivePath}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
       'X-Correlation-Id': `${fixturePrefix}-${correlationSuffix}`
     },
-    body: body === undefined ? undefined : JSON.stringify(body)
+    body: effectiveBody === undefined ? undefined : JSON.stringify(effectiveBody)
   });
   const text = await response.text();
   let json = null;
@@ -576,15 +589,15 @@ async function readReservationSnapshot(reservationId) {
 
 async function runCases() {
   await pool.query('SELECT 1');
+  await discoverSourcePropertyAndDate();
+
   let probe;
   try {
-    probe = await fetchFn(`${baseUrl}/api/room-categories`);
+    probe = await fetchFn(`${baseUrl}/api/room-categories?property_id=${sourceProperty.id}`);
   } catch (_error) {
     throw new Error(`backend is not reachable at ${baseUrl}`);
   }
   assert(probe.ok, `backend probe returned HTTP ${probe.status}`);
-
-  await discoverSourcePropertyAndDate();
 
   const firstCategory = await createCategory(CATEGORY_SPECS[0]);
   assert(String(firstCategory.code) === categoryCode('DLX') && firstCategory.is_active === true,

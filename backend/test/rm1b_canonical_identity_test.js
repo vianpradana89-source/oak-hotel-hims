@@ -11,6 +11,14 @@ const pool = new Pool({
 
 const fetchFn = globalThis.fetch || require('node-fetch');
 
+let propertyId = null;
+
+async function discoverProperty() {
+  const result = await pool.query('SELECT id FROM properties ORDER BY id LIMIT 1');
+  expect(result.rows.length >= 1, 'No properties found');
+  propertyId = Number(result.rows[0].id);
+}
+
 function expect(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -35,10 +43,25 @@ function correlationId(label) {
 }
 
 async function request(method, path, body, corr) {
-  const response = await fetchFn(`${baseUrl}${path}`, {
+  let effectiveBody = body;
+  if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object' && propertyId) {
+    if (!effectiveBody.property_id) {
+      effectiveBody = { ...effectiveBody, property_id: propertyId };
+    }
+  } else if (method === 'POST' && (effectiveBody === null || effectiveBody === undefined) && propertyId) {
+    effectiveBody = { property_id: propertyId };
+  }
+  let effectivePath = path;
+  if (propertyId && (effectivePath.startsWith('/api/rooms') || effectivePath.startsWith('/api/availability') || effectivePath.startsWith('/api/tapechart'))) {
+    if (!effectivePath.includes('property_id=')) {
+      const sep = effectivePath.includes('?') ? '&' : '?';
+      effectivePath = `${effectivePath}${sep}property_id=${propertyId}`;
+    }
+  }
+  const response = await fetchFn(`${baseUrl}${effectivePath}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': corr },
-    body: body ? JSON.stringify(body) : undefined
+    body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   });
   const text = await response.text();
   let json = null;
@@ -111,9 +134,10 @@ async function pickSellableRoom() {
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
     WHERE r.status IN ('Ready', 'VACANT_CLEAN', 'INSPECTED') AND r.room_type_id IS NOT NULL
+      AND ($1::int IS NULL OR r.property_id = $1)
     ORDER BY (SELECT COUNT(*) FROM rooms x WHERE x.room_type_id = r.room_type_id) DESC, r.id
     LIMIT 1
-  `);
+  `, [propertyId]);
   expect(result.rowCount > 0, 'no sellable room with canonical room_type_id found');
   return result.rows[0];
 }
@@ -434,9 +458,10 @@ async function testInventoryViolationScan() {
 
 async function main() {
   await pool.query('SELECT 1');
+  await discoverProperty();
   let probe = null;
   try {
-    probe = await fetchFn(`${baseUrl}/api/rooms`);
+    probe = await fetchFn(`${baseUrl}/api/rooms?property_id=${propertyId}`);
   } catch (_error) {
     throw new Error(`Backend server is not reachable at ${baseUrl}. Start the backend before running these tests.`);
   }

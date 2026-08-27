@@ -34,9 +34,14 @@ function ids(values) {
 
 async function request(path) {
   const address = server.address();
-  const response = await fetch(`http://127.0.0.1:${address.port}${path}`);
+  let effectivePath = path;
+  if (propertyId && !effectivePath.includes('property_id=')) {
+    const sep = effectivePath.includes('?') ? '&' : '?';
+    effectivePath = `${effectivePath}${sep}property_id=${propertyId}`;
+  }
+  const response = await fetch(`http://127.0.0.1:${address.port}${effectivePath}`);
   const text = await response.text();
-  expect(response.status === 200, `${path} failed: ${response.status} ${text}`);
+  expect(response.status === 200, `${effectivePath} failed: ${response.status} ${text}`);
   return JSON.parse(text);
 }
 

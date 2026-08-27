@@ -118,7 +118,7 @@ async function verifyCalendarOrderingContract() {
     .filter((category) => Number(category.physical_room_count) > 0)
     .map((category) => Number(category.id));
 
-  const tapechartResponse = await request('GET', '/api/tapechart?start=2026-09-01&end=2026-09-08&include_inactive=1');
+  const tapechartResponse = await request('GET', '/api/tapechart?start=2026-09-01&end=2026-09-08&include_inactive=1&property_id=1');
   expect(tapechartResponse.status === 200, 'tapechart ordering read failed');
   const categories = new Map();
   for (const room of tapechartResponse.json.rooms) {
@@ -140,6 +140,7 @@ async function verifyCreateDefaultsToEnd() {
   const maxOrder = Math.max(...before.json.data.map((category) => Number(category.display_order)), 0);
   const expectedOrder = Math.floor(maxOrder / 10) * 10 + 10;
   const created = await request('POST', '/api/room-categories', {
+    property_id: 1,
     code: `${prefix}N`,
     name: `${prefix} New Category`,
     description: `${prefix} append test`
