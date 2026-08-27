@@ -48,12 +48,14 @@ async function setupFixtures() {
   try {
     await client.query('BEGIN');
 
+    const randA = Math.floor(1000 + Math.random() * 9000);
+    const randB = Math.floor(1000 + Math.random() * 9000);
     // Two test properties
     const propA = await client.query(
-      "INSERT INTO properties (name, property_code, timezone, currency, address, is_active) VALUES ('Folio Prop A', 'FLPA', 'Asia/Jakarta', 'IDR', 'Address A', TRUE) RETURNING id"
+      `INSERT INTO properties (name, property_code, timezone, currency, address, is_active) VALUES ('Folio Prop A', 'FA${randA}', 'Asia/Jakarta', 'IDR', 'Address A', TRUE) RETURNING id`
     );
     const propB = await client.query(
-      "INSERT INTO properties (name, property_code, timezone, currency, address, is_active) VALUES ('Folio Prop B', 'FLPB', 'Asia/Jakarta', 'IDR', 'Address B', TRUE) RETURNING id"
+      `INSERT INTO properties (name, property_code, timezone, currency, address, is_active) VALUES ('Folio Prop B', 'FB${randB}', 'Asia/Jakarta', 'IDR', 'Address B', TRUE) RETURNING id`
     );
 
     propIdA = propA.rows[0].id;
@@ -164,21 +166,38 @@ async function cleanupFixtures() {
   try {
     await client.query('BEGIN');
 
-    // Delete payment transactions & folio entries
-    await client.query('DELETE FROM payment_transactions WHERE reservation_id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
-    await client.query('DELETE FROM folio_entries WHERE reservation_id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
+    // 1. Audit logs
+    if (propIdA || propIdB) {
+      await client.query(
+        'DELETE FROM audit_logs WHERE property_id IN ($1, $2) OR record_id IN ($3, $4, $5)',
+        [propIdA || 0, propIdB || 0, String(resIdA || 0), String(resIdB || 0), String(resIdCrossRoom || 0)]
+      );
+    }
 
-    // Delete reservations & bookings
-    await client.query('DELETE FROM reservations WHERE id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
-    await client.query('DELETE FROM bookings WHERE id IN ($1, $2)', [bookingIdA, bookingIdB]);
+    // 2. Folio & Payment
+    if (resIdA || resIdB || resIdCrossRoom) {
+      await client.query('DELETE FROM payment_transactions WHERE reservation_id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
+      await client.query('DELETE FROM folio_entries WHERE reservation_id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
+      await client.query('DELETE FROM reservations WHERE id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
+    }
 
-    // Delete rooms & room types & categories
-    await client.query('DELETE FROM rooms WHERE property_id IN ($1, $2)', [propIdA, propIdB]);
-    await client.query('DELETE FROM room_types WHERE property_id IN ($1, $2)', [propIdA, propIdB]);
-    await client.query('DELETE FROM room_categories WHERE property_id IN ($1, $2)', [propIdA, propIdB]);
+    // 3. Bookings
+    if (bookingIdA || bookingIdB || propIdA || propIdB) {
+      await client.query('DELETE FROM bookings WHERE id IN ($1, $2) OR property_id IN ($3, $4)', [bookingIdA || 0, bookingIdB || 0, propIdA || 0, propIdB || 0]);
+    }
 
-    // Delete properties
-    await client.query('DELETE FROM properties WHERE id IN ($1, $2)', [propIdA, propIdB]);
+    // 4. Availability dates
+    if (propIdA || propIdB) {
+      await client.query('DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id IN ($1, $2))', [propIdA || 0, propIdB || 0]);
+    }
+
+    // 5. Rooms, Room Types, Categories
+    if (propIdA || propIdB) {
+      await client.query('DELETE FROM rooms WHERE property_id IN ($1, $2)', [propIdA || 0, propIdB || 0]);
+      await client.query('DELETE FROM room_types WHERE property_id IN ($1, $2)', [propIdA || 0, propIdB || 0]);
+      await client.query('DELETE FROM room_categories WHERE property_id IN ($1, $2)', [propIdA || 0, propIdB || 0]);
+      await client.query('DELETE FROM properties WHERE id IN ($1, $2)', [propIdA || 0, propIdB || 0]);
+    }
 
     await client.query('COMMIT');
   } catch (err) {
@@ -446,6 +465,12 @@ async function runTests() {
 
   const resRes = await pool.query('SELECT COUNT(*)::int AS count FROM reservations WHERE id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
   expect(resRes.rows[0].count === 0, 'X4: zero test reservations residue');
+
+  const resBook = await pool.query('SELECT COUNT(*)::int AS count FROM bookings WHERE id IN ($1, $2) OR property_id IN ($3, $4)', [bookingIdA, bookingIdB, propIdA, propIdB]);
+  expect(resBook.rows[0].count === 0, 'X5: zero test bookings residue');
+
+  const resAudit = await pool.query('SELECT COUNT(*)::int AS count FROM audit_logs WHERE property_id IN ($1, $2)', [propIdA, propIdB]);
+  expect(resAudit.rows[0].count === 0, 'X6: zero test audit_logs residue');
 
   console.log(`\nProperty-scoped folio & payment: ${passed} passed, ${failed} failed`);
   process.exitCode = failed > 0 ? 1 : 0;

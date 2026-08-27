@@ -30,6 +30,8 @@
     "test:room-blocks-migration": "node test/room_blocks_migration_sealing_test.js",
     "test:occupancy-engine": "node test/property_scoped_occupancy_engine_test.js",
     "test:booking-invariants": "node scripts/booking_invariants.js",
+    "test:property-folio-payment": "node test/property_scoped_folio_payment_test.js",
+    "test:payment-correction": "node test/payment_correction_reversal_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

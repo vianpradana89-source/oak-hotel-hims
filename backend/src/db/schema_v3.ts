@@ -25,6 +25,11 @@ export async function initializeDatabase(pool: Pool) {
       payment_method VARCHAR(30) DEFAULT 'CASH',
       reference_code VARCHAR(100),
       status VARCHAR(30) DEFAULT 'SUCCESS',
+      reference_payment_id INTEGER REFERENCES payment_transactions(id) ON DELETE SET NULL,
+      correction_group_id VARCHAR(100),
+      reason_code VARCHAR(50),
+      reason_text TEXT,
+      created_by VARCHAR(100),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -1004,6 +1009,28 @@ export async function initializeDatabase(pool: Pool) {
 
         INSERT INTO schema_migrations (version)
         VALUES ('guest_b1_relational_foundation')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // 7. Payment correction, void & immutable reversal schema migration
+    const paymentCorrMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'payment_correction_void_schema_v1'"
+    );
+    if ((paymentCorrMarkerCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS reference_payment_id INTEGER REFERENCES payment_transactions(id) ON DELETE SET NULL;
+        ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS correction_group_id VARCHAR(100);
+        ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS reason_code VARCHAR(50);
+        ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS reason_text TEXT;
+        ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS created_by VARCHAR(100);
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_reservation ON payment_transactions (reservation_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_ref_payment ON payment_transactions (reference_payment_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_correction_group ON payment_transactions (correction_group_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('payment_correction_void_schema_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }

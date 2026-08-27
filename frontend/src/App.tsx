@@ -6,6 +6,18 @@ import {
   validateIdrPaymentInput,
   calculateRemainingBalancePreview,
 } from './features/transactions/paymentIdrHelpers.ts';
+import {
+  isPaymentEligibleForCorrection,
+  calculateCorrectionDifference,
+  validateCorrectionForm,
+  validateVoidForm,
+  formatHotelTimestamp,
+  formatActorName,
+  getPaymentStatusVisual,
+  getReasonLabel,
+  PAYMENT_CORRECTION_REASONS,
+  type PaymentTransactionItem,
+} from './features/transactions/paymentCorrectionHelpers.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
@@ -82,6 +94,46 @@ function App() {
   const [paymentSubmitting, setPaymentSubmitting] = useState<boolean>(false);
   const [paymentFeedback, setPaymentFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const paymentInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [activePaymentMenuId, setActivePaymentMenuId] = useState<number | null>(null);
+  const [paymentDetailModal, setPaymentDetailModal] = useState<{
+    open: boolean;
+    payment: PaymentTransactionItem | null;
+  }>({ open: false, payment: null });
+  const [paymentCorrectionModal, setPaymentCorrectionModal] = useState<{
+    open: boolean;
+    payment: PaymentTransactionItem | null;
+    newAmountDraft: string;
+    paymentMethod: string;
+    reasonCode: string;
+    reasonText: string;
+    submitting: boolean;
+    error: string | null;
+  }>({
+    open: false,
+    payment: null,
+    newAmountDraft: '',
+    paymentMethod: 'CASH',
+    reasonCode: 'WRONG_AMOUNT',
+    reasonText: '',
+    submitting: false,
+    error: null,
+  });
+  const [paymentVoidModal, setPaymentVoidModal] = useState<{
+    open: boolean;
+    payment: PaymentTransactionItem | null;
+    reasonCode: string;
+    reasonText: string;
+    submitting: boolean;
+    error: string | null;
+  }>({
+    open: false,
+    payment: null,
+    reasonCode: 'PAYMENT_CANCELLED',
+    reasonText: '',
+    submitting: false,
+    error: null,
+  });
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
   const [maintenanceTasks, setMaintenanceTasks] = useState<any[]>([]);
@@ -1237,6 +1289,260 @@ function App() {
       });
     } finally {
       setPaymentSubmitting(false);
+    }
+  };
+
+  const openPaymentDetailModal = (payment: PaymentTransactionItem) => {
+    setActivePaymentMenuId(null);
+    setPaymentDetailModal({ open: true, payment });
+  };
+
+  const openPaymentCorrectionModal = (payment: PaymentTransactionItem) => {
+    setActivePaymentMenuId(null);
+    setPaymentCorrectionModal({
+      open: true,
+      payment,
+      newAmountDraft: formatIdrInput(String(payment.amount || 0)),
+      paymentMethod: payment.payment_method || 'CASH',
+      reasonCode: 'WRONG_AMOUNT',
+      reasonText: '',
+      submitting: false,
+      error: null,
+    });
+  };
+
+  const openPaymentVoidModal = (payment: PaymentTransactionItem) => {
+    setActivePaymentMenuId(null);
+    setPaymentVoidModal({
+      open: true,
+      payment,
+      reasonCode: 'PAYMENT_CANCELLED',
+      reasonText: '',
+      submitting: false,
+      error: null,
+    });
+  };
+
+  const submitPaymentCorrection = async () => {
+    if (!selectedRes || !paymentCorrectionModal.payment || paymentCorrectionModal.submitting) return;
+
+    const originalAmount = Math.round(Number(paymentCorrectionModal.payment.amount || 0));
+    const newAmount = parseIdrInput(paymentCorrectionModal.newAmountDraft);
+    const totalPrice = Math.round(Number(selectedRes.total_price || 0));
+    const currentPaid = Math.round(Number(selectedRes.amount_paid || 0));
+    const maxAllowedNewAmount = totalPrice - (currentPaid - originalAmount);
+
+    const validation = validateCorrectionForm({
+      originalAmount,
+      newAmount,
+      maxAllowedNewAmount,
+      reasonCode: paymentCorrectionModal.reasonCode,
+      reasonText: paymentCorrectionModal.reasonText,
+    });
+
+    if (!validation.valid) {
+      const firstErr = validation.errors.amount || validation.errors.reasonCode || validation.errors.reasonText;
+      setPaymentCorrectionModal((prev) => ({ ...prev, error: firstErr || 'Form tidak valid' }));
+      return;
+    }
+
+    if (propertyId === null) {
+      setPaymentCorrectionModal((prev) => ({ ...prev, error: 'Property belum dipilih' }));
+      return;
+    }
+
+    setPaymentCorrectionModal((prev) => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${selectedRes.id}/payments/${paymentCorrectionModal.payment.id}/correct`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            amount: newAmount,
+            payment_method: paymentCorrectionModal.paymentMethod,
+            reason_code: paymentCorrectionModal.reasonCode,
+            reason_text: paymentCorrectionModal.reasonText.trim() || undefined,
+          }),
+        }
+      );
+      const data = await response.json();
+      if (!response.ok || data.status !== 'SUCCESS') {
+        throw new Error(data.message || 'Gagal mengoreksi pembayaran');
+      }
+
+      const updatedRes = data.data?.reservation;
+      if (updatedRes) {
+        setSelectedRes((prev: any) => {
+          if (!prev || Number(prev.id) !== Number(updatedRes.id)) return prev;
+          return {
+            ...prev,
+            ...updatedRes,
+            room_number: prev.room_number ?? updatedRes.room_number,
+          };
+        });
+
+        setReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? { ...r, ...updatedRes, room_number: r.room_number ?? updatedRes.room_number }
+              : r
+          )
+        );
+
+        setTransactionReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? {
+                  ...r,
+                  ...updatedRes,
+                  bid: r.bid ?? updatedRes.bid,
+                  room_number: r.room_number ?? updatedRes.room_number,
+                  room_type: r.room_type ?? updatedRes.room_type,
+                  guest_segment: r.guest_segment ?? updatedRes.guest_segment,
+                  booking_source: r.booking_source ?? updatedRes.booking_source,
+                  channel: r.channel ?? updatedRes.channel,
+                }
+              : r
+          )
+        );
+      }
+
+      await fetchReservationFolio(Number(selectedRes.id));
+      await fetchReservationAudit(Number(selectedRes.id));
+      fetchData();
+      fetchOperationsData();
+      if (fetchTransactionReservationsRef.current) {
+        fetchTransactionReservationsRef.current(propertyId);
+      }
+
+      setPaymentCorrectionModal({
+        open: false,
+        payment: null,
+        newAmountDraft: '',
+        paymentMethod: 'CASH',
+        reasonCode: 'WRONG_AMOUNT',
+        reasonText: '',
+        submitting: false,
+        error: null,
+      });
+      setPaymentFeedback({
+        type: 'success',
+        message: `Koreksi pembayaran berhasil disimpan. Saldo dan folio telah disinkronkan.`
+      });
+    } catch (err: any) {
+      setPaymentCorrectionModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err.message || 'Terjadi kesalahan sistem',
+      }));
+    }
+  };
+
+  const submitPaymentVoid = async () => {
+    if (!selectedRes || !paymentVoidModal.payment || paymentVoidModal.submitting) return;
+
+    const validation = validateVoidForm({
+      reasonCode: paymentVoidModal.reasonCode,
+      reasonText: paymentVoidModal.reasonText,
+    });
+
+    if (!validation.valid) {
+      const firstErr = validation.errors.reasonCode || validation.errors.reasonText;
+      setPaymentVoidModal((prev) => ({ ...prev, error: firstErr || 'Form tidak valid' }));
+      return;
+    }
+
+    if (propertyId === null) {
+      setPaymentVoidModal((prev) => ({ ...prev, error: 'Property belum dipilih' }));
+      return;
+    }
+
+    setPaymentVoidModal((prev) => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${selectedRes.id}/payments/${paymentVoidModal.payment.id}/void`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            reason_code: paymentVoidModal.reasonCode,
+            reason_text: paymentVoidModal.reasonText.trim() || undefined,
+          }),
+        }
+      );
+      const data = await response.json();
+      if (!response.ok || data.status !== 'SUCCESS') {
+        throw new Error(data.message || 'Gagal membatalkan pembayaran');
+      }
+
+      const updatedRes = data.data?.reservation;
+      if (updatedRes) {
+        setSelectedRes((prev: any) => {
+          if (!prev || Number(prev.id) !== Number(updatedRes.id)) return prev;
+          return {
+            ...prev,
+            ...updatedRes,
+            room_number: prev.room_number ?? updatedRes.room_number,
+          };
+        });
+
+        setReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? { ...r, ...updatedRes, room_number: r.room_number ?? updatedRes.room_number }
+              : r
+          )
+        );
+
+        setTransactionReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? {
+                  ...r,
+                  ...updatedRes,
+                  bid: r.bid ?? updatedRes.bid,
+                  room_number: r.room_number ?? updatedRes.room_number,
+                  room_type: r.room_type ?? updatedRes.room_type,
+                  guest_segment: r.guest_segment ?? updatedRes.guest_segment,
+                  booking_source: r.booking_source ?? updatedRes.booking_source,
+                  channel: r.channel ?? updatedRes.channel,
+                }
+              : r
+          )
+        );
+      }
+
+      await fetchReservationFolio(Number(selectedRes.id));
+      await fetchReservationAudit(Number(selectedRes.id));
+      fetchData();
+      fetchOperationsData();
+      if (fetchTransactionReservationsRef.current) {
+        fetchTransactionReservationsRef.current(propertyId);
+      }
+
+      setPaymentVoidModal({
+        open: false,
+        payment: null,
+        reasonCode: 'PAYMENT_CANCELLED',
+        reasonText: '',
+        submitting: false,
+        error: null,
+      });
+      setPaymentFeedback({
+        type: 'success',
+        message: `Pembayaran berhasil dibatalkan. Reversal pembalik saldo telah dibuat.`
+      });
+    } catch (err: any) {
+      setPaymentVoidModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err.message || 'Terjadi kesalahan sistem',
+      }));
     }
   };
 
@@ -3551,8 +3857,8 @@ function App() {
                   <div className="summary-box summary-box--compact">
                     <div className="summary-box-head">Folio snapshot</div>
                     <div className="summary-box-row"><span>Total tagihan</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Sudah dibayar</span><strong>{formatCurrency(Number(selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0))}</strong></div>
-                    <div className="summary-box-row total"><span>Sisa</span><strong>{formatCurrency(Math.max(Number(selectedRes.total_price || 0) - (selectedFolio?.payments?.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0) || 0), 0))}</strong></div>
+                    <div className="summary-box-row"><span>Sudah dibayar</span><strong>{formatCurrency(Number(selectedRes.amount_paid || 0))}</strong></div>
+                    <div className="summary-box-row total"><span>Sisa</span><strong>{formatCurrency(Number(selectedRes.remaining_balance || 0))}</strong></div>
                   </div>
                 </div>
               </div>
@@ -3732,6 +4038,91 @@ function App() {
               </div>
 
               <div className="detail-history-grid">
+                <div className="reservation-folio-panel">
+                  <div className="reservation-doc-title">Riwayat Pembayaran</div>
+                  {selectedFolio?.payments?.length ? (
+                    <div className="space-y-2 text-xs">
+                      {selectedFolio.payments.map((p: any) => {
+                        const visual = getPaymentStatusVisual(p.status, p.transaction_type);
+                        const eligible = isPaymentEligibleForCorrection(p);
+                        const isMenuOpen = activePaymentMenuId === Number(p.id);
+
+                        return (
+                          <div
+                            key={p.id}
+                            className="p-2.5 bg-white border border-slate-200 rounded-lg flex items-center justify-between gap-2 shadow-xs relative"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`font-bold ${visual.strikeThrough ? 'line-through text-slate-400' : p.transaction_type === 'REVERSAL' ? 'text-rose-700' : 'text-slate-800'}`}>
+                                  {p.transaction_type === 'REVERSAL' ? 'Reversal' : p.transaction_type === 'CORRECTION_REPLACEMENT' ? 'Pengganti' : 'Pembayaran'} {p.payment_method || 'CASH'}
+                                </span>
+                                <span className={`font-mono font-bold ${visual.strikeThrough ? 'line-through text-slate-400' : p.transaction_type === 'REVERSAL' ? 'text-rose-700' : 'text-emerald-700'}`}>
+                                  {p.transaction_type === 'REVERSAL' ? '-' : ''}{formatCurrency(Number(p.amount || 0))}
+                                </span>
+                                <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded border ${visual.bgColor} ${visual.textColor} ${visual.borderColor}`}>
+                                  {visual.label}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
+                                <span>{formatHotelTimestamp(p.created_at)}</span>
+                                {p.reason_code && (
+                                  <span className="text-amber-700 font-medium truncate">
+                                    • {getReasonLabel(p.reason_code)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="relative">
+                              <button
+                                type="button"
+                                onClick={() => setActivePaymentMenuId(isMenuOpen ? null : Number(p.id))}
+                                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded text-xs cursor-pointer tracking-wider"
+                                title="Aksi pembayaran"
+                              >
+                                ⋯
+                              </button>
+
+                              {isMenuOpen && (
+                                <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1 text-xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => openPaymentDetailModal(p)}
+                                    className="w-full text-left px-3 py-1.5 hover:bg-slate-50 text-slate-700 cursor-pointer flex items-center gap-2"
+                                  >
+                                    <span>🔍</span> Detail Pembayaran
+                                  </button>
+                                  {eligible && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => openPaymentCorrectionModal(p)}
+                                        className="w-full text-left px-3 py-1.5 hover:bg-amber-50 text-amber-800 font-medium cursor-pointer flex items-center gap-2"
+                                      >
+                                        <span>✏️</span> Koreksi Pembayaran
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => openPaymentVoidModal(p)}
+                                        className="w-full text-left px-3 py-1.5 hover:bg-rose-50 text-rose-700 font-medium cursor-pointer flex items-center gap-2"
+                                      >
+                                        <span>🚫</span> Batalkan Pembayaran
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-slate-400 italic py-2">Belum ada transaksi pembayaran</div>
+                  )}
+                </div>
+
                 <div className="reservation-audit-panel">
                   <div className="reservation-doc-title">Reservation Activity</div>
                   <div className="reservation-audit-list">
@@ -3743,7 +4134,7 @@ function App() {
                         <div className="reservation-audit-copy">
                           <div className="font-semibold text-slate-800">{audit.action || 'UPDATE'}</div>
                           <div className="text-[11px] text-slate-500">
-                            {audit.module || 'PMS'} • {audit.timestamp ? new Date(audit.timestamp).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                            {audit.module || 'PMS'} • {formatHotelTimestamp(audit.timestamp)}
                           </div>
                         </div>
                       </div>
@@ -3779,7 +4170,7 @@ function App() {
                           <div className="reservation-audit-copy">
                             <div className="font-semibold text-slate-800">{audit.action || 'UPDATE'}</div>
                             <div className="text-[11px] text-slate-500">
-                              {audit.module || 'PMS'} • {audit.timestamp ? new Date(audit.timestamp).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                              {audit.module || 'PMS'} • {formatHotelTimestamp(audit.timestamp)}
                             </div>
                           </div>
                         </div>
@@ -3873,6 +4264,362 @@ function App() {
                 Sudah
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {paymentDetailModal.open && paymentDetailModal.payment && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <h3 className="text-base font-bold text-slate-900">Detail Transaksi Pembayaran</h3>
+              <button
+                type="button"
+                onClick={() => setPaymentDetailModal({ open: false, payment: null })}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {(() => {
+              const p = paymentDetailModal.payment;
+              const visual = getPaymentStatusVisual(p.status, p.transaction_type);
+
+              return (
+                <div className="space-y-3 text-xs">
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">ID Pembayaran</span>
+                    <strong className="font-mono text-slate-800">#{p.id}</strong>
+                  </div>
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Tipe Transaksi</span>
+                    <strong className="text-slate-800">{p.transaction_type}</strong>
+                  </div>
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Status</span>
+                    <span className={`px-2 py-0.5 font-bold rounded border ${visual.bgColor} ${visual.textColor} ${visual.borderColor}`}>
+                      {visual.label}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Nominal</span>
+                    <strong className="text-sm font-bold text-emerald-800 font-mono">
+                      {formatCurrency(Number(p.amount || 0))}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Metode</span>
+                    <strong className="text-slate-800">{p.payment_method || 'CASH'}</strong>
+                  </div>
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Waktu Transaksi</span>
+                    <strong className="text-slate-800">{formatHotelTimestamp(p.created_at)}</strong>
+                  </div>
+                  {p.reference_code && (
+                    <div className="flex justify-between py-1.5 border-b border-slate-100">
+                      <span className="text-slate-500">Kode Referensi</span>
+                      <strong className="font-mono text-slate-800">{p.reference_code}</strong>
+                    </div>
+                  )}
+                  {p.reference_payment_id && (
+                    <div className="flex justify-between py-1.5 border-b border-slate-100">
+                      <span className="text-slate-500">Referensi ID</span>
+                      <strong className="font-mono text-slate-800">#{p.reference_payment_id}</strong>
+                    </div>
+                  )}
+                  {p.reason_code && (
+                    <div className="flex justify-between py-1.5 border-b border-slate-100">
+                      <span className="text-slate-500">Alasan</span>
+                      <strong className="text-amber-800">{getReasonLabel(p.reason_code)}</strong>
+                    </div>
+                  )}
+                  {p.reason_text && (
+                    <div className="py-1.5 border-b border-slate-100">
+                      <div className="text-slate-500 mb-0.5">Catatan:</div>
+                      <div className="text-slate-800 bg-slate-50 p-2 rounded border border-slate-100">{p.reason_text}</div>
+                    </div>
+                  )}
+                  <div className="flex justify-between py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Dibuat Oleh</span>
+                    <strong className="text-slate-800">{formatActorName(p.created_by)}</strong>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPaymentDetailModal({ open: false, payment: null })}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paymentCorrectionModal.open && paymentCorrectionModal.payment && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Koreksi Pembayaran</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Koreksi nominal atau metode transaksi #{paymentCorrectionModal.payment.id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPaymentCorrectionModal((prev) => ({ ...prev, open: false, payment: null }))}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {(() => {
+              const origAmount = Math.round(Number(paymentCorrectionModal.payment.amount || 0));
+              const newAmount = parseIdrInput(paymentCorrectionModal.newAmountDraft);
+              const diff = calculateCorrectionDifference(origAmount, newAmount);
+              const totalPrice = Math.round(Number(selectedRes?.total_price || 0));
+              const currentPaid = Math.round(Number(selectedRes?.amount_paid || 0));
+              const maxAllowedNewAmount = totalPrice - (currentPaid - origAmount);
+              const val = validateCorrectionForm({
+                originalAmount: origAmount,
+                newAmount,
+                maxAllowedNewAmount,
+                reasonCode: paymentCorrectionModal.reasonCode,
+                reasonText: paymentCorrectionModal.reasonText,
+              });
+
+              return (
+                <div className="space-y-3.5 text-xs">
+                  <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-[11px] leading-relaxed">
+                    <strong>💡 Prinsip Immutabilitas Finansial:</strong> Pembayaran asli tidak akan dihapus. Sistem akan otomatis menerbitkan transaksi <strong>REVERSAL (-Rp {formatCurrency(origAmount)})</strong> dan <strong>PEMBAYARAN PENGGANTI</strong>.
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-500 font-semibold mb-1">Nominal Sebelumnya</label>
+                      <input
+                        type="text"
+                        disabled
+                        value={`Rp ${formatCurrency(origAmount)}`}
+                        className="w-full bg-slate-100 border border-slate-200 rounded-lg px-3 py-2 font-mono font-bold text-slate-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Nominal Yang Benar *</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 select-none pointer-events-none">Rp</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={paymentCorrectionModal.newAmountDraft}
+                          onChange={(e) => {
+                            const valFormatted = formatIdrInput(e.target.value);
+                            setPaymentCorrectionModal((prev) => ({ ...prev, newAmountDraft: valFormatted, error: null }));
+                          }}
+                          placeholder="0"
+                          disabled={paymentCorrectionModal.submitting}
+                          className="w-full bg-white border border-slate-300 rounded-lg pl-9 pr-3 py-2 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 flex items-center justify-between">
+                    <span className="text-slate-600">Selisih penyesuaian:</span>
+                    <strong className={`font-mono text-xs ${diff.isIncrease ? 'text-emerald-700' : diff.isDecrease ? 'text-rose-700' : 'text-slate-600'}`}>
+                      {diff.isIncrease ? `+ Rp ${formatCurrency(diff.absDifference)} (Tagihan berkurang)` : diff.isDecrease ? `- Rp ${formatCurrency(diff.absDifference)} (Sisa tagihan bertambah)` : 'Rp 0'}
+                    </strong>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Metode Pembayaran</label>
+                      <select
+                        value={paymentCorrectionModal.paymentMethod}
+                        onChange={(e) => setPaymentCorrectionModal((prev) => ({ ...prev, paymentMethod: e.target.value }))}
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      >
+                        <option value="CASH">Tunai (CASH)</option>
+                        <option value="TRANSFER">Transfer Bank</option>
+                        <option value="QRIS">QRIS</option>
+                        <option value="DEBIT">Kartu Debit</option>
+                        <option value="CREDIT_CARD">Kartu Kredit</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Alasan Koreksi *</label>
+                      <select
+                        value={paymentCorrectionModal.reasonCode}
+                        onChange={(e) => setPaymentCorrectionModal((prev) => ({ ...prev, reasonCode: e.target.value, error: null }))}
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      >
+                        {PAYMENT_CORRECTION_REASONS.map((r) => (
+                          <option key={r.code} value={r.code}>{r.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1">
+                      Catatan / Keterangan {paymentCorrectionModal.reasonCode === 'OTHER' ? '(Wajib)' : '(Opsional)'}
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={paymentCorrectionModal.reasonText}
+                      onChange={(e) => setPaymentCorrectionModal((prev) => ({ ...prev, reasonText: e.target.value, error: null }))}
+                      placeholder={paymentCorrectionModal.reasonCode === 'OTHER' ? 'Jelaskan alasan koreksi...' : 'Keterangan tambahan...'}
+                      className="w-full bg-white border border-slate-300 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    />
+                  </div>
+
+                  {(paymentCorrectionModal.error || (!val.valid && (val.errors.amount || val.errors.reasonCode || val.errors.reasonText))) && (
+                    <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-medium text-xs">
+                      {paymentCorrectionModal.error || val.errors.amount || val.errors.reasonCode || val.errors.reasonText}
+                    </div>
+                  )}
+
+                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentCorrectionModal((prev) => ({ ...prev, open: false, payment: null }))}
+                      disabled={paymentCorrectionModal.submitting}
+                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={submitPaymentCorrection}
+                      disabled={paymentCorrectionModal.submitting || !val.valid}
+                      className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all ${
+                        paymentCorrectionModal.submitting || !val.valid
+                          ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                          : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
+                      }`}
+                    >
+                      {paymentCorrectionModal.submitting ? 'Menyimpan...' : 'Simpan Koreksi'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {paymentVoidModal.open && paymentVoidModal.payment && (
+        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Batalkan Pembayaran</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Batalkan transaksi pembayaran #{paymentVoidModal.payment.id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPaymentVoidModal((prev) => ({ ...prev, open: false, payment: null }))}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {(() => {
+              const p = paymentVoidModal.payment;
+              const val = validateVoidForm({
+                reasonCode: paymentVoidModal.reasonCode,
+                reasonText: paymentVoidModal.reasonText,
+              });
+
+              return (
+                <div className="space-y-3 text-xs">
+                  <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-lg p-3 text-[11px] leading-relaxed">
+                    <strong>⚠️ Peringatan Pembatalan:</strong> Pembayaran asli tidak akan dihapus dari histori. Sistem akan menandai transaksi sebagai <strong>DIBATALKAN</strong> dan membuat transaksi reversal pembalik saldo sebesar <strong>-Rp {formatCurrency(Number(p.amount || 0))}</strong>.
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Nominal:</span>
+                      <strong className="text-slate-800 font-mono font-bold text-sm">Rp {formatCurrency(Number(p.amount || 0))}</strong>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Metode:</span>
+                      <strong className="text-slate-800">{p.payment_method || 'CASH'}</strong>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Waktu:</span>
+                      <strong className="text-slate-800">{formatHotelTimestamp(p.created_at)}</strong>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1">Alasan Pembatalan *</label>
+                    <select
+                      value={paymentVoidModal.reasonCode}
+                      onChange={(e) => setPaymentVoidModal((prev) => ({ ...prev, reasonCode: e.target.value, error: null }))}
+                      className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-600"
+                    >
+                      {PAYMENT_CORRECTION_REASONS.map((r) => (
+                        <option key={r.code} value={r.code}>{r.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1">
+                      Catatan {paymentVoidModal.reasonCode === 'OTHER' ? '(Wajib)' : '(Opsional)'}
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={paymentVoidModal.reasonText}
+                      onChange={(e) => setPaymentVoidModal((prev) => ({ ...prev, reasonText: e.target.value, error: null }))}
+                      placeholder={paymentVoidModal.reasonCode === 'OTHER' ? 'Jelaskan alasan pembatalan...' : 'Catatan pembatalan...'}
+                      className="w-full bg-white border border-slate-300 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-600"
+                    />
+                  </div>
+
+                  {(paymentVoidModal.error || (!val.valid && (val.errors.reasonCode || val.errors.reasonText))) && (
+                    <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-medium text-xs">
+                      {paymentVoidModal.error || val.errors.reasonCode || val.errors.reasonText}
+                    </div>
+                  )}
+
+                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentVoidModal((prev) => ({ ...prev, open: false, payment: null }))}
+                      disabled={paymentVoidModal.submitting}
+                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs cursor-pointer"
+                    >
+                      Kembali
+                    </button>
+                    <button
+                      type="button"
+                      onClick={submitPaymentVoid}
+                      disabled={paymentVoidModal.submitting || !val.valid}
+                      className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all ${
+                        paymentVoidModal.submitting || !val.valid
+                          ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                          : 'bg-rose-700 hover:bg-rose-800 active:bg-rose-900 cursor-pointer'
+                      }`}
+                    >
+                      {paymentVoidModal.submitting ? 'Membatalkan...' : 'Konfirmasi Batalkan'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}

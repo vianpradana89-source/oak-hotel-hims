@@ -1974,9 +1974,9 @@ app.get('/api/reservations/:id/audit', async (req, res) => {
 
     const result = await pool.query(
       `SELECT * FROM audit_logs
-       WHERE entity = 'RESERVATION' AND record_id = $1 AND property_id = $2
+       WHERE property_id = $2 AND record_id = $1 AND (entity = 'RESERVATION' OR module = 'PAYMENT')
        ORDER BY timestamp DESC, audit_id DESC
-       LIMIT 20`,
+       LIMIT 30`,
       [String(reservationId), propertyId]
     );
     res.json({ status: 'OK', data: result.rows });
@@ -4179,11 +4179,16 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
     const updatedRemaining = totalPrice - updatedAmountPaid;
     const updatedPaymentStatus = updatedAmountPaid <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
 
+    const actorName = req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null;
+    const actorId = req.body.actor_user_id || req.body.actor_id || null;
+    const actorRole = req.body.actor_role_snapshot || req.body.actor_role || null;
+    const corrId = req.body.correlation_id || req.headers['x-correlation-id'] || `corr_pay_${Date.now()}`;
+
     const payment = await client.query(
-      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, reference_code, status)
-       VALUES ($1, $2, $3, $4, $5, 'SUCCESS')
+      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, reference_code, status, created_by, correction_group_id)
+       VALUES ($1, $2, $3, $4, $5, 'SUCCESS', $6, $7)
        RETURNING *`,
-      [reservationId, transaction_type || 'PAYMENT', paymentAmount, payment_method || 'CASH', reference_code || `TXN-${Date.now()}`]
+      [reservationId, transaction_type || 'PAYMENT', paymentAmount, payment_method || 'CASH', reference_code || `TXN-${Date.now()}`, actorName, corrId]
     );
 
     await client.query(
@@ -4197,8 +4202,478 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
       [updatedAmountPaid, updatedRemaining, updatedPaymentStatus, reservationId]
     );
 
+    const paymentAuditPayload = {
+      event: 'PAYMENT_CREATED',
+      payment_transaction_id: payment.rows[0].id,
+      payment_id: payment.rows[0].id,
+      reservation_id: reservationId,
+      amount: paymentAmount,
+      payment_method: payment_method || 'CASH',
+      actor_user_id: actorId,
+      actor_id: actorId,
+      actor_name_snapshot: actorName,
+      actor_name: actorName,
+      actor_role_snapshot: actorRole,
+      actor_role: actorRole,
+      property_id: propertyId,
+      correlation_id: corrId,
+      created_at: new Date().toISOString(),
+      timestamp: new Date().toISOString()
+    };
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ('PAYMENT', 'PAYMENT_CREATED', 'RESERVATION', $1, $2, $3, $4)`,
+      [String(reservationId), JSON.stringify(paymentAuditPayload), corrId, propertyId]
+    );
+
     await client.query('COMMIT');
     res.json({ status: 'SUCCESS', data: { payment: payment.rows[0], reservation: withReservationHotelDates(updated.rows[0]) } });
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/reservations/:id/payments/:paymentId/correct', async (req, res) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+
+  const { property_id: propertyIdRaw, amount, payment_method, reason_code, reason_text, actor_name, actor_id, actor_role } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const correctedAmount = Number(amount);
+  if (!Number.isFinite(correctedAmount) || correctedAmount <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be greater than zero' });
+  }
+  if (!Number.isInteger(correctedAmount)) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be an integer (IDR currency does not support decimal amounts)' });
+  }
+
+  const allowedReasons = ['WRONG_AMOUNT', 'WRONG_PAYMENT_METHOD', 'DUPLICATE_ENTRY', 'PAYMENT_CANCELLED', 'OTHER'];
+  if (!reason_code || !allowedReasons.includes(String(reason_code))) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'reason_code is required and must be one of: WRONG_AMOUNT, WRONG_PAYMENT_METHOD, DUPLICATE_ENTRY, PAYMENT_CANCELLED, OTHER'
+    });
+  }
+
+  if (reason_code === 'OTHER' && (!reason_text || String(reason_text).trim() === '')) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'reason_text is required when reason_code is OTHER'
+    });
+  }
+
+  const actor = req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null;
+  const actorId = req.body.actor_user_id || req.body.actor_id || null;
+  const role = req.body.actor_role_snapshot || req.body.actor_role || null;
+  const correlationId = req.body.correlation_id || req.headers['x-correlation-id'] || `corr_pay_corr_${paymentId}_${Date.now()}`;
+
+  const client = await pool.connect();
+  try {
+    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    await client.query('BEGIN');
+
+    const reservation = await client.query(`
+      SELECT
+        r.id,
+        r.total_price,
+        r.amount_paid,
+        r.payment_status,
+        r.booking_id,
+        b.property_id AS booking_property_id
+      FROM reservations r
+      LEFT JOIN bookings b ON b.id = r.booking_id
+      WHERE r.id = $1
+      FOR UPDATE OF r
+    `, [reservationId]);
+
+    if (!hasRows(reservation)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: 'reservation not found' });
+    }
+
+    const bookingPropertyId = reservation.rows[0].booking_property_id;
+    if (bookingPropertyId === null || bookingPropertyId === undefined) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
+    }
+
+    if (Number(bookingPropertyId) !== propertyId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
+    }
+
+    const paymentRes = await client.query(
+      `SELECT * FROM payment_transactions WHERE id = $1 AND reservation_id = $2 FOR UPDATE`,
+      [paymentId, reservationId]
+    );
+
+    if (!hasRows(paymentRes)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'PAYMENT_NOT_FOUND', message: 'payment transaction not found' });
+    }
+
+    const originalPayment = paymentRes.rows[0];
+    if (originalPayment.status === 'CORRECTED' || originalPayment.status === 'VOIDED' || originalPayment.transaction_type === 'REVERSAL') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'PAYMENT_ALREADY_REVERSED',
+        message: 'Payment has already been corrected or voided, or is a reversal transaction'
+      });
+    }
+
+    const oldAmount = Math.round(Number(originalPayment.amount || 0));
+    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
+    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
+
+    const resultingPaid = (currentPaid - oldAmount) + correctedAmount;
+    if (resultingPaid > totalPrice) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'OVERPAYMENT_NOT_ALLOWED',
+        message: 'Nominal koreksi melebihi total tagihan reservasi',
+        details: {
+          corrected_amount: correctedAmount,
+          resulting_paid: resultingPaid,
+          total_price: totalPrice,
+          maximum_allowed_payment: totalPrice - (currentPaid - oldAmount)
+        }
+      });
+    }
+
+    const resultingRemaining = Math.max(0, totalPrice - resultingPaid);
+    const resultingPaymentStatus = resultingPaid <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
+
+    // 1. Mark original payment as CORRECTED
+    await client.query(
+      `UPDATE payment_transactions SET status = 'CORRECTED' WHERE id = $1`,
+      [paymentId]
+    );
+
+    // 2. Insert compensating REVERSAL
+    const reversal = await client.query(
+      `INSERT INTO payment_transactions (
+        reservation_id, transaction_type, amount, payment_method, reference_code,
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+      ) VALUES (
+        $1, 'REVERSAL', $2, $3, $4,
+        'SUCCESS', $5, $6, $7, $8, $9
+      ) RETURNING *`,
+      [
+        reservationId,
+        oldAmount,
+        originalPayment.payment_method || 'CASH',
+        `REV-${paymentId}-${Date.now()}`,
+        paymentId,
+        correlationId,
+        reason_code,
+        reason_text || null,
+        actor
+      ]
+    );
+
+    // 3. Insert replacement CORRECTION_REPLACEMENT
+    const chosenMethod = payment_method || originalPayment.payment_method || 'CASH';
+    const replacement = await client.query(
+      `INSERT INTO payment_transactions (
+        reservation_id, transaction_type, amount, payment_method, reference_code,
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+      ) VALUES (
+        $1, 'CORRECTION_REPLACEMENT', $2, $3, $4,
+        'SUCCESS', $5, $6, $7, $8, $9
+      ) RETURNING *`,
+      [
+        reservationId,
+        correctedAmount,
+        chosenMethod,
+        `REPL-${paymentId}-${Date.now()}`,
+        paymentId,
+        correlationId,
+        reason_code,
+        reason_text || null,
+        actor
+      ]
+    );
+
+    // 4. Folio entries (reversal DEBIT + replacement CREDIT)
+    await client.query(
+      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
+       VALUES ($1, 'PAYMENT_REVERSAL', $2, $3, 'DEBIT')`,
+      [reservationId, `Pembatalan pembayaran #${paymentId} (koreksi)`, oldAmount]
+    );
+
+    await client.query(
+      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
+       VALUES ($1, 'PAYMENT', $2, $3, 'CREDIT')`,
+      [reservationId, `Pembayaran pengganti (koreksi #${paymentId})`, correctedAmount]
+    );
+
+    // 5. Update reservation
+    const updated = await client.query(
+      `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
+      [resultingPaid, resultingRemaining, resultingPaymentStatus, reservationId]
+    );
+
+    // 6. Audit log
+    const auditPayload = {
+      event: 'PAYMENT_CORRECTED',
+      property_id: propertyId,
+      reservation_id: reservationId,
+      payment_id: paymentId,
+      original_payment_id: paymentId,
+      reversal_payment_id: reversal.rows[0].id,
+      replacement_payment_id: replacement.rows[0].id,
+      old_amount: oldAmount,
+      new_amount: correctedAmount,
+      old_payment_method: originalPayment.payment_method,
+      new_payment_method: chosenMethod,
+      reason_code: reason_code,
+      reason_text: reason_text || null,
+      actor_user_id: actorId,
+      actor_id: actorId,
+      actor_name_snapshot: actor,
+      actor_name: actor,
+      actor_role_snapshot: role,
+      actor_role: role,
+      correlation_id: correlationId,
+      created_at: new Date().toISOString(),
+      timestamp: new Date().toISOString()
+    };
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ('PAYMENT', 'PAYMENT_CORRECTED', 'RESERVATION', $1, $2, $3, $4)`,
+      [String(reservationId), JSON.stringify(auditPayload), correlationId, propertyId]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      status: 'SUCCESS',
+      data: {
+        original_payment_id: paymentId,
+        reversal: reversal.rows[0],
+        replacement: replacement.rows[0],
+        reservation: withReservationHotelDates(updated.rows[0])
+      }
+    });
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
+  const reservationId = Number(req.params.id);
+  const paymentId = Number(req.params.paymentId);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+  }
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+  }
+
+  const { property_id: propertyIdRaw, reason_code, reason_text, actor_name, actor_id, actor_role } = req.body;
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const allowedReasons = ['WRONG_AMOUNT', 'WRONG_PAYMENT_METHOD', 'DUPLICATE_ENTRY', 'PAYMENT_CANCELLED', 'OTHER'];
+  if (!reason_code || !allowedReasons.includes(String(reason_code))) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'reason_code is required and must be one of: WRONG_AMOUNT, WRONG_PAYMENT_METHOD, DUPLICATE_ENTRY, PAYMENT_CANCELLED, OTHER'
+    });
+  }
+
+  if (reason_code === 'OTHER' && (!reason_text || String(reason_text).trim() === '')) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'reason_text is required when reason_code is OTHER'
+    });
+  }
+
+  const actor = req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null;
+  const actorId = req.body.actor_user_id || req.body.actor_id || null;
+  const role = req.body.actor_role_snapshot || req.body.actor_role || null;
+  const correlationId = req.body.correlation_id || req.headers['x-correlation-id'] || `corr_pay_void_${paymentId}_${Date.now()}`;
+
+  const client = await pool.connect();
+  try {
+    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if ((propCheck.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
+    }
+
+    await client.query('BEGIN');
+
+    const reservation = await client.query(`
+      SELECT
+        r.id,
+        r.total_price,
+        r.amount_paid,
+        r.payment_status,
+        r.booking_id,
+        b.property_id AS booking_property_id
+      FROM reservations r
+      LEFT JOIN bookings b ON b.id = r.booking_id
+      WHERE r.id = $1
+      FOR UPDATE OF r
+    `, [reservationId]);
+
+    if (!hasRows(reservation)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: 'reservation not found' });
+    }
+
+    const bookingPropertyId = reservation.rows[0].booking_property_id;
+    if (bookingPropertyId === null || bookingPropertyId === undefined) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ status: 'ERROR', code: 'RESERVATION_INTEGRITY_ERROR', message: 'Reservation lacks authoritative booking property ownership' });
+    }
+
+    if (Number(bookingPropertyId) !== propertyId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
+    }
+
+    const paymentRes = await client.query(
+      `SELECT * FROM payment_transactions WHERE id = $1 AND reservation_id = $2 FOR UPDATE`,
+      [paymentId, reservationId]
+    );
+
+    if (!hasRows(paymentRes)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'ERROR', code: 'PAYMENT_NOT_FOUND', message: 'payment transaction not found' });
+    }
+
+    const originalPayment = paymentRes.rows[0];
+    if (originalPayment.status === 'CORRECTED' || originalPayment.status === 'VOIDED' || originalPayment.transaction_type === 'REVERSAL') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'PAYMENT_ALREADY_REVERSED',
+        message: 'Payment has already been corrected or voided, or is a reversal transaction'
+      });
+    }
+
+    const oldAmount = Math.round(Number(originalPayment.amount || 0));
+    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
+    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
+
+    const resultingPaid = Math.max(0, currentPaid - oldAmount);
+    const resultingRemaining = totalPrice - resultingPaid;
+    const resultingPaymentStatus = resultingPaid <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
+
+    // 1. Mark original payment as VOIDED
+    await client.query(
+      `UPDATE payment_transactions SET status = 'VOIDED' WHERE id = $1`,
+      [paymentId]
+    );
+
+    // 2. Insert compensating REVERSAL
+    const reversal = await client.query(
+      `INSERT INTO payment_transactions (
+        reservation_id, transaction_type, amount, payment_method, reference_code,
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+      ) VALUES (
+        $1, 'REVERSAL', $2, $3, $4,
+        'SUCCESS', $5, $6, $7, $8, $9
+      ) RETURNING *`,
+      [
+        reservationId,
+        oldAmount,
+        originalPayment.payment_method || 'CASH',
+        `REV-${paymentId}-${Date.now()}`,
+        paymentId,
+        correlationId,
+        reason_code,
+        reason_text || null,
+        actor
+      ]
+    );
+
+    // 3. Folio entry (reversal DEBIT)
+    await client.query(
+      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
+       VALUES ($1, 'PAYMENT_VOID', $2, $3, 'DEBIT')`,
+      [reservationId, `Pembatalan pembayaran #${paymentId}`, oldAmount]
+    );
+
+    // 4. Update reservation
+    const updated = await client.query(
+      `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
+      [resultingPaid, resultingRemaining, resultingPaymentStatus, reservationId]
+    );
+
+    // 5. Audit log
+    const auditPayload = {
+      event: 'PAYMENT_VOIDED',
+      property_id: propertyId,
+      reservation_id: reservationId,
+      payment_id: paymentId,
+      original_payment_id: paymentId,
+      reversal_payment_id: reversal.rows[0].id,
+      amount: oldAmount,
+      payment_method: originalPayment.payment_method,
+      reason_code: reason_code,
+      reason_text: reason_text || null,
+      actor_user_id: actorId,
+      actor_id: actorId,
+      actor_name_snapshot: actor,
+      actor_name: actor,
+      actor_role_snapshot: role,
+      actor_role: role,
+      correlation_id: correlationId,
+      created_at: new Date().toISOString(),
+      timestamp: new Date().toISOString()
+    };
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ('PAYMENT', 'PAYMENT_VOIDED', 'RESERVATION', $1, $2, $3, $4)`,
+      [String(reservationId), JSON.stringify(auditPayload), correlationId, propertyId]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      status: 'SUCCESS',
+      data: {
+        original_payment_id: paymentId,
+        reversal: reversal.rows[0],
+        reservation: withReservationHotelDates(updated.rows[0])
+      }
+    });
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     res.status(500).json({ status: 'ERROR', message: err.message });
@@ -4254,8 +4729,8 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
       return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
     }
 
-    const payments = await pool.query('SELECT * FROM payment_transactions WHERE reservation_id = $1 ORDER BY created_at DESC', [reservationId]);
-    const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY created_at DESC', [reservationId]);
+    const payments = await pool.query('SELECT * FROM payment_transactions WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
+    const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
 
     res.json({
       status: 'OK',
