@@ -10,6 +10,7 @@
     "test:occupancy-helpers": "node test/occupancy_reporting_date_helpers_test.ts",
     "test:transaction-ux": "node test/transaction_ux_helpers_test.ts",
     "test:guest-crm": "node test/guest_crm_helpers_test.ts",
+    "test:payment-idr": "node test/payment_idr_helpers_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

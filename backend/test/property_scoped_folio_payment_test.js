@@ -275,6 +275,66 @@ async function runTests() {
     expect(Number(resCheckA.rows[0].remaining_balance) === 600000, 'H2: reservation remaining_balance updated to 600,000');
     expect(resCheckA.rows[0].payment_status === 'PARTIAL', 'H3: reservation payment_status is PARTIAL');
 
+    // H4. Negative payment rejected with 400
+    const payNeg = await api('POST', `/api/reservations/${resIdA}/payments`, {
+      property_id: propIdA,
+      amount: -50000,
+      payment_method: 'CASH'
+    });
+    expect(payNeg.status === 400, 'H4a: POST negative payment rejected with 400');
+    expect(payNeg.json?.code === 'VALIDATION_ERROR', 'H4b: negative payment code is VALIDATION_ERROR');
+
+    // H5. Decimal payment rejected with 400
+    const payDec = await api('POST', `/api/reservations/${resIdA}/payments`, {
+      property_id: propIdA,
+      amount: 1000.50,
+      payment_method: 'CASH'
+    });
+    expect(payDec.status === 400, 'H5a: POST non-integer decimal payment rejected with 400');
+    expect(payDec.json?.code === 'VALIDATION_ERROR', 'H5b: decimal payment code is VALIDATION_ERROR');
+
+    // H6. Overpayment rejected with 400 OVERPAYMENT_NOT_ALLOWED (attempt 700,000 when remaining is 600,000)
+    const payOver = await api('POST', `/api/reservations/${resIdA}/payments`, {
+      property_id: propIdA,
+      amount: 700000,
+      payment_method: 'CASH',
+      reference_code: 'REF-OVERPAY-ATTEMPT'
+    });
+    expect(payOver.status === 400, 'H6a: POST overpayment rejected with 400');
+    expect(payOver.json?.code === 'OVERPAYMENT_NOT_ALLOWED', 'H6b: overpayment code is OVERPAYMENT_NOT_ALLOWED');
+    expect(payOver.json?.details?.remaining_balance === 600000, 'H6c: details return exact remaining_balance');
+    expect(payOver.json?.details?.payment_amount === 700000, 'H6d: details return attempted payment_amount');
+
+    // H7. Atomicity check: overpayment rejection left NO payment row and NO folio row
+    const ptOver = await pool.query('SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reference_code = $1', ['REF-OVERPAY-ATTEMPT']);
+    expect(ptOver.rows[0].count === 0, 'H7a: rejected overpayment created 0 payment_transactions rows');
+    const resCheckA2 = await pool.query('SELECT amount_paid, remaining_balance FROM reservations WHERE id = $1', [resIdA]);
+    expect(Number(resCheckA2.rows[0].amount_paid) === 400000, 'H7b: amount_paid unchanged at 400,000 after rejected overpayment');
+    expect(Number(resCheckA2.rows[0].remaining_balance) === 600000, 'H7c: remaining_balance unchanged at 600,000 after rejected overpayment');
+
+    // H8. Exact payment succeeds (pay exact remaining 600,000)
+    const payExact = await api('POST', `/api/reservations/${resIdA}/payments`, {
+      property_id: propIdA,
+      amount: 600000,
+      payment_method: 'CASH',
+      reference_code: 'REF-PAY-A-002-EXACT'
+    });
+    expect(payExact.status === 200, 'H8a: POST exact payment returns 200');
+    expect(payExact.json?.status === 'SUCCESS', 'H8b: response status is SUCCESS');
+    const resCheckA3 = await pool.query('SELECT amount_paid, remaining_balance, payment_status FROM reservations WHERE id = $1', [resIdA]);
+    expect(Number(resCheckA3.rows[0].amount_paid) === 1000000, 'H8c: reservation amount_paid updated to 1,000,000');
+    expect(Number(resCheckA3.rows[0].remaining_balance) === 0, 'H8d: reservation remaining_balance updated to 0');
+    expect(resCheckA3.rows[0].payment_status === 'PAID', 'H8e: reservation payment_status is PAID');
+
+    // H9. Overpayment on already paid reservation rejected with 400
+    const payAfterPaid = await api('POST', `/api/reservations/${resIdA}/payments`, {
+      property_id: propIdA,
+      amount: 10000,
+      payment_method: 'CASH'
+    });
+    expect(payAfterPaid.status === 400, 'H9a: payment on fully paid reservation rejected with 400');
+    expect(payAfterPaid.json?.code === 'OVERPAYMENT_NOT_ALLOWED', 'H9b: code is OVERPAYMENT_NOT_ALLOWED');
+
     // I. Cross-property payment: Reservation B with Property A requested -> rejected 403
     const payCross = await api('POST', `/api/reservations/${resIdB}/payments`, {
       property_id: propIdA, // Property A requested for Property B reservation!
@@ -332,8 +392,8 @@ async function runTests() {
     expect(folioA.json?.status === 'OK', 'Q2: response status is OK');
     expect(Array.isArray(folioA.json?.data?.payments), 'Q3: data contains payments array');
     expect(Array.isArray(folioA.json?.data?.folio), 'Q4: data contains folio array');
-    expect(folioA.json?.data?.payments?.length === 1, 'Q5: Reservation A has exactly 1 payment');
-    expect(folioA.json?.data?.folio?.length === 2, 'Q6: Reservation A has exactly 2 folio entries (1 debit + 1 credit)');
+    expect(folioA.json?.data?.payments?.length === 2, 'Q5: Reservation A has exactly 2 payments (partial + exact)');
+    expect(folioA.json?.data?.folio?.length === 3, 'Q6: Reservation A has exactly 3 folio entries (1 debit + 2 credits)');
 
     // R. Same-property GET folio on Reservation B with Property B -> succeeds 200
     const folioB = await api('GET', `/api/reservations/${resIdB}/folio?property_id=${propIdB}`);

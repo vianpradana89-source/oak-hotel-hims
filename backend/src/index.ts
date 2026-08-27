@@ -4110,8 +4110,12 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
   }
 
-  if (!amount || Number(amount) <= 0) {
+  const paymentAmount = Number(amount);
+  if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be greater than zero' });
+  }
+  if (!Number.isInteger(paymentAmount)) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'amount must be an integer (IDR currency does not support decimal amounts)' });
   }
 
   const client = await pool.connect();
@@ -4152,12 +4156,28 @@ app.post('/api/reservations/:id/payments', async (req, res) => {
       return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
     }
 
-    const paymentAmount = Number(amount);
-    const currentPaid = Number(reservation.rows[0].amount_paid || 0);
-    const totalPrice = Number(reservation.rows[0].total_price || 0);
+    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
+    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
+    const currentRemaining = Math.max(totalPrice - currentPaid, 0);
+
+    if (paymentAmount > currentRemaining) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'OVERPAYMENT_NOT_ALLOWED',
+        message: 'Nominal pembayaran melebihi sisa tagihan',
+        details: {
+          payment_amount: paymentAmount,
+          remaining_balance: currentRemaining,
+          total_price: totalPrice,
+          amount_paid: currentPaid
+        }
+      });
+    }
+
     const updatedAmountPaid = currentPaid + paymentAmount;
-    const updatedRemaining = Math.max(totalPrice - updatedAmountPaid, 0);
-    const updatedPaymentStatus = updatedAmountPaid <= 0 ? 'UNPAID' : updatedRemaining <= 0.01 ? 'PAID' : 'PARTIAL';
+    const updatedRemaining = totalPrice - updatedAmountPaid;
+    const updatedPaymentStatus = updatedAmountPaid <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     const payment = await client.query(
       `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, reference_code, status)

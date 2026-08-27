@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { TransactionReservationList } from './features/transactions/TransactionReservationList.tsx';
+import {
+  formatIdrInput,
+  parseIdrInput,
+  validateIdrPaymentInput,
+  calculateRemainingBalancePreview,
+} from './features/transactions/paymentIdrHelpers.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
@@ -73,6 +79,9 @@ function App() {
   const [selectedBookingChildren, setSelectedBookingChildren] = useState<any[]>([]);
   const [bidCopyState, setBidCopyState] = useState<{ kind: 'idle' | 'success' | 'error'; message: string }>({ kind: 'idle', message: '' });
   const [paymentDraft, setPaymentDraft] = useState<string>('');
+  const [paymentSubmitting, setPaymentSubmitting] = useState<boolean>(false);
+  const [paymentFeedback, setPaymentFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const paymentInputRef = useRef<HTMLInputElement | null>(null);
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
   const [maintenanceTasks, setMaintenanceTasks] = useState<any[]>([]);
@@ -971,6 +980,16 @@ function App() {
         throw new Error(data.message || 'Failed to load folio');
       }
       setSelectedFolio(data.data || null);
+      if (data.data?.reservation) {
+        setSelectedRes((prev: any) => {
+          if (!prev || Number(prev.id) !== Number(reservationId)) return prev;
+          return {
+            ...prev,
+            ...data.data.reservation,
+            room_number: prev.room_number ?? data.data.reservation.room_number,
+          };
+        });
+      }
     } catch (error) {
       console.error('Failed to fetch reservation folio', error);
       setSelectedFolio(null);
@@ -1112,14 +1131,30 @@ function App() {
   };
 
   const handlePayment = async () => {
-    if (!selectedRes || !paymentDraft) {
-      alert('Masukkan nominal pembayaran terlebih dahulu');
+    if (paymentSubmitting) return;
+
+    if (!selectedRes) {
+      setPaymentFeedback({ type: 'error', message: 'Reservasi tidak ditemukan' });
       return;
     }
+
+    const currentRemaining = Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0))));
+    const validation = validateIdrPaymentInput(paymentDraft, currentRemaining);
+    if (!validation.isValid) {
+      setPaymentFeedback({ type: 'error', message: validation.error || 'Nominal pembayaran tidak valid' });
+      paymentInputRef.current?.focus();
+      return;
+    }
+
+    const rawAmount = validation.amount;
+
     if (propertyId === null) {
-      alert('Property belum dipilih');
+      setPaymentFeedback({ type: 'error', message: 'Property belum dipilih' });
       return;
     }
+
+    setPaymentSubmitting(true);
+    setPaymentFeedback(null);
 
     try {
       const response = await fetch(`/api/reservations/${selectedRes.id}/payments`, {
@@ -1127,21 +1162,81 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: propertyId,
-          amount: Number(paymentDraft),
+          amount: rawAmount,
           payment_method: 'CASH',
           reference_code: `PMT-${Date.now()}`
         })
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.message || 'Failed to record payment');
-      setPaymentDraft('');
+      if (!response.ok || (data.status !== 'SUCCESS' && data.status !== 'OK')) {
+        throw new Error(data.message || 'Gagal mencatat pembayaran');
+      }
+
+      const updatedRes = data.data?.reservation;
+
+      // 1. Immediately synchronize open Detail Reservasi modal state
+      if (updatedRes) {
+        setSelectedRes((prev: any) => {
+          if (!prev || Number(prev.id) !== Number(updatedRes.id)) return prev;
+          return {
+            ...prev,
+            ...updatedRes,
+            room_number: prev.room_number ?? updatedRes.room_number,
+          };
+        });
+
+        // 2. Immediately synchronize Calendar / Tapechart reservations list
+        setReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? { ...r, ...updatedRes, room_number: r.room_number ?? updatedRes.room_number }
+              : r
+          )
+        );
+
+        // 3. Immediately synchronize Transaksi table reservations list (preserves page & filters)
+        setTransactionReservations((prev) =>
+          prev.map((r) =>
+            Number(r.id) === Number(updatedRes.id)
+              ? {
+                  ...r,
+                  ...updatedRes,
+                  bid: r.bid ?? updatedRes.bid,
+                  room_number: r.room_number ?? updatedRes.room_number,
+                  room_type: r.room_type ?? updatedRes.room_type,
+                  guest_segment: r.guest_segment ?? updatedRes.guest_segment,
+                  booking_source: r.booking_source ?? updatedRes.booking_source,
+                  channel: r.channel ?? updatedRes.channel,
+                }
+              : r
+          )
+        );
+      }
+
+      // 4. Authoritatively refresh Folio snapshot and payment ledger
+      await fetchReservationFolio(Number(selectedRes.id));
+
+      // 5. Background revalidations
       fetchData();
       fetchOperationsData();
-      fetchReservationFolio(Number(selectedRes.id));
-      alert('Pembayaran berhasil dicatat');
-    } catch (error) {
+      if (fetchTransactionReservationsRef.current) {
+        fetchTransactionReservationsRef.current(propertyId);
+      }
+
+      // 6. Clear draft input and provide concise success feedback
+      setPaymentDraft('');
+      setPaymentFeedback({
+        type: 'success',
+        message: `Pembayaran ${formatCurrency(rawAmount)} berhasil dicatat.`
+      });
+    } catch (error: any) {
       console.error('Payment failed', error);
-      alert(`Gagal menyimpan pembayaran: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setPaymentFeedback({
+        type: 'error',
+        message: `Gagal menyimpan pembayaran: ${error instanceof Error ? error.message : 'Terjadi kesalahan sistem'}`
+      });
+    } finally {
+      setPaymentSubmitting(false);
     }
   };
 
@@ -1149,6 +1244,8 @@ function App() {
     setSelectedRes(null);
     setSelectedFolio(null);
     setPaymentDraft('');
+    setPaymentFeedback(null);
+    setPaymentSubmitting(false);
   }, [propertyId]);
 
   useEffect(() => {
@@ -2132,7 +2229,21 @@ function App() {
     { key: 'extend', label: 'Extend', enabled: canExtend, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id)) },
     { key: 'shorten', label: 'Shorten', enabled: canShorten, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id)) },
     { key: 'cancel', label: 'Cancel', enabled: canCancel, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
-    { key: 'payment', label: 'Payment', enabled: canPay, variant: 'primary', onClick: () => handlePayment() }
+    {
+      key: 'payment',
+      label: 'Payment',
+      enabled: canPay,
+      variant: 'primary',
+      onClick: () => {
+        const remaining = selectedRes ? Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0)))) : 0;
+        const validation = validateIdrPaymentInput(paymentDraft, remaining);
+        if (validation.isValid) {
+          void handlePayment();
+        } else {
+          paymentInputRef.current?.focus();
+        }
+      }
+    }
   ].filter((button) => button.enabled && Number.isFinite(Number(selectedRes?.id)));
 
   const copyBookingBid = async () => {
@@ -3281,7 +3392,7 @@ function App() {
                 <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500 font-bold">Reservasi</div>
                 <h3 className="reservation-detail-title">Detail Reservasi</h3>
               </div>
-              <button onClick={() => { setSelectedRes(null); setSelectedFolio(null); setPaymentDraft(''); setBidCopyState({ kind: 'idle', message: '' }); }} className="reservation-detail-close">Tutup</button>
+              <button onClick={() => { setSelectedRes(null); setSelectedFolio(null); setPaymentDraft(''); setPaymentFeedback(null); setPaymentSubmitting(false); setBidCopyState({ kind: 'idle', message: '' }); }} className="reservation-detail-close">Tutup</button>
             </div>
 
             <div className="reservation-detail-body">
@@ -3505,7 +3616,14 @@ function App() {
                   )}
                   {canPay && (
                     <button
-                      onClick={handlePayment}
+                      type="button"
+                      onClick={() => {
+                        if (parseIdrInput(paymentDraft) > 0) {
+                          void handlePayment();
+                        } else {
+                          paymentInputRef.current?.focus();
+                        }
+                      }}
                       className="reservation-action-button reservation-action-button--primary"
                     >
                       Payment
@@ -3533,18 +3651,83 @@ function App() {
                   </div>
                 )}
 
-                <div className="reservation-payment-panel">
-                  <label className="text-xs font-semibold text-slate-700">Pembayaran baru</label>
-                  <div className="reservation-payment-row">
-                    <input
-                      type="number"
-                      value={paymentDraft}
-                      onChange={(e) => setPaymentDraft(e.target.value)}
-                      placeholder="Masukkan nominal"
-                      className="flex-1 border rounded px-3 py-2 text-sm"
-                    />
-                    <button onClick={handlePayment} className="bg-blue-600 text-white px-3 py-2 rounded text-sm">Bayar</button>
-                  </div>
+                <div className="reservation-payment-panel space-y-2.5 p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  {(() => {
+                    const panelRemaining = Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0))));
+                    const validation = validateIdrPaymentInput(paymentDraft, panelRemaining);
+                    const hasInput = paymentDraft.trim().length > 0;
+
+                    return (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Pembayaran Baru</label>
+                          <span className="text-xs text-slate-500">
+                            Sisa tagihan: <strong className="text-slate-800 font-bold">{formatCurrency(panelRemaining)}</strong>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 select-none pointer-events-none">Rp</span>
+                            <input
+                              ref={paymentInputRef}
+                              type="text"
+                              inputMode="numeric"
+                              value={paymentDraft}
+                              onChange={(e) => {
+                                setPaymentFeedback(null);
+                                setPaymentDraft(formatIdrInput(e.target.value));
+                              }}
+                              placeholder="0"
+                              disabled={paymentSubmitting}
+                              className="w-full bg-white border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-700 disabled:bg-slate-100"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handlePayment}
+                            disabled={paymentSubmitting || !validation.isValid}
+                            className={`px-4 py-2 rounded-lg text-sm font-bold text-white transition-all shadow-sm ${
+                              paymentSubmitting || !validation.isValid
+                                ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
+                                : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
+                            }`}
+                          >
+                            {paymentSubmitting ? 'Memproses...' : 'Bayar'}
+                          </button>
+                        </div>
+
+                        {validation.isValid && (
+                          <div className="text-xs flex items-center justify-between px-3 py-2 bg-white rounded-lg border border-slate-200 text-slate-600">
+                            <span>Sisa setelah pembayaran (estimasi):</span>
+                            <strong className={
+                              calculateRemainingBalancePreview(panelRemaining, paymentDraft) <= 0
+                                ? 'text-emerald-700 font-bold'
+                                : 'text-slate-800 font-bold'
+                            }>
+                              {formatCurrency(
+                                calculateRemainingBalancePreview(panelRemaining, paymentDraft)
+                              )}
+                              {calculateRemainingBalancePreview(panelRemaining, paymentDraft) <= 0 && ' (Lunas)'}
+                            </strong>
+                          </div>
+                        )}
+
+                        {paymentFeedback ? (
+                          <div className={`text-xs px-3 py-2 rounded-lg border font-medium ${
+                            paymentFeedback.type === 'success'
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : 'bg-rose-50 border-rose-200 text-rose-800'
+                          }`}>
+                            {paymentFeedback.message}
+                          </div>
+                        ) : hasInput && !validation.isValid ? (
+                          <div className="text-xs px-3 py-2 rounded-lg border font-medium bg-rose-50 border-rose-200 text-rose-800">
+                            {validation.error}
+                          </div>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 
