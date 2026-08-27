@@ -142,6 +142,12 @@ async function main() {
     );
     assert(auditIndexCheck2.rowCount > 0, 'L5. idx_audit_logs_property_timestamp index exists');
 
+    assert(await tableExists('public', 'schema_migrations'), 'L6. schema_migrations table exists');
+    var markerCheck = await testPool.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'b4b_historical_audit_backfill'"
+    );
+    assert(markerCheck.rowCount === 1, 'L7. b4b_historical_audit_backfill migration marker exists');
+
     assert(await countRows('properties') === 0, 'M. zero properties is valid');
     assert(await countRows('rooms') === 0, 'N. zero rooms is valid');
     assert(await countRows('room_types') === 0, 'O. zero room_types is valid');

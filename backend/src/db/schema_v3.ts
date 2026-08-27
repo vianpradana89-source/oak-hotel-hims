@@ -603,78 +603,144 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_guest_receivables_property ON guest_receivables(property_id);
     CREATE INDEX IF NOT EXISTS idx_guest_receivables_property_status ON guest_receivables(property_id, status);
-
-    -- 5. Audit logs property_id column, indexes, and deterministic backfill
-    ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS property_id INTEGER;
-    DO $$ BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_property'
-      ) THEN
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'audit_logs_property_id_fkey'
-        ) THEN
-          ALTER TABLE audit_logs DROP CONSTRAINT audit_logs_property_id_fkey;
-        END IF;
-        ALTER TABLE audit_logs ADD CONSTRAINT fk_audit_logs_property FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE RESTRICT;
-      END IF;
-    END $$;
-    CREATE INDEX IF NOT EXISTS idx_audit_logs_property_entity_record ON audit_logs (property_id, entity, record_id, timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_audit_logs_property_timestamp ON audit_logs (property_id, timestamp DESC);
-
-    -- Priority 1: Relational Deterministic Backfill
-    UPDATE audit_logs a
-    SET property_id = b.property_id
-    FROM bookings b
-    WHERE a.property_id IS NULL
-      AND a.entity = 'BOOKING'
-      AND a.record_id ~ '^[0-9]+$'
-      AND b.id = a.record_id::bigint;
-
-    UPDATE audit_logs a
-    SET property_id = b.property_id
-    FROM reservations r
-    JOIN bookings b ON b.id = r.booking_id
-    WHERE a.property_id IS NULL
-      AND a.entity = 'RESERVATION'
-      AND a.record_id ~ '^[0-9]+$'
-      AND r.id = a.record_id::integer;
-
-    UPDATE audit_logs a
-    SET property_id = rm.property_id
-    FROM rooms rm
-    WHERE a.property_id IS NULL
-      AND a.entity = 'ROOM'
-      AND a.record_id ~ '^[0-9]+$'
-      AND rm.id = a.record_id::integer;
-
-    UPDATE audit_logs a
-    SET property_id = rt.property_id
-    FROM room_types rt
-    WHERE a.property_id IS NULL
-      AND a.entity = 'ROOM_TYPE'
-      AND a.record_id ~ '^[0-9]+$'
-      AND rt.id = a.record_id::integer;
-
-    UPDATE audit_logs a
-    SET property_id = rc.property_id
-    FROM room_categories rc
-    WHERE a.property_id IS NULL
-      AND a.entity = 'ROOM_CATEGORY'
-      AND a.record_id ~ '^[0-9]+$'
-      AND rc.id = a.record_id::integer;
-
-    -- Priority 2: Payload Deterministic Backfill (crash-safe regex extraction, zero JSON casting failure)
-    UPDATE audit_logs a
-    SET property_id = p.id
-    FROM properties p
-    WHERE a.property_id IS NULL
-      AND a.new_value IS NOT NULL
-      AND (
-        COALESCE(SUBSTRING(a.new_value FROM '"property_id"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
-        OR
-        COALESCE(SUBSTRING(a.new_value FROM '"propertyId"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
-      );
   `);
+
+  // 5. Audit logs property_id column, indexes, and permanently sealed one-time migration
+  const auditMigrationClient = await pool.connect();
+  try {
+    await auditMigrationClient.query('BEGIN');
+    await auditMigrationClient.query("SELECT pg_advisory_xact_lock(hashtext('oak_hims_schema_migrations_lock'))");
+
+    await auditMigrationClient.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version VARCHAR(100) PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    const markerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'b4b_historical_audit_backfill'"
+    );
+    const markerExists = (markerCheck.rowCount ?? 0) > 0;
+
+    // Inspect pre-migration schema & data state before ensuring DDL
+    const colCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'property_id'"
+    );
+    const propertyColExisted = (colCheck.rowCount ?? 0) > 0;
+
+    const fkCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_property'"
+    );
+    const fkExisted = (fkCheck.rowCount ?? 0) > 0;
+
+    const idxCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_property_entity_record'"
+    );
+    const idxExisted = (idxCheck.rowCount ?? 0) > 0;
+
+    const auditCountRes = await auditMigrationClient.query(
+      "SELECT COUNT(*)::bigint AS cnt FROM audit_logs"
+    );
+    const totalAuditRows = BigInt(auditCountRes.rows[0]?.cnt || 0);
+
+    // Ensure idempotent DDL: column, FK constraint, and indexes
+    await auditMigrationClient.query(`
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS property_id INTEGER;
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_property'
+        ) THEN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'audit_logs_property_id_fkey'
+          ) THEN
+            ALTER TABLE audit_logs DROP CONSTRAINT audit_logs_property_id_fkey;
+          END IF;
+          ALTER TABLE audit_logs ADD CONSTRAINT fk_audit_logs_property FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE RESTRICT;
+        END IF;
+      END $$;
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_property_entity_record ON audit_logs (property_id, entity, record_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_property_timestamp ON audit_logs (property_id, timestamp DESC);
+    `);
+
+    if (!markerExists) {
+      const isAlreadyMigrated = propertyColExisted && (fkExisted || idxExisted);
+      const isFreshDb = totalAuditRows === 0n;
+
+      if (!isAlreadyMigrated && !isFreshDb) {
+        // Genuine Pre-B4B Legacy DB: execute deterministic Tier A/Tier B backfill ONCE
+        await auditMigrationClient.query(`
+          -- Priority 1: Relational Deterministic Backfill
+          UPDATE audit_logs a
+          SET property_id = b.property_id
+          FROM bookings b
+          WHERE a.property_id IS NULL
+            AND a.entity = 'BOOKING'
+            AND a.record_id ~ '^[0-9]+$'
+            AND b.id = a.record_id::bigint;
+
+          UPDATE audit_logs a
+          SET property_id = b.property_id
+          FROM reservations r
+          JOIN bookings b ON b.id = r.booking_id
+          WHERE a.property_id IS NULL
+            AND a.entity = 'RESERVATION'
+            AND a.record_id ~ '^[0-9]+$'
+            AND r.id = a.record_id::integer;
+
+          UPDATE audit_logs a
+          SET property_id = rm.property_id
+          FROM rooms rm
+          WHERE a.property_id IS NULL
+            AND a.entity = 'ROOM'
+            AND a.record_id ~ '^[0-9]+$'
+            AND rm.id = a.record_id::integer;
+
+          UPDATE audit_logs a
+          SET property_id = rt.property_id
+          FROM room_types rt
+          WHERE a.property_id IS NULL
+            AND a.entity = 'ROOM_TYPE'
+            AND a.record_id ~ '^[0-9]+$'
+            AND rt.id = a.record_id::integer;
+
+          UPDATE audit_logs a
+          SET property_id = rc.property_id
+          FROM room_categories rc
+          WHERE a.property_id IS NULL
+            AND a.entity = 'ROOM_CATEGORY'
+            AND a.record_id ~ '^[0-9]+$'
+            AND rc.id = a.record_id::integer;
+
+          -- Priority 2: Payload Deterministic Backfill (crash-safe regex extraction, zero JSON casting failure)
+          UPDATE audit_logs a
+          SET property_id = p.id
+          FROM properties p
+          WHERE a.property_id IS NULL
+            AND a.new_value IS NOT NULL
+            AND (
+              COALESCE(SUBSTRING(a.new_value FROM '"property_id"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
+              OR
+              COALESCE(SUBSTRING(a.new_value FROM '"propertyId"[[:space:]]*:[[:space:]]*([0-9]+)'), '0')::bigint = p.id
+            );
+        `);
+      }
+
+      // Record sealed migration marker
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('b4b_historical_audit_backfill')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    await auditMigrationClient.query('COMMIT');
+  } catch (err) {
+    await auditMigrationClient.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    auditMigrationClient.release();
+  }
 
   // GL accounts seed removed — fresh DB must remain data-neutral (property_id required)
 
