@@ -74,6 +74,20 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_payment_evidences_uploaded_at ON payment_evidences (uploaded_at);
     CREATE INDEX IF NOT EXISTS idx_payment_evidences_active ON payment_evidences (is_active);
 
+    CREATE TABLE IF NOT EXISTS property_brandings (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL UNIQUE REFERENCES properties(id) ON DELETE CASCADE,
+      display_name VARCHAR(200),
+      short_name VARCHAR(20),
+      tagline VARCHAR(255),
+      primary_color VARCHAR(20) DEFAULT '#1b4332',
+      accent_color VARCHAR(20) DEFAULT '#c5a880',
+      logo_url VARCHAR(500),
+      compact_logo_url VARCHAR(500),
+      created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_property_brandings_property ON property_brandings (property_id);
 
     CREATE TABLE IF NOT EXISTS housekeeping_tasks (
       id SERIAL PRIMARY KEY,

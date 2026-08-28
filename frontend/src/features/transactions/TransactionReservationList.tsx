@@ -339,15 +339,15 @@ export const TransactionReservationList: React.FC<TransactionReservationListProp
           {/* Compact Reservation Table */}
           <div className="overflow-x-auto rounded-xl border border-slate-200">
             <table className="min-w-full text-xs text-left">
-              <thead>
-                <tr className="bg-slate-50 text-slate-600 border-b border-slate-200 text-[11px] uppercase tracking-wider font-semibold">
-                  <th className="px-3 py-2.5">Tamu</th>
-                  <th className="px-3 py-2.5">Kamar</th>
-                  <th className="px-3 py-2.5">Periode Menginap</th>
-                  <th className="px-3 py-2.5">Status</th>
-                  <th className="px-3 py-2.5">Pembayaran</th>
-                  <th className="px-3 py-2.5">Tagihan</th>
-                  <th className="px-3 py-2.5 text-right">Aksi</th>
+              <thead className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200">
+                <tr className="bg-slate-50 text-slate-600 text-[11px] uppercase tracking-wider font-semibold">
+                  <th className="px-3 py-2.5 bg-slate-50">Tamu</th>
+                  <th className="px-3 py-2.5 bg-slate-50">Kamar</th>
+                  <th className="px-3 py-2.5 bg-slate-50">Periode Menginap</th>
+                  <th className="px-3 py-2.5 bg-slate-50">Status</th>
+                  <th className="px-3 py-2.5 bg-slate-50">Pembayaran</th>
+                  <th className="px-3 py-2.5 bg-slate-50">Tagihan</th>
+                  <th className="px-3 py-2.5 text-right bg-slate-50">Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">

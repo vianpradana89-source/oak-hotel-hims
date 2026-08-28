@@ -336,18 +336,18 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         </button>
 
         {showDailyTable && (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
             <table className="min-w-full text-xs divide-y divide-slate-200">
-              <thead className="bg-slate-50/75 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
+              <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-200">
                 <tr>
-                  <th className="py-2.5 px-3 text-left">Tanggal</th>
-                  <th className="py-2.5 px-3 text-right">Gross</th>
-                  <th className="py-2.5 px-3 text-right">OOO</th>
-                  <th className="py-2.5 px-3 text-right">OOS</th>
-                  <th className="py-2.5 px-3 text-right">Sellable</th>
-                  <th className="py-2.5 px-3 text-right">Terjual</th>
-                  <th className="py-2.5 px-3 text-right">Tersedia</th>
-                  <th className="py-2.5 px-3 text-right">Occupancy</th>
+                  <th className="py-2.5 px-3 text-left bg-slate-100">Tanggal</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Gross</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">OOO</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">OOS</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Sellable</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Terjual</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Tersedia</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Occupancy</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
@@ -390,17 +390,17 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         </button>
 
         {showRoomTypeTable && (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
             <table className="min-w-full text-xs divide-y divide-slate-200">
-              <thead className="bg-slate-50/75 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
+              <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-200">
                 <tr>
-                  <th className="py-2.5 px-3 text-left">Tipe Kamar</th>
-                  <th className="py-2.5 px-3 text-right">Gross</th>
-                  <th className="py-2.5 px-3 text-right">Diblokir</th>
-                  <th className="py-2.5 px-3 text-right">Sellable</th>
-                  <th className="py-2.5 px-3 text-right">Terjual</th>
-                  <th className="py-2.5 px-3 text-right">Tersedia</th>
-                  <th className="py-2.5 px-3 text-right">Occupancy</th>
+                  <th className="py-2.5 px-3 text-left bg-slate-100">Tipe Kamar</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Gross</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Diblokir</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Sellable</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Terjual</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Tersedia</th>
+                  <th className="py-2.5 px-3 text-right bg-slate-100">Occupancy</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">

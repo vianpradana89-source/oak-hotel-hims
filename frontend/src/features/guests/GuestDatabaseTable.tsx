@@ -151,16 +151,16 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
           </div>
         ) : (
           <table className="w-full text-left text-xs border-collapse">
-            <thead className="bg-stone-100 text-stone-600 font-semibold uppercase tracking-wider border-b border-stone-200">
+            <thead className="sticky top-0 z-10 bg-stone-100 text-stone-700 font-semibold uppercase tracking-wider border-b border-stone-200">
               <tr>
-                <th className="py-3 px-4">Tamu</th>
-                <th className="py-3 px-3">Kontak & Kota</th>
-                <th className="py-3 px-3">Status VIP</th>
-                <th className="py-3 px-3">Segmentasi</th>
-                <th className="py-3 px-3 text-center">Kunjungan</th>
-                <th className="py-3 px-3">Stay Terakhir</th>
-                <th className="py-3 px-3">Catatan</th>
-                <th className="py-3 px-4 text-right">Aksi</th>
+                <th className="py-3 px-4 bg-stone-100">Tamu</th>
+                <th className="py-3 px-3 bg-stone-100">Kontak & Kota</th>
+                <th className="py-3 px-3 bg-stone-100">Status VIP</th>
+                <th className="py-3 px-3 bg-stone-100">Segmentasi</th>
+                <th className="py-3 px-3 text-center bg-stone-100">Kunjungan</th>
+                <th className="py-3 px-3 bg-stone-100">Stay Terakhir</th>
+                <th className="py-3 px-3 bg-stone-100">Catatan</th>
+                <th className="py-3 px-4 text-right bg-stone-100">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100 text-stone-800">

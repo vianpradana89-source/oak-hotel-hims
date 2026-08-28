@@ -40,6 +40,12 @@ import type {
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
+import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
+import { AppSidebar } from './features/shell/AppSidebar.tsx';
+import type { MainNavKey } from './features/shell/shellTypes.ts';
+import { PropertyBrandingSettings } from './features/propertySettings/PropertyBrandingSettings.tsx';
+import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
+import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
 import CalendarFilters from './features/calendar/CalendarFilters';
 import ReservationBar from './features/calendar/ReservationBar';
@@ -198,7 +204,75 @@ function App() {
   const [financeSummary, setFinanceSummary] = useState<any>(null);
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
-  const [selectedMenu, setSelectedMenu] = useState<'Kalender' | 'Transaksi' | 'Laporan' | 'Produk & Inventori' | 'Pelanggan' | 'Pengaturan'>('Kalender');
+  const [selectedMenu, setSelectedMenu] = useState<MainNavKey>('Kalender');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('oak_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+  const [propertyBrandings, setPropertyBrandings] = useState<Record<number, PropertyBrandingConfig>>({});
+  const [pengaturanTab, setPengaturanTab] = useState<'branding' | 'hr'>('branding');
+
+  const handleToggleSidebarCollapse = () => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('oak_sidebar_collapsed', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleSelectProperty = (val: number) => {
+    if (Number.isInteger(val) && val > 0) {
+      setTransactionReservations([]);
+      setTransactionError(null);
+      setDailyOperations(null);
+      transactionRequestVersionRef.current++;
+      dailyOperationsRequestVersionRef.current++;
+      setPropertyId(val);
+    }
+  };
+
+  useEffect(() => {
+    if (!propertyId) return;
+    let isMounted = true;
+    const currentProp = properties.find((p: any) => p.id === propertyId);
+    fetchPropertyBranding(propertyId, currentProp?.name, currentProp?.property_code)
+      .then((branding) => {
+        if (isMounted) {
+          setPropertyBrandings((prev) => ({
+            ...prev,
+            [propertyId]: branding,
+          }));
+        }
+      })
+      .catch(() => {
+        // Fallback already handled in fetchPropertyBranding
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [propertyId, properties]);
+
+  const activeBranding = useMemo(() => {
+    if (!propertyId) return undefined;
+    const existing = propertyBrandings[propertyId];
+    if (existing) return existing;
+    const currentProp = properties.find((p: any) => p.id === propertyId);
+    return getFallbackPropertyBranding(propertyId, currentProp?.name, currentProp?.property_code);
+  }, [propertyId, properties, propertyBrandings]);
+
+  const handleSaveBranding = async (updated: PropertyBrandingConfig) => {
+    const saved = await savePropertyBranding(updated.propertyId, updated);
+    setPropertyBrandings((prev) => ({
+      ...prev,
+      [saved.propertyId]: saved,
+    }));
+  };
   const [calendarSearch, setCalendarSearch] = useState('');
   const [calendarRoomSearch, setCalendarRoomSearch] = useState('');
   const [calendarRoomCategoryFilter, setCalendarRoomCategoryFilter] = useState('');
@@ -2766,77 +2840,41 @@ function App() {
 
   return (
     <div className="hotel-app">
-      <div className="hotel-statusbar">
-        <div className="hotel-status-left">
-          <span className="hotel-status-time">04:12</span>
-          <span className="hotel-status-live" />
-        </div>
-        <div className="hotel-status-center">
-          <span className="hotel-status-pill" />
-        </div>
-        <div className="hotel-status-right">
-          <span className="hotel-status-icon">◔</span>
-          <span className="hotel-status-icon">⚡</span>
-          <span className="hotel-status-text">86%</span>
-        </div>
-      </div>
+      <GlobalOperationsBar
+        activeProperty={properties.find((p: any) => p.id === propertyId) || null}
+        properties={properties}
+        onSelectProperty={handleSelectProperty}
+        onToggleSidebar={() => {
+          if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+            setIsMobileSidebarOpen(!isMobileSidebarOpen);
+          } else {
+            handleToggleSidebarCollapse();
+          }
+        }}
+        isSidebarCollapsed={isSidebarCollapsed}
+        currentUser={{
+          name: 'Vian Pradana',
+          email: 'vian.pradana89@gmail.com',
+          role: 'Owner',
+          avatarInitials: 'VP',
+        }}
+        onOpenPos={() => setSelectedMenu('Produk & Inventori')}
+        propertyBranding={activeBranding}
+      />
 
       <div className="hotel-layout">
-        <aside className="hotel-sidebar">
-          <div className="hotel-brand">{properties.find((p) => p.id === propertyId)?.name || 'OAK HIMS'}</div>
-          <nav className="hotel-nav">
-            {[
-              'Kalender',
-              'Transaksi',
-              'Laporan',
-              'Produk & Inventori',
-              'Pelanggan',
-              'Pengaturan'
-            ].map((label) => (
-              <NavItem
-                key={label}
-                label={label}
-                active={selectedMenu === label}
-                onClick={() => setSelectedMenu(label as any)}
-              />
-            ))}
-          </nav>
-        </aside>
+        <AppSidebar
+          selectedMenu={selectedMenu}
+          onSelectMenu={(menu) => setSelectedMenu(menu)}
+          isCollapsed={isSidebarCollapsed}
+          onToggleCollapse={handleToggleSidebarCollapse}
+          isMobileOpen={isMobileSidebarOpen}
+          onCloseMobile={() => setIsMobileSidebarOpen(false)}
+          activeProperty={properties.find((p: any) => p.id === propertyId) || null}
+          propertyBranding={activeBranding}
+        />
 
         <main className="hotel-main">
-          <header className="hotel-header">
-           <div>
-             <h2 className="hotel-header-title">{properties.find((p: any) => p.id === propertyId)?.name || 'OAK HIMS'}</h2>
-             <p className="hotel-header-subtitle">Selamat datang, vian.pradana89@gmail.com (Owner)</p>
-           </div>
-           <div className="hotel-header-actions">
-             {properties.length > 1 && (
-               <select
-                 className="hotel-action-btn"
-                 value={propertyId ?? ''}
-                 onChange={(e) => {
-                   const val = Number(e.target.value);
-                   if (Number.isInteger(val) && val > 0) {
-                     setTransactionReservations([]);
-                     setTransactionError(null);
-                     setDailyOperations(null);
-                     transactionRequestVersionRef.current++;
-                     dailyOperationsRequestVersionRef.current++;
-                     setPropertyId(val);
-                   }
-                 }}
-                 style={{ marginRight: 8 }}
-               >
-                 <option value="" disabled>Pilih Properti</option>
-                 {properties.map((p: any) => (
-                   <option key={p.id} value={p.id}>{p.name}</option>
-                 ))}
-               </select>
-             )}
-             <button className="hotel-action-btn">POS</button>
-             <button className="hotel-action-btn">Deposit</button>
-           </div>
-          </header>
 
           {propertyId === null && (
             <div className="p-8 text-center text-gray-500">
@@ -2867,20 +2905,20 @@ function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white border rounded shadow-sm p-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm">Housekeeping</h3>
-                  <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">{housekeepingTasks.length} task</span>
+                  <h3 className="font-bold text-sm text-slate-900">Housekeeping</h3>
+                  <span className="text-xs bg-emerald-50 text-emerald-800 border border-emerald-200/80 px-2.5 py-0.5 rounded-full font-semibold">{housekeepingTasks.length} task</span>
                 </div>
                 <div className="space-y-2">
                   {housekeepingTasks.slice(0, 4).map((task: any) => (
-                    <div key={task.id} className="flex justify-between items-center border rounded p-2 text-xs">
+                    <div key={task.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
                       <div>
-                        <div className="font-semibold">Kamar {task.room_number || '-'}</div>
-                        <div className="text-gray-500">{task.task_type}</div>
+                        <div className="font-semibold text-slate-800">Kamar {task.room_number || '-'}</div>
+                        <div className="text-slate-500 text-[11px] mt-0.5">{task.task_type}</div>
                       </div>
-                      <span className={`px-2 py-1 rounded ${task.status === 'DONE' ? 'bg-green-100 text-green-700' : task.status === 'IN_PROGRESS' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'}`}>
+                      <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
                         {task.status}
                       </span>
                     </div>
@@ -2888,19 +2926,19 @@ function App() {
                 </div>
               </div>
 
-              <div className="bg-white border rounded shadow-sm p-4">
+              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm">Maintenance</h3>
-                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded">{maintenanceTasks.length} task</span>
+                  <h3 className="font-bold text-sm text-slate-900">Maintenance</h3>
+                  <span className="text-xs bg-amber-50 text-amber-800 border border-amber-200/80 px-2.5 py-0.5 rounded-full font-semibold">{maintenanceTasks.length} task</span>
                 </div>
                 <div className="space-y-2">
                   {maintenanceTasks.slice(0, 4).map((task: any) => (
-                    <div key={task.id} className="flex justify-between items-center border rounded p-2 text-xs">
+                    <div key={task.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
                       <div>
-                        <div className="font-semibold">Kamar {task.room_number || '-'}</div>
-                        <div className="text-gray-500">{task.issue_type}</div>
+                        <div className="font-semibold text-slate-800">Kamar {task.room_number || '-'}</div>
+                        <div className="text-slate-500 text-[11px] mt-0.5">{task.issue_type}</div>
                       </div>
-                      <span className={`px-2 py-1 rounded ${task.status === 'DONE' ? 'bg-green-100 text-green-700' : task.status === 'IN_PROGRESS' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                      <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
                         {task.status}
                       </span>
                     </div>
@@ -2909,7 +2947,7 @@ function App() {
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded shadow-sm border">
+            <div className="bg-white p-4 rounded-xl shadow-xs border border-slate-200/90">
               <div className="flex flex-col gap-3 mb-4 lg:flex-row lg:justify-between lg:items-center">
                 <div className="room-search-wrap calendar-search-wrap">
                   <span className="room-search-icon">⌕</span>
@@ -3260,14 +3298,14 @@ function App() {
                         </div>
 
                         {bookingComposerChildren.length === 0 ? (
-                          <div className="booking-child-card" style={{ padding: 12 }}>Belum ada kamar yang ditambahkan.</div>
+                          <div className="border border-dashed border-slate-200 rounded-xl p-4 text-xs text-slate-500 text-center">Belum ada kamar yang ditambahkan.</div>
                         ) : (
                           bookingComposerChildren.map((child, index) => (
-                            <div key={child.id} className="booking-child-card" style={{ marginBottom: 12, padding: 12, border: '1px solid #e5e7eb', borderRadius: 12, background: '#f8fafc' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                                <strong style={{ fontSize: 13 }}>R{String(index + 1).padStart(2, '0')}</strong>
+                            <div key={child.id} className="border border-slate-200/90 rounded-xl p-3.5 bg-slate-50/70 mb-3">
+                              <div className="flex items-center justify-between mb-2.5">
+                                <strong className="text-xs font-bold text-slate-800">R{String(index + 1).padStart(2, '0')}</strong>
                                 {bookingComposerChildren.length > 1 && (
-                                  <button type="button" onClick={() => removeBookingChild(child.id)} className="booking-cancel-btn" style={{ padding: '6px 10px', fontSize: 12 }}>Hapus</button>
+                                  <button type="button" onClick={() => removeBookingChild(child.id)} className="text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-md transition-colors cursor-pointer">Hapus</button>
                                 )}
                               </div>
 
@@ -3647,42 +3685,42 @@ function App() {
               getPaymentBadgeClass={getPaymentBadgeClass}
             />
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white border rounded shadow-sm p-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm">POS / F&B</h3>
-                  <button onClick={createPosOrder} className="bg-blue-600 text-white text-xs px-3 py-1 rounded">Create Demo Order</button>
+                  <h3 className="font-bold text-sm text-slate-800">POS / F&B</h3>
+                  <button onClick={createPosOrder} className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer shadow-xs">Create Demo Order</button>
                 </div>
                 <div className="space-y-2 max-h-52 overflow-y-auto">
                   {(posMenu || []).slice(0, 6).map((item: any) => (
-                    <div key={item.id} className="flex justify-between border rounded p-2 text-xs">
+                    <div key={item.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
                       <div>
-                        <div className="font-semibold">{item.name}</div>
-                        <div className="text-gray-500">{item.category_name}</div>
+                        <div className="font-semibold text-slate-800">{item.name}</div>
+                        <div className="text-slate-500 text-[11px] mt-0.5">{item.category_name}</div>
                       </div>
                       <div className="text-right">
-                        <div className="font-semibold">Rp {Number(item.price).toLocaleString('id-ID')}</div>
-                        <div className="text-gray-500">{item.item_code}</div>
+                        <div className="font-semibold text-slate-800">Rp {Number(item.price).toLocaleString('id-ID')}</div>
+                        <div className="text-slate-500 text-[11px] mt-0.5">{item.item_code}</div>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              <div className="bg-white border rounded shadow-sm p-4">
+              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm">Recent POS Orders</h3>
-                  <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded">{posOrders.length}</span>
+                  <h3 className="font-bold text-sm text-slate-800">Recent POS Orders</h3>
+                  <span className="text-xs bg-purple-50 text-purple-700 border border-purple-200/80 px-2.5 py-0.5 rounded-full font-semibold">{posOrders.length}</span>
                 </div>
                 <div className="space-y-2 max-h-52 overflow-y-auto">
                   {posOrders.slice(0, 5).map((order: any) => (
-                    <div key={order.id} className="border rounded p-2 text-xs">
-                      <div className="flex justify-between">
-                        <div className="font-semibold">{order.order_number}</div>
-                        <span className="bg-gray-100 px-1.5 rounded">{order.status}</span>
+                    <div key={order.id} className="border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
+                      <div className="flex justify-between items-center">
+                        <div className="font-semibold text-slate-800">{order.order_number}</div>
+                        <span className="bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded text-[11px] font-semibold">{order.status}</span>
                       </div>
-                      <div className="text-gray-600">Table {order.table_number} • {order.guest_name}</div>
-                      <div className="font-semibold mt-1">Rp {Number(order.total_amount || 0).toLocaleString('id-ID')}</div>
+                      <div className="text-slate-600 mt-1">Table {order.table_number} • {order.guest_name}</div>
+                      <div className="font-semibold mt-1 text-slate-800">Rp {Number(order.total_amount || 0).toLocaleString('id-ID')}</div>
                     </div>
                   ))}
                 </div>
@@ -3814,19 +3852,19 @@ function App() {
 
             {/* Section 4: Akuntansi Ringkasan */}
             <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Ringkasan Buku Besar Akuntansi</div>
-              <div className="grid grid-cols-3 gap-4">
-                <div className="bg-white border rounded shadow-sm p-4">
-                  <div className="text-xs uppercase text-gray-500 font-semibold">Hutang Vendor</div>
-                  <div className="text-2xl font-bold mt-2 text-slate-800">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">Ringkasan Buku Besar Akuntansi</div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
+                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Hutang Vendor</div>
+                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
                 </div>
-                <div className="bg-white border rounded shadow-sm p-4">
-                  <div className="text-xs uppercase text-gray-500 font-semibold">Piutang Tamu (Buku Besar)</div>
-                  <div className="text-2xl font-bold mt-2 text-slate-800">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
+                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
+                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Piutang Tamu (Buku Besar)</div>
+                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
                 </div>
-                <div className="bg-white border rounded shadow-sm p-4">
-                  <div className="text-xs uppercase text-gray-500 font-semibold">Jumlah Jurnal</div>
-                  <div className="text-2xl font-bold mt-2 text-slate-800">{financeSummary?.entries?.length || 0}</div>
+                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
+                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Jumlah Jurnal</div>
+                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">{financeSummary?.entries?.length || 0}</div>
                 </div>
               </div>
             </div>
@@ -3847,20 +3885,72 @@ function App() {
         )}
 
         {selectedMenu === 'Pengaturan' && (
-          <div className="bg-white border rounded shadow-sm p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-lg">HR & Payroll</h3>
-              <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">{employees.length}</span>
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 tracking-tight">Pengaturan Properti & Manajemen</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Konfigurasi identitas properti, branding visual, dan data operasional internal.</p>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPengaturanTab('branding')}
+                  className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
+                    pengaturanTab === 'branding'
+                      ? 'bg-white text-[#1b4332] shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Branding & Identitas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPengaturanTab('hr')}
+                  className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
+                    pengaturanTab === 'hr'
+                      ? 'bg-white text-[#1b4332] shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  HR & Payroll ({employees.length})
+                </button>
+              </div>
             </div>
-            <div className="space-y-2">
-              {employees.map((employee: any) => (
-                <div key={employee.id} className="border rounded p-3 text-sm">
-                  <div className="font-semibold">{employee.full_name}</div>
-                  <div className="text-gray-600">{employee.position}</div>
-                  <div className="text-gray-500">Net payroll: Rp {Number(payroll.find((p: any) => p.employee_id === employee.id)?.net_salary || 0).toLocaleString('id-ID')}</div>
+
+            {pengaturanTab === 'branding' && propertyId !== null && (
+              <PropertyBrandingSettings
+                propertyId={propertyId}
+                initialBranding={activeBranding || getFallbackPropertyBranding(propertyId, properties.find((p: any) => p.id === propertyId)?.name, properties.find((p: any) => p.id === propertyId)?.property_code)}
+                onSaveBranding={handleSaveBranding}
+              />
+            )}
+
+            {pengaturanTab === 'hr' && (
+              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <h3 className="font-bold text-sm text-slate-800">Daftar Karyawan & Payroll</h3>
+                  <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full font-semibold">
+                    {employees.length} Karyawan
+                  </span>
                 </div>
-              ))}
-            </div>
+                <div className="space-y-2">
+                  {employees.map((employee: any) => (
+                    <div key={employee.id} className="border border-slate-200/80 rounded-lg p-3 text-xs bg-[#faf9f6] flex items-center justify-between">
+                      <div>
+                        <div className="font-bold text-slate-900">{employee.full_name}</div>
+                        <div className="text-slate-500 mt-0.5">{employee.position}</div>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[11px] text-slate-400 block">Net payroll:</span>
+                        <span className="font-mono font-bold text-slate-800">
+                          Rp {Number(payroll.find((p: any) => p.employee_id === employee.id)?.net_salary || 0).toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
         </main>
@@ -4070,48 +4160,6 @@ function App() {
               )}
 
               <div className="detail-section">
-                <div className="detail-section-title">Operational actions</div>
-                <div className="reservation-action-row reservation-action-row--dense">
-                  {canCheckIn && (
-                    <button
-                      onClick={() => handleReservationAction(Number(selectedRes.id), 'checkin')}
-                      className="reservation-action-button reservation-action-button--success"
-                    >
-                      Check In
-                    </button>
-                  )}
-                  {canCheckOut && (
-                    <button
-                      onClick={() => openCheckoutConfirmation(Number(selectedRes.id))}
-                      className="reservation-action-button reservation-action-button--warn"
-                    >
-                      Checkout
-                    </button>
-                  )}
-                  {canCancel && (
-                    <button
-                      onClick={() => handleReservationCancel(Number(selectedRes.id))}
-                      className="reservation-action-button reservation-action-button--danger"
-                    >
-                      Cancel
-                    </button>
-                  )}
-                  {canPay && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (parseIdrInput(paymentDraft) > 0) {
-                          void handlePayment();
-                        } else {
-                          paymentInputRef.current?.focus();
-                        }
-                      }}
-                      className="reservation-action-button reservation-action-button--primary"
-                    >
-                      Payment
-                    </button>
-                  )}
-                </div>
 
                 {selectedRes.room_id && (
                   <div className="reservation-turnover-row reservation-turnover-row--spaced">
@@ -5110,13 +5158,7 @@ function App() {
   );
 }
 
-function NavItem({ label, active, onClick }: any) {
-  return (
-    <div onClick={onClick} className={`hotel-nav-item ${active ? 'hotel-nav-item--active' : ''}`}>
-      <span>{label}</span>
-    </div>
-  );
-}
+
 
 function StatCard({ title, value, color }: any) {
   return (

@@ -14,6 +14,7 @@ import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
 import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
 import { createGuestsRouter, createReservationGuestsRouter } from './domains/guests/guestsRouter';
+import { createPropertyBrandingRouter } from './domains/propertyBranding/propertyBrandingRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
   applyCancellationInventoryPlan,
@@ -5213,6 +5214,9 @@ app.get('/api/properties', async (req, res) => {
     res.status(500).json({ status: 'ERROR', message: err.message });
   }
 });
+
+// Property branding routes (/api/properties/:id/branding)
+app.use('/api/properties', createPropertyBrandingRouter(pool));
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
