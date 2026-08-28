@@ -1,3 +1,52 @@
+export type TurnoverState = 'NONE' | 'OUTGOING_OCCUPIED' | 'CLEANING' | 'READY' | 'OUT_OF_SERVICE';
+
+export type ReadinessReasonCode =
+  | 'OUTGOING_NOT_CHECKED_OUT'
+  | 'HOUSEKEEPING_IN_PROGRESS'
+  | 'ROOM_OUT_OF_SERVICE'
+  | 'ROOM_NOT_READY';
+
+export interface OutgoingReservationInfo {
+  id: number;
+  guest_name: string;
+  check_out: string;
+  checked_out_at: string | null;
+  status: string;
+}
+
+export interface RoomReadinessInfo {
+  is_ready: boolean;
+  turnover_state: TurnoverState;
+  reason_code: ReadinessReasonCode | null;
+  reason_message: string | null;
+  room_status: string;
+  outgoing_reservation: OutgoingReservationInfo | null;
+}
+
+export interface CellTurnoverInfo {
+  has_turnover: boolean;
+  turnover_state: TurnoverState;
+  outgoing: OutgoingReservationInfo | null;
+  incoming: {
+    reservation_id: number;
+    guest_name: string;
+    check_in: string;
+    status: string;
+    is_ready: boolean;
+    reason_code: ReadinessReasonCode | null;
+    reason_message: string | null;
+  } | null;
+}
+
+export interface CalendarCell {
+  date: string;
+  reservations: any[];
+  departures?: any[];
+  arrivals?: any[];
+  turnover?: CellTurnoverInfo | null;
+  availability: any | null;
+}
+
 export interface CalendarRoom {
   id: number;
   room_id: number;
@@ -19,11 +68,7 @@ export interface CalendarRoom {
   operational_status: string | null;
   future_reservation_count: number;
   next_future_check_in: string | null;
-  cells: Array<{
-    date: string;
-    reservations: any[];
-    availability: any | null;
-  }>;
+  cells: CalendarCell[];
 }
 
 export interface RoomTypeCalendarGroup {

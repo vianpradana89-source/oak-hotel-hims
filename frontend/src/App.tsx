@@ -2775,20 +2775,34 @@ function App() {
       await fetchOperationsData();
       closeStayChangePrompt();
       console.error(`${stayChangeState.type} stay failed`, error);
-      alert(`Gagal ${stayChangeState.type === 'extend' ? 'memperpanjang' : 'memendekkan'} masa inap: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
+  const isRoomReadyForCheckIn = selectedRes?.readiness ? Boolean(selectedRes.readiness.is_ready) : true;
+  const checkInDisabledReason = selectedRes?.readiness && !selectedRes.readiness.is_ready
+    ? (selectedRes.readiness.reason_message || 'Kamar belum siap untuk check-in')
+    : undefined;
+
   const quickActionButtons = [
-    { key: 'checkin', label: 'Check In', enabled: canCheckIn, variant: 'success', onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin') },
-    { key: 'checkout', label: 'Checkout', enabled: canCheckOut, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
-    { key: 'extend', label: 'Extend', enabled: canExtend, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id)) },
-    { key: 'shorten', label: 'Shorten', enabled: canShorten, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id)) },
-    { key: 'cancel', label: 'Cancel', enabled: canCancel, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
+    {
+      key: 'checkin',
+      label: 'Check In',
+      enabled: canCheckIn,
+      disabled: !isRoomReadyForCheckIn,
+      title: checkInDisabledReason,
+      variant: 'success',
+      onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin')
+    },
+    { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
+    { key: 'extend', label: 'Extend', enabled: canExtend, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id)) },
+    { key: 'shorten', label: 'Shorten', enabled: canShorten, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id)) },
+    { key: 'cancel', label: 'Cancel', enabled: canCancel, disabled: false, title: undefined, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
     {
       key: 'payment',
       label: 'Payment',
       enabled: canPay,
+      disabled: false,
+      title: undefined,
       variant: 'primary',
       onClick: () => {
         const remaining = selectedRes ? Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0)))) : 0;
@@ -3069,6 +3083,14 @@ function App() {
                                     const searchMatch = isCalendarReservationMatch(r);
                                     const previewCheckOut = reservationResizePreview[String(r.id)] || r.check_out;
                                     const nights = Math.max(1, hotelNightsBetween(normalizeHotelDate(r.check_in), normalizeHotelDate(previewCheckOut)) ?? 1);
+                                    const arrivalDateKey = normalizeHotelDate(r.check_in);
+                                    const cellAtArrival = room.cells?.find(c => c.date === arrivalDateKey);
+                                    const turnoverInfo = cellAtArrival?.turnover ? {
+                                      has_turnover: cellAtArrival.turnover.has_turnover,
+                                      is_ready: cellAtArrival.turnover.incoming?.is_ready,
+                                      reason_message: cellAtArrival.turnover.incoming?.reason_message
+                                    } : null;
+
                                     cells.push(
                                       <ReservationBar
                                         key={`${room.id}-${i}-${r.id}`}
@@ -3086,6 +3108,7 @@ function App() {
                                         resizable={['BOOKED', 'CHECKED_IN'].includes(String(r.status || '').toUpperCase())}
                                         searchMatch={searchMatch}
                                         nights={nights}
+                                        turnoverInfo={turnoverInfo}
                                         onDragStart={(event) => handleDragStart(event, r, room.id)}
                                         onDragEnd={handleDragEnd}
                                         onOpen={() => {
@@ -3100,6 +3123,8 @@ function App() {
                                     const day = days[i];
                                     const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.operational_status || room.status || undefined);
                                     const isToday = day.date === getOperationalDateKey();
+                                    const cellData = room.cells?.find(c => c.date === day.date);
+                                    const hasDepartures = Boolean(cellData?.departures && cellData.departures.length > 0);
                                     const cellState = !masterActive
                                       ? 'Inactive'
                                       : operationalStatus === 'Maintenance'
@@ -3151,6 +3176,14 @@ function App() {
                                             }
                                           }}
                                         >
+                                          {hasDepartures && (
+                                            <div
+                                              className="text-[10px] font-bold text-amber-900 bg-amber-100/90 px-1 py-0.5 rounded border border-amber-300 mb-1 truncate select-none"
+                                              title={`Check-out hari ini: ${cellData?.departures?.map((d: any) => d.guest_name).join(', ')}`}
+                                            >
+                                              DEP: {cellData?.departures?.[0]?.guest_name}
+                                            </div>
+                                          )}
                                           {cellState === 'Available' && <div className="status-available-cell">Tersedia</div>}
                                           {cellState === 'Maintenance' && <div className="status-maintenance-cell">Maintenance</div>}
                                           {cellState === 'Occupied' && <div className="status-occupied-cell">Occupied</div>}
@@ -4022,6 +4055,25 @@ function App() {
                 </div>
               </div>
 
+              {selectedRes.readiness && !selectedRes.readiness.is_ready && (
+                <div className="mb-4 p-3.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 flex items-start gap-3 shadow-xs">
+                  <div className="text-lg leading-none mt-0.5 select-none">⚠️</div>
+                  <div className="flex-1 text-xs">
+                    <div className="font-bold uppercase tracking-wider text-amber-900 mb-0.5">
+                      Kamar Belum Siap (Kamar {selectedRoomLabel || selectedRes.room_id})
+                    </div>
+                    <div className="text-amber-800 leading-relaxed font-medium">
+                      {selectedRes.readiness.reason_message || 'Kamar sedang dipersiapkan dan belum dapat di-check-in.'}
+                    </div>
+                    {selectedRes.readiness.outgoing_reservation && (
+                      <div className="mt-1.5 text-[11px] text-amber-700 bg-amber-100/70 p-1.5 rounded-md">
+                        Tamu sebelumnya: <strong>{selectedRes.readiness.outgoing_reservation.guest_name}</strong> (Check-out: {formatCompactHotelDate(selectedRes.readiness.outgoing_reservation.check_out)})
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {bookingChildren.length > 1 && (
                 <div className="detail-section">
                   <div className="detail-section-title">Rooms in this booking</div>
@@ -4063,10 +4115,14 @@ function App() {
                     <button
                       key={button.key}
                       type="button"
-                      className={`reservation-action-button reservation-action-button--${button.variant}`}
+                      disabled={button.disabled}
+                      title={button.title}
+                      className={`reservation-action-button reservation-action-button--${button.variant} ${button.disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                       onClick={(event) => {
                         event.stopPropagation();
-                        button.onClick();
+                        if (!button.disabled) {
+                          button.onClick();
+                        }
                       }}
                     >
                       {button.label}

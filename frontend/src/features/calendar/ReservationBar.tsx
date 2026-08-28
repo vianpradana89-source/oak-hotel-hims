@@ -15,6 +15,11 @@ interface Props {
   resizable: boolean;
   searchMatch: boolean;
   nights: number;
+  turnoverInfo?: {
+    has_turnover: boolean;
+    is_ready?: boolean;
+    reason_message?: string | null;
+  } | null;
   onDragStart: (event: any) => void;
   onDragEnd: (event: any) => void;
   onOpen: () => void;
@@ -37,6 +42,18 @@ export default function ReservationBar(props: Props) {
             <div className="reservation-card-name">{reservation.guest_name}</div>
             <span className={props.badgeClass}>{props.badge}</span>
             <span className={props.segmentMeta.className}>{props.segmentMeta.label}</span>
+            {props.turnoverInfo?.has_turnover && (
+              <span
+                className={`text-[9px] px-1 py-0.5 rounded font-bold uppercase tracking-wider ${
+                  props.turnoverInfo.is_ready === false
+                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                    : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                }`}
+                title={props.turnoverInfo.reason_message || (props.turnoverInfo.is_ready === false ? 'Turnover: Kamar belum siap' : 'Turnover: Kamar siap')}
+              >
+                {props.turnoverInfo.is_ready === false ? '⚠ TURNOVER' : 'ARR'}
+              </span>
+            )}
           </div>
           <div className="reservation-card-identity">{props.identity}</div>
           <div className="reservation-card-meta">

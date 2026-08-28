@@ -34,6 +34,7 @@
     "test:payment-correction": "node test/payment_correction_reversal_test.js",
     "test:payment-evidence": "node test/payment_evidence_test.js",
     "test:property-branding": "node test/property_branding_persistence_test.js",
+    "test:turnover-readiness": "node test/turnover_readiness_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

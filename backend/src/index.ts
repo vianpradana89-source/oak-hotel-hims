@@ -48,6 +48,18 @@ import {
   deactivateEvidence,
   recordEvidenceAccessAudit
 } from './domains/payments/paymentEvidenceService';
+import {
+  evaluateRoomReadiness,
+  assertCheckInEligible,
+  normalizePhysicalRoomStatus,
+  isReadyPhysicalStatus
+} from './domains/turnover/turnoverService';
+import type {
+  TurnoverState,
+  ReadinessReasonCode,
+  RoomReadinessInfo,
+  CellTurnoverInfo
+} from './domains/turnover/turnoverTypes';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
 
 const app: any = express();
@@ -443,7 +455,7 @@ function isRoomStatusSellable(statusValue: any): boolean {
   if (normalizedStatus === null) {
     return true;
   }
-  return ['VACANT_CLEAN', 'INSPECTED'].includes(normalizedStatus);
+  return normalizedStatus !== 'OUT_OF_ORDER' && normalizedStatus !== 'OUT_OF_SERVICE';
 }
 
 function isRoomOverlapViolation(err: any): boolean {
@@ -1136,13 +1148,12 @@ async function createCanonicalBooking(
         throw createHttpError(409, `room ${child.roomId} does not belong to property ${bookingPropertyId}`);
       }
 
-      const roomStatus = roomInfo.room_status;
-      if (!isRoomStatusSellable(roomStatus)) {
-        throw createHttpError(409, `room ${child.roomId} is not sellable: status=${String(roomStatus || 'UNKNOWN')}`);
-      }
-
       if (roomInfo.room_is_active === false || roomInfo.room_type_is_active === false) {
         throw createHttpError(409, `room ${child.roomId} or its room type is inactive in Room Master and cannot accept new bookings`);
+      }
+
+      if (!isRoomStatusSellable(roomInfo.room_status)) {
+        throw createHttpError(409, `room ${child.roomId} is not sellable: status=${roomInfo.room_status}`);
       }
 
       child.roomType = String(roomInfo.room_type || '');
@@ -1621,7 +1632,13 @@ app.get('/api/reservations/:id', async (req, res) => {
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
     }
-    res.json({ status: 'OK', data: withReservationHotelDates(result.rows[0]) });
+    const row = result.rows[0];
+    const data = withReservationHotelDates(row);
+    let readiness: RoomReadinessInfo | null = null;
+    if (row.room_id) {
+      readiness = await evaluateRoomReadiness(pool, Number(row.room_id), reservationId);
+    }
+    res.json({ status: 'OK', data: { ...data, readiness } });
   } catch (err: any) {
     if (err?.statusCode) {
       return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
@@ -3922,6 +3939,10 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
         message: 'room is out of order or out of service during requested stay'
       });
     }
+
+    // TURNOVER-1: Check-in safety gate (outgoing checked-in guest & room physical readiness)
+    await assertCheckInEligible(client, roomId, reservationId);
+
     const nextStatus = current.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'CHECKED_IN';
     const updated = await client.query(
       `UPDATE reservations
@@ -5298,7 +5319,7 @@ app.get('/api/tapechart', async (req, res) => {
            FROM reservations r
            LEFT JOIN bookings b ON b.id = r.booking_id
            WHERE r.room_id = ANY($1::int[])
-             AND NOT (check_out <= $2::timestamp OR check_in >= $3::timestamp)`,
+             AND NOT (check_out < $2::timestamp OR check_in >= $3::timestamp)`,
           [roomIds, start, end]
         )
       : { rows: [] as any[] };
@@ -5345,8 +5366,9 @@ app.get('/api/tapechart', async (req, res) => {
     const resultRooms = rooms.map((room: any) => {
       const cells = dates.map((d) => {
         const dateStr = d;
-        // reservations for this room that cover this date
-        const resForRoom = (reservationsByRoom[String(room.id)] || []).filter((r: any) => {
+        const allRoomRes = reservationsByRoom[String(room.id)] || [];
+        // reservations for this room that cover this date (night stay)
+        const resForRoom = allRoomRes.filter((r: any) => {
           const ci = hotelDateKey(r.check_in);
           const co = hotelDateKey(r.check_out);
           // Nightly stay is inclusive on check-in and exclusive on check-out.
@@ -5382,6 +5404,79 @@ app.get('/api/tapechart', async (req, res) => {
           legacy_status: r.status == null
         }));
 
+        // TURNOVER-1: departures and arrivals on this cell date
+        const departures = allRoomRes.filter((r: any) => hotelDateKey(r.check_out) === dateStr);
+        const arrivals = allRoomRes.filter((r: any) => hotelDateKey(r.check_in) === dateStr);
+
+        let turnover: any = null;
+        if (departures.length > 0 || arrivals.length > 0) {
+          const outgoingRes = departures[0] || null;
+          const incomingRes = arrivals[0] || null;
+
+          const outgoing = outgoingRes ? {
+            id: outgoingRes.id,
+            guest_name: outgoingRes.guest_name,
+            check_out: hotelDateKey(outgoingRes.check_out),
+            checked_out_at: outgoingRes.checked_out_at ? new Date(outgoingRes.checked_out_at).toISOString() : null,
+            status: outgoingRes.status
+          } : null;
+
+          let incoming: any = null;
+          if (incomingRes) {
+            const isOutgoingInHouse = departures.some((dep: any) => String(dep.status).toUpperCase() === 'CHECKED_IN');
+            const roomPhysical = normalizePhysicalRoomStatus(room.status);
+            let isReady = false;
+            let reasonCode: string | null = null;
+            let reasonMessage: string | null = null;
+            let state: TurnoverState = 'NONE';
+
+            if (isOutgoingInHouse) {
+              state = 'OUTGOING_OCCUPIED';
+              reasonCode = 'OUTGOING_NOT_CHECKED_OUT';
+              reasonMessage = 'Tamu sebelumnya belum check-out.';
+            } else if (roomPhysical === 'VACANT_DIRTY' || roomPhysical === 'CLEANING') {
+              state = 'CLEANING';
+              reasonCode = 'HOUSEKEEPING_IN_PROGRESS';
+              reasonMessage = 'Kamar sedang dipersiapkan Housekeeping.';
+            } else if (roomPhysical === 'OUT_OF_ORDER' || roomPhysical === 'OUT_OF_SERVICE') {
+              state = 'OUT_OF_SERVICE';
+              reasonCode = 'ROOM_OUT_OF_SERVICE';
+              reasonMessage = 'Kamar sedang dalam pemeliharaan (Out of Order / Out of Service).';
+            } else if (isReadyPhysicalStatus(roomPhysical)) {
+              state = 'READY';
+              isReady = true;
+            } else {
+              state = 'NONE';
+              reasonCode = 'ROOM_NOT_READY';
+              reasonMessage = 'Kamar belum siap untuk check-in.';
+            }
+
+            incoming = {
+              reservation_id: incomingRes.id,
+              guest_name: incomingRes.guest_name,
+              check_in: hotelDateKey(incomingRes.check_in),
+              status: incomingRes.status,
+              is_ready: isReady,
+              reason_code: reasonCode,
+              reason_message: reasonMessage
+            };
+          }
+
+          let turnoverState: TurnoverState = 'NONE';
+          if (incoming) {
+            turnoverState = incoming.is_ready ? 'READY' : (outgoing?.status === 'CHECKED_IN' ? 'OUTGOING_OCCUPIED' : 'CLEANING');
+          } else if (outgoing) {
+            turnoverState = outgoing.status === 'CHECKED_IN' ? 'OUTGOING_OCCUPIED' : 'READY';
+          }
+
+          turnover = {
+            has_turnover: departures.length > 0 && arrivals.length > 0,
+            turnover_state: turnoverState,
+            outgoing,
+            incoming
+          };
+        }
+
         // Canonical rooms never fall through to a duplicate display name.
         // Name lookup is compatibility-only for rooms without room_type_id.
         const availIdKey = room.room_type_id == null ? null : `id:${room.room_type_id}|${dateStr}`;
@@ -5389,7 +5484,24 @@ app.get('/api/tapechart', async (req, res) => {
         const avail = availIdKey
           ? availabilityMap[availIdKey] || null
           : availabilityMap[availNameKey] || null;
-        return { date: dateStr, reservations: resForRoom, availability: avail };
+        return {
+          date: dateStr,
+          reservations: resForRoom,
+          departures: departures.map((r: any) => ({
+            id: r.id,
+            guest_name: r.guest_name,
+            check_out: hotelDateKey(r.check_out),
+            status: r.status
+          })),
+          arrivals: arrivals.map((r: any) => ({
+            id: r.id,
+            guest_name: r.guest_name,
+            check_in: hotelDateKey(r.check_in),
+            status: r.status
+          })),
+          turnover,
+          availability: avail
+        };
       });
       return {
         id: room.id,
