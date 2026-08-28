@@ -137,20 +137,21 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
           ...patch
         })
       });
+      const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || 'Gagal menyimpan pengaturan housekeeping');
+        throw new Error(json.message || 'Gagal menyimpan pengaturan housekeeping');
       }
-      const json = await res.json();
-      if (json.data) setHkSettings(json.data);
+      if (json.data) {
+        setHkSettings(json.data);
+      }
       setFeedback({
         type: 'success',
-        message: 'Kebijakan operasional Housekeeping berhasil diperbarui.'
+        message: 'Pengaturan housekeeping berhasil disimpan'
       });
     } catch (err: any) {
       setFeedback({
         type: 'error',
-        message: err.message || 'Gagal menyimpan pengaturan housekeeping.'
+        message: err.message || 'Gagal menyimpan pengaturan housekeeping'
       });
       throw err;
     }

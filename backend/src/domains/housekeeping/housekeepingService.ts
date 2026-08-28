@@ -19,6 +19,22 @@ function hasRows(result: any): boolean {
   return Array.isArray(result?.rows) && result.rows.length > 0;
 }
 
+export function formatSettingsRecord(row: any): PropertyHousekeepingSettings {
+  return {
+    id: Number(row.id),
+    property_id: Number(row.property_id),
+    require_final_inspection: Boolean(row.require_final_inspection),
+    require_checkout_room_check: Boolean(row.require_checkout_room_check),
+    allow_calendar_room_status_override: Boolean(row.allow_calendar_room_status_override),
+    default_cleaning_template_code: row.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING',
+    default_room_cleaning_template_code: row.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING',
+    default_checkout_template_code: row.default_checkout_template_code || 'CHECKOUT_INSPECTION',
+    default_checkout_inspection_template_code: row.default_checkout_template_code || 'CHECKOUT_INSPECTION',
+    created_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
 export async function getPropertyHousekeepingSettings(
   client: PoolClient | Pool,
   propertyId: number
@@ -28,17 +44,24 @@ export async function getPropertyHousekeepingSettings(
     [propertyId]
   );
   if (hasRows(res)) {
-    return res.rows[0];
+    return formatSettingsRecord(res.rows[0]);
   }
-  // Default fallback
+  // Default fallback upsert
   const inserted = await client.query(
-    `INSERT INTO property_housekeeping_settings (property_id, require_final_inspection, require_checkout_room_check, allow_calendar_room_status_override)
-     VALUES ($1, false, false, false)
+    `INSERT INTO property_housekeeping_settings (
+       property_id,
+       require_final_inspection,
+       require_checkout_room_check,
+       allow_calendar_room_status_override,
+       default_cleaning_template_code,
+       default_checkout_template_code
+     )
+     VALUES ($1, false, false, false, 'STANDARD_ROOM_CLEANING', 'CHECKOUT_INSPECTION')
      ON CONFLICT (property_id) DO UPDATE SET updated_at = NOW()
      RETURNING *`,
     [propertyId]
   );
-  return inserted.rows[0];
+  return formatSettingsRecord(inserted.rows[0]);
 }
 
 export async function updatePropertyHousekeepingSettings(
@@ -48,32 +71,89 @@ export async function updatePropertyHousekeepingSettings(
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<PropertyHousekeepingSettings> {
   const current = await getPropertyHousekeepingSettings(client, propertyId);
-  const requireFinalInspection = settings.require_final_inspection !== undefined ? settings.require_final_inspection : current.require_final_inspection;
-  const requireCheckoutRoomCheck = settings.require_checkout_room_check !== undefined ? settings.require_checkout_room_check : current.require_checkout_room_check;
-  const allowCalendarOverride = settings.allow_calendar_room_status_override !== undefined ? settings.allow_calendar_room_status_override : current.allow_calendar_room_status_override;
-  const defaultCleaningTemplate = settings.default_cleaning_template_code || current.default_cleaning_template_code;
-  const defaultCheckoutTemplate = settings.default_checkout_template_code || current.default_checkout_template_code;
 
+  // 1. Explicit boolean semantics: true -> false, false -> true, preserving existing if undefined
+  const requireFinalInspection = typeof settings.require_final_inspection === 'boolean'
+    ? settings.require_final_inspection
+    : current.require_final_inspection;
+
+  const requireCheckoutRoomCheck = typeof settings.require_checkout_room_check === 'boolean'
+    ? settings.require_checkout_room_check
+    : current.require_checkout_room_check;
+
+  const allowCalendarOverride = typeof settings.allow_calendar_room_status_override === 'boolean'
+    ? settings.allow_calendar_room_status_override
+    : current.allow_calendar_room_status_override;
+
+  // 2. Default template code resolution & validation against active templates of this property
+  const inputCleaningTemplate = settings.default_room_cleaning_template_code || settings.default_cleaning_template_code;
+  const inputCheckoutTemplate = settings.default_checkout_inspection_template_code || settings.default_checkout_template_code;
+
+  let defaultCleaningTemplate = current.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING';
+  if (inputCleaningTemplate && typeof inputCleaningTemplate === 'string' && inputCleaningTemplate.trim().length > 0) {
+    const trimmed = inputCleaningTemplate.trim();
+    const tplCheck = await client.query(
+      'SELECT id, code, is_active FROM checklist_templates WHERE property_id = $1 AND code = $2',
+      [propertyId, trimmed]
+    );
+    if (!hasRows(tplCheck)) {
+      const err: any = new Error(`Template code '${trimmed}' is invalid or does not belong to property ${propertyId}`);
+      err.statusCode = 400;
+      err.code = 'INVALID_TEMPLATE_CODE';
+      throw err;
+    }
+    defaultCleaningTemplate = trimmed;
+  }
+
+  let defaultCheckoutTemplate = current.default_checkout_template_code || 'CHECKOUT_INSPECTION';
+  if (inputCheckoutTemplate && typeof inputCheckoutTemplate === 'string' && inputCheckoutTemplate.trim().length > 0) {
+    const trimmed = inputCheckoutTemplate.trim();
+    const tplCheck = await client.query(
+      'SELECT id, code, is_active FROM checklist_templates WHERE property_id = $1 AND code = $2',
+      [propertyId, trimmed]
+    );
+    if (!hasRows(tplCheck)) {
+      const err: any = new Error(`Template code '${trimmed}' is invalid or does not belong to property ${propertyId}`);
+      err.statusCode = 400;
+      err.code = 'INVALID_TEMPLATE_CODE';
+      throw err;
+    }
+    defaultCheckoutTemplate = trimmed;
+  }
+
+  // 3. Atomic UPSERT
   const res = await client.query(
-    `UPDATE property_housekeeping_settings
-     SET require_final_inspection = $1,
-         require_checkout_room_check = $2,
-         allow_calendar_room_status_override = $3,
-         default_cleaning_template_code = $4,
-         default_checkout_template_code = $5,
+    `INSERT INTO property_housekeeping_settings (
+       property_id,
+       require_final_inspection,
+       require_checkout_room_check,
+       allow_calendar_room_status_override,
+       default_cleaning_template_code,
+       default_checkout_template_code,
+       updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (property_id) DO UPDATE
+     SET require_final_inspection = EXCLUDED.require_final_inspection,
+         require_checkout_room_check = EXCLUDED.require_checkout_room_check,
+         allow_calendar_room_status_override = EXCLUDED.allow_calendar_room_status_override,
+         default_cleaning_template_code = EXCLUDED.default_cleaning_template_code,
+         default_checkout_template_code = EXCLUDED.default_checkout_template_code,
          updated_at = NOW()
-     WHERE property_id = $6
      RETURNING *`,
-    [requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, defaultCleaningTemplate, defaultCheckoutTemplate, propertyId]
+    [propertyId, requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, defaultCleaningTemplate, defaultCheckoutTemplate]
   );
 
+  const formatted = formatSettingsRecord(res.rows[0]);
+
+  // 4. Audit Trail
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    ['HOUSEKEEPING', 'UPDATE_SETTINGS', 'PROPERTY_SETTINGS', String(propertyId), JSON.stringify(res.rows[0]), actor?.name || 'System', propertyId]
+    ['HOUSEKEEPING', 'UPDATE_SETTINGS', 'PROPERTY_SETTINGS', String(propertyId), JSON.stringify(formatted), actor?.name || 'System', propertyId]
   );
 
-  return res.rows[0];
+  return formatted;
 }
 
 export async function getChecklistTemplates(

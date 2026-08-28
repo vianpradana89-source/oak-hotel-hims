@@ -166,7 +166,9 @@ export interface PropertyHousekeepingSettings {
   require_checkout_room_check: boolean;
   allow_calendar_room_status_override: boolean;
   default_cleaning_template_code: string;
+  default_room_cleaning_template_code?: string;
   default_checkout_template_code: string;
+  default_checkout_inspection_template_code?: string;
   created_at: string;
   updated_at: string;
 }

@@ -409,9 +409,108 @@ async function runHousekeepingFeatureFlagsSuite() {
     console.log('✔ Authoritative lifecycle verified: VACANT_DIRTY -> CLEANING -> VACANT_CLEAN -> FINAL_INSPECTION -> (RETURN_TO_CLEANING / PASS) -> INSPECTED.');
 
     // =========================================================================
-    // TEST 5: Verify Inventory Invariants (Zero Drift)
+    // TEST 5: Housekeeping Operational Settings Save & Validation Contract
     // =========================================================================
-    console.log('\n--- TEST 5: Verifying Invariants & Ledger Consistency ---');
+    console.log('\n--- TEST 5: Housekeeping Operational Settings Save & Validation Contract ---');
+
+    // 5A. Seed a specific template on Property B
+    const tplBRes = await pool.query(`
+      INSERT INTO checklist_templates (property_id, code, name, task_type, is_active, requires_verification)
+      VALUES ($1, 'PROP_B_EXCLUSIVE_TEMPLATE', 'Property B Cleaning', 'ROOM_CLEANING', true, false)
+      ON CONFLICT (property_id, code) DO UPDATE SET updated_at = NOW()
+      RETURNING id
+    `, [propertyBId]);
+
+    // 5B. Error cases: Missing property_id (400) and unknown property_id (404)
+    const missingPropRes = await request('PATCH', '/api/housekeeping/settings', {
+      require_final_inspection: true
+    });
+    expect(missingPropRes.status === 400, `Expected 400 on missing property_id, got ${missingPropRes.status}`);
+
+    const unknownPropRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: 999999,
+      require_final_inspection: true
+    });
+    expect(unknownPropRes.status === 404, `Expected 404 on unknown property_id, got ${unknownPropRes.status}`);
+
+    // 5C. Cross-Property Template Validation (must reject Property B template on Property 1 with 400)
+    const crossPropRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: propertyId,
+      default_room_cleaning_template_code: 'PROP_B_EXCLUSIVE_TEMPLATE'
+    });
+    expect(crossPropRes.status === 400, `Expected 400 when assigning cross-property template, got ${crossPropRes.status}`);
+    expect(crossPropRes.body.code === 'INVALID_TEMPLATE_CODE', `Expected code INVALID_TEMPLATE_CODE, got ${crossPropRes.body?.code}`);
+
+    // Non-existent template code on Property 1 must be rejected with 400
+    const nonExistentTplRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: propertyId,
+      default_cleaning_template_code: 'NON_EXISTENT_TEMPLATE_XYZ'
+    });
+    expect(nonExistentTplRes.status === 400, `Expected 400 on non-existent template code, got ${nonExistentTplRes.status}`);
+
+    // 5D. Boolean false preservation: false -> true -> false
+    // Step 1: Save all flags to true
+    const saveTrueRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: propertyId,
+      require_final_inspection: true,
+      require_checkout_room_check: true,
+      allow_calendar_room_status_override: true,
+      default_cleaning_template_code: 'STANDARD_ROOM_CLEANING',
+      default_checkout_template_code: 'CHECKOUT_INSPECTION'
+    });
+    expect(saveTrueRes.status === 200, `Expected 200 on save settings true, got ${saveTrueRes.status}`);
+    expect(saveTrueRes.body.data.require_final_inspection === true, 'require_final_inspection should be true');
+    expect(saveTrueRes.body.data.require_checkout_room_check === true, 'require_checkout_room_check should be true');
+    expect(saveTrueRes.body.data.allow_calendar_room_status_override === true, 'allow_calendar_room_status_override should be true');
+
+    // Step 2: Save boolean false (ensure false is not discarded via truthiness fallback)
+    const saveFalseRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: propertyId,
+      require_final_inspection: false,
+      require_checkout_room_check: false,
+      allow_calendar_room_status_override: false
+    });
+    expect(saveFalseRes.status === 200, `Expected 200 on save settings false, got ${saveFalseRes.status}`);
+    expect(saveFalseRes.body.data.require_final_inspection === false, 'require_final_inspection should be false');
+    expect(saveFalseRes.body.data.require_checkout_room_check === false, 'require_checkout_room_check should be false');
+    expect(saveFalseRes.body.data.allow_calendar_room_status_override === false, 'allow_calendar_room_status_override should be false');
+
+    // Step 3: Reload proof (GET settings) -> values must remain false
+    const reloadRes = await request('GET', `/api/housekeeping/settings?property_id=${propertyId}`);
+    expect(reloadRes.status === 200, `Expected 200 on GET settings, got ${reloadRes.status}`);
+    expect(reloadRes.body.data.require_final_inspection === false, 'require_final_inspection should remain false after reload');
+    expect(reloadRes.body.data.require_checkout_room_check === false, 'require_checkout_room_check should remain false after reload');
+    expect(reloadRes.body.data.allow_calendar_room_status_override === false, 'allow_calendar_room_status_override should remain false after reload');
+    expect(reloadRes.body.data.default_cleaning_template_code === 'STANDARD_ROOM_CLEANING', 'default cleaning template preserved');
+
+    // 5E. Feature Flag vs Policy separation:
+    // Ensure saving policies did NOT modify property_features table
+    const checkFeaturesRes = await request('GET', `/api/properties/${propertyId}/features`);
+    expect(checkFeaturesRes.status === 200, 'GET property features should succeed');
+    // housekeeping.enabled remains true as set in previous tests
+    expect(checkFeaturesRes.body.data['housekeeping.enabled'] === true, 'Feature flag must not be affected by policy save');
+
+    // 5F. Atomic Upsert on new property without pre-existing row
+    await pool.query('DELETE FROM property_housekeeping_settings WHERE property_id = $1', [propertyBId]);
+    const initUpsertRes = await request('PATCH', '/api/housekeeping/settings', {
+      property_id: propertyBId,
+      require_final_inspection: true,
+      default_room_cleaning_template_code: 'PROP_B_EXCLUSIVE_TEMPLATE'
+    });
+    expect(initUpsertRes.status === 200, `Expected 200 on first-time upsert for Property B, got ${initUpsertRes.status}`);
+    expect(initUpsertRes.body.data.require_final_inspection === true, 'Property B require_final_inspection set to true');
+    expect(initUpsertRes.body.data.default_cleaning_template_code === 'PROP_B_EXCLUSIVE_TEMPLATE', 'Property B template assigned');
+
+    // Verify exactly 1 row exists for Property B in DB
+    const propBRowCount = await pool.query('SELECT COUNT(*) FROM property_housekeeping_settings WHERE property_id = $1', [propertyBId]);
+    expect(parseInt(propBRowCount.rows[0].count, 10) === 1, 'Exactly one row must exist for Property B');
+
+    console.log('✔ Operational settings save, atomic upsert, boolean false safety, and template validation contract verified.');
+
+    // =========================================================================
+    // TEST 6: Verify Inventory Invariants (Zero Drift)
+    // =========================================================================
+    console.log('\n--- TEST 6: Verifying Invariants & Ledger Consistency ---');
     const driftCheck = await pool.query(`
       SELECT
         ad.room_type_id,
@@ -477,6 +576,7 @@ async function runHousekeepingFeatureFlagsSuite() {
         await pool.query(`DELETE FROM room_types WHERE id = $1`, [roomTypeId]);
       }
       if (propertyBId) {
+        await pool.query(`DELETE FROM audit_logs WHERE property_id = $1`, [propertyBId]);
         await pool.query(`DELETE FROM property_features WHERE property_id = $1`, [propertyBId]);
         await pool.query(`DELETE FROM property_housekeeping_settings WHERE property_id = $1`, [propertyBId]);
         await pool.query(`DELETE FROM checklist_template_items WHERE template_id IN (SELECT id FROM checklist_templates WHERE property_id = $1)`, [propertyBId]);

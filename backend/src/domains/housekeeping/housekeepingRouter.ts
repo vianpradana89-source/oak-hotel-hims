@@ -369,7 +369,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const settings = await updatePropertyHousekeepingSettings(client, propertyId, req.body, actor);
       await client.query('COMMIT');
 
-      res.json({ status: 'SUCCESS', data: settings });
+      res.json({ status: 'OK', data: settings });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;

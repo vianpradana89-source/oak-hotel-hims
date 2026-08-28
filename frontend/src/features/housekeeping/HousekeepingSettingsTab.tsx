@@ -23,14 +23,24 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   onUpdateFeatureFlag,
   isLoading
 }) => {
-  const [requireFinalInspection, setRequireFinalInspection] = useState(
-    settings?.require_final_inspection || false
+  const [requireFinalInspection, setRequireFinalInspection] = useState<boolean>(
+    Boolean(settings?.require_final_inspection)
   );
-  const [requireCheckoutRoomCheck, setRequireCheckoutRoomCheck] = useState(
-    settings?.require_checkout_room_check || false
+  const [requireCheckoutRoomCheck, setRequireCheckoutRoomCheck] = useState<boolean>(
+    Boolean(settings?.require_checkout_room_check)
   );
-  const [allowCalendarOverride, setAllowCalendarOverride] = useState(
-    settings?.allow_calendar_room_status_override || false
+  const [allowCalendarOverride, setAllowCalendarOverride] = useState<boolean>(
+    Boolean(settings?.allow_calendar_room_status_override)
+  );
+  const [cleaningTemplateCode, setCleaningTemplateCode] = useState<string>(
+    settings?.default_cleaning_template_code ||
+    settings?.default_room_cleaning_template_code ||
+    'STANDARD_ROOM_CLEANING'
+  );
+  const [checkoutTemplateCode, setCheckoutTemplateCode] = useState<string>(
+    settings?.default_checkout_template_code ||
+    settings?.default_checkout_inspection_template_code ||
+    'CHECKOUT_INSPECTION'
   );
 
   const [localFlags, setLocalFlags] = useState<Record<string, boolean>>(featureFlags);
@@ -43,9 +53,19 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
 
   useEffect(() => {
     if (settings) {
-      setRequireFinalInspection(settings.require_final_inspection || false);
-      setRequireCheckoutRoomCheck(settings.require_checkout_room_check || false);
-      setAllowCalendarOverride(settings.allow_calendar_room_status_override || false);
+      setRequireFinalInspection(Boolean(settings.require_final_inspection));
+      setRequireCheckoutRoomCheck(Boolean(settings.require_checkout_room_check));
+      setAllowCalendarOverride(Boolean(settings.allow_calendar_room_status_override));
+      setCleaningTemplateCode(
+        settings.default_cleaning_template_code ||
+        settings.default_room_cleaning_template_code ||
+        'STANDARD_ROOM_CLEANING'
+      );
+      setCheckoutTemplateCode(
+        settings.default_checkout_template_code ||
+        settings.default_checkout_inspection_template_code ||
+        'CHECKOUT_INSPECTION'
+      );
     }
   }, [settings]);
 
@@ -68,11 +88,15 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       await onSaveSettings({
         require_final_inspection: requireFinalInspection,
         require_checkout_room_check: requireCheckoutRoomCheck,
-        allow_calendar_room_status_override: allowCalendarOverride
+        allow_calendar_room_status_override: allowCalendarOverride,
+        default_cleaning_template_code: cleaningTemplateCode,
+        default_room_cleaning_template_code: cleaningTemplateCode,
+        default_checkout_template_code: checkoutTemplateCode,
+        default_checkout_inspection_template_code: checkoutTemplateCode
       });
-      setFeedbackMsg({ type: 'success', text: 'Kebijakan operasional Housekeeping berhasil diperbarui.' });
+      setFeedbackMsg({ type: 'success', text: 'Pengaturan housekeeping berhasil disimpan' });
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message || 'Gagal menyimpan pengaturan.' });
+      setFeedbackMsg({ type: 'error', text: err.message || 'Gagal menyimpan pengaturan housekeeping' });
     } finally {
       setIsSaving(false);
     }
@@ -397,6 +421,49 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
               </p>
             </div>
           </label>
+
+          {/* Default Checklist Template Selectors */}
+          <div className="pt-3 border-t border-neutral-100 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-neutral-800 mb-1">
+                Template Pembersihan Kamar (Default)
+              </label>
+              <select
+                value={cleaningTemplateCode}
+                onChange={(e) => setCleaningTemplateCode(e.target.value)}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                {templates.map((tpl) => (
+                  <option key={tpl.id} value={tpl.code}>
+                    {tpl.name} ({tpl.code})
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-neutral-400 mt-1">
+                Digunakan otomatis saat Front Desk / sistem menjadwalkan tugas Room Cleaning.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-neutral-800 mb-1">
+                Template Pemeriksaan Checkout (Default)
+              </label>
+              <select
+                value={checkoutTemplateCode}
+                onChange={(e) => setCheckoutTemplateCode(e.target.value)}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                {templates.map((tpl) => (
+                  <option key={tpl.id} value={tpl.code}>
+                    {tpl.name} ({tpl.code})
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-neutral-400 mt-1">
+                Digunakan otomatis saat Front Office memulai alur Checkout Room Check.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
