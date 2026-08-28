@@ -101,6 +101,9 @@ export async function initializeDatabase(pool: Pool) {
       due_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS task_number VARCHAR(60);
+    CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_task_number ON housekeeping_tasks (task_number);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_housekeeping_tasks_task_number ON housekeeping_tasks (task_number) WHERE task_number IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS maintenance_tasks (
       id SERIAL PRIMARY KEY,
@@ -1122,6 +1125,281 @@ export async function initializeDatabase(pool: Pool) {
         VALUES ('payment_evidence_schema_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
+    }
+
+    // 9. Housekeeping operations & checklist schema migration (HK-OPS-1)
+    const hkOpsMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_operations_schema_v1'"
+    );
+    if ((hkOpsMarkerCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- Upgrade housekeeping_tasks table
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS task_category VARCHAR(30) NOT NULL DEFAULT 'ROOM_OPERATIONS';
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS guest_id INTEGER REFERENCES guests(id) ON DELETE SET NULL;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS title VARCHAR(255);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS description TEXT;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS assigned_department VARCHAR(50) DEFAULT 'Housekeeping';
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS assigned_user_id INTEGER;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS assigned_user_name_snapshot VARCHAR(150);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS requested_by_user_id INTEGER;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS requested_by_name_snapshot VARCHAR(150);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS requested_by_role_snapshot VARCHAR(100);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP WITHOUT TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP WITHOUT TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMP WITHOUT TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP WITHOUT TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITHOUT TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS completion_note TEXT;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) DEFAULT 'MANUAL';
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS source_entity_id VARCHAR(100);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS inspection_result VARCHAR(30);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS issue_type VARCHAR(50);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS issue_note TEXT;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS estimated_charge NUMERIC(12, 2);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS task_number VARCHAR(60);
+
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_property_status ON housekeeping_tasks (property_id, status);
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_room ON housekeeping_tasks (room_id);
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_reservation ON housekeeping_tasks (reservation_id);
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_category ON housekeeping_tasks (task_category);
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_type ON housekeeping_tasks (task_type);
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_task_number ON housekeeping_tasks (task_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_housekeeping_tasks_task_number ON housekeeping_tasks (task_number) WHERE task_number IS NOT NULL;
+
+        -- Checklist Templates
+        CREATE TABLE IF NOT EXISTS checklist_templates (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(150) NOT NULL,
+          task_type VARCHAR(50) NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          requires_verification BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_checklist_templates_prop_code UNIQUE (property_id, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_templates_prop ON checklist_templates (property_id);
+
+        -- Checklist Template Items
+        CREATE TABLE IF NOT EXISTS checklist_template_items (
+          id SERIAL PRIMARY KEY,
+          template_id INTEGER NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
+          section VARCHAR(100) NOT NULL,
+          label VARCHAR(255) NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_required BOOLEAN NOT NULL DEFAULT TRUE,
+          requires_note BOOLEAN NOT NULL DEFAULT FALSE,
+          requires_photo BOOLEAN NOT NULL DEFAULT FALSE,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_items_template ON checklist_template_items (template_id);
+
+        -- Task Checklist Snapshot Items
+        CREATE TABLE IF NOT EXISTS housekeeping_task_checklist_items (
+          id SERIAL PRIMARY KEY,
+          task_id INTEGER NOT NULL REFERENCES housekeeping_tasks(id) ON DELETE CASCADE,
+          template_item_id INTEGER REFERENCES checklist_template_items(id) ON DELETE SET NULL,
+          section VARCHAR(100) NOT NULL,
+          label VARCHAR(255) NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_required BOOLEAN NOT NULL DEFAULT TRUE,
+          requires_note BOOLEAN NOT NULL DEFAULT FALSE,
+          requires_photo BOOLEAN NOT NULL DEFAULT FALSE,
+          is_completed BOOLEAN NOT NULL DEFAULT FALSE,
+          completed_at TIMESTAMP WITHOUT TIME ZONE,
+          completed_by_name VARCHAR(150),
+          note TEXT,
+          photo_storage_key VARCHAR(500),
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_checklist_items_task ON housekeeping_task_checklist_items (task_id);
+
+        -- Property Housekeeping Settings
+        CREATE TABLE IF NOT EXISTS property_housekeeping_settings (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL UNIQUE REFERENCES properties(id) ON DELETE RESTRICT,
+          require_final_inspection BOOLEAN NOT NULL DEFAULT FALSE,
+          require_checkout_room_check BOOLEAN NOT NULL DEFAULT FALSE,
+          allow_calendar_room_status_override BOOLEAN NOT NULL DEFAULT FALSE,
+          default_cleaning_template_code VARCHAR(50) NOT NULL DEFAULT 'STANDARD_ROOM_CLEANING',
+          default_checkout_template_code VARCHAR(50) NOT NULL DEFAULT 'CHECKOUT_INSPECTION',
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_property_hk_settings_prop ON property_housekeeping_settings (property_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_operations_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed standard default templates and settings for all existing properties
+      const propsRes = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const prop of propsRes.rows) {
+        const propId = prop.id;
+
+        // Settings
+        await auditMigrationClient.query(`
+          INSERT INTO property_housekeeping_settings (property_id, require_final_inspection, require_checkout_room_check, allow_calendar_room_status_override)
+          VALUES ($1, false, false, false)
+          ON CONFLICT (property_id) DO NOTHING
+        `, [propId]);
+
+        // Template 1: STANDARD_ROOM_CLEANING
+        const t1Res = await auditMigrationClient.query(`
+          INSERT INTO checklist_templates (property_id, code, name, task_type, is_active, requires_verification)
+          VALUES ($1, 'STANDARD_ROOM_CLEANING', 'Standard Room Cleaning', 'ROOM_CLEANING', true, false)
+          ON CONFLICT (property_id, code) DO UPDATE SET updated_at = NOW()
+          RETURNING id
+        `, [propId]);
+        const t1Id = t1Res.rows[0]?.id;
+        if (t1Id) {
+          const count1 = await auditMigrationClient.query('SELECT COUNT(*) as c FROM checklist_template_items WHERE template_id = $1', [t1Id]);
+          if (Number(count1.rows[0].c) === 0) {
+            await auditMigrationClient.query(`
+              INSERT INTO checklist_template_items (template_id, section, label, sort_order, is_required)
+              VALUES
+                ($1, 'BEDROOM', 'Sprei diganti / diperiksa', 1, true),
+                ($1, 'BEDROOM', 'Bed dibuat rapi', 2, true),
+                ($1, 'BEDROOM', 'Bantal diperiksa', 3, true),
+                ($1, 'BEDROOM', 'Lantai dibersihkan', 4, true),
+                ($1, 'BEDROOM', 'Debu furniture dibersihkan', 5, true),
+                ($1, 'BATHROOM', 'Toilet dibersihkan', 6, true),
+                ($1, 'BATHROOM', 'Shower dibersihkan', 7, true),
+                ($1, 'BATHROOM', 'Handuk diganti / diperiksa', 8, true),
+                ($1, 'BATHROOM', 'Amenities dilengkapi', 9, true),
+                ($1, 'BATHROOM', 'Air panas diperiksa', 10, true),
+                ($1, 'ROOM_AMENITIES', 'Air mineral tersedia', 11, true),
+                ($1, 'ROOM_AMENITIES', 'Coffee / tea replenished', 12, false),
+                ($1, 'ROOM_AMENITIES', 'Trash bin kosong', 13, true),
+                ($1, 'ROOM_AMENITIES', 'AC diperiksa', 14, true),
+                ($1, 'ROOM_AMENITIES', 'TV / remote tersedia', 15, true),
+                ($1, 'FINAL_CHECK', 'Tidak ada barang tamu tertinggal', 16, true),
+                ($1, 'FINAL_CHECK', 'Tidak ada kerusakan terlihat', 17, true),
+                ($1, 'FINAL_CHECK', 'Kondisi kamar siap untuk tamu berikutnya', 18, true)
+            `, [t1Id]);
+          }
+        }
+
+        // Template 2: CHECKOUT_INSPECTION
+        const t2Res = await auditMigrationClient.query(`
+          INSERT INTO checklist_templates (property_id, code, name, task_type, is_active, requires_verification)
+          VALUES ($1, 'CHECKOUT_INSPECTION', 'Checkout Inspection', 'CHECKOUT_ROOM_CHECK', true, false)
+          ON CONFLICT (property_id, code) DO UPDATE SET updated_at = NOW()
+          RETURNING id
+        `, [propId]);
+        const t2Id = t2Res.rows[0]?.id;
+        if (t2Id) {
+          const count2 = await auditMigrationClient.query('SELECT COUNT(*) as c FROM checklist_template_items WHERE template_id = $1', [t2Id]);
+          if (Number(count2.rows[0].c) === 0) {
+            await auditMigrationClient.query(`
+              INSERT INTO checklist_template_items (template_id, section, label, sort_order, is_required)
+              VALUES
+                ($1, 'CHECKOUT_INSPECTION', 'Minibar checked', 1, true),
+                ($1, 'CHECKOUT_INSPECTION', 'Linen / towel checked', 2, true),
+                ($1, 'CHECKOUT_INSPECTION', 'Hotel inventory complete', 3, true),
+                ($1, 'CHECKOUT_INSPECTION', 'No visible room damage', 4, true),
+                ($1, 'CHECKOUT_INSPECTION', 'No hotel property missing', 5, true),
+                ($1, 'CHECKOUT_INSPECTION', 'Guest belongings / Lost & Found checked', 6, true),
+                ($1, 'CHECKOUT_INSPECTION', 'Other room condition checked', 7, false)
+            `, [t2Id]);
+          }
+        }
+
+        // Template 3: FINAL_INSPECTION
+        const t3Res = await auditMigrationClient.query(`
+          INSERT INTO checklist_templates (property_id, code, name, task_type, is_active, requires_verification)
+          VALUES ($1, 'FINAL_INSPECTION', 'Supervisor Final Inspection', 'FINAL_INSPECTION', true, false)
+          ON CONFLICT (property_id, code) DO UPDATE SET updated_at = NOW()
+          RETURNING id
+        `, [propId]);
+        const t3Id = t3Res.rows[0]?.id;
+        if (t3Id) {
+          const count3 = await auditMigrationClient.query('SELECT COUNT(*) as c FROM checklist_template_items WHERE template_id = $1', [t3Id]);
+          if (Number(count3.rows[0].c) === 0) {
+            await auditMigrationClient.query(`
+              INSERT INTO checklist_template_items (template_id, section, label, sort_order, is_required)
+              VALUES
+                ($1, 'SUPERVISOR_INSPECTION', 'Bed presentation sesuai standard', 1, true),
+                ($1, 'SUPERVISOR_INSPECTION', 'Bathroom standard', 2, true),
+                ($1, 'SUPERVISOR_INSPECTION', 'Amenities complete', 3, true),
+                ($1, 'SUPERVISOR_INSPECTION', 'No odor', 4, true),
+                ($1, 'SUPERVISOR_INSPECTION', 'AC / TV / lighting normal', 5, true),
+                ($1, 'SUPERVISOR_INSPECTION', 'No visible defect', 6, true)
+            `, [t3Id]);
+          }
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // MIGRATION 10: Property Modular Features & Sub-Feature Flags
+    // -------------------------------------------------------------------------
+    const hasFeaturesMigration = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'property_feature_flags_v1'`
+    );
+
+    if ((hasFeaturesMigration.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS property_features (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          feature_key VARCHAR(100) NOT NULL,
+          enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_by VARCHAR(255),
+          CONSTRAINT uq_property_feature UNIQUE (property_id, feature_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_property_features_prop ON property_features (property_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('property_feature_flags_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed standard default feature flags for all existing properties
+      const propsRes = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const prop of propsRes.rows) {
+        const propId = prop.id;
+        await auditMigrationClient.query(`
+          INSERT INTO property_features (property_id, feature_key, enabled)
+          VALUES
+            ($1, 'housekeeping.enabled', TRUE),
+            ($1, 'housekeeping.room_operations', TRUE),
+            ($1, 'housekeeping.checkout_inspection', TRUE),
+            ($1, 'housekeeping.final_inspection', TRUE),
+            ($1, 'housekeeping.service_requests', TRUE),
+            ($1, 'housekeeping.department_tasks', TRUE),
+            ($1, 'housekeeping.public_area_cleaning', FALSE),
+            ($1, 'housekeeping.recurring_cleaning', FALSE),
+            ($1, 'housekeeping.laundry', FALSE),
+            ($1, 'housekeeping.laundry_internal', FALSE),
+            ($1, 'housekeeping.laundry_vendor', FALSE),
+            ($1, 'housekeeping.guest_laundry', FALSE),
+            ($1, 'housekeeping.linen_inventory', FALSE),
+            ($1, 'housekeeping.amenities_inventory', FALSE),
+            ($1, 'housekeeping.chemical_inventory', FALSE),
+            ($1, 'housekeeping.hk_pantry_inventory', FALSE),
+            ($1, 'housekeeping.lost_and_found', FALSE),
+            ($1, 'housekeeping.linen', FALSE),
+            ($1, 'housekeeping.amenities', FALSE),
+            ($1, 'front_office.enabled', TRUE),
+            ($1, 'pos.enabled', TRUE),
+            ($1, 'finance.enabled', TRUE),
+            ($1, 'hrd.enabled', TRUE),
+            ($1, 'events_banquet.enabled', FALSE),
+            ($1, 'marketing.enabled', TRUE),
+            ($1, 'purchasing.enabled', FALSE),
+            ($1, 'general_affair.enabled', FALSE)
+          ON CONFLICT (property_id, feature_key) DO NOTHING
+        `, [propId]);
+      }
     }
 
     await auditMigrationClient.query('COMMIT');

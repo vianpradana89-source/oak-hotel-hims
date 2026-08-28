@@ -60,6 +60,10 @@ import type {
   RoomReadinessInfo,
   CellTurnoverInfo
 } from './domains/turnover/turnoverTypes';
+import { createHousekeepingRouter } from './domains/housekeeping/housekeepingRouter';
+import { ensureCheckoutRoomCleaningTask, getPropertyHousekeepingSettings } from './domains/housekeeping/housekeepingService';
+import { createFeatureRouter } from './domains/features/featureRouter';
+import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
 
 const app: any = express();
@@ -1638,7 +1642,36 @@ app.get('/api/reservations/:id', async (req, res) => {
     if (row.room_id) {
       readiness = await evaluateRoomReadiness(pool, Number(row.room_id), reservationId);
     }
-    res.json({ status: 'OK', data: { ...data, readiness } });
+
+    let checkout_inspection: any = null;
+    const chkRes = await pool.query(
+      `SELECT id, status, inspection_result, issue_type, issue_note, estimated_charge, created_at, completed_at
+       FROM housekeeping_tasks
+       WHERE reservation_id = $1 AND task_type = 'CHECKOUT_ROOM_CHECK'
+       ORDER BY id DESC LIMIT 1`,
+      [reservationId]
+    );
+    if (hasRows(chkRes)) {
+      const task = chkRes.rows[0];
+      let clearanceState = 'REQUESTED';
+      if (task.status === 'IN_PROGRESS') clearanceState = 'INSPECTING';
+      else if (task.status === 'DONE') {
+        clearanceState = task.inspection_result === 'ISSUE_FOUND' ? 'ISSUE_FOUND' : 'CLEAR';
+      }
+      checkout_inspection = {
+        task_id: task.id,
+        status: task.status,
+        clearance_state: clearanceState,
+        inspection_result: task.inspection_result,
+        issue_type: task.issue_type,
+        issue_note: task.issue_note,
+        estimated_charge: task.estimated_charge !== null && task.estimated_charge !== undefined ? Number(task.estimated_charge) : null,
+        created_at: task.created_at,
+        completed_at: task.completed_at
+      };
+    }
+
+    res.json({ status: 'OK', data: { ...data, readiness, checkout_inspection } });
   } catch (err: any) {
     if (err?.statusCode) {
       return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
@@ -2764,142 +2797,8 @@ app.get('/api/rooms', async (req, res) => {
   }
 });
 
-app.get('/api/housekeeping/tasks', async (req, res) => {
-  try {
-    const propertyId = parsePropertyId(req.query.property_id, 'property_id');
-    await assertPropertyExists(pool, propertyId);
-    const tasks = await pool.query(
-      'SELECT * FROM housekeeping_tasks WHERE property_id = $1 ORDER BY due_at ASC NULLS LAST, created_at DESC',
-      [propertyId]
-    );
-    res.json({ status: 'OK', data: tasks.rows });
-  } catch (err: any) {
-    const sc = err.statusCode || 500;
-    res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
-  }
-});
+// Housekeeping domain routes are mounted via createHousekeepingRouter (HK-OPS-1)
 
-app.post('/api/housekeeping/tasks', async (req, res) => {
-  const propertyId = parsePropertyId(req.body.property_id, 'property_id');
-  const { room_number, task_type, priority, status, assignee, notes, due_at } = req.body;
-
-  try {
-    await assertPropertyExists(pool, propertyId);
-
-    if (room_number) {
-      const roomCheck = await pool.query(
-        'SELECT id FROM rooms WHERE room_number = $1 AND property_id = $2',
-        [room_number, propertyId]
-      );
-      if (!hasRows(roomCheck)) {
-        return res.status(400).json({ status: 'ERROR', code: 'ROOM_NOT_IN_PROPERTY', message: `room_number "${room_number}" not found in property ${propertyId}` });
-      }
-    }
-
-    const result = await pool.query(
-      `INSERT INTO housekeeping_tasks (property_id, room_number, task_type, priority, status, assignee, notes, due_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [propertyId, room_number || null, task_type || 'ROOM_SERVICE', priority || 'MEDIUM', status || 'PENDING', assignee || null, notes || null, due_at || null]
-    );
-
-    res.status(201).json({ status: 'SUCCESS', data: result.rows[0] });
-  } catch (err: any) {
-    const sc = err.statusCode || 500;
-    res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
-  }
-});
-
-app.patch('/api/housekeeping/tasks/:id/status', async (req, res) => {
-  const taskId = Number(req.params.id);
-  const propertyId = parsePropertyId(req.body.property_id, 'property_id');
-  const nextTaskStatus = String(req.body?.status || 'PENDING').toUpperCase();
-  const client = await pool.connect();
-
-  try {
-    await assertPropertyExists(pool, propertyId);
-    await client.query('BEGIN');
-    const existingTask = await client.query(
-      'SELECT * FROM housekeeping_tasks WHERE id = $1 FOR UPDATE',
-      [taskId]
-    );
-    if (!hasRows(existingTask)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'task not found' });
-    }
-    if (existingTask.rows[0].property_id !== propertyId) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: 'task does not belong to this property' });
-    }
-
-    const result = await client.query(
-      'UPDATE housekeeping_tasks SET status = $1 WHERE id = $2 RETURNING *',
-      [nextTaskStatus, taskId]
-    );
-    const task = result.rows[0];
-
-    let roomUpdatePayload: { roomId: number; status: string } | null = null;
-    const taskType = String(task.task_type || '').toUpperCase();
-    const roomNumber = String(task.room_number || '').trim();
-    if (taskType === 'ROOM_CLEANING' && (nextTaskStatus === 'DONE' || nextTaskStatus === 'IN_PROGRESS')) {
-      if (!roomNumber) {
-        throw new Error('room_number is required for ROOM_CLEANING task status updates');
-      }
-      const roomResult = await client.query(
-        'SELECT id FROM rooms WHERE room_number = $1 AND property_id = $2 FOR UPDATE',
-        [roomNumber, propertyId]
-      );
-      if (!hasRows(roomResult)) {
-        throw new Error(`Unable to resolve room for housekeeping task ${taskId} with room_number "${roomNumber}" in property ${propertyId}`);
-      }
-
-      const roomId = Number(roomResult.rows[0].id);
-      let targetStatus: string | null = null;
-
-      if (nextTaskStatus === 'IN_PROGRESS') {
-        targetStatus = 'CLEANING';
-      } else if (nextTaskStatus === 'DONE') {
-        const inHouse = await client.query(
-          `SELECT 1
-           FROM reservations
-           WHERE room_id = $1
-             AND status = 'CHECKED_IN'
-             AND stay_status = 'IN_HOUSE'
-             AND checked_in_at IS NOT NULL
-             AND checked_out_at IS NULL
-             AND (check_out IS NULL OR check_out >= CURRENT_DATE)
-           LIMIT 1`,
-          [roomId]
-        );
-        targetStatus = hasRows(inHouse) ? 'OCCUPIED_CLEAN' : 'VACANT_CLEAN';
-      }
-
-      if (targetStatus) {
-        await client.query(
-          'UPDATE rooms SET status = $1 WHERE id = $2',
-          [targetStatus, roomId]
-        );
-        roomUpdatePayload = { roomId, status: targetStatus };
-      }
-    }
-
-    await client.query('COMMIT');
-    if (roomUpdatePayload) {
-      broadcastEvent('RoomStatusUpdated', {
-        room_id: roomUpdatePayload.roomId,
-        status: roomUpdatePayload.status,
-        timestamp: new Date().toISOString()
-      });
-    }
-    res.json({ status: 'SUCCESS', data: result.rows[0] });
-  } catch (err: any) {
-    await client.query('ROLLBACK');
-    const sc = err.statusCode || 500;
-    res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
-  } finally {
-    client.release();
-  }
-});
 
 app.get('/api/maintenance/tasks', async (req, res) => {
   try {
@@ -4056,6 +3955,29 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
 
     let checkoutReservation = targetReservation;
     if (targetStatus !== 'CHECKED_OUT') {
+      // Check mandatory checkout inspection policy
+      const isHkEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.enabled');
+      const isCheckoutCheckFeature = isHkEnabled && (await isFeatureEnabled(client, propertyId, 'housekeeping.checkout_inspection'));
+      if (isCheckoutCheckFeature) {
+        const hkSettings = await getPropertyHousekeepingSettings(client, propertyId);
+        if (hkSettings.require_checkout_room_check) {
+          const chkTaskRes = await client.query(
+            `SELECT status, inspection_result FROM housekeeping_tasks
+             WHERE reservation_id = $1 AND task_type = 'CHECKOUT_ROOM_CHECK'
+             ORDER BY id DESC LIMIT 1`,
+            [reservationId]
+          );
+          if (!hasRows(chkTaskRes) || chkTaskRes.rows[0].status !== 'DONE') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              status: 'ERROR',
+              code: 'CHECKOUT_INSPECTION_REQUIRED',
+              message: 'Pemeriksaan kamar oleh Housekeeping wajib diselesaikan sebelum proses checkout.'
+            });
+          }
+        }
+      }
+
       const updated = await client.query(
         `UPDATE reservations
          SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
@@ -4086,6 +4008,8 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         'UPDATE rooms SET status = $1 WHERE id = $2',
         ['VACANT_DIRTY', currentRoomId]
       );
+
+      await ensureCheckoutRoomCleaningTask(client, propertyId, currentRoomId, reservationId);
 
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
@@ -5236,8 +5160,9 @@ app.get('/api/properties', async (req, res) => {
   }
 });
 
-// Property branding routes (/api/properties/:id/branding)
+// Property branding & features routes
 app.use('/api/properties', createPropertyBrandingRouter(pool));
+app.use('/api/properties', createFeatureRouter(pool));
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
@@ -5247,6 +5172,7 @@ app.use('/api/reports', createReportsRouter(pool));
 app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
+app.use('/api/housekeeping', createHousekeepingRouter(pool));
 
 
 // GET tapechart: rooms × dates with reservations per cell

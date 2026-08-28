@@ -13,6 +13,7 @@ export interface AppSidebarProps {
   onCloseMobile: () => void;
   activeProperty: ShellPropertyItem | null;
   propertyBranding?: PropertyBrandingConfig | null;
+  featureFlags?: Record<string, boolean>;
 }
 
 export const AppSidebar: React.FC<AppSidebarProps> = ({
@@ -24,7 +25,10 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   onCloseMobile,
   activeProperty,
   propertyBranding,
+  featureFlags,
 }) => {
+  const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
+
   // OAK HIMS Grouped Navigation
   const navGroups: NavGroupDef[] = [
     {
@@ -65,8 +69,22 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
     {
       title: 'Departemen',
       items: [
+        ...(isHkEnabled
+          ? [
+              {
+                key: 'Housekeeping' as MainNavKey,
+                label: 'Housekeeping',
+                isFunctional: true,
+                icon: (
+                  <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                ),
+              },
+            ]
+          : []),
         {
-          key: 'Produk & Inventori',
+          key: 'Produk & Inventori' as MainNavKey,
           label: 'Master Kamar & Produk',
           isFunctional: true,
           icon: (

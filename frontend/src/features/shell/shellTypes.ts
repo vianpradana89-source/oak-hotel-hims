@@ -3,6 +3,7 @@ import React from 'react';
 export type MainNavKey =
   | 'Kalender'
   | 'Transaksi'
+  | 'Housekeeping'
   | 'Laporan'
   | 'Produk & Inventori'
   | 'Pelanggan'

@@ -38,12 +38,13 @@ import type {
   PaymentEvidenceType
 } from './features/transactions/paymentEvidenceTypes.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
+import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
-import { PropertyBrandingSettings } from './features/propertySettings/PropertyBrandingSettings.tsx';
+import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
@@ -214,7 +215,6 @@ function App() {
   });
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [propertyBrandings, setPropertyBrandings] = useState<Record<number, PropertyBrandingConfig>>({});
-  const [pengaturanTab, setPengaturanTab] = useState<'branding' | 'hr'>('branding');
 
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
@@ -265,6 +265,25 @@ function App() {
     const currentProp = properties.find((p: any) => p.id === propertyId);
     return getFallbackPropertyBranding(propertyId, currentProp?.name, currentProp?.property_code);
   }, [propertyId, properties, propertyBrandings]);
+
+  const [propertyFeatures, setPropertyFeatures] = useState<Record<string, boolean>>({});
+  const [initialSettingsCategory, setInitialSettingsCategory] = useState<SettingsCategoryKey>('housekeeping');
+
+  useEffect(() => {
+    if (!propertyId) return;
+    let isMounted = true;
+    fetch(`/api/properties/${propertyId}/features`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted && data?.data) {
+          setPropertyFeatures(data.data);
+        }
+      })
+      .catch((err) => console.error('Failed to fetch property features:', err));
+    return () => {
+      isMounted = false;
+    };
+  }, [propertyId]);
 
   const handleSaveBranding = async (updated: PropertyBrandingConfig) => {
     const saved = await savePropertyBranding(updated.propertyId, updated);
@@ -1238,6 +1257,33 @@ function App() {
     } catch (error) {
       console.error(`Reservation ${action} failed`, error);
       alert(`Gagal ${action === 'checkin' ? 'check-in' : 'check-out'}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleRequestCheckoutRoomCheck = async () => {
+    if (!selectedRes || !selectedRes.id || propertyId === null) return;
+    try {
+      const resp = await fetch('/api/housekeeping/checkout-room-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          reservation_id: Number(selectedRes.id),
+          requested_by_name_snapshot: 'Front Desk'
+        })
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || 'Gagal meminta pemeriksaan kamar');
+      }
+      alert('Permintaan pemeriksaan kamar telah dikirim ke Housekeeping (Priority Critical).');
+      const detailRes = await fetch(`/api/reservations/${selectedRes.id}?property_id=${propertyId}`);
+      if (detailRes.ok) {
+        const json = await detailRes.json();
+        if (json.data) setSelectedRes((prev: any) => ({ ...prev, ...json.data }));
+      }
+    } catch (e: any) {
+      alert(e.message || 'Gagal meminta pemeriksaan kamar');
     }
   };
 
@@ -2886,6 +2932,7 @@ function App() {
           onCloseMobile={() => setIsMobileSidebarOpen(false)}
           activeProperty={properties.find((p: any) => p.id === propertyId) || null}
           propertyBranding={activeBranding}
+          featureFlags={propertyFeatures}
         />
 
         <main className="hotel-main">
@@ -3904,6 +3951,17 @@ function App() {
           </div>
         )}
 
+        {selectedMenu === 'Housekeeping' && propertyId !== null && (
+          <HousekeepingWorkspace
+            propertyId={propertyId}
+            onNavigateToSettings={(section) => {
+              if (section) setInitialSettingsCategory(section as SettingsCategoryKey);
+              setSelectedMenu('Pengaturan');
+            }}
+            featureFlags={propertyFeatures}
+          />
+        )}
+
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
             propertyId={propertyId}
@@ -3917,74 +3975,16 @@ function App() {
           <GuestCrmWorkspace propertyId={propertyId} />
         )}
 
-        {selectedMenu === 'Pengaturan' && (
-          <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900 tracking-tight">Pengaturan Properti & Manajemen</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Konfigurasi identitas properti, branding visual, dan data operasional internal.</p>
-              </div>
-              <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setPengaturanTab('branding')}
-                  className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
-                    pengaturanTab === 'branding'
-                      ? 'bg-white text-[#1b4332] shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Branding & Identitas
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPengaturanTab('hr')}
-                  className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
-                    pengaturanTab === 'hr'
-                      ? 'bg-white text-[#1b4332] shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  HR & Payroll ({employees.length})
-                </button>
-              </div>
-            </div>
-
-            {pengaturanTab === 'branding' && propertyId !== null && (
-              <PropertyBrandingSettings
-                propertyId={propertyId}
-                initialBranding={activeBranding || getFallbackPropertyBranding(propertyId, properties.find((p: any) => p.id === propertyId)?.name, properties.find((p: any) => p.id === propertyId)?.property_code)}
-                onSaveBranding={handleSaveBranding}
-              />
-            )}
-
-            {pengaturanTab === 'hr' && (
-              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4 space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                  <h3 className="font-bold text-sm text-slate-800">Daftar Karyawan & Payroll</h3>
-                  <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full font-semibold">
-                    {employees.length} Karyawan
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  {employees.map((employee: any) => (
-                    <div key={employee.id} className="border border-slate-200/80 rounded-lg p-3 text-xs bg-[#faf9f6] flex items-center justify-between">
-                      <div>
-                        <div className="font-bold text-slate-900">{employee.full_name}</div>
-                        <div className="text-slate-500 mt-0.5">{employee.position}</div>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[11px] text-slate-400 block">Net payroll:</span>
-                        <span className="font-mono font-bold text-slate-800">
-                          Rp {Number(payroll.find((p: any) => p.employee_id === employee.id)?.net_salary || 0).toLocaleString('id-ID')}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+        {selectedMenu === 'Pengaturan' && propertyId !== null && (
+          <ManagementSettingsWorkspace
+            propertyId={propertyId}
+            activeProperty={properties.find((p: any) => p.id === propertyId)}
+            activeBranding={activeBranding || getFallbackPropertyBranding(propertyId, properties.find((p: any) => p.id === propertyId)?.name, properties.find((p: any) => p.id === propertyId)?.property_code)}
+            onSaveBranding={handleSaveBranding}
+            employees={employees}
+            payroll={payroll}
+            initialCategory={initialSettingsCategory}
+          />
         )}
         </main>
       </div>
@@ -4129,6 +4129,68 @@ function App() {
                     </button>
                   ))}
                 </div>
+
+                {/* Checkout Inspection Status / Request (HK-OPS-1) */}
+                {propertyFeatures['housekeeping.enabled'] !== false && propertyFeatures['housekeeping.checkout_inspection'] !== false && (
+                  selectedRes.checkout_inspection ? (
+                    <div className={`mt-3 p-3 rounded-xl border text-xs ${
+                      selectedRes.checkout_inspection.clearance_state === 'CLEAR'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND'
+                        ? 'bg-rose-50 border-rose-300 text-rose-950'
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}>
+                      <div className="flex items-center justify-between font-bold">
+                        <span className="flex items-center gap-1.5">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                          </svg>
+                          Pemeriksaan Kamar (Checkout Inspection)
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          selectedRes.checkout_inspection.clearance_state === 'CLEAR'
+                            ? 'bg-emerald-200 text-emerald-900'
+                            : selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND'
+                            ? 'bg-rose-200 text-rose-900'
+                            : 'bg-amber-200 text-amber-900 animate-pulse'
+                        }`}>
+                          {selectedRes.checkout_inspection.clearance_state === 'CLEAR' ? 'CLEAR (AMAN)' :
+                           selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND' ? 'ADA TEMUAN' :
+                           selectedRes.checkout_inspection.clearance_state === 'INSPECTING' ? 'SEDANG DIPERIKSA' : 'DIMINTA (PENDING)'}
+                        </span>
+                      </div>
+
+                      {selectedRes.checkout_inspection.issue_type && (
+                        <div className="mt-1.5 p-2 bg-white/80 rounded border border-rose-200 text-rose-900">
+                          <div className="font-semibold text-xs">
+                            Temuan: <span className="font-bold">{selectedRes.checkout_inspection.issue_type}</span>
+                          </div>
+                          {selectedRes.checkout_inspection.issue_note && (
+                            <div className="mt-0.5 italic">{selectedRes.checkout_inspection.issue_note}</div>
+                          )}
+                          {Number(selectedRes.checkout_inspection.estimated_charge || 0) > 0 && (
+                            <div className="mt-1 font-bold text-rose-800">
+                              Estimasi Biaya Tambahan: {formatCurrency(Number(selectedRes.checkout_inspection.estimated_charge))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    selectedRes.status === 'CHECKED_IN' && (
+                      <button
+                        type="button"
+                        onClick={handleRequestCheckoutRoomCheck}
+                        className="mt-3 w-full py-2 px-3 text-xs font-bold text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <svg className="w-4 h-4 text-purple-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                        </svg>
+                        Minta Pemeriksaan Kamar ke Housekeeping
+                      </button>
+                    )
+                  )
+                )}
               </div>
 
               <div className="detail-section">

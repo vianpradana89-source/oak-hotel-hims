@@ -44,14 +44,14 @@ export default function ReservationBar(props: Props) {
             <span className={props.segmentMeta.className}>{props.segmentMeta.label}</span>
             {props.turnoverInfo?.has_turnover && (
               <span
-                className={`text-[9px] px-1 py-0.5 rounded font-bold uppercase tracking-wider ${
+                className={`text-[9px] px-1.5 py-0.2 rounded-sm font-bold uppercase tracking-wider inline-flex items-center gap-0.5 shadow-2xs ${
                   props.turnoverInfo.is_ready === false
                     ? 'bg-amber-100 text-amber-900 border border-amber-300'
                     : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
                 }`}
-                title={props.turnoverInfo.reason_message || (props.turnoverInfo.is_ready === false ? 'Turnover: Kamar belum siap' : 'Turnover: Kamar siap')}
+                title={props.turnoverInfo.reason_message || (props.turnoverInfo.is_ready === false ? 'Turnover: Kamar belum siap untuk check-in' : 'Turnover: Kamar siap huni')}
               >
-                {props.turnoverInfo.is_ready === false ? '⚠ TURNOVER' : 'ARR'}
+                {props.turnoverInfo.is_ready === false ? 'DEP • ARR' : 'ARR'}
               </span>
             )}
           </div>
