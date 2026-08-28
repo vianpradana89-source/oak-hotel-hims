@@ -61,7 +61,9 @@ import type {
   CellTurnoverInfo
 } from './domains/turnover/turnoverTypes';
 import { createHousekeepingRouter } from './domains/housekeeping/housekeepingRouter';
-import { ensureCheckoutRoomCleaningTask, getPropertyHousekeepingSettings } from './domains/housekeeping/housekeepingService';
+import { ensureDirtyRoomCleaningTask, ensureCheckoutRoomCleaningTask, getPropertyHousekeepingSettings } from './domains/housekeeping/housekeepingService';
+import { createAttendanceRouter } from './domains/attendance/attendanceRouter';
+import { createHrdRouter } from './domains/hrd/hrdRouter';
 import { createFeatureRouter } from './domains/features/featureRouter';
 import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
@@ -3371,7 +3373,7 @@ app.post('/api/accounting/payables', async (req, res) => {
 
 app.patch('/api/rooms/:id/status', async (req, res) => {
   const roomId = Number(req.params.id);
-  const { status } = req.body;
+  const { status, force_hk_override } = req.body;
 
   if (!status) {
     return res.status(400).json({ status: 'ERROR', message: 'missing status' });
@@ -3389,6 +3391,30 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
 
     await client.query('BEGIN');
     await assertRoomBelongsToProperty(client, roomId, propertyId);
+
+    const currentRoom = await client.query('SELECT status FROM rooms WHERE id = $1', [roomId]);
+    const currentPhysicalStatus = currentRoom.rows[0]?.status;
+
+    // Check allow_calendar_room_status_override setting if attempting Dirty -> Ready transition
+    const isTransitionToReady = (mappedStatus === 'VACANT_CLEAN' || mappedStatus === 'INSPECTED') &&
+      (currentPhysicalStatus === 'VACANT_DIRTY' || currentPhysicalStatus === 'CLEANING' || currentPhysicalStatus === 'DIRTY');
+
+    if (isTransitionToReady && !force_hk_override) {
+      const hkSet = await client.query(
+        'SELECT allow_calendar_room_status_override FROM property_housekeeping_settings WHERE property_id = $1',
+        [propertyId]
+      );
+      const allowOverride = hkSet.rows.length > 0 ? Boolean(hkSet.rows[0].allow_calendar_room_status_override) : false;
+      if (!allowOverride) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'OVERRIDE_DISABLED',
+          message: 'Perubahan status kesiapan kamar dari kalender dinonaktifkan oleh pengaturan housekeeping properti. Kesiapan kamar harus diselesaikan melalui alur kerja Housekeeping.'
+        });
+      }
+    }
+
     const result = await client.query(
       'UPDATE rooms SET status = $1 WHERE id = $2 RETURNING *',
       [mappedStatus, roomId]
@@ -3401,8 +3427,12 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      ['PMS', 'UPDATE_STATUS', 'ROOM', roomId, JSON.stringify({ input_status: status, status: mappedStatus }), req.headers['x-correlation-id'] || null, propertyId]
+      ['PMS', 'UPDATE_STATUS', 'ROOM', roomId, JSON.stringify({ input_status: status, status: mappedStatus, force_hk_override: Boolean(force_hk_override) }), req.headers['x-correlation-id'] || null, propertyId]
     );
+
+    if (mappedStatus === 'VACANT_DIRTY' || mappedStatus === 'DIRTY') {
+      await ensureDirtyRoomCleaningTask(client, propertyId, roomId, { sourceType: 'ROOM_STATUS_MUTATION' });
+    }
 
     await client.query('COMMIT');
     broadcastEvent('RoomStatusUpdated', { room_id: roomId, status: mappedStatus, timestamp: new Date().toISOString() });
@@ -5173,6 +5203,9 @@ app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool))
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
+app.use('/api/attendance', createAttendanceRouter(pool));
+app.use('/api/hrd', createHrdRouter(pool));
+
 
 
 // GET tapechart: rooms × dates with reservations per cell
@@ -5250,6 +5283,39 @@ app.get('/api/tapechart', async (req, res) => {
         )
       : { rows: [] as any[] };
     const reservations = reservationsRes.rows;
+
+    // fetch checkout inspections for turnover context
+    const resIds = reservations.map((r: any) => Number(r.id)).filter(Boolean);
+    const checkoutInspectionsRes = resIds.length > 0
+      ? await pool.query(
+          `SELECT id, reservation_id, status, inspection_result, issue_type, issue_note, estimated_charge
+           FROM housekeeping_tasks
+           WHERE property_id = $1 AND task_type = 'CHECKOUT_ROOM_CHECK' AND reservation_id = ANY($2::int[])
+           ORDER BY id DESC`,
+          [propertyId, resIds]
+        )
+      : { rows: [] as any[] };
+
+    const checkoutInspectionByRes = new Map<number, any>();
+    for (const row of checkoutInspectionsRes.rows) {
+      const rid = Number(row.reservation_id);
+      if (!checkoutInspectionByRes.has(rid)) {
+        let clearanceState = 'REQUESTED';
+        if (row.status === 'IN_PROGRESS') clearanceState = 'INSPECTING';
+        else if (row.status === 'DONE' || row.status === 'VERIFIED') {
+          clearanceState = row.inspection_result === 'ISSUE_FOUND' ? 'ISSUE_FOUND' : 'CLEAR';
+        }
+        checkoutInspectionByRes.set(rid, {
+          task_id: row.id,
+          status: row.status,
+          clearance_state: clearanceState,
+          inspection_result: row.inspection_result,
+          issue_type: row.issue_type,
+          issue_note: row.issue_note,
+          estimated_charge: row.estimated_charge !== null ? Number(row.estimated_charge) : null
+        });
+      }
+    }
 
     // fetch availability for range (per room type & date) - scoped to property's room types
     const propertyTypeRes = await pool.query('SELECT id FROM room_types WHERE property_id = $1', [propertyId]);
@@ -5339,12 +5405,14 @@ app.get('/api/tapechart', async (req, res) => {
           const outgoingRes = departures[0] || null;
           const incomingRes = arrivals[0] || null;
 
+          const outgoingChk = outgoingRes ? checkoutInspectionByRes.get(Number(outgoingRes.id)) || null : null;
           const outgoing = outgoingRes ? {
             id: outgoingRes.id,
             guest_name: outgoingRes.guest_name,
             check_out: hotelDateKey(outgoingRes.check_out),
             checked_out_at: outgoingRes.checked_out_at ? new Date(outgoingRes.checked_out_at).toISOString() : null,
-            status: outgoingRes.status
+            status: outgoingRes.status,
+            checkout_inspection: outgoingChk
           } : null;
 
           let incoming: any = null;

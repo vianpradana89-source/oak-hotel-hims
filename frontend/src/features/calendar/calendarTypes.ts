@@ -7,11 +7,21 @@ export type ReadinessReasonCode =
   | 'ROOM_NOT_READY';
 
 export interface OutgoingReservationInfo {
-  id: number;
+  id?: number;
+  reservation_id?: number;
   guest_name: string;
-  check_out: string;
-  checked_out_at: string | null;
-  status: string;
+  check_out?: string;
+  checked_out_at?: string | null;
+  status?: string;
+  checkout_inspection?: {
+    task_id: number;
+    status: string;
+    clearance_state: 'CLEAR' | 'ISSUE_FOUND' | 'REQUESTED' | 'INSPECTING' | 'NO_CHECK';
+    inspection_result?: string | null;
+    issue_type?: string | null;
+    issue_note?: string | null;
+    estimated_charge?: number | null;
+  } | null;
 }
 
 export interface RoomReadinessInfo {

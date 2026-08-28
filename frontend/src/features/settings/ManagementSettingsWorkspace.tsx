@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
 import { PropertyBrandingSettings } from '../propertySettings/PropertyBrandingSettings';
 import { HousekeepingSettingsTab } from '../housekeeping/HousekeepingSettingsTab';
+import { AttendanceSettingsTab } from './AttendanceSettingsTab';
+import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 
 export type SettingsCategoryKey =
@@ -59,6 +61,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   const [hkTemplates, setHkTemplates] = useState<ChecklistTemplate[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [hrSubTab, setHrSubTab] = useState<'STAFF' | 'ATTENDANCE' | 'ROLE_POLICY'>('STAFF');
 
   // Sync initialCategory if changed externally (e.g. from HK shortcut)
   useEffect(() => {
@@ -685,33 +688,78 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
 
           {/* Active Category: HR & Karyawan */}
           {activeCategory === 'hr' && (
-            <div className="bg-white border border-neutral-200/90 rounded-2xl shadow-xs p-5 space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
-                <div>
-                  <h3 className="font-bold text-sm text-neutral-900">Daftar Karyawan & Payroll Internal</h3>
-                  <p className="text-xs text-neutral-500">Staf terdaftar pada properti ini.</p>
-                </div>
-                <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
-                  {employees.length} Karyawan
-                </span>
+            <div className="space-y-4">
+              {/* HR Sub-Tabs */}
+              <div className="flex items-center gap-2 border-b border-neutral-200 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setHrSubTab('STAFF')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    hrSubTab === 'STAFF'
+                      ? 'bg-[#1b4332] text-white shadow'
+                      : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                  }`}
+                >
+                  Daftar Staf & Payroll ({employees.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHrSubTab('ATTENDANCE')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    hrSubTab === 'ATTENDANCE'
+                      ? 'bg-[#1b4332] text-white shadow'
+                      : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                  }`}
+                >
+                  Gerbang Absensi & Lokasi
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHrSubTab('ROLE_POLICY')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    hrSubTab === 'ROLE_POLICY'
+                      ? 'bg-[#1b4332] text-white shadow'
+                      : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                  }`}
+                >
+                  Account & Role Policy (Owner & GM)
+                </button>
               </div>
 
-              <div className="space-y-2">
-                {employees.map((employee: any) => (
-                  <div key={employee.id} className="border border-neutral-200/80 rounded-xl p-3 text-xs bg-[#faf9f6] flex items-center justify-between">
+              {hrSubTab === 'ATTENDANCE' ? (
+                <AttendanceSettingsTab propertyId={propertyId} />
+              ) : hrSubTab === 'ROLE_POLICY' ? (
+                <HrdRolePolicyTab propertyId={propertyId} />
+              ) : (
+                <div className="bg-white border border-neutral-200/90 rounded-2xl shadow-xs p-5 space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
                     <div>
-                      <div className="font-bold text-neutral-900">{employee.full_name}</div>
-                      <div className="text-neutral-500 mt-0.5">{employee.position}</div>
+                      <h3 className="font-bold text-sm text-neutral-900">Daftar Karyawan & Payroll Internal</h3>
+                      <p className="text-xs text-neutral-500">Staf terdaftar pada properti ini.</p>
                     </div>
-                    <div className="text-right">
-                      <span className="text-[11px] text-neutral-400 block">Net payroll:</span>
-                      <span className="font-mono font-bold text-neutral-800">
-                        Rp {Number(payroll.find((p: any) => p.employee_id === employee.id)?.net_salary || 0).toLocaleString('id-ID')}
-                      </span>
-                    </div>
+                    <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
+                      {employees.length} Karyawan
+                    </span>
                   </div>
-                ))}
-              </div>
+
+                  <div className="space-y-2">
+                    {employees.map((employee: any) => (
+                      <div key={employee.id} className="border border-neutral-200/80 rounded-xl p-3 text-xs bg-[#faf9f6] flex items-center justify-between">
+                        <div>
+                          <div className="font-bold text-neutral-900">{employee.full_name}</div>
+                          <div className="text-neutral-500 mt-0.5">{employee.position}</div>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-[11px] text-neutral-400 block">Net payroll:</span>
+                          <span className="font-mono font-bold text-neutral-800">
+                            Rp {Number(payroll.find((p: any) => p.employee_id === employee.id)?.net_salary || 0).toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

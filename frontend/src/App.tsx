@@ -39,6 +39,9 @@ import type {
 } from './features/transactions/paymentEvidenceTypes.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
+import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorkspace.tsx';
+import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeMobileManagementWorkspace.tsx';
+import { HrdWorkspace } from './features/hrd/HrdWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
@@ -199,6 +202,9 @@ function App() {
   });
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
+  const [checkoutInspections, setCheckoutInspections] = useState<any[]>([]);
+  const [pendingCheckoutInspectionsCount, setPendingCheckoutInspectionsCount] = useState<number>(0);
+  const [selectedCheckoutInspection, setSelectedCheckoutInspection] = useState<any | null>(null);
   const [maintenanceTasks, setMaintenanceTasks] = useState<any[]>([]);
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
@@ -1005,14 +1011,15 @@ function App() {
     setPosOrders([]);
     setFinanceSummary(null);
     try {
-      const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes] = await Promise.all([
+      const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes, checkoutRes] = await Promise.all([
         fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
         fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
         fetch('/api/pos/orders?property_id=' + targetPropertyId),
         fetch('/api/accounting/summary?property_id=' + targetPropertyId),
         fetch('/api/hr/employees'),
-        fetch('/api/hr/payroll')
+        fetch('/api/hr/payroll'),
+        fetch(`/api/housekeeping/checkout-inspections?property_id=${targetPropertyId}`)
       ]);
 
       const housekeepingData = await housekeepingRes.json();
@@ -1022,9 +1029,14 @@ function App() {
       const financeData = await financeRes.json();
       const employeesData = await employeesRes.json();
       const payrollData = await payrollRes.json();
+      const checkoutData = await checkoutRes.json();
 
       if (targetPropertyId !== propertyId) return;
       if (housekeepingData?.status === 'OK') setHousekeepingTasks(housekeepingData.data || []);
+      if (checkoutData?.status === 'OK') {
+        setCheckoutInspections(checkoutData.data?.inspections || []);
+        setPendingCheckoutInspectionsCount(checkoutData.data?.pending_count || 0);
+      }
       if (maintenanceData?.status === 'OK') setMaintenanceTasks(maintenanceData.data || []);
       if (posMenuData?.status === 'OK') setPosMenu(posMenuData.data?.items || []);
       if (posOrderData?.status === 'OK') setPosOrders(posOrderData.data || []);
@@ -2020,7 +2032,7 @@ function App() {
 
       const data = await res.json().catch(() => ({}));
       if (!(res.ok && data.status === 'SUCCESS')) {
-        alert('Gagal memperbarui status kamar di database');
+        alert(data.message || 'Gagal memperbarui status kamar di database');
         return;
       }
 
@@ -2969,22 +2981,97 @@ function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm text-slate-900">Housekeeping</h3>
-                  <span className="text-xs bg-emerald-50 text-emerald-800 border border-emerald-200/80 px-2.5 py-0.5 rounded-full font-semibold">{housekeepingTasks.length} task</span>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-sm text-slate-900">PEMERIKSAAN CHECKOUT</h3>
+                    <span className="text-[10px] text-slate-400 font-mono">FO Room Check</span>
+                  </div>
+                  <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold border ${
+                    pendingCheckoutInspectionsCount > 0
+                      ? 'bg-amber-50 text-amber-800 border-amber-300'
+                      : 'bg-emerald-50 text-emerald-800 border-emerald-200/80'
+                  }`}>
+                    {pendingCheckoutInspectionsCount} Menunggu
+                  </span>
                 </div>
-                <div className="space-y-2">
-                  {housekeepingTasks.slice(0, 4).map((task: any) => (
-                    <div key={task.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
-                      <div>
-                        <div className="font-semibold text-slate-800">Kamar {task.room_number || '-'}</div>
-                        <div className="text-slate-500 text-[11px] mt-0.5">{task.task_type}</div>
-                      </div>
-                      <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-slate-100 text-slate-700 border border-slate-200'}`}>
-                        {task.status}
-                      </span>
+
+                {checkoutInspections.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-400">
+                    Tidak ada permintaan pemeriksaan checkout saat ini.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="grid grid-cols-12 text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-1 border-b border-slate-100">
+                      <div className="col-span-4">Kamar</div>
+                      <div className="col-span-4 text-center">Status</div>
+                      <div className="col-span-4 text-right">Waktu</div>
                     </div>
-                  ))}
-                </div>
+                    {checkoutInspections.slice(0, 5).map((chk: any) => {
+                      const isPending = ['REQUESTED', 'ASSIGNED'].includes(chk.status);
+                      const isInProgress = ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(chk.status);
+                      const isClear = chk.status === 'DONE' && chk.inspection_result === 'CLEAR';
+                      const isIssue = chk.status === 'DONE' && chk.inspection_result === 'ISSUE_FOUND';
+
+                      const statusLabel = isPending
+                        ? 'MENUNGGU'
+                        : isInProgress
+                        ? 'SEDANG DICEK'
+                        : isClear
+                        ? '✓ AMAN'
+                        : isIssue
+                        ? '⚠ ADA TEMUAN'
+                        : chk.status;
+
+                      const statusBadge = isPending
+                        ? 'bg-amber-100 text-amber-900 border-amber-300'
+                        : isInProgress
+                        ? 'bg-blue-100 text-blue-900 border-blue-300'
+                        : isClear
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300 font-extrabold'
+                        : isIssue
+                        ? 'bg-rose-100 text-rose-900 border-rose-300 font-extrabold'
+                        : 'bg-slate-100 text-slate-700 border-slate-200';
+
+                      const timeStr = chk.completed_at
+                        ? new Date(chk.completed_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+                        : chk.created_at
+                        ? new Date(chk.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+                        : '-';
+
+                      return (
+                        <div
+                          key={chk.id}
+                          onClick={() => setSelectedCheckoutInspection(chk)}
+                          className="grid grid-cols-12 items-center p-2 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition cursor-pointer"
+                        >
+                          <div className="col-span-4 font-bold text-slate-900 flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full ${isClear ? 'bg-emerald-500' : isIssue ? 'bg-rose-500' : 'bg-amber-500'}`} />
+                            <span>Kamar {chk.room_number || '-'}</span>
+                          </div>
+                          <div className="col-span-4 text-center">
+                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold border ${statusBadge}`}>
+                              {statusLabel}
+                            </span>
+                          </div>
+                          <div className="col-span-4 text-right font-mono text-[11px] text-slate-500">
+                            {timeStr}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {checkoutInspections.length > 5 && (
+                      <div className="pt-1 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedMenu('Housekeeping')}
+                          className="text-xs font-semibold text-[#1b4332] hover:underline cursor-pointer"
+                        >
+                          Lihat Semua ({checkoutInspections.length} pemeriksaan) &rarr;
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
@@ -3131,11 +3218,26 @@ function App() {
                                     const previewCheckOut = reservationResizePreview[String(r.id)] || r.check_out;
                                     const nights = Math.max(1, hotelNightsBetween(normalizeHotelDate(r.check_in), normalizeHotelDate(previewCheckOut)) ?? 1);
                                     const arrivalDateKey = normalizeHotelDate(r.check_in);
+                                    const departureDateKey = normalizeHotelDate(previewCheckOut);
                                     const cellAtArrival = room.cells?.find(c => c.date === arrivalDateKey);
-                                    const turnoverInfo = cellAtArrival?.turnover ? {
-                                      has_turnover: cellAtArrival.turnover.has_turnover,
-                                      is_ready: cellAtArrival.turnover.incoming?.is_ready,
-                                      reason_message: cellAtArrival.turnover.incoming?.reason_message
+                                    const cellAtDeparture = room.cells?.find(c => c.date === departureDateKey);
+                                    const outgoingInspection = (cellAtDeparture?.turnover?.outgoing?.reservation_id === r.id)
+                                      ? cellAtDeparture?.turnover?.outgoing?.checkout_inspection
+                                      : (cellAtArrival?.turnover?.outgoing?.reservation_id === r.id)
+                                      ? cellAtArrival?.turnover?.outgoing?.checkout_inspection
+                                      : null;
+
+                                    const turnoverInfo = (cellAtArrival?.turnover || outgoingInspection) ? {
+                                      has_turnover: Boolean(cellAtArrival?.turnover?.has_turnover),
+                                      is_ready: cellAtArrival?.turnover?.incoming?.is_ready,
+                                      reason_message: cellAtArrival?.turnover?.incoming?.reason_message,
+                                      outgoing_clearance: outgoingInspection ? {
+                                        clearance_state: outgoingInspection.clearance_state,
+                                        inspection_result: outgoingInspection.inspection_result,
+                                        issue_type: outgoingInspection.issue_type,
+                                        issue_note: outgoingInspection.issue_note,
+                                        estimated_charge: outgoingInspection.estimated_charge
+                                      } : null
                                     } : null;
 
                                     cells.push(
@@ -3962,6 +4064,37 @@ function App() {
           />
         )}
 
+        {selectedMenu === 'Mobile Portal' && propertyId !== null && (
+          <div className="flex justify-center p-2 sm:p-6 bg-neutral-900/10 min-h-screen">
+            <div className="w-full max-w-md bg-[#fdfbf7] shadow-2xl rounded-3xl overflow-hidden border border-neutral-300">
+              <EmployeeMobileWorkspace
+                propertyId={propertyId}
+                currentUser={{
+                  id: 1,
+                  name: 'Siti Rahmawati (Crew HK)',
+                  role: 'Housekeeping',
+                  department: 'Housekeeping'
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {selectedMenu === 'HRD' && propertyId !== null && (
+          <HrdWorkspace
+            propertyId={propertyId}
+            propertyName={properties.find((p: any) => p.id === propertyId)?.name}
+          />
+        )}
+
+        {selectedMenu === 'Employee Mobile' && propertyId !== null && (
+          <EmployeeMobileManagementWorkspace
+            propertyId={propertyId}
+            propertyName={properties.find((p: any) => p.id === propertyId)?.name}
+            onOpenMobilePortal={() => setSelectedMenu('Mobile Portal')}
+          />
+        )}
+
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
             propertyId={propertyId}
@@ -3988,6 +4121,143 @@ function App() {
         )}
         </main>
       </div>
+
+      {/* Checkout Room Inspection Modal */}
+      {selectedCheckoutInspection && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200 space-y-4 p-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <div>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                  PEMERIKSAAN CHECKOUT
+                </span>
+                <h3 className="font-serif font-bold text-base text-slate-900 mt-1">
+                  Kamar {selectedCheckoutInspection.room_number || '-'} — {selectedCheckoutInspection.room_type_name || 'Standar'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedCheckoutInspection(null)}
+                className="text-slate-400 hover:text-slate-700 font-bold text-sm cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] text-slate-500 block">Status Pemeriksaan</span>
+                <span className={`inline-block px-2 py-0.5 mt-1 rounded text-[11px] font-extrabold border ${
+                  selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'CLEAR'
+                    ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                    : selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'ISSUE_FOUND'
+                    ? 'bg-rose-100 text-rose-900 border-rose-300'
+                    : ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(selectedCheckoutInspection.status)
+                    ? 'bg-blue-100 text-blue-900 border-blue-300'
+                    : 'bg-amber-100 text-amber-900 border-amber-300'
+                }`}>
+                  {selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'CLEAR'
+                    ? '✓ HK AMAN'
+                    : selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'ISSUE_FOUND'
+                    ? '⚠ ADA TEMUAN'
+                    : ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(selectedCheckoutInspection.status)
+                    ? 'SEDANG DICEK'
+                    : 'MENUNGGU'}
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] text-slate-500 block">Petugas Pemeriksa (PIC)</span>
+                <div className="font-bold text-slate-900 mt-1">
+                  {selectedCheckoutInspection.assigned_to_name || selectedCheckoutInspection.crew_name || 'Kru Housekeeping'}
+                </div>
+              </div>
+            </div>
+
+            {/* Timestamps */}
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Waktu Permintaan:</span>
+                <span className="font-mono text-slate-800">
+                  {selectedCheckoutInspection.created_at ? new Date(selectedCheckoutInspection.created_at).toLocaleString('id-ID') : '-'}
+                </span>
+              </div>
+              {selectedCheckoutInspection.started_at && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Mulai Diperiksa:</span>
+                  <span className="font-mono text-slate-800">
+                    {new Date(selectedCheckoutInspection.started_at).toLocaleString('id-ID')}
+                  </span>
+                </div>
+              )}
+              {selectedCheckoutInspection.completed_at && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Selesai:</span>
+                  <span className="font-mono text-slate-800 font-bold">
+                    {new Date(selectedCheckoutInspection.completed_at).toLocaleString('id-ID')}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Findings if any */}
+            {selectedCheckoutInspection.findings && selectedCheckoutInspection.findings.length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-rose-800 flex items-center gap-1.5">
+                  <span>⚠ Daftar Temuan Pemeriksaan ({selectedCheckoutInspection.findings.length})</span>
+                </div>
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {selectedCheckoutInspection.findings.map((f: any, idx: number) => (
+                    <div key={idx} className="p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-xs space-y-1">
+                      <div className="flex justify-between font-bold text-rose-900">
+                        <span>{f.finding_type || f.category || 'Temuan Operasional'}</span>
+                        {f.estimated_charge && Number(f.estimated_charge) > 0 && (
+                          <span className="font-mono text-rose-800">
+                            Rp {Number(f.estimated_charge).toLocaleString('id-ID')}
+                          </span>
+                        )}
+                      </div>
+                      {f.notes && <div className="text-rose-800">{f.notes}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : selectedCheckoutInspection.status === 'DONE' ? (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center gap-2">
+                <span className="text-base font-bold text-emerald-700">✓</span>
+                <div>
+                  <strong>Hasil Pemeriksaan: AMAN</strong>
+                  <p className="text-emerald-800 mt-0.5">
+                    Tidak ditemukan kerusakan atau konsumsi minibar yang belum tercatat.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Front Office Guidance banner */}
+            <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 text-xs text-blue-900 space-y-1">
+              <strong className="font-bold">Panduan Front Office:</strong>
+              <p className="text-blue-800 text-[11px]">
+                {selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'CLEAR'
+                  ? 'Kamar terverifikasi AMAN. Tamu dipersilakan melanjutkan penyelesaian checkout. Pembersihan kamar untuk tamu berikutnya akan berjalan terpisah dalam workstream Cleaning setelah kamar berstatus VACANT_DIRTY.'
+                  : selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'ISSUE_FOUND'
+                  ? 'Terdapat temuan barang/kerusakan. Konfirmasikan rincian biaya taksiran kepada tamu sebelum memfinalisasi checkout.'
+                  : 'Pemeriksaan kamar sedang berlangsung oleh kru Housekeeping.'}
+              </p>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedCheckoutInspection(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectedRes && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">

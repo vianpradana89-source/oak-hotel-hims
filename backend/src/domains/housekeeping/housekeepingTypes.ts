@@ -99,6 +99,10 @@ export interface HousekeepingTaskRecord {
   issue_type?: HkIssueType | null;
   issue_note?: string | null;
   estimated_charge?: number | null;
+  is_archived?: boolean;
+  archived_at?: string | null;
+  archived_by?: string | null;
+  archive_reason?: string | null;
   created_at: string;
   updated_at: string;
 
@@ -171,4 +175,81 @@ export interface PropertyHousekeepingSettings {
   default_checkout_inspection_template_code?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface HistoryEditPayload {
+  assigned_user_id?: number | null;
+  assigned_user_name_snapshot?: string | null;
+  priority?: HkTaskPriority;
+  title?: string;
+  description?: string;
+  scheduled_at?: string | null;
+  due_at?: string | null;
+  completion_note?: string | null;
+  reason: string;
+}
+
+export type FindingSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface HousekeepingFindingType {
+  id: number;
+  property_id: number;
+  code: string;
+  label: string;
+  description?: string | null;
+  severity: FindingSeverity;
+  is_active: boolean;
+  sort_order: number;
+  note_required: boolean;
+  photo_required: boolean;
+  estimated_charge_allowed: boolean;
+  supervisor_review_required: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateFindingTypePayload {
+  code: string;
+  label: string;
+  description?: string | null;
+  severity?: FindingSeverity;
+  is_active?: boolean;
+  sort_order?: number;
+  note_required?: boolean;
+  photo_required?: boolean;
+  estimated_charge_allowed?: boolean;
+  supervisor_review_required?: boolean;
+}
+
+export interface UpdateFindingTypePayload {
+  code?: string;
+  label?: string;
+  description?: string | null;
+  severity?: FindingSeverity;
+  is_active?: boolean;
+  sort_order?: number;
+  note_required?: boolean;
+  photo_required?: boolean;
+  estimated_charge_allowed?: boolean;
+  supervisor_review_required?: boolean;
+}
+
+export interface CreateChecklistTemplateItemPayload {
+  section: string;
+  label: string;
+  sort_order?: number;
+  is_required?: boolean;
+  requires_note?: boolean;
+  requires_photo?: boolean;
+  is_active?: boolean;
+}
+
+export interface UpdateChecklistTemplateItemPayload {
+  section?: string;
+  label?: string;
+  sort_order?: number;
+  is_required?: boolean;
+  requires_note?: boolean;
+  requires_photo?: boolean;
+  is_active?: boolean;
 }

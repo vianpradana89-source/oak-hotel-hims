@@ -1,0 +1,213 @@
+import { Router, Request, Response } from 'express';
+import type { Pool } from 'pg';
+import {
+  getHrdRolePolicies,
+  updateHrdRolePolicies,
+  getAvailableRolesForHrd,
+  getEmployees,
+  createEmployeeAccount,
+  updateEmployeeAccount,
+  deactivateEmployeeAccount
+} from './hrdService';
+import type { CreateEmployeePayload, UpdateEmployeePayload } from './hrdTypes';
+
+function parsePropertyId(val: any): number {
+  const p = Number(val);
+  if (isNaN(p) || p <= 0) {
+    const err: any = new Error('Property ID is required and must be a positive integer.');
+    err.statusCode = 400;
+    err.code = 'INVALID_PROPERTY_ID';
+    throw err;
+  }
+  return p;
+}
+
+export function createHrdRouter(pool: Pool): Router {
+  const router = Router();
+
+  // 1. Get HRD Role Policies
+  router.get('/policies', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      const policies = await getHrdRolePolicies(client, propertyId);
+      res.json({ status: 'OK', data: policies });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 2. Update HRD Role Policies
+  router.patch('/policies', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'Management Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const updated = await updateHrdRolePolicies(client, propertyId, req.body, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: updated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 3. Get Permitted Roles for HRD
+  router.get('/roles', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      const roles = await getAvailableRolesForHrd(client, propertyId);
+      res.json({ status: 'OK', data: roles });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 4. Get Employees List
+  router.get('/employees', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      const scope = typeof req.query.scope === 'string' ? req.query.scope : 'active';
+      const department = typeof req.query.department === 'string' ? req.query.department : undefined;
+      const role = typeof req.query.role === 'string' ? req.query.role : undefined;
+
+      const employees = await getEmployees(client, propertyId, { scope, department, role });
+      res.json({ status: 'OK', data: employees });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 5. Create Employee Account
+  router.post('/employees', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      const payload: CreateEmployeePayload = {
+        property_id: propertyId,
+        employee_code: req.body.employee_code,
+        full_name: req.body.full_name || req.body.name,
+        position: req.body.position,
+        department: req.body.department,
+        role: req.body.role,
+        username: req.body.username,
+        email: req.body.email,
+        phone: req.body.phone,
+        hire_date: req.body.hire_date,
+        monthly_salary: req.body.monthly_salary ? Number(req.body.monthly_salary) : 0,
+        status: req.body.status || 'ACTIVE'
+      };
+
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'HRD Admin',
+        role: req.body.actor_role || 'HRD'
+      };
+
+      const created = await createEmployeeAccount(client, propertyId, payload, actor);
+      await client.query('COMMIT');
+      res.status(201).json({ status: 'OK', data: created });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 6. Update Employee Account
+  router.patch('/employees/:id', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const payload: UpdateEmployeePayload = {
+        employee_code: req.body.employee_code,
+        full_name: req.body.full_name || req.body.name,
+        position: req.body.position,
+        department: req.body.department,
+        role: req.body.role,
+        username: req.body.username,
+        email: req.body.email,
+        phone: req.body.phone,
+        hire_date: req.body.hire_date,
+        monthly_salary: req.body.monthly_salary !== undefined ? Number(req.body.monthly_salary) : undefined,
+        status: req.body.status,
+        is_active: req.body.is_active !== undefined ? Boolean(req.body.is_active) : undefined
+      };
+
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'HRD Admin',
+        role: req.body.actor_role || 'HRD'
+      };
+
+      const updated = await updateEmployeeAccount(client, propertyId, employeeId, payload, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: updated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 7. Soft Delete / Deactivate Employee Account
+  router.delete('/employees/:id', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId || req.body.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'HRD Admin',
+        role: req.body.actor_role || 'HRD'
+      };
+
+      const deactivated = await deactivateEmployeeAccount(client, propertyId, employeeId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: deactivated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  return router;
+}

@@ -51,6 +51,23 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState<boolean>(false);
 
+  // History Tab Specific States
+  const [historyPreset, setHistoryPreset] = useState<'today' | 'yesterday' | '7days' | '30days' | 'this_month' | 'all'>('today');
+  const [includeArchived, setIncludeArchived] = useState<boolean>(false);
+  const [historyEditTask, setHistoryEditTask] = useState<HousekeepingTaskRecord | null>(null);
+  const [historyEditForm, setHistoryEditForm] = useState<{
+    notes: string;
+    inspection_result: string;
+    damage_charge_estimate: string;
+    reason: string;
+  }>({
+    notes: '',
+    inspection_result: 'CLEAR',
+    damage_charge_estimate: '0',
+    reason: ''
+  });
+  const [isHistorySaving, setIsHistorySaving] = useState<boolean>(false);
+
   // Fetch daily operations & tasks
   const fetchDailyOperations = useCallback(async (isBackground = false) => {
     if (!isBackground) setIsLoading(true);
@@ -98,9 +115,11 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   }, [apiBaseUrl, propertyId]);
 
   // Fetch history tasks
-  const fetchHistory = useCallback(async () => {
+  const fetchHistory = useCallback(async (preset = historyPreset, incArchived = includeArchived) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/history?property_id=${propertyId}`);
+      const presetParam = preset === 'all' ? '' : `&preset=${preset}`;
+      const url = `${apiBaseUrl}/housekeeping/history?property_id=${propertyId}${presetParam}${incArchived ? '&include_archived=true' : ''}`;
+      const res = await fetch(url);
       if (res.ok) {
         const json = await res.json();
         setHistoryTasks(json.data || []);
@@ -108,7 +127,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     } catch (err) {
       console.error('Failed to fetch HK history:', err);
     }
-  }, [apiBaseUrl, propertyId]);
+  }, [apiBaseUrl, propertyId, historyPreset, includeArchived]);
 
   useEffect(() => {
     fetchDailyOperations();
@@ -117,9 +136,110 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
   useEffect(() => {
     if (activeTab === 'history') {
-      fetchHistory();
+      fetchHistory(historyPreset, includeArchived);
     }
-  }, [activeTab, fetchHistory]);
+  }, [activeTab, historyPreset, includeArchived, fetchHistory]);
+
+  // History Actions: Safe Edit, Archive, Unarchive
+  const handleOpenHistoryEdit = (task: HousekeepingTaskRecord) => {
+    setHistoryEditTask(task);
+    setHistoryEditForm({
+      notes: task.notes || '',
+      inspection_result: task.inspection_result || 'CLEAR',
+      damage_charge_estimate: String(task.damage_charge_estimate || 0),
+      reason: ''
+    });
+  };
+
+  const handleSaveHistoryEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!historyEditTask) return;
+    if (!historyEditForm.reason.trim()) {
+      alert('Alasan perubahan riwayat wajib diisi untuk audit log.');
+      return;
+    }
+
+    try {
+      setIsHistorySaving(true);
+      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${historyEditTask.id}/history-edit`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          actor_name: 'Supervisor HK',
+          actor_role: 'Supervisor',
+          reason: historyEditForm.reason.trim(),
+          notes: historyEditForm.notes.trim(),
+          inspection_result: historyEditForm.inspection_result,
+          damage_charge_estimate: Number(historyEditForm.damage_charge_estimate) || 0
+        })
+      });
+
+      if (res.ok) {
+        setHistoryEditTask(null);
+        await fetchHistory(historyPreset, includeArchived);
+      } else {
+        const data = await res.json();
+        alert(data.message || 'Gagal menyimpan perubahan riwayat.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Koneksi gagal.');
+    } finally {
+      setIsHistorySaving(false);
+    }
+  };
+
+  const handleArchiveTask = async (task: HousekeepingTaskRecord) => {
+    const reason = prompt('Masukkan alasan pengarsipan tugas ini (Audit Log):', 'Pembersihan duplikat / koreksi manual');
+    if (!reason) return;
+
+    try {
+      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/archive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          archived_by: 'Supervisor HK',
+          archive_reason: reason
+        })
+      });
+
+      if (res.ok) {
+        await fetchHistory(historyPreset, includeArchived);
+        await fetchDailyOperations(true);
+      } else {
+        const data = await res.json();
+        alert(data.message || 'Gagal mengarsipkan tugas.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Koneksi error.');
+    }
+  };
+
+  const handleUnarchiveTask = async (task: HousekeepingTaskRecord) => {
+    if (!confirm(`Batalkan arsip untuk tugas ${task.task_number}?`)) return;
+
+    try {
+      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/unarchive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          unarchived_by: 'Supervisor HK'
+        })
+      });
+
+      if (res.ok) {
+        await fetchHistory(historyPreset, includeArchived);
+        await fetchDailyOperations(true);
+      } else {
+        const data = await res.json();
+        alert(data.message || 'Gagal membatalkan arsip.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Koneksi error.');
+    }
+  };
 
   // Filter tasks based on activeTab, metricFilter, statusFilter, and searchTerm
   const filteredTasks = useMemo(() => {
@@ -626,25 +746,65 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           </div>
 
           {/* Search & Filter Bar for List Views */}
-          <div className="flex items-center gap-2 pb-2">
+          <div className="flex flex-wrap items-center gap-2 pb-2">
+            {activeTab === 'history' ? (
+              <>
+                <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-lg">
+                  {[
+                    { id: 'today', label: 'Hari Ini' },
+                    { id: 'yesterday', label: 'Kemarin' },
+                    { id: '7days', label: '7 Hari' },
+                    { id: '30days', label: '30 Hari' },
+                    { id: 'this_month', label: 'Bulan Ini' },
+                    { id: 'all', label: 'Semua' }
+                  ].map(p => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setHistoryPreset(p.id as any)}
+                      className={`px-2.5 py-1 rounded text-[11px] font-semibold transition ${
+                        historyPreset === p.id
+                          ? 'bg-[#1b4332] text-white shadow-xs'
+                          : 'text-neutral-600 hover:text-neutral-900'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                <label className="flex items-center gap-1.5 text-xs text-neutral-600 cursor-pointer ml-2">
+                  <input
+                    type="checkbox"
+                    checked={includeArchived}
+                    onChange={(e) => setIncludeArchived(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded text-[#1b4332] focus:ring-[#1b4332]"
+                  />
+                  <span>Tampilkan Data Diarsipkan</span>
+                </label>
+              </>
+            ) : null}
+
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Cari kamar / judul / PIC..."
-              className="text-xs px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white w-48 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+              className="text-xs px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white w-44 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
             />
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="text-xs px-2 py-1.5 rounded-lg border border-neutral-300 bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-            >
-              <option value="ALL">Semua Status</option>
-              <option value="ASSIGNED">ASSIGNED</option>
-              <option value="ACKNOWLEDGED">ACKNOWLEDGED</option>
-              <option value="IN_PROGRESS">IN PROGRESS</option>
-              <option value="DONE">DONE</option>
-            </select>
+            {activeTab !== 'history' && (
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-lg border border-neutral-300 bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+              >
+                <option value="ALL">Semua Status</option>
+                <option value="ASSIGNED">ASSIGNED</option>
+                <option value="ACKNOWLEDGED">ACKNOWLEDGED</option>
+                <option value="IN_PROGRESS">IN PROGRESS</option>
+                <option value="DONE">DONE</option>
+              </select>
+            )}
           </div>
         </div>
 
@@ -789,6 +949,35 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
                         {/* Actions */}
                         <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1.5">
+                          {activeTab === 'history' ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenHistoryEdit(t)}
+                                className="px-2.5 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded border border-emerald-200"
+                              >
+                                Koreksi Riwayat
+                              </button>
+                              {t.is_archived ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnarchiveTask(t)}
+                                  className="px-2 py-1 text-[11px] font-semibold text-neutral-600 bg-neutral-100 hover:bg-neutral-200 rounded"
+                                >
+                                  Batal Arsip
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleArchiveTask(t)}
+                                  className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded border border-amber-200"
+                                >
+                                  Arsipkan
+                                </button>
+                              )}
+                            </>
+                          ) : null}
+
                           {t.status === 'ASSIGNED' && (
                             <button
                               type="button"
@@ -848,6 +1037,100 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         rooms={rooms}
         templates={templates}
       />
+
+      {/* Safe History Correction Modal */}
+      {historyEditTask && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-neutral-200 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
+              <div>
+                <h3 className="font-bold text-sm text-neutral-900">
+                  Koreksi Riwayat Tugas {historyEditTask.task_number}
+                </h3>
+                <p className="text-xs text-neutral-500">
+                  Kamar {historyEditTask.room_number || 'Non-Kamar'} &bull; {historyEditTask.task_type}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryEditTask(null)}
+                className="text-neutral-400 hover:text-neutral-600 text-lg leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveHistoryEdit} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Catatan Tugas / Operasional:</label>
+                <textarea
+                  rows={2}
+                  value={historyEditForm.notes}
+                  onChange={(e) => setHistoryEditForm(p => ({ ...p, notes: e.target.value }))}
+                  className="w-full p-2.5 rounded-xl border border-neutral-300 text-xs focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              {historyEditTask.task_type === 'CHECKOUT_ROOM_CHECK' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Hasil Pemeriksaan:</label>
+                    <select
+                      value={historyEditForm.inspection_result}
+                      onChange={(e) => setHistoryEditForm(p => ({ ...p, inspection_result: e.target.value }))}
+                      className="w-full p-2 rounded-xl border border-neutral-300 text-xs focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="CLEAR">CLEAR (Kamar Aman)</option>
+                      <option value="ISSUE_FOUND">ISSUE_FOUND (Ada Temuan)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Estimasi Charge (Rp):</label>
+                    <input
+                      type="number"
+                      value={historyEditForm.damage_charge_estimate}
+                      onChange={(e) => setHistoryEditForm(p => ({ ...p, damage_charge_estimate: e.target.value }))}
+                      className="w-full p-2 rounded-xl border border-neutral-300 text-xs focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-1.5">
+                <label className="block font-bold text-amber-900">
+                  Alasan Perubahan / Koreksi (Wajib untuk Audit Log):
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Contoh: Koreksi catatan minibar / salah input PIC"
+                  value={historyEditForm.reason}
+                  onChange={(e) => setHistoryEditForm(p => ({ ...p, reason: e.target.value }))}
+                  className="w-full p-2 rounded-lg border border-amber-300 bg-white text-xs text-neutral-800 placeholder:text-neutral-400 focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setHistoryEditTask(null)}
+                  className="px-4 py-2 rounded-xl text-neutral-600 bg-neutral-100 hover:bg-neutral-200 font-semibold"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isHistorySaving}
+                  className="px-4 py-2 rounded-xl text-white bg-[#1b4332] hover:bg-[#143225] font-semibold shadow"
+                >
+                  {isHistorySaving ? 'Menyimpan...' : 'Simpan Koreksi & Audit'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

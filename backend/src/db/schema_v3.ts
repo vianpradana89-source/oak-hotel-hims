@@ -1402,6 +1402,218 @@ export async function initializeDatabase(pool: Pool) {
       }
     }
 
+    // -------------------------------------------------------------------------
+    // MIGRATION 11: Employee Attendance Records, Settings & HK Task Archive (EMP-MOBILE-1)
+    // -------------------------------------------------------------------------
+    const hasAttendanceMigration = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'employee_attendance_schema_v1'`
+    );
+
+    if ((hasAttendanceMigration.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Employee Attendance Records
+        CREATE TABLE IF NOT EXISTS employee_attendance_records (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          employee_id INTEGER REFERENCES hr_employees(id) ON DELETE SET NULL,
+          employee_name VARCHAR(150) NOT NULL,
+          department VARCHAR(80),
+          attendance_date DATE NOT NULL,
+          attendance_type VARCHAR(30) NOT NULL,
+          server_recorded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+          latitude NUMERIC(10, 7),
+          longitude NUMERIC(10, 7),
+          location_accuracy_meters NUMERIC(10, 2),
+          property_distance_meters NUMERIC(10, 2),
+          geofence_result VARCHAR(30) NOT NULL DEFAULT 'DISABLED',
+          photo_storage_key TEXT,
+          source VARCHAR(30) NOT NULL DEFAULT 'MOBILE_WEB',
+          status VARCHAR(30) NOT NULL DEFAULT 'ACCEPTED',
+          reason TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_attendance_records_prop_date ON employee_attendance_records (property_id, attendance_date);
+        CREATE INDEX IF NOT EXISTS idx_attendance_records_employee ON employee_attendance_records (employee_id);
+        CREATE INDEX IF NOT EXISTS idx_attendance_records_status ON employee_attendance_records (status);
+
+        -- 2. Property Attendance Settings
+        CREATE TABLE IF NOT EXISTS property_attendance_settings (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL UNIQUE REFERENCES properties(id) ON DELETE RESTRICT,
+          attendance_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          require_employee_attendance BOOLEAN NOT NULL DEFAULT TRUE,
+          require_checkin_photo BOOLEAN NOT NULL DEFAULT TRUE,
+          require_checkout_photo BOOLEAN NOT NULL DEFAULT FALSE,
+          geofence_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+          geofence_latitude NUMERIC(10, 7),
+          geofence_longitude NUMERIC(10, 7),
+          geofence_radius_meters NUMERIC(10, 2) DEFAULT 100,
+          outside_geofence_policy VARCHAR(30) NOT NULL DEFAULT 'ALLOW_WITH_REASON',
+          exempt_roles JSONB DEFAULT '["Owner", "General Manager"]'::jsonb,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_property_attendance_settings_prop ON property_attendance_settings (property_id);
+
+        -- 3. Housekeeping Tasks Archive / Correction columns
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS archived_by VARCHAR(150);
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_archived ON housekeeping_tasks (is_archived);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('employee_attendance_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed standard attendance settings and feature flags for all existing properties
+      const propsRes = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const prop of propsRes.rows) {
+        const propId = prop.id;
+        // Attendance Settings
+        await auditMigrationClient.query(`
+          INSERT INTO property_attendance_settings (
+            property_id, attendance_enabled, require_employee_attendance,
+            require_checkin_photo, require_checkout_photo, geofence_enabled,
+            geofence_radius_meters, outside_geofence_policy
+          )
+          VALUES ($1, TRUE, TRUE, TRUE, FALSE, FALSE, 100, 'ALLOW_WITH_REASON')
+          ON CONFLICT (property_id) DO NOTHING
+        `, [propId]);
+
+        // Feature flags for Employee Mobile & Attendance
+        await auditMigrationClient.query(`
+          INSERT INTO property_features (property_id, feature_key, enabled)
+          VALUES
+            ($1, 'hrd.attendance', TRUE),
+            ($1, 'hrd.attendance_photo', TRUE),
+            ($1, 'hrd.attendance_geofence', FALSE),
+            ($1, 'employee_mobile.enabled', TRUE),
+            ($1, 'employee_mobile.notifications', TRUE)
+          ON CONFLICT (property_id, feature_key) DO NOTHING
+        `, [propId]);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // MIGRATION 12: Housekeeping Finding Types Catalog & Checklist Configuration
+    // -------------------------------------------------------------------------
+    const hasFindingTypesMigration = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_finding_types_schema_v1'`
+    );
+
+    if ((hasFindingTypesMigration.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS housekeeping_finding_types (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          code VARCHAR(50) NOT NULL,
+          label VARCHAR(150) NOT NULL,
+          description TEXT,
+          severity VARCHAR(30) NOT NULL DEFAULT 'MEDIUM',
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          note_required BOOLEAN NOT NULL DEFAULT FALSE,
+          photo_required BOOLEAN NOT NULL DEFAULT FALSE,
+          estimated_charge_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+          supervisor_review_required BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_housekeeping_finding_types_prop_code UNIQUE (property_id, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hk_finding_types_prop ON housekeeping_finding_types (property_id);
+        CREATE INDEX IF NOT EXISTS idx_hk_finding_types_active ON housekeeping_finding_types (property_id, is_active);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_finding_types_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed standard default finding types for all existing properties
+      const propsRes = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const prop of propsRes.rows) {
+        const propId = prop.id;
+        const findingSeeds = [
+          { code: 'MINIBAR', label: 'Minibar / Konsumsi Tamu', desc: 'Item minibar terkonsumsi atau belum terisi', severity: 'LOW', sort: 1, noteReq: false, photoReq: false, chargeAllowed: true, supReview: false },
+          { code: 'REMOTE_TV_HILANG', label: 'Remote TV Hilang / Rusak', desc: 'Remote TV tidak ditemukan di kamar atau rusak fisik', severity: 'MEDIUM', sort: 2, noteReq: false, photoReq: false, chargeAllowed: true, supReview: false },
+          { code: 'REMOTE_AC_HILANG', label: 'Remote AC Hilang / Rusak', desc: 'Remote AC tidak ditemukan di kamar atau rusak fisik', severity: 'MEDIUM', sort: 3, noteReq: false, photoReq: false, chargeAllowed: true, supReview: false },
+          { code: 'HANDUK_KURANG', label: 'Handuk Kurang / Rusak', desc: 'Handuk mandi/wajah hilang, sobek, atau noda permanen', severity: 'LOW', sort: 4, noteReq: false, photoReq: false, chargeAllowed: true, supReview: false },
+          { code: 'LINEN_RUSAK', label: 'Linen / Sprei Rusak / Noda Berat', desc: 'Sprei, duvet cover, atau sarung bantal sobek/terbakar/noda darah/luntur', severity: 'MEDIUM', sort: 5, noteReq: false, photoReq: false, chargeAllowed: true, supReview: false },
+          { code: 'BARANG_HILANG', label: 'Barang Hotel Hilang', desc: 'Inventaris kamar (mug, ketel, hair dryer, hanger) hilang', severity: 'HIGH', sort: 6, noteReq: true, photoReq: false, chargeAllowed: true, supReview: true },
+          { code: 'KERUSAKAN_FURNITURE', label: 'Kerusakan Furniture', desc: 'Meja, kursi, lemari, ranjang patah/tergores berat', severity: 'HIGH', sort: 7, noteReq: true, photoReq: true, chargeAllowed: true, supReview: true },
+          { code: 'KERUSAKAN_ELEKTRONIK', label: 'Kerusakan Elektronik', desc: 'TV, AC, Water Heater, Lampu tidak berfungsi karena kerusakan fisik', severity: 'HIGH', sort: 8, noteReq: true, photoReq: true, chargeAllowed: true, supReview: true },
+          { code: 'LOST_AND_FOUND', label: 'Lost & Found (Barang Tamu Tertinggal)', desc: 'Barang milik tamu tertinggal di kamar saat checkout', severity: 'INFO', sort: 9, noteReq: true, photoReq: false, chargeAllowed: false, supReview: false },
+          { code: 'LAINNYA', label: 'Lainnya / Catatan Khusus', desc: 'Temuan atau insiden khusus lainnya di kamar', severity: 'INFO', sort: 10, noteReq: true, photoReq: false, chargeAllowed: true, supReview: false }
+        ];
+
+        for (const item of findingSeeds) {
+          await auditMigrationClient.query(`
+            INSERT INTO housekeeping_finding_types (
+              property_id, code, label, description, severity, sort_order,
+              note_required, photo_required, estimated_charge_allowed, supervisor_review_required, is_active
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+            ON CONFLICT (property_id, code) DO NOTHING
+          `, [
+            propId, item.code, item.label, item.desc, item.severity, item.sort,
+            item.noteReq, item.photoReq, item.chargeAllowed, item.supReview
+          ]);
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // MIGRATION 13: hrd_account_and_role_policy_schema_v1
+    // -------------------------------------------------------------
+    const m13Res = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'hrd_account_and_role_policy_schema_v1'"
+    );
+    if (m13Res.rows.length === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS hrd_role_policies (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          allow_hrd_assign_owner_role BOOLEAN NOT NULL DEFAULT FALSE,
+          allow_hrd_assign_gm_role BOOLEAN NOT NULL DEFAULT FALSE,
+          allow_hrd_assign_dept_manager_role BOOLEAN NOT NULL DEFAULT TRUE,
+          allow_hrd_assign_accountant_role BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_hrd_role_policies_prop UNIQUE (property_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hrd_role_policies_prop ON hrd_role_policies (property_id);
+
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE DEFAULT 1;
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'Crew';
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS username VARCHAR(100);
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS email VARCHAR(150);
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        CREATE INDEX IF NOT EXISTS idx_hr_employees_prop ON hr_employees (property_id);
+        CREATE INDEX IF NOT EXISTS idx_hr_employees_active ON hr_employees (property_id, is_active);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('hrd_account_and_role_policy_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed default HRD role policy for all existing properties
+      const propsRes = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const prop of propsRes.rows) {
+        await auditMigrationClient.query(`
+          INSERT INTO hrd_role_policies (
+            property_id, allow_hrd_assign_owner_role, allow_hrd_assign_gm_role,
+            allow_hrd_assign_dept_manager_role, allow_hrd_assign_accountant_role
+          )
+          VALUES ($1, FALSE, FALSE, TRUE, TRUE)
+          ON CONFLICT (property_id) DO NOTHING
+        `, [prop.id]);
+      }
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

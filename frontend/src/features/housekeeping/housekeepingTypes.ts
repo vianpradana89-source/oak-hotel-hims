@@ -99,6 +99,13 @@ export interface HousekeepingTaskRecord {
   issue_type?: HkIssueType | null;
   issue_note?: string | null;
   estimated_charge?: number | null;
+  damage_charge_estimate?: number | null;
+  notes?: string | null;
+  room_floor?: number | string | null;
+  is_archived?: boolean;
+  archived_at?: string | null;
+  archived_by?: string | null;
+  archive_reason?: string | null;
   created_at: string;
   updated_at: string;
 
@@ -180,3 +187,68 @@ export type HousekeepingTab =
   | 'department_tasks'
   | 'history'
   | 'templates_settings';
+
+export type FindingSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface HkFindingType {
+  id: number;
+  property_id: number;
+  code: string;
+  label: string;
+  description?: string | null;
+  severity: FindingSeverity;
+  is_active: boolean;
+  sort_order: number;
+  note_required: boolean;
+  photo_required: boolean;
+  estimated_charge_allowed: boolean;
+  supervisor_review_required: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateFindingTypePayload {
+  code: string;
+  label: string;
+  description?: string | null;
+  severity?: FindingSeverity;
+  is_active?: boolean;
+  sort_order?: number;
+  note_required?: boolean;
+  photo_required?: boolean;
+  estimated_charge_allowed?: boolean;
+  supervisor_review_required?: boolean;
+}
+
+export interface UpdateFindingTypePayload {
+  code?: string;
+  label?: string;
+  description?: string | null;
+  severity?: FindingSeverity;
+  is_active?: boolean;
+  sort_order?: number;
+  note_required?: boolean;
+  photo_required?: boolean;
+  estimated_charge_allowed?: boolean;
+  supervisor_review_required?: boolean;
+}
+
+export interface CreateChecklistTemplateItemPayload {
+  section: string;
+  label: string;
+  sort_order?: number;
+  is_required?: boolean;
+  requires_note?: boolean;
+  requires_photo?: boolean;
+  is_active?: boolean;
+}
+
+export interface UpdateChecklistTemplateItemPayload {
+  section?: string;
+  label?: string;
+  sort_order?: number;
+  is_required?: boolean;
+  requires_note?: boolean;
+  requires_photo?: boolean;
+  is_active?: boolean;
+}

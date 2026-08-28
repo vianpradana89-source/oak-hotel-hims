@@ -11,7 +11,13 @@ import {
   ChecklistTemplate,
   ChecklistTemplateItem,
   TaskChecklistItem,
-  PropertyHousekeepingSettings
+  PropertyHousekeepingSettings,
+  HistoryEditPayload,
+  HousekeepingFindingType,
+  CreateFindingTypePayload,
+  UpdateFindingTypePayload,
+  CreateChecklistTemplateItemPayload,
+  UpdateChecklistTemplateItemPayload
 } from './housekeepingTypes';
 import { isFeatureEnabled } from '../features/featureService';
 
@@ -284,22 +290,24 @@ export async function getHousekeepingDailyOperations(
     }
   }
 
-  // 3. Query housekeeping tasks for property
+  // 3. Query housekeeping tasks for property (active, non-archived, legacy-isolated)
   const tasksRes = await client.query(
     `SELECT t.*
      FROM housekeeping_tasks t
      WHERE t.property_id = $1
+       AND COALESCE(t.is_archived, FALSE) = FALSE
+       AND (t.room_id IS NOT NULL OR (t.task_category <> 'ROOM_OPERATIONS' AND t.task_type NOT IN ('ROOM_CLEANING', 'TURN_DOWN', 'DEEP_CLEAN', 'MAKEUP', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'FINAL_INSPECTION', 'CHECKOUT_ROOM_CHECK')))
      ORDER BY
        CASE
-         WHEN t.priority = 'CRITICAL' THEN 1
+         WHEN t.task_type = 'CHECKOUT_ROOM_CHECK' AND t.status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS') THEN 1
          WHEN t.priority = 'TURNOVER' THEN 2
-         WHEN t.priority = 'VIP' THEN 3
-         WHEN t.priority = 'HIGH' THEN 4
-         WHEN t.priority = 'NORMAL' THEN 5
+         WHEN t.due_at IS NOT NULL AND t.due_at < NOW() THEN 3
+         WHEN t.priority IN ('CRITICAL', 'HIGH', 'VIP') THEN 4
+         WHEN t.task_type = 'ROOM_CLEANING' THEN 5
          ELSE 6
        END,
        t.due_at ASC NULLS LAST,
-       t.created_at DESC`,
+       t.created_at ASC`,
     [propertyId]
   );
 
@@ -506,6 +514,14 @@ export async function createHousekeepingTask(
     }
   }
 
+  // Authoritative data integrity rule: ROOM_CLEANING must require a valid room_id
+  if (payload.task_type === 'ROOM_CLEANING' && !roomId) {
+    throw Object.assign(
+      new Error('Tugas pembersihan kamar (ROOM_CLEANING) membutuhkan data kamar (room_id) yang valid.'),
+      { statusCode: 400, code: 'ROOM_ID_REQUIRED' }
+    );
+  }
+
   const title = payload.title || (
     payload.task_type === 'ROOM_CLEANING' ? `Pembersihan Kamar ${roomNumber || ''}` :
     payload.task_type === 'CHECKOUT_ROOM_CHECK' ? `Pemeriksaan Checkout Kamar ${roomNumber || ''}` :
@@ -517,6 +533,35 @@ export async function createHousekeepingTask(
   const priority = payload.priority || (
     payload.task_type === 'CHECKOUT_ROOM_CHECK' ? 'CRITICAL' : 'NORMAL'
   );
+
+  // Concurrency & single active task rule for ROOM_CLEANING
+  if (payload.task_type === 'ROOM_CLEANING' && roomId) {
+    // Lock the room row to prevent race conditions from concurrent triggers
+    await client.query('SELECT id FROM rooms WHERE id = $1 AND property_id = $2 FOR UPDATE', [roomId, propertyId]);
+
+    const existingActive = await client.query(
+      `SELECT * FROM housekeeping_tasks
+       WHERE property_id = $1
+         AND room_id = $2
+         AND task_type = 'ROOM_CLEANING'
+         AND status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+         AND COALESCE(is_archived, FALSE) = FALSE
+       ORDER BY id DESC LIMIT 1`,
+      [propertyId, roomId]
+    );
+
+    if (hasRows(existingActive)) {
+      const existingTask = existingActive.rows[0];
+      if (priority === 'TURNOVER' && existingTask.priority !== 'TURNOVER') {
+        const upd = await client.query(
+          `UPDATE housekeeping_tasks SET priority = 'TURNOVER', title = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+          [title, existingTask.id]
+        );
+        return upd.rows[0];
+      }
+      return existingTask;
+    }
+  }
 
   const taskNumber = await generateTaskNumber(client, propertyId);
 
@@ -574,35 +619,36 @@ export async function createHousekeepingTask(
   return createdTask;
 }
 
-export async function ensureCheckoutRoomCleaningTask(
+export async function ensureDirtyRoomCleaningTask(
   client: PoolClient,
   propertyId: number,
   roomId: number,
-  reservationId?: number | null
+  options?: {
+    reservationId?: number | null;
+    sourceType?: string;
+    sourceEntityId?: string | null;
+    actor?: { id?: number; name?: string; role?: string };
+  }
 ): Promise<HousekeepingTaskRecord | null> {
   const isRoomOpsEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.room_operations');
   if (!isRoomOpsEnabled) {
     return null;
   }
 
-  // Idempotency check: check if active ROOM_CLEANING task already exists for this room
+  // Row lock on room to prevent concurrency races
+  await client.query('SELECT id FROM rooms WHERE id = $1 AND property_id = $2 FOR UPDATE', [roomId, propertyId]);
+
+  // Check if active ROOM_CLEANING task already exists for this room
   const existingRes = await client.query(
     `SELECT * FROM housekeeping_tasks
      WHERE property_id = $1
        AND room_id = $2
        AND task_type = 'ROOM_CLEANING'
        AND status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+       AND COALESCE(is_archived, FALSE) = FALSE
      ORDER BY id DESC LIMIT 1`,
     [propertyId, roomId]
   );
-
-  if (hasRows(existingRes)) {
-    return existingRes.rows[0];
-  }
-
-  // Get room details
-  const roomRes = await client.query('SELECT room_number FROM rooms WHERE id = $1 AND property_id = $2', [roomId, propertyId]);
-  const roomNumber = hasRows(roomRes) ? roomRes.rows[0].room_number : null;
 
   // Check if incoming check-in today exists for this room
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -619,6 +665,27 @@ export async function ensureCheckoutRoomCleaningTask(
   );
 
   const hasIncomingArrival = hasRows(arrivalCheck);
+
+  if (hasRows(existingRes)) {
+    const existingTask = existingRes.rows[0];
+    if (hasIncomingArrival && existingTask.priority !== 'TURNOVER') {
+      const updated = await client.query(
+        `UPDATE housekeeping_tasks
+         SET priority = 'TURNOVER',
+             title = COALESCE(title, '') || ' (Arrival Hari Ini)',
+             updated_at = NOW()
+         WHERE id = $1 RETURNING *`,
+        [existingTask.id]
+      );
+      return updated.rows[0];
+    }
+    return existingTask;
+  }
+
+  // Get room details
+  const roomRes = await client.query('SELECT room_number FROM rooms WHERE id = $1 AND property_id = $2', [roomId, propertyId]);
+  const roomNumber = hasRows(roomRes) ? roomRes.rows[0].room_number : null;
+
   const priority: HkTaskPriority = hasIncomingArrival ? 'TURNOVER' : 'NORMAL';
   const title = hasIncomingArrival
     ? `Turnover Pembersihan Kamar ${roomNumber || ''} (Arrival Hari Ini)`
@@ -632,14 +699,28 @@ export async function ensureCheckoutRoomCleaningTask(
       task_type: 'ROOM_CLEANING',
       room_id: roomId,
       room_number: roomNumber,
-      reservation_id: reservationId || null,
+      reservation_id: options?.reservationId || null,
       title,
       priority,
-      source_type: 'CHECKOUT_EVENT',
-      source_entity_id: reservationId ? String(reservationId) : null
+      source_type: options?.sourceType || 'DIRTY_ROOM_EVENT',
+      source_entity_id: options?.sourceEntityId || (options?.reservationId ? String(options.reservationId) : null)
     },
-    { name: 'System (Checkout Trigger)' }
+    options?.actor || { name: 'System (Dirty Event)' }
   );
+}
+
+export async function ensureCheckoutRoomCleaningTask(
+  client: PoolClient,
+  propertyId: number,
+  roomId: number,
+  reservationId?: number | null
+): Promise<HousekeepingTaskRecord | null> {
+  return await ensureDirtyRoomCleaningTask(client, propertyId, roomId, {
+    reservationId,
+    sourceType: 'CHECKOUT_EVENT',
+    sourceEntityId: reservationId ? String(reservationId) : null,
+    actor: { name: 'System (Checkout Trigger)' }
+  });
 }
 
 export async function requestCheckoutRoomCheck(
@@ -660,8 +741,9 @@ export async function requestCheckoutRoomCheck(
      WHERE property_id = $1
        AND reservation_id = $2
        AND task_type = 'CHECKOUT_ROOM_CHECK'
-       AND status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS')
-     LIMIT 1`,
+       AND status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+       AND COALESCE(is_archived, FALSE) = FALSE
+     ORDER BY id DESC LIMIT 1`,
     [propertyId, reservationId]
   );
   if (hasRows(existingRes)) {
@@ -850,25 +932,33 @@ export async function completeHousekeepingTask(
   }
   const task = taskRes.rows[0];
 
-  // 1. Mandatory checklist validation (enforced for room cleaning and inspection pass)
+  // 1. Mandatory checklist validation
   const isRework = payload.inspection_result === 'RETURN_TO_CLEANING';
   const isCheckoutCheck = task.task_type === 'CHECKOUT_ROOM_CHECK';
-  if (!isRework && !isCheckoutCheck) {
-    const incompleteItems = await client.query(
-      `SELECT id, label, section
-       FROM housekeeping_task_checklist_items
-       WHERE task_id = $1 AND is_required = true AND is_completed = false`,
-      [taskId]
-    );
-    if (hasRows(incompleteItems)) {
-      throw Object.assign(
-        new Error(`Tidak dapat menyelesaikan tugas. Ada ${incompleteItems.rows.length} checklist wajib yang belum lengkap.`),
-        {
-          statusCode: 400,
-          code: 'CHECKLIST_INCOMPLETE',
-          incomplete_items: incompleteItems.rows
-        }
+  const isCheckoutClear = isCheckoutCheck && (payload.inspection_result === 'CLEAR' || (!payload.inspection_result && !task.inspection_result));
+
+  if (!isRework) {
+    if (!isCheckoutCheck || isCheckoutClear) {
+      const incompleteItems = await client.query(
+        `SELECT id, label, section
+         FROM housekeeping_task_checklist_items
+         WHERE task_id = $1 AND is_required = true AND is_completed = false`,
+        [taskId]
       );
+      if (hasRows(incompleteItems)) {
+        throw Object.assign(
+          new Error(
+            isCheckoutClear
+              ? `Tidak dapat menyatakan kamar aman. Ada ${incompleteItems.rows.length} butir checklist wajib yang belum diperiksa.`
+              : `Tidak dapat menyelesaikan tugas. Ada ${incompleteItems.rows.length} checklist wajib yang belum lengkap.`
+          ),
+          {
+            statusCode: 400,
+            code: 'CHECKLIST_INCOMPLETE',
+            incomplete_items: incompleteItems.rows
+          }
+        );
+      }
     }
   }
 
@@ -883,8 +973,25 @@ export async function completeHousekeepingTask(
     if (!inspectionResult) {
       inspectionResult = 'CLEAR';
     }
-    if (inspectionResult === 'ISSUE_FOUND' && !issueType) {
-      throw Object.assign(new Error('Tipe temuan (issue_type) wajib diisi jika hasil pemeriksaan terdapat temuan.'), { statusCode: 400, code: 'ISSUE_TYPE_REQUIRED' });
+    if (inspectionResult === 'ISSUE_FOUND') {
+      if (!issueType) {
+        throw Object.assign(new Error('Tipe temuan (issue_type) wajib diisi jika hasil pemeriksaan terdapat temuan.'), { statusCode: 400, code: 'ISSUE_TYPE_REQUIRED' });
+      }
+
+      // Check against finding types catalog
+      const ftRes = await client.query(
+        `SELECT * FROM housekeeping_finding_types WHERE property_id = $1 AND (code = $2 OR label = $2)`,
+        [propertyId, issueType]
+      );
+      if (hasRows(ftRes)) {
+        const ft = ftRes.rows[0];
+        if (ft.note_required && (!issueNote || issueNote.trim().length === 0)) {
+          throw Object.assign(new Error(`Catatan temuan wajib diisi untuk jenis temuan '${ft.label}'.`), { statusCode: 400, code: 'NOTE_REQUIRED' });
+        }
+        if (!ft.estimated_charge_allowed) {
+          estimatedCharge = 0;
+        }
+      }
     }
   } else if (task.task_type === 'FINAL_INSPECTION') {
     if (!inspectionResult) {
@@ -1007,4 +1114,522 @@ export async function completeHousekeepingTask(
   );
 
   return updatedTask;
+}
+
+export async function updateTaskHistoryRecord(
+  client: PoolClient,
+  propertyId: number,
+  taskId: number,
+  payload: HistoryEditPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingTaskRecord> {
+  if (!payload.reason || String(payload.reason).trim() === '') {
+    throw Object.assign(new Error('Alasan perbaikan riwayat tugas wajib diisi.'), {
+      statusCode: 400,
+      code: 'REASON_REQUIRED'
+    });
+  }
+
+  const currentRes = await client.query(
+    'SELECT * FROM housekeeping_tasks WHERE id = $1 AND property_id = $2',
+    [taskId, propertyId]
+  );
+  if (!hasRows(currentRes)) {
+    throw Object.assign(new Error('Tugas housekeeping tidak ditemukan.'), {
+      statusCode: 404,
+      code: 'TASK_NOT_FOUND'
+    });
+  }
+  const currentTask = currentRes.rows[0];
+
+  const assignedUserId = payload.assigned_user_id !== undefined ? payload.assigned_user_id : currentTask.assigned_user_id;
+  const assignedName = payload.assigned_user_name_snapshot !== undefined ? payload.assigned_user_name_snapshot : currentTask.assigned_user_name_snapshot;
+  const priority = payload.priority || currentTask.priority;
+  const title = payload.title || currentTask.title;
+  const description = payload.description !== undefined ? payload.description : currentTask.description;
+  const scheduledAt = payload.scheduled_at !== undefined ? payload.scheduled_at : currentTask.scheduled_at;
+  const dueAt = payload.due_at !== undefined ? payload.due_at : currentTask.due_at;
+  const completionNote = payload.completion_note !== undefined ? payload.completion_note : currentTask.completion_note;
+
+  const updateRes = await client.query(
+    `UPDATE housekeeping_tasks
+     SET assigned_user_id = $1,
+         assigned_user_name_snapshot = $2,
+         priority = $3,
+         title = $4,
+         description = $5,
+         scheduled_at = $6,
+         due_at = $7,
+         completion_note = $8,
+         updated_at = NOW()
+     WHERE id = $9 AND property_id = $10
+     RETURNING *`,
+    [
+      assignedUserId,
+      assignedName,
+      priority,
+      title,
+      description,
+      scheduledAt,
+      dueAt,
+      completionNote,
+      taskId,
+      propertyId
+    ]
+  );
+
+  const updatedTask = updateRes.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HOUSEKEEPING',
+      'HK_TASK_HISTORY_CORRECTED',
+      'HOUSEKEEPING_TASK',
+      Number(taskId),
+      JSON.stringify({ previous: currentTask, updated_fields: payload, updated_task: updatedTask, reason: payload.reason }),
+      actor?.name || 'Supervisor',
+      propertyId
+    ]
+  );
+
+  return updatedTask;
+}
+
+export async function archiveHousekeepingTask(
+  client: PoolClient,
+  propertyId: number,
+  taskId: number,
+  reason?: string,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingTaskRecord> {
+  const currentRes = await client.query(
+    'SELECT * FROM housekeeping_tasks WHERE id = $1 AND property_id = $2',
+    [taskId, propertyId]
+  );
+  if (!hasRows(currentRes)) {
+    throw Object.assign(new Error('Tugas housekeeping tidak ditemukan.'), {
+      statusCode: 404,
+      code: 'TASK_NOT_FOUND'
+    });
+  }
+
+  const updateRes = await client.query(
+    `UPDATE housekeeping_tasks
+     SET is_archived = TRUE,
+         archived_at = NOW(),
+         archived_by = $1,
+         archive_reason = $2,
+         updated_at = NOW()
+     WHERE id = $3 AND property_id = $4
+     RETURNING *`,
+    [actor?.name || 'Staff', reason || null, taskId, propertyId]
+  );
+
+  const updatedTask = updateRes.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HOUSEKEEPING',
+      'HK_TASK_ARCHIVED',
+      'HOUSEKEEPING_TASK',
+      Number(taskId),
+      JSON.stringify({ reason: reason, archived_by: actor?.name || 'Staff' }),
+      actor?.name || 'Staff',
+      propertyId
+    ]
+  );
+
+  return updatedTask;
+}
+
+export async function unarchiveHousekeepingTask(
+  client: PoolClient,
+  propertyId: number,
+  taskId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingTaskRecord> {
+  const currentRes = await client.query(
+    'SELECT * FROM housekeeping_tasks WHERE id = $1 AND property_id = $2',
+    [taskId, propertyId]
+  );
+  if (!hasRows(currentRes)) {
+    throw Object.assign(new Error('Tugas housekeeping tidak ditemukan.'), {
+      statusCode: 404,
+      code: 'TASK_NOT_FOUND'
+    });
+  }
+
+  const updateRes = await client.query(
+    `UPDATE housekeeping_tasks
+     SET is_archived = FALSE,
+         archived_at = NULL,
+         archived_by = NULL,
+         archive_reason = NULL,
+         updated_at = NOW()
+     WHERE id = $1 AND property_id = $2
+     RETURNING *`,
+    [taskId, propertyId]
+  );
+
+  const updatedTask = updateRes.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HOUSEKEEPING',
+      'HK_TASK_UNARCHIVED',
+      'HOUSEKEEPING_TASK',
+      Number(taskId),
+      JSON.stringify({ unarchived_by: actor?.name || 'Staff' }),
+      actor?.name || 'Staff',
+      propertyId
+    ]
+  );
+
+  return updatedTask;
+}
+
+// -----------------------------------------------------------------------------
+// Finding Types Catalog Management
+// -----------------------------------------------------------------------------
+
+export async function getFindingTypes(
+  client: PoolClient | Pool,
+  propertyId: number,
+  options?: 'all' | 'active' | { scope?: 'all' | 'active' }
+): Promise<HousekeepingFindingType[]> {
+  const scope = typeof options === 'string' ? options : (options?.scope || 'all');
+  let sql = `SELECT * FROM housekeeping_finding_types WHERE property_id = $1`;
+  if (scope === 'active') {
+    sql += ` AND is_active = TRUE`;
+  }
+  sql += ` ORDER BY sort_order ASC, id ASC`;
+  const res = await client.query(sql, [propertyId]);
+  return res.rows;
+}
+
+export async function createFindingType(
+  client: PoolClient,
+  propertyId: number,
+  payload: CreateFindingTypePayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingFindingType> {
+  const code = (payload.code || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const label = (payload.label || '').trim();
+  if (!code) {
+    throw Object.assign(new Error('Kode jenis temuan wajib diisi.'), { statusCode: 400, code: 'CODE_REQUIRED' });
+  }
+  if (!label) {
+    throw Object.assign(new Error('Nama label jenis temuan wajib diisi.'), { statusCode: 400, code: 'LABEL_REQUIRED' });
+  }
+
+  const existing = await client.query(
+    'SELECT id FROM housekeeping_finding_types WHERE property_id = $1 AND code = $2',
+    [propertyId, code]
+  );
+  if (hasRows(existing)) {
+    throw Object.assign(new Error(`Jenis temuan dengan kode '${code}' sudah ada pada properti ini.`), { statusCode: 400, code: 'DUPLICATE_CODE' });
+  }
+
+  let sortOrder = payload.sort_order;
+  if (sortOrder === undefined || sortOrder === null) {
+    const maxRes = await client.query(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM housekeeping_finding_types WHERE property_id = $1',
+      [propertyId]
+    );
+    sortOrder = Number(maxRes.rows[0]?.next_sort || 1);
+  }
+
+  const res = await client.query(
+    `INSERT INTO housekeeping_finding_types (
+      property_id, code, label, description, severity, is_active,
+      sort_order, note_required, photo_required, estimated_charge_allowed, supervisor_review_required,
+      created_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6,
+      $7, $8, $9, $10, $11,
+      NOW(), NOW()
+    ) RETURNING *`,
+    [
+      propertyId,
+      code,
+      label,
+      payload.description || null,
+      payload.severity || 'MEDIUM',
+      payload.is_active !== undefined ? Boolean(payload.is_active) : true,
+      sortOrder,
+      payload.note_required !== undefined ? Boolean(payload.note_required) : false,
+      payload.photo_required !== undefined ? Boolean(payload.photo_required) : false,
+      payload.estimated_charge_allowed !== undefined ? Boolean(payload.estimated_charge_allowed) : true,
+      payload.supervisor_review_required !== undefined ? Boolean(payload.supervisor_review_required) : false
+    ]
+  );
+
+  const created: HousekeepingFindingType = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HOUSEKEEPING', 'HK_FINDING_TYPE_CREATED', 'FINDING_TYPE', String(created.id), JSON.stringify(created), actor?.name || 'Admin', propertyId]
+  );
+
+  return created;
+}
+
+export async function updateFindingType(
+  client: PoolClient,
+  propertyId: number,
+  id: number,
+  payload: UpdateFindingTypePayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingFindingType> {
+  const currentRes = await client.query(
+    'SELECT * FROM housekeeping_finding_types WHERE id = $1 AND property_id = $2',
+    [id, propertyId]
+  );
+  if (!hasRows(currentRes)) {
+    throw Object.assign(new Error('Jenis temuan tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  let code = current.code;
+  if (payload.code && payload.code.trim()) {
+    code = payload.code.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+    if (code !== current.code) {
+      const dup = await client.query(
+        'SELECT id FROM housekeeping_finding_types WHERE property_id = $1 AND code = $2 AND id <> $3',
+        [propertyId, code, id]
+      );
+      if (hasRows(dup)) {
+        throw Object.assign(new Error(`Kode jenis temuan '${code}' sudah digunakan.`), { statusCode: 400, code: 'DUPLICATE_CODE' });
+      }
+    }
+  }
+
+  const label = payload.label !== undefined ? payload.label.trim() : current.label;
+  const description = payload.description !== undefined ? payload.description : current.description;
+  const severity = payload.severity !== undefined ? payload.severity : current.severity;
+  const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
+  const sortOrder = payload.sort_order !== undefined ? Number(payload.sort_order) : current.sort_order;
+  const noteRequired = payload.note_required !== undefined ? Boolean(payload.note_required) : current.note_required;
+  const photoRequired = payload.photo_required !== undefined ? Boolean(payload.photo_required) : current.photo_required;
+  const chargeAllowed = payload.estimated_charge_allowed !== undefined ? Boolean(payload.estimated_charge_allowed) : current.estimated_charge_allowed;
+  const supReview = payload.supervisor_review_required !== undefined ? Boolean(payload.supervisor_review_required) : current.supervisor_review_required;
+
+  const res = await client.query(
+    `UPDATE housekeeping_finding_types
+     SET code = $1, label = $2, description = $3, severity = $4, is_active = $5,
+         sort_order = $6, note_required = $7, photo_required = $8,
+         estimated_charge_allowed = $9, supervisor_review_required = $10,
+         updated_at = NOW()
+     WHERE id = $11 AND property_id = $12
+     RETURNING *`,
+    [code, label, description, severity, isActive, sortOrder, noteRequired, photoRequired, chargeAllowed, supReview, id, propertyId]
+  );
+
+  const updated: HousekeepingFindingType = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HOUSEKEEPING', 'HK_FINDING_TYPE_UPDATED', 'FINDING_TYPE', String(id), JSON.stringify(updated), actor?.name || 'Admin', propertyId]
+  );
+
+  return updated;
+}
+
+export async function reorderFindingTypes(
+  client: PoolClient | Pool,
+  propertyId: number,
+  items: (number | { id: number; sort_order?: number })[],
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HousekeepingFindingType[]> {
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const id = typeof it === 'number' ? it : Number(it.id);
+    const sortOrder = typeof it === 'number' ? (i + 1) : (it.sort_order !== undefined ? Number(it.sort_order) : (i + 1));
+    await client.query(
+      `UPDATE housekeeping_finding_types SET sort_order = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3`,
+      [sortOrder, id, propertyId]
+    );
+  }
+  return getFindingTypes(client, propertyId, { scope: 'all' });
+}
+
+// -----------------------------------------------------------------------------
+// Checklist Template Items Management
+// -----------------------------------------------------------------------------
+
+export async function addChecklistTemplateItem(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  payload: CreateChecklistTemplateItemPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<ChecklistTemplateItem> {
+  const tplCheck = await client.query(
+    'SELECT id, name FROM checklist_templates WHERE id = $1 AND property_id = $2',
+    [templateId, propertyId]
+  );
+  if (!hasRows(tplCheck)) {
+    throw Object.assign(new Error('Template checklist tidak ditemukan pada properti ini.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  const label = (payload.label || '').trim();
+  const section = (payload.section || 'CHECKLIST').trim().toUpperCase();
+  if (!label) {
+    throw Object.assign(new Error('Label butir checklist wajib diisi.'), { statusCode: 400, code: 'LABEL_REQUIRED' });
+  }
+
+  let sortOrder = payload.sort_order;
+  if (sortOrder === undefined || sortOrder === null) {
+    const maxRes = await client.query(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM checklist_template_items WHERE template_id = $1',
+      [templateId]
+    );
+    sortOrder = Number(maxRes.rows[0]?.next_sort || 1);
+  }
+
+  const res = await client.query(
+    `INSERT INTO checklist_template_items (
+      template_id, section, label, sort_order, is_required, requires_note, requires_photo, is_active, created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, NOW()
+    ) RETURNING *`,
+    [
+      templateId,
+      section,
+      label,
+      sortOrder,
+      payload.is_required !== undefined ? Boolean(payload.is_required) : true,
+      payload.requires_note !== undefined ? Boolean(payload.requires_note) : false,
+      payload.requires_photo !== undefined ? Boolean(payload.requires_photo) : false,
+      payload.is_active !== undefined ? Boolean(payload.is_active) : true
+    ]
+  );
+
+  const created: ChecklistTemplateItem = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_CREATED', 'TEMPLATE_ITEM', String(created.id), JSON.stringify(created), actor?.name || 'Admin', propertyId]
+  );
+
+  return created;
+}
+
+export async function updateChecklistTemplateItem(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  itemId: number,
+  payload: UpdateChecklistTemplateItemPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<ChecklistTemplateItem> {
+  const itemCheck = await client.query(
+    `SELECT i.* FROM checklist_template_items i
+     JOIN checklist_templates t ON t.id = i.template_id
+     WHERE i.id = $1 AND i.template_id = $2 AND t.property_id = $3`,
+    [itemId, templateId, propertyId]
+  );
+  if (!hasRows(itemCheck)) {
+    throw Object.assign(new Error('Butir checklist tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+  const current = itemCheck.rows[0];
+
+  const section = payload.section !== undefined ? payload.section.trim().toUpperCase() : current.section;
+  const label = payload.label !== undefined ? payload.label.trim() : current.label;
+  const sortOrder = payload.sort_order !== undefined ? Number(payload.sort_order) : current.sort_order;
+  const isRequired = payload.is_required !== undefined ? Boolean(payload.is_required) : current.is_required;
+  const reqNote = payload.requires_note !== undefined ? Boolean(payload.requires_note) : current.requires_note;
+  const reqPhoto = payload.requires_photo !== undefined ? Boolean(payload.requires_photo) : current.requires_photo;
+  const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
+
+  const res = await client.query(
+    `UPDATE checklist_template_items
+     SET section = $1, label = $2, sort_order = $3, is_required = $4,
+         requires_note = $5, requires_photo = $6, is_active = $7
+     WHERE id = $8 AND template_id = $9
+     RETURNING *`,
+    [section, label, sortOrder, isRequired, reqNote, reqPhoto, isActive, itemId, templateId]
+  );
+
+  const updated: ChecklistTemplateItem = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_UPDATED', 'TEMPLATE_ITEM', String(itemId), JSON.stringify(updated), actor?.name || 'Admin', propertyId]
+  );
+
+  return updated;
+}
+
+export async function deleteChecklistTemplateItem(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  itemId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; deactivated?: boolean }> {
+  const itemCheck = await client.query(
+    `SELECT i.* FROM checklist_template_items i
+     JOIN checklist_templates t ON t.id = i.template_id
+     WHERE i.id = $1 AND i.template_id = $2 AND t.property_id = $3`,
+    [itemId, templateId, propertyId]
+  );
+  if (!hasRows(itemCheck)) {
+    throw Object.assign(new Error('Butir checklist tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  await client.query(
+    `UPDATE checklist_template_items SET is_active = FALSE WHERE id = $1 AND template_id = $2`,
+    [itemId, templateId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_DEACTIVATED', 'TEMPLATE_ITEM', String(itemId), JSON.stringify({ is_active: false }), actor?.name || 'Admin', propertyId]
+  );
+
+  return { success: true, deactivated: true };
+}
+
+export async function reorderChecklistTemplateItems(
+  client: PoolClient | Pool,
+  propertyId: number,
+  templateId: number,
+  items: (number | { id: number; sort_order?: number })[],
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<ChecklistTemplateItem[]> {
+  const tplCheck = await client.query(
+    'SELECT id FROM checklist_templates WHERE id = $1 AND property_id = $2',
+    [templateId, propertyId]
+  );
+  if (!hasRows(tplCheck)) {
+    throw Object.assign(new Error('Template tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const id = typeof it === 'number' ? it : Number(it.id);
+    const sortOrder = typeof it === 'number' ? (i + 1) : (it.sort_order !== undefined ? Number(it.sort_order) : (i + 1));
+    await client.query(
+      `UPDATE checklist_template_items SET sort_order = $1 WHERE id = $2 AND template_id = $3`,
+      [sortOrder, id, templateId]
+    );
+  }
+
+  const itemsRes = await client.query(
+    'SELECT * FROM checklist_template_items WHERE template_id = $1 ORDER BY sort_order ASC, id ASC',
+    [templateId]
+  );
+  return itemsRes.rows;
 }
