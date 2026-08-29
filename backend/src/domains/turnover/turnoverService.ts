@@ -126,6 +126,34 @@ export async function evaluateRoomReadiness(
     };
   }
 
+  // Check for unresolved blocking findings
+  try {
+    const blockingRes = await client.query(
+      `SELECT f.id, f.finding_type_label, f.notes, f.severity
+       FROM housekeeping_task_findings f
+       WHERE f.room_id = $1
+         AND f.status = 'OPEN'
+         AND f.block_room_ready = TRUE
+       ORDER BY f.id DESC
+       LIMIT 1`,
+      [roomId]
+    );
+
+    if ((blockingRes.rowCount ?? 0) > 0) {
+      const bf = blockingRes.rows[0];
+      return {
+        is_ready: false,
+        turnover_state: 'OUT_OF_SERVICE',
+        reason_code: 'BLOCKING_FINDING_ACTIVE',
+        reason_message: `Kamar memiliki kendala aktif (${bf.finding_type_label}${bf.notes ? ': ' + bf.notes : ''}) yang belum diselesaikan.`,
+        room_status: rawStatus,
+        outgoing_reservation: null
+      };
+    }
+  } catch {
+    // Ignore if table not yet initialized during migration
+  }
+
   if (isReadyPhysicalStatus(normalized)) {
     return {
       is_ready: true,

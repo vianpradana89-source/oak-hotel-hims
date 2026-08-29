@@ -87,20 +87,29 @@ async function cleanup() {
   const cleanupErrors = [];
   try {
     await client.query('BEGIN');
-    for (const tid of tracked.tasks) {
-      await safe(() => client.query('DELETE FROM housekeeping_tasks WHERE id = $1', [tid]));
+    if (tracked.tasks.length > 0) {
+      await safe(() => client.query('DELETE FROM housekeeping_task_checklist_items WHERE task_id = ANY($1::int[])', [tracked.tasks]));
+      await safe(() => client.query('DELETE FROM housekeeping_task_findings WHERE task_id = ANY($1::int[])', [tracked.tasks]));
+      await safe(() => client.query('DELETE FROM housekeeping_tasks WHERE id = ANY($1::int[])', [tracked.tasks]));
     }
-    for (const rid of tracked.rooms) {
-      await safe(() => client.query('DELETE FROM rooms WHERE id = $1', [rid]));
+    if (tracked.rooms.length > 0) {
+      await safe(() => client.query('DELETE FROM rooms WHERE id = ANY($1::int[])', [tracked.rooms]));
     }
-    for (const pid of tracked.properties) {
-      await safe(() => client.query('DELETE FROM room_types WHERE property_id = $1', [pid]));
+    if (tracked.properties.length > 0) {
+      await safe(() => client.query('DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_features WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM housekeeping_finding_types WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM checklist_template_items WHERE template_id IN (SELECT id FROM checklist_templates WHERE property_id = ANY($1::int[]))', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM checklist_templates WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM audit_logs WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM room_types WHERE property_id = ANY($1::int[])', [tracked.properties]));
     }
-    for (const cid of tracked.categories) {
-      await safe(() => client.query('DELETE FROM room_categories WHERE id = $1', [cid]));
+    if (tracked.categories.length > 0) {
+      await safe(() => client.query('DELETE FROM room_categories WHERE id = ANY($1::int[])', [tracked.categories]));
     }
-    for (const pid of tracked.properties) {
-      await safe(() => client.query('DELETE FROM properties WHERE id = $1', [pid]));
+    if (tracked.properties.length > 0) {
+      await safe(() => client.query('DELETE FROM properties WHERE id = ANY($1::int[])', [tracked.properties]));
     }
     await client.query('COMMIT');
 

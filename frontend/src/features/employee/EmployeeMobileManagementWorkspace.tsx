@@ -23,11 +23,11 @@ export const EmployeeMobileManagementWorkspace: React.FC<EmployeeMobileManagemen
               MANAJEMEN
             </span>
             <h1 className="text-xl font-bold font-serif text-slate-900">
-              Employee Mobile — Administrasi & Portal Operasional
+              Employee Mobile — Administrasi & Pengaturan Portal Karyawan
             </h1>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Pengaturan akses portal mobile kru operasional (Housekeeping, Front Office, F&B) untuk {propertyName || 'OAK Hotel'}.
+            Pengaturan tautan akses portal mobile kru operasional (Housekeeping, Front Office, F&B) untuk {propertyName || 'OAK Hotel'}.
           </p>
         </div>
 

@@ -39,61 +39,69 @@ export default function ReservationBar(props: Props) {
   const outgoingClearance = turnover?.outgoing_clearance;
 
   return (
-    <td colSpan={props.span} className="p-2 border align-middle h-14">
+    <td colSpan={props.span} className="p-1 border align-middle h-14">
       <div
         draggable
         onDragStart={props.onDragStart}
         onDragEnd={props.onDragEnd}
         onClick={props.onOpen}
-        className={`reservation-card relative overflow-hidden ${props.cardClass} reservation-card--${props.density} ${props.searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold`}
+        className={`reservation-card relative overflow-hidden ${props.cardClass} reservation-card--${props.density} ${props.searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold shadow-xs hover:shadow-sm transition-shadow`}
       >
         <div className="reservation-card-stack">
-          <div className="reservation-card-topline flex-wrap gap-1">
-            <div className="reservation-card-name">{reservation.guest_name}</div>
-            <span className={props.badgeClass}>{props.badge}</span>
-            <span className={props.segmentMeta.className}>{props.segmentMeta.label}</span>
+          <div className="reservation-card-topline flex-wrap items-center gap-1">
+            {/* Arrival starting-edge indicator */}
+            <span
+              className="inline-flex items-center text-[9px] font-extrabold text-sky-900 bg-sky-100/90 px-1 py-0.2 rounded border border-sky-300/80 shadow-2xs select-none shrink-0"
+              title={`Check-in: ${reservation.check_in}`}
+            >
+              ARR ↘
+            </span>
+
+            <div className="reservation-card-name truncate">{reservation.guest_name}</div>
+            <span className={`${props.badgeClass} shrink-0`}>{props.badge}</span>
+            <span className={`${props.segmentMeta.className} shrink-0`}>{props.segmentMeta.label}</span>
 
             {/* Outgoing Checkout HK Clearance Indicator */}
             {outgoingClearance && outgoingClearance.clearance_state === 'CLEAR' && (
               <span
-                className="text-[9px] px-1.5 py-0.2 rounded-sm font-bold uppercase tracking-wider inline-flex items-center gap-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-2xs"
-                title="HK CLEAR: Pemeriksaan kamar checkout bersih & bebas tanggungan"
+                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300/80 shadow-2xs shrink-0"
+                title="HK CLEAR: Pemeriksaan kamar checkout bersih"
               >
-                ✓ HK CLEAR
+                ✓ Clear
               </span>
             )}
             {outgoingClearance && outgoingClearance.clearance_state === 'ISSUE_FOUND' && (
               <span
-                className="text-[9px] px-1.5 py-0.2 rounded-sm font-bold uppercase tracking-wider inline-flex items-center gap-0.5 bg-rose-100 text-rose-800 border border-rose-300 shadow-2xs"
+                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-rose-50 text-rose-800 border border-rose-300/80 shadow-2xs shrink-0"
                 title={`HK ISSUE: ${outgoingClearance.issue_note || 'Ada temuan tagihan / kerusakan kamar'}`}
               >
-                ⚠ HK ISSUE
+                ⚠ Issue
               </span>
             )}
             {outgoingClearance && (outgoingClearance.clearance_state === 'REQUESTED' || outgoingClearance.clearance_state === 'INSPECTING') && (
               <span
-                className="text-[9px] px-1.5 py-0.2 rounded-sm font-bold uppercase tracking-wider inline-flex items-center gap-0.5 bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs"
-                title="HK CEK: Pemeriksaan kamar sedang berlangsung oleh crew"
+                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-amber-50 text-amber-800 border border-amber-300/80 shadow-2xs shrink-0"
+                title="HK CEK: Pemeriksaan kamar sedang berlangsung"
               >
-                ⏳ HK CEK
+                ⏳ Cek
               </span>
             )}
 
             {/* Incoming Room Readiness Indicator */}
             {turnover?.has_turnover && (
               <span
-                className={`text-[9px] px-1.5 py-0.2 rounded-sm font-bold uppercase tracking-wider inline-flex items-center gap-0.5 shadow-2xs ${
+                className={`text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 shadow-2xs shrink-0 ${
                   turnover.is_ready === false
-                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                    : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                    ? 'bg-amber-50 text-amber-900 border border-amber-300/80'
+                    : 'bg-emerald-50 text-emerald-900 border border-emerald-300/80'
                 }`}
                 title={turnover.reason_message || (turnover.is_ready === false ? 'Turnover: Kamar belum siap untuk check-in' : 'Turnover: Kamar siap huni')}
               >
-                {turnover.is_ready === false ? '⚠ NOT READY' : '✓ READY'}
+                {turnover.is_ready === false ? '⚠ Not Ready' : '✓ Ready'}
               </span>
             )}
           </div>
-          <div className="reservation-card-identity">{props.identity}</div>
+          <div className="reservation-card-identity truncate">{props.identity}</div>
           <div className="reservation-card-meta">
             <span>{props.nights} malam</span>
             <span>{props.statusLabel}{props.legacy ? ' · LEGACY' : ''}</span>

@@ -52,7 +52,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [isActionSubmitting, setIsActionSubmitting] = useState<boolean>(false);
 
   // History Tab Specific States
-  const [historyPreset, setHistoryPreset] = useState<'today' | 'yesterday' | '7days' | '30days' | 'this_month' | 'all'>('today');
+  const [historyPreset, setHistoryPreset] = useState<'today' | 'yesterday' | 'custom' | '7days' | '30days' | 'this_month' | 'all'>('today');
   const [includeArchived, setIncludeArchived] = useState<boolean>(false);
   const [historyEditTask, setHistoryEditTask] = useState<HousekeepingTaskRecord | null>(null);
   const [historyEditForm, setHistoryEditForm] = useState<{
@@ -67,6 +67,35 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     reason: ''
   });
   const [isHistorySaving, setIsHistorySaving] = useState<boolean>(false);
+
+  // Date Presets & Helpers
+  const todayStr = useMemo(() => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }, []);
+
+  const yesterdayStr = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }, []);
+
+  const handleSelectDate = (newDate: string) => {
+    setDateStr(newDate);
+    if (newDate === todayStr) {
+      setHistoryPreset('today');
+    } else if (newDate === yesterdayStr) {
+      setHistoryPreset('yesterday');
+    } else {
+      setHistoryPreset('custom');
+    }
+  };
 
   // Fetch daily operations & tasks
   const fetchDailyOperations = useCallback(async (isBackground = false) => {
@@ -115,10 +144,19 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   }, [apiBaseUrl, propertyId]);
 
   // Fetch history tasks
-  const fetchHistory = useCallback(async (preset = historyPreset, incArchived = includeArchived) => {
+  const fetchHistory = useCallback(async (preset = historyPreset, incArchived = includeArchived, customDate = dateStr) => {
     try {
-      const presetParam = preset === 'all' ? '' : `&preset=${preset}`;
-      const url = `${apiBaseUrl}/housekeeping/history?property_id=${propertyId}${presetParam}${incArchived ? '&include_archived=true' : ''}`;
+      let queryParam = '';
+      if (preset === 'custom' && customDate) {
+        queryParam = `&start_date=${customDate}&end_date=${customDate}`;
+      } else if (preset === 'today') {
+        queryParam = `&preset=today`;
+      } else if (preset === 'yesterday') {
+        queryParam = `&preset=yesterday`;
+      } else if (preset && preset !== 'all') {
+        queryParam = `&preset=${preset}`;
+      }
+      const url = `${apiBaseUrl}/housekeeping/history?property_id=${propertyId}${queryParam}${incArchived ? '&include_archived=true' : ''}`;
       const res = await fetch(url);
       if (res.ok) {
         const json = await res.json();
@@ -127,7 +165,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     } catch (err) {
       console.error('Failed to fetch HK history:', err);
     }
-  }, [apiBaseUrl, propertyId, historyPreset, includeArchived]);
+  }, [apiBaseUrl, propertyId, historyPreset, includeArchived, dateStr]);
 
   useEffect(() => {
     fetchDailyOperations();
@@ -136,9 +174,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
   useEffect(() => {
     if (activeTab === 'history') {
-      fetchHistory(historyPreset, includeArchived);
+      fetchHistory(historyPreset, includeArchived, dateStr);
     }
-  }, [activeTab, historyPreset, includeArchived, fetchHistory]);
+  }, [activeTab, historyPreset, includeArchived, dateStr, fetchHistory]);
 
   // History Actions: Safe Edit, Archive, Unarchive
   const handleOpenHistoryEdit = (task: HousekeepingTaskRecord) => {
@@ -516,18 +554,59 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={dateStr}
-            onChange={(e) => setDateStr(e.target.value)}
-            className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-neutral-300 bg-white text-neutral-800 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-          />
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Quick Date Control */}
+          <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-lg border border-neutral-200">
+            <button
+              type="button"
+              onClick={() => handleSelectDate(todayStr)}
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                dateStr === todayStr
+                  ? 'bg-[#1b4332] text-white shadow-xs'
+                  : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-200/70'
+              }`}
+            >
+              <span>Hari Ini</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectDate(yesterdayStr)}
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                dateStr === yesterdayStr
+                  ? 'bg-[#1b4332] text-white shadow-xs'
+                  : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-200/70'
+              }`}
+            >
+              <span>Kemarin</span>
+            </button>
+            <div className="relative flex items-center">
+              <div className="absolute left-2.5 text-neutral-500 pointer-events-none">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <input
+                type="date"
+                value={dateStr}
+                onChange={(e) => handleSelectDate(e.target.value)}
+                className={`pl-8 pr-2.5 py-1 text-xs font-semibold rounded-md border transition cursor-pointer ${
+                  dateStr !== todayStr && dateStr !== yesterdayStr
+                    ? 'bg-[#1b4332] text-white border-[#1b4332]'
+                    : 'bg-white text-neutral-800 border-neutral-300 hover:border-neutral-400'
+                }`}
+                title="Pencarian Tanggal Manual"
+              />
+            </div>
+          </div>
+
           <button
             type="button"
-            onClick={() => fetchDailyOperations(true)}
+            onClick={() => {
+              fetchDailyOperations(true);
+              if (activeTab === 'history') fetchHistory(historyPreset, includeArchived, dateStr);
+            }}
             disabled={isRefreshing}
-            className="p-2 text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors cursor-pointer"
+            className="p-2 text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors cursor-pointer border border-neutral-200"
             title="Segarkan Data"
           >
             <svg className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -747,56 +826,30 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
           {/* Search & Filter Bar for List Views */}
           <div className="flex flex-wrap items-center gap-2 pb-2">
-            {activeTab === 'history' ? (
-              <>
-                <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-lg">
-                  {[
-                    { id: 'today', label: 'Hari Ini' },
-                    { id: 'yesterday', label: 'Kemarin' },
-                    { id: '7days', label: '7 Hari' },
-                    { id: '30days', label: '30 Hari' },
-                    { id: 'this_month', label: 'Bulan Ini' },
-                    { id: 'all', label: 'Semua' }
-                  ].map(p => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => setHistoryPreset(p.id as any)}
-                      className={`px-2.5 py-1 rounded text-[11px] font-semibold transition ${
-                        historyPreset === p.id
-                          ? 'bg-[#1b4332] text-white shadow-xs'
-                          : 'text-neutral-600 hover:text-neutral-900'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-
-                <label className="flex items-center gap-1.5 text-xs text-neutral-600 cursor-pointer ml-2">
-                  <input
-                    type="checkbox"
-                    checked={includeArchived}
-                    onChange={(e) => setIncludeArchived(e.target.checked)}
-                    className="w-3.5 h-3.5 rounded text-[#1b4332] focus:ring-[#1b4332]"
-                  />
-                  <span>Tampilkan Data Diarsipkan</span>
-                </label>
-              </>
-            ) : null}
+            {activeTab === 'history' && (
+              <label className="flex items-center gap-1.5 text-xs text-neutral-600 cursor-pointer mr-1">
+                <input
+                  type="checkbox"
+                  checked={includeArchived}
+                  onChange={(e) => setIncludeArchived(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded text-[#1b4332] focus:ring-[#1b4332]"
+                />
+                <span>Tampilkan Data Diarsipkan</span>
+              </label>
+            )}
 
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Cari kamar / judul / PIC..."
-              className="text-xs px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white w-44 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+              className="text-xs px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white w-48 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
             />
             {activeTab !== 'history' && (
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="text-xs px-2 py-1.5 rounded-lg border border-neutral-300 bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                className="text-xs px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
               >
                 <option value="ALL">Semua Status</option>
                 <option value="ASSIGNED">ASSIGNED</option>

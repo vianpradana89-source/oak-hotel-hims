@@ -58,6 +58,8 @@ const ChevronRight = ({ className = "w-5 h-5" }: { className?: string }) => (
 interface EmployeeMobileWorkspaceProps {
   propertyId: number;
   propertyName?: string;
+  isPreview?: boolean;
+  initialTab?: 'HOME' | 'TASKS' | 'DEPT' | 'NOTIF' | 'PROFILE';
   currentUser?: {
     id?: number;
     name: string;
@@ -71,16 +73,18 @@ interface EmployeeMobileWorkspaceProps {
 export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = ({
   propertyId,
   propertyName = 'OAK Hotel Grand',
+  isPreview = false,
+  initialTab = 'TASKS',
   currentUser = { name: 'Staff Housekeeping', role: 'Staff', department: 'Housekeeping' },
   onBackToDesktop,
   onLogout
 }) => {
-  const [activeTab, setActiveTab] = useState<'HOME' | 'TASKS' | 'DEPT' | 'NOTIF' | 'PROFILE'>('TASKS');
+  const [activeTab, setActiveTab] = useState<'HOME' | 'TASKS' | 'DEPT' | 'NOTIF' | 'PROFILE'>(initialTab);
 
   // Attendance Gate State
   const [attendanceGateOpen, setAttendanceGateOpen] = useState(false);
   const [attendanceStatus, setAttendanceStatus] = useState<EmployeeAttendanceStatus | null>(null);
-  const [attendanceLoading, setAttendanceLoading] = useState(true);
+  const [attendanceLoading, setAttendanceLoading] = useState(!isPreview);
 
   // Live WIB Clock
   const [currentTimeWib, setCurrentTimeWib] = useState<string>('');
@@ -122,8 +126,13 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch Attendance Status & Check Gate
+  // Fetch Attendance Status & Check Gate (Skipped in Preview Mode)
   const fetchAttendanceStatus = async () => {
+    if (isPreview) {
+      setAttendanceLoading(false);
+      setAttendanceGateOpen(false);
+      return;
+    }
     try {
       setAttendanceLoading(true);
       const url = `/api/attendance/status?property_id=${propertyId}${currentUser.id ? `&employee_id=${currentUser.id}` : ''}&role=${encodeURIComponent(currentUser.role)}`;
@@ -243,6 +252,25 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
 
   return (
     <div className="min-h-screen bg-stone-50 text-neutral-900 flex flex-col justify-between max-w-md mx-auto select-none shadow-xl">
+      {/* Mode Pratinjau Banner */}
+      {isPreview && (
+        <div className="bg-amber-500 text-neutral-950 px-3 py-1.5 text-[11px] font-bold text-center flex items-center justify-between border-b border-amber-600 shadow-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="bg-black/20 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-extrabold">MODE PRATINJAU</span>
+            <span>Pratinjau Manajemen (Tidak Mengubah Status Absensi)</span>
+          </div>
+          {onBackToDesktop && (
+            <button
+              type="button"
+              onClick={onBackToDesktop}
+              className="text-[10px] underline hover:text-white font-semibold cursor-pointer"
+            >
+              Kembali
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Compact Top Header (Dark Charcoal with Gold/Green Accent) */}
       <header className="sticky top-0 z-40 bg-[#1c2321] border-b border-neutral-800 px-3.5 py-2.5 shadow-xs">
         <div className="flex items-center justify-between gap-2">
@@ -263,17 +291,22 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
             </div>
           </div>
 
-          {/* Right: Quick Active Task Pill & Notifications */}
+          {/* Right: Quick Actions & Notifications */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <div className="px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-600/40 text-[10px] font-bold text-emerald-300 flex items-center gap-1">
-              <span>Tugas:</span>
-              <span className="font-mono text-white">{activeTaskCount}</span>
-            </div>
+            {onBackToDesktop && !isPreview && (
+              <button
+                type="button"
+                onClick={onBackToDesktop}
+                className="px-2 py-1 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white text-[10px] font-semibold cursor-pointer"
+              >
+                Tutup
+              </button>
+            )}
 
             <button
               type="button"
               onClick={() => setActiveTab('NOTIF')}
-              className="relative p-1.5 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white"
+              className="relative p-1.5 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white cursor-pointer"
               title="Notifikasi"
             >
               <Bell className="w-4 h-4" />

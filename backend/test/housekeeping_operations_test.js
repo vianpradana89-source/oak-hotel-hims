@@ -57,11 +57,21 @@ async function runHousekeepingOperationsSuite() {
   let roomTypeId = null;
   let roomAId = null;
   let roomBId = null;
+  let origSettings = null;
   const createdBookingIds = [];
   const createdReservationIds = [];
   const createdTaskIds = [];
 
   try {
+    const origSettingsRes = await pool.query('SELECT * FROM property_housekeeping_settings WHERE property_id = $1', [propertyId]);
+    origSettings = origSettingsRes.rows[0] || null;
+
+    await pool.query(
+      `INSERT INTO property_housekeeping_settings (property_id, require_checkout_room_check, require_final_inspection)
+       VALUES ($1, false, false)
+       ON CONFLICT (property_id) DO UPDATE SET require_checkout_room_check = false, require_final_inspection = false`,
+      [propertyId]
+    );
     // 1. Setup Fixture Room Type and Physical Rooms
     const catRes = await pool.query('SELECT id FROM room_categories WHERE property_id = $1 LIMIT 1', [propertyId]);
     const catId = catRes.rows[0]?.id || null;
@@ -436,6 +446,14 @@ async function runHousekeepingOperationsSuite() {
     if (roomTypeId) {
       await pool.query('DELETE FROM availability_dates WHERE room_type_id = $1', [roomTypeId]);
       await pool.query('DELETE FROM room_types WHERE id = $1', [roomTypeId]);
+    }
+    if (origSettings) {
+      await pool.query(
+        `UPDATE property_housekeeping_settings
+         SET require_checkout_room_check = $1, require_final_inspection = $2
+         WHERE property_id = $3`,
+        [origSettings.require_checkout_room_check, origSettings.require_final_inspection, propertyId]
+      );
     }
     console.log('[TEARDOWN] Finished cleaning test fixtures with 0 residue.');
   }

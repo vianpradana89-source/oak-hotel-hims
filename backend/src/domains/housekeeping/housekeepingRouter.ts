@@ -6,9 +6,14 @@ import {
   requestCheckoutRoomCheck,
   acknowledgeHousekeepingTask,
   startHousekeepingTask,
+  getTaskChecklistItems,
   updateTaskChecklistItem,
   completeHousekeepingTask,
   getChecklistTemplates,
+  createChecklistTemplate,
+  updateChecklistTemplate,
+  duplicateChecklistTemplate,
+  deleteChecklistTemplate,
   getPropertyHousekeepingSettings,
   updatePropertyHousekeepingSettings,
   updateTaskHistoryRecord,
@@ -18,13 +23,31 @@ import {
   createFindingType,
   updateFindingType,
   reorderFindingTypes,
+  createTaskFinding,
+  getTaskFindings,
+  getRoomActiveFindings,
+  resolveFinding,
+  verifyFinding,
   addChecklistTemplateItem,
   updateChecklistTemplateItem,
   deleteChecklistTemplateItem,
-  reorderChecklistTemplateItems
+  reorderChecklistTemplateItems,
+  getChecklistTemplateGroups,
+  addChecklistTemplateGroup,
+  updateChecklistTemplateGroup,
+  deleteChecklistTemplateGroup,
+  reorderChecklistTemplateGroups,
+  repairActiveCleaningChecklistSnapshots,
+  reconcileDuplicateActiveCleaningTasks
 } from './housekeepingService';
 
 function parsePropertyId(raw: any, fieldName = 'property_id'): number {
+  if (raw === undefined || raw === null || raw === '') {
+    const err: any = new Error(`${fieldName} is required`);
+    err.statusCode = 400;
+    err.code = 'MISSING_PROPERTY_ID';
+    throw err;
+  }
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     const err: any = new Error(`${fieldName} must be a positive integer`);
@@ -47,6 +70,29 @@ export function createHousekeepingRouter(pool: Pool): Router {
       err.code = 'PROPERTY_NOT_FOUND';
       throw err;
     }
+  }
+
+  async function resolvePropertyId(req: Request, templateId?: number, taskId?: number): Promise<number> {
+    const raw = req.body?.property_id || req.body?.propertyId || req.query?.property_id || req.query?.propertyId;
+    if (raw !== undefined && raw !== null && raw !== '') {
+      return parsePropertyId(raw);
+    }
+    if (templateId && Number.isInteger(Number(templateId)) && Number(templateId) > 0) {
+      const tplRes = await pool.query('SELECT property_id FROM checklist_templates WHERE id = $1', [templateId]);
+      if (tplRes.rows && tplRes.rows.length > 0) {
+        return Number(tplRes.rows[0].property_id);
+      }
+    }
+    if (taskId && Number.isInteger(Number(taskId)) && Number(taskId) > 0) {
+      const taskRes = await pool.query('SELECT property_id FROM housekeeping_tasks WHERE id = $1', [taskId]);
+      if (taskRes.rows && taskRes.rows.length > 0) {
+        return Number(taskRes.rows[0].property_id);
+      }
+    }
+    const err: any = new Error('property_id is required');
+    err.statusCode = 400;
+    err.code = 'MISSING_PROPERTY_ID';
+    throw err;
   }
 
   // 1. Daily Operations & Metrics Board
@@ -112,6 +158,9 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const streamParam = req.query.stream ? String(req.query.stream).toUpperCase() : null;
       if (streamParam === 'CLEANING' || filter === 'CLEANING') {
         sql += ` AND t.room_id IS NOT NULL AND t.task_type = 'ROOM_CLEANING'`;
+        if (!statusParam && scope !== 'history') {
+          sql += ` AND r.status IN ('VACANT_DIRTY', 'DIRTY', 'CLEANING')`;
+        }
       } else if (streamParam === 'CHECKOUT' || filter === 'CHECKOUT_CHECK' || filter === 'CHECKOUT') {
         sql += ` AND t.task_type = 'CHECKOUT_ROOM_CHECK'`;
       } else if (streamParam === 'TASK' || filter === 'TASK') {
@@ -127,24 +176,56 @@ export function createHousekeepingRouter(pool: Pool): Router {
       }
 
       // 6. Urgency Ordering
-      sql += `
-        ORDER BY
-          CASE
-            WHEN t.task_type = 'CHECKOUT_ROOM_CHECK' AND t.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS') THEN 1
-            WHEN t.priority = 'TURNOVER' THEN 2
-            WHEN t.due_at IS NOT NULL AND t.due_at < NOW() THEN 3
-            WHEN t.priority IN ('CRITICAL', 'HIGH', 'VIP') THEN 4
-            WHEN t.task_type = 'ROOM_CLEANING' THEN 5
-            ELSE 6
-          END,
-          t.due_at ASC NULLS LAST,
-          t.created_at ASC
-      `;
+      if (scope === 'history') {
+        sql += `
+          ORDER BY
+            COALESCE(t.completed_at, t.updated_at, t.created_at) DESC,
+            t.id DESC
+        `;
+      } else {
+        sql += `
+          ORDER BY
+            CASE
+              WHEN t.task_type = 'CHECKOUT_ROOM_CHECK' AND t.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS') THEN 1
+              WHEN t.priority = 'TURNOVER' THEN 2
+              WHEN t.due_at IS NOT NULL AND t.due_at < NOW() THEN 3
+              WHEN t.priority IN ('CRITICAL', 'HIGH', 'VIP') THEN 4
+              WHEN t.task_type = 'ROOM_CLEANING' THEN 5
+              ELSE 6
+            END,
+            t.due_at ASC NULLS LAST,
+            t.created_at ASC
+        `;
+      }
 
       const tasksRes = await pool.query(sql, params);
 
+      // Enforce backend single active cleaning task invariant per physical room
+      let taskRows = tasksRes.rows;
+      if (scope !== 'history') {
+        const canonicalByRoom = new Map<number, any>();
+        const otherTasks: any[] = [];
+        for (const t of taskRows) {
+          if (t.task_type === 'ROOM_CLEANING' && t.room_id) {
+            const rid = Number(t.room_id);
+            const existing = canonicalByRoom.get(rid);
+            if (!existing) {
+              canonicalByRoom.set(rid, t);
+            } else {
+              const statusRank = (s: string) => (s === 'IN_PROGRESS' ? 1 : s === 'ACKNOWLEDGED' ? 2 : s === 'BLOCKED' ? 3 : s === 'ASSIGNED' ? 4 : 5);
+              if (statusRank(t.status) < statusRank(existing.status)) {
+                canonicalByRoom.set(rid, t);
+              }
+            }
+          } else {
+            otherTasks.push(t);
+          }
+        }
+        taskRows = [...Array.from(canonicalByRoom.values()), ...otherTasks];
+      }
+
       // Check checklist summaries
-      const taskIds = tasksRes.rows.map((t: any) => t.id);
+      const taskIds = taskRows.map((t: any) => t.id);
       const checklistSummaryMap = new Map<number, { total: number; completed: number; required_total: number; required_completed: number }>();
       if (taskIds.length > 0) {
         const itemsRes = await pool.query(
@@ -182,7 +263,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
         if (arr.room_id) arrivalMap.set(Number(arr.room_id), arr);
       }
 
-      const enriched = tasksRes.rows.map((t: any) => {
+      const enriched = taskRows.map((t: any) => {
         const arr = t.room_id ? arrivalMap.get(Number(t.room_id)) : null;
         return {
           ...t,
@@ -206,9 +287,9 @@ export function createHousekeepingRouter(pool: Pool): Router {
   // 2. Single Task Detail
   router.get('/tasks/:id', async (req: Request, res: Response) => {
     try {
-      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
-      await assertPropertyExists(propertyId);
       const taskId = Number(req.params.id);
+      const propertyId = await resolvePropertyId(req, undefined, taskId);
+      await assertPropertyExists(propertyId);
 
       const taskRes = await pool.query('SELECT * FROM housekeeping_tasks WHERE id = $1 AND property_id = $2', [taskId, propertyId]);
       if (!taskRes.rows || taskRes.rows.length === 0) {
@@ -237,13 +318,14 @@ export function createHousekeepingRouter(pool: Pool): Router {
 
       const [cleaningRes, checkoutRes, taskRes, historyRes] = await Promise.all([
         pool.query(`
-          SELECT COUNT(*)::int AS count FROM housekeeping_tasks t
+          SELECT COUNT(DISTINCT t.room_id)::int AS count FROM housekeeping_tasks t
+          LEFT JOIN rooms r ON r.id = t.room_id
           WHERE t.property_id = $1
             AND COALESCE(t.is_archived, FALSE) = FALSE
-            AND (t.room_id IS NOT NULL OR (t.task_category <> 'ROOM_OPERATIONS' AND t.task_type NOT IN ('ROOM_CLEANING', 'TURN_DOWN', 'DEEP_CLEAN', 'MAKEUP', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'FINAL_INSPECTION', 'CHECKOUT_ROOM_CHECK')))
             AND t.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
             AND t.room_id IS NOT NULL
             AND t.task_type = 'ROOM_CLEANING'
+            AND r.status IN ('VACANT_DIRTY', 'DIRTY', 'CLEANING')
         `, [propertyId]),
         pool.query(`
           SELECT COUNT(*)::int AS count FROM housekeeping_tasks t
@@ -422,7 +504,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const task = await createHousekeepingTask(client, propertyId, req.body, actor);
       await client.query('COMMIT');
 
-      res.status(201).json({ status: 'SUCCESS', data: task });
+      res.status(201).json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -491,7 +573,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const task = await createHousekeepingTask(client, propertyId, payload as any, actor);
       await client.query('COMMIT');
 
-      res.status(201).json({ status: 'SUCCESS', data: task });
+      res.status(201).json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -533,7 +615,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const task = await requestCheckoutRoomCheck(client, propertyId, reservationId, roomId, actor);
       await client.query('COMMIT');
 
-      res.status(201).json({ status: 'SUCCESS', data: task });
+      res.status(201).json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -543,8 +625,8 @@ export function createHousekeepingRouter(pool: Pool): Router {
     }
   });
 
-  // 5. Acknowledge Task
-  router.patch('/tasks/:id/acknowledge', async (req: Request, res: Response) => {
+  // 5. Acknowledge Task (Supports PATCH and POST)
+  const acknowledgeTaskHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
@@ -560,7 +642,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const task = await acknowledgeHousekeepingTask(client, propertyId, taskId, actor);
       await client.query('COMMIT');
 
-      res.json({ status: 'SUCCESS', data: task });
+      res.json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -568,10 +650,12 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/tasks/:id/acknowledge', acknowledgeTaskHandler);
+  router.post('/tasks/:id/acknowledge', acknowledgeTaskHandler);
 
-  // 6. Start Task
-  router.patch('/tasks/:id/start', async (req: Request, res: Response) => {
+  // 6. Start Task (Supports PATCH and POST)
+  const startTaskHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
@@ -587,7 +671,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const task = await startHousekeepingTask(client, propertyId, taskId, actor);
       await client.query('COMMIT');
 
-      res.json({ status: 'SUCCESS', data: task });
+      res.json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -595,16 +679,40 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/tasks/:id/start', startTaskHandler);
+  router.post('/tasks/:id/start', startTaskHandler);
 
-  // 7. Update Checklist Item
-  router.patch('/tasks/:id/checklist-items/:itemId', async (req: Request, res: Response) => {
+  // 6b. Get Task Checklist Items (supports /tasks/:id/checklist, /tasks/:id/checklist-items, /checklist, /checklist-items)
+  const getTaskChecklistHandler = async (req: Request, res: Response) => {
+    try {
+      const rawTaskId = req.params.id || req.query.task_id || req.query.taskId;
+      if (!rawTaskId) {
+        return res.json({ status: 'OK', data: [] });
+      }
+      const taskId = Number(rawTaskId);
+      const propertyId = await resolvePropertyId(req, undefined, taskId);
+      await assertPropertyExists(propertyId);
+      const items = await getTaskChecklistItems(pool, propertyId, taskId);
+      res.json({ status: 'OK', data: items });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  };
+  router.get('/tasks/:id/checklist', getTaskChecklistHandler);
+  router.get('/tasks/:id/checklist-items', getTaskChecklistHandler);
+  router.get('/checklist', getTaskChecklistHandler);
+  router.get('/checklist-items', getTaskChecklistHandler);
+
+  // 7. Update Checklist Item (supports /tasks/:id/checklist/:itemId, /tasks/:id/checklist-items/:itemId, PATCH and POST)
+  const updateChecklistItemHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
-      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      const taskId = Number(req.params.id || req.body.task_id || req.body.taskId);
+      const propertyId = await resolvePropertyId(req, undefined, taskId);
       await assertPropertyExists(propertyId);
-      const taskId = Number(req.params.id);
-      const itemId = Number(req.params.itemId);
+      const itemId = Number(req.params.itemId || req.body.item_id || req.body.itemId);
 
       await client.query('BEGIN');
       const actor = {
@@ -626,7 +734,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       );
       await client.query('COMMIT');
 
-      res.json({ status: 'SUCCESS', data: item });
+      res.json({ status: 'OK', success: true, data: item });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -634,10 +742,14 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/tasks/:id/checklist-items/:itemId', updateChecklistItemHandler);
+  router.post('/tasks/:id/checklist-items/:itemId', updateChecklistItemHandler);
+  router.patch('/tasks/:id/checklist/:itemId', updateChecklistItemHandler);
+  router.post('/tasks/:id/checklist/:itemId', updateChecklistItemHandler);
 
-  // 8. Complete Task
-  router.patch('/tasks/:id/complete', async (req: Request, res: Response) => {
+  // 8. Complete Task (Supports PATCH and POST)
+  const completeTaskHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
@@ -647,7 +759,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       await client.query('BEGIN');
       const actor = {
         id: req.body.actor_id,
-        name: req.body.actor_name || 'Staff',
+        name: req.body.actor_name || req.body.inspector_name || 'Staff',
         role: req.body.actor_role || 'Staff'
       };
       const task = await completeHousekeepingTask(
@@ -656,6 +768,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
         taskId,
         {
           completion_note: req.body.completion_note,
+          cleaning_note: req.body.cleaning_note,
           inspection_result: req.body.inspection_result,
           issue_type: req.body.issue_type,
           issue_note: req.body.issue_note,
@@ -665,7 +778,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
       );
       await client.query('COMMIT');
 
-      res.json({ status: 'SUCCESS', data: task });
+      res.json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
@@ -678,10 +791,14 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/tasks/:id/complete', completeTaskHandler);
+  router.post('/tasks/:id/complete', completeTaskHandler);
+  router.patch('/checkout-inspections/:id/submit', completeTaskHandler);
+  router.post('/checkout-inspections/:id/submit', completeTaskHandler);
 
-  // 8b. Legacy/Direct Status Update Compatibility
-  router.patch('/tasks/:id/status', async (req: Request, res: Response) => {
+  // 8b. Legacy/Direct Status Update Compatibility (Supports PATCH and POST)
+  const statusUpdateHandler = async (req: Request, res: Response) => {
     try {
       const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
       await assertPropertyExists(propertyId);
@@ -692,12 +809,44 @@ export function createHousekeepingRouter(pool: Pool): Router {
         [status, taskId, propertyId]
       );
       if (!upd.rows.length) {
+        const existCheck = await pool.query('SELECT property_id FROM housekeeping_tasks WHERE id = $1', [taskId]);
+        if (existCheck.rows.length > 0 && Number(existCheck.rows[0].property_id) !== propertyId) {
+          return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_FORBIDDEN', message: 'Cross-property task modification forbidden' });
+        }
         return res.status(404).json({ status: 'ERROR', code: 'TASK_NOT_FOUND', message: 'Task not found' });
       }
       res.json({ status: 'OK', data: upd.rows[0] });
     } catch (err: any) {
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  };
+  router.patch('/tasks/:id/status', statusUpdateHandler);
+  router.post('/tasks/:id/status', statusUpdateHandler);
+
+  // 8f. Safe Idempotent Repair of Active Tasks Checklist Snapshots & Duplicate Active Cleaning Tasks
+  router.post(['/tasks/repair-checklists', '/tasks/reconcile-duplicates'], async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
+      await assertPropertyExists(propertyId);
+
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'Admin Safe Repair',
+        role: req.body.actor_role || 'Admin'
+      };
+
+      const result = await repairActiveCleaningChecklistSnapshots(client, propertyId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
     }
   });
 
@@ -904,6 +1053,114 @@ export function createHousekeepingRouter(pool: Pool): Router {
     }
   });
 
+  // 10b. Create Checklist Template Master
+  router.post('/templates', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const created = await createChecklistTemplate(client, propertyId, req.body, actor);
+      await client.query('COMMIT');
+
+      res.status(201).json({ status: 'OK', data: created });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 10c. Update Checklist Template Master
+  router.patch('/templates/:templateId', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const updated = await updateChecklistTemplate(client, propertyId, templateId, req.body, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: updated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 10d. Duplicate Checklist Template Master
+  router.post('/templates/:templateId/duplicate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const duplicated = await duplicateChecklistTemplate(client, propertyId, templateId, actor);
+      await client.query('COMMIT');
+
+      res.status(201).json({ status: 'OK', data: duplicated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 10e. Delete / Safe Archive Checklist Template Master
+  router.delete('/templates/:templateId', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const result = await deleteChecklistTemplate(client, propertyId, templateId, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   // 11. Property Settings
   router.get('/settings', async (req: Request, res: Response) => {
     try {
@@ -1035,12 +1292,258 @@ export function createHousekeepingRouter(pool: Pool): Router {
     }
   });
 
-  // 13. Template Items Management
+  // 12b. Task Findings & Blocking Lifecycle
+  const getTaskFindingsHandler = async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      await assertPropertyExists(propertyId);
+      const rawTaskId = req.params.id || req.query.task_id || req.query.taskId;
+      const rawRoomId = req.params.roomId || req.query.room_id || req.query.roomId;
+
+      if (rawTaskId) {
+        const taskId = Number(rawTaskId);
+        const findings = await getTaskFindings(pool, propertyId, taskId);
+        return res.json({ status: 'OK', data: findings || [] });
+      }
+
+      if (rawRoomId) {
+        const roomId = Number(rawRoomId);
+        const findings = await getRoomActiveFindings(pool, propertyId, roomId);
+        return res.json({ status: 'OK', data: findings || [] });
+      }
+
+      // If neither task_id nor room_id is specified, return empty array safely (never 404)
+      return res.json({ status: 'OK', data: [] });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  };
+  router.get('/tasks/:id/findings', getTaskFindingsHandler);
+  router.get('/findings', getTaskFindingsHandler);
+
+  router.get('/rooms/:roomId/findings', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      const roomId = Number(req.params.roomId);
+      await assertPropertyExists(propertyId);
+
+      const findings = await getRoomActiveFindings(pool, propertyId, roomId);
+      res.json({ status: 'OK', data: findings || [] });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  });
+
+  const createTaskFindingHandler = async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id || req.query.propertyId);
+      const taskId = Number(req.params.id || req.body.task_id || req.body.taskId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Staff',
+        role: req.body.actor_role || 'Staff'
+      };
+      const created = await createTaskFinding(client, propertyId, taskId, req.body, actor);
+      await client.query('COMMIT');
+
+      res.status(201).json({ status: 'OK', data: created });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+  router.post('/tasks/:id/findings', createTaskFindingHandler);
+  router.post('/findings', createTaskFindingHandler);
+
+  router.patch('/findings/:id/resolve', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
+      const id = Number(req.params.id);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Staff',
+        role: req.body.actor_role || 'Staff'
+      };
+      const resolved = await resolveFinding(client, propertyId, id, req.body, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: resolved });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.patch('/findings/:id/verify', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
+      const id = Number(req.params.id);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Supervisor',
+        role: req.body.actor_role || 'Supervisor'
+      };
+      const verified = await verifyFinding(client, propertyId, id, req.body, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: verified });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 13. Template Groups Management (EMP-MOBILE-3F)
+  router.get('/templates/:templateId/groups', async (req: Request, res: Response) => {
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+
+      const groups = await getChecklistTemplateGroups(pool, propertyId, templateId);
+      res.json({ status: 'OK', data: groups });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  });
+
+  router.post('/templates/:templateId/groups', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const created = await addChecklistTemplateGroup(client, propertyId, templateId, req.body, actor);
+      await client.query('COMMIT');
+
+      res.status(201).json({ status: 'OK', data: created });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.patch('/templates/:templateId/groups/:groupId', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      const groupId = Number(req.params.groupId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const updated = await updateChecklistTemplateGroup(client, propertyId, templateId, groupId, req.body, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: updated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.delete('/templates/:templateId/groups/:groupId', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      const groupId = Number(req.params.groupId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const result = await deleteChecklistTemplateGroup(client, propertyId, templateId, groupId, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.post('/templates/:templateId/groups/reorder', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
+      await assertPropertyExists(propertyId);
+      const rawGroups = req.body.groups || req.body.group_ids || req.body.groupIds || req.body.items || [];
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || 'Admin',
+        role: req.body.actor_role || 'Admin'
+      };
+      const reordered = await reorderChecklistTemplateGroups(client, propertyId, templateId, rawGroups, actor);
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', data: reordered });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 14. Template Items Management
   router.post('/templates/:templateId/items', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
-      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
       const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
       await assertPropertyExists(propertyId);
 
       await client.query('BEGIN');
@@ -1065,8 +1568,8 @@ export function createHousekeepingRouter(pool: Pool): Router {
   router.patch('/templates/:templateId/items/:itemId', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
-      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId || req.query.property_id);
       const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
       const itemId = Number(req.params.itemId);
       await assertPropertyExists(propertyId);
 
@@ -1092,8 +1595,8 @@ export function createHousekeepingRouter(pool: Pool): Router {
   router.delete('/templates/:templateId/items/:itemId', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
-      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId || req.body.property_id);
       const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
       const itemId = Number(req.params.itemId);
       await assertPropertyExists(propertyId);
 
@@ -1116,13 +1619,13 @@ export function createHousekeepingRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/templates/:templateId/reorder', async (req: Request, res: Response) => {
+  const reorderItemsHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
-      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
       const templateId = Number(req.params.templateId);
+      const propertyId = await resolvePropertyId(req, templateId);
       await assertPropertyExists(propertyId);
-      const itemIds = Array.isArray(req.body.item_ids) ? req.body.item_ids.map(Number) : [];
+      const rawItems = req.body.items || (Array.isArray(req.body.item_ids) ? req.body.item_ids.map(Number) : []);
 
       await client.query('BEGIN');
       const actor = {
@@ -1130,7 +1633,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
         name: req.body.actor_name || 'Admin',
         role: req.body.actor_role || 'Admin'
       };
-      const reordered = await reorderChecklistTemplateItems(client, propertyId, templateId, itemIds, actor);
+      const reordered = await reorderChecklistTemplateItems(client, propertyId, templateId, rawItems, actor);
       await client.query('COMMIT');
 
       res.json({ status: 'OK', data: reordered });
@@ -1141,7 +1644,10 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+
+  router.post('/templates/:templateId/reorder', reorderItemsHandler);
+  router.post('/templates/:templateId/items/reorder', reorderItemsHandler);
 
   return router;
 }

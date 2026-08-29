@@ -51,6 +51,11 @@ export interface TaskChecklistItem {
   id: number;
   task_id: number;
   template_item_id?: number | null;
+  group_id?: number | null;
+  source_group_id?: number | null;
+  group_code?: string | null;
+  group_name?: string | null;
+  group_sort_order?: number;
   section: string;
   label: string;
   sort_order: number;
@@ -63,6 +68,7 @@ export interface TaskChecklistItem {
   note?: string | null;
   photo_storage_key?: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface HousekeepingTaskRecord {
@@ -92,6 +98,9 @@ export interface HousekeepingTaskRecord {
   completed_at?: string | null;
   verified_at?: string | null;
   completion_note?: string | null;
+  cleaning_note?: string | null;
+  cleaning_note_by?: string | null;
+  cleaning_note_at?: string | null;
   blocked_reason?: string | null;
   source_type: string;
   source_entity_id?: string | null;
@@ -137,17 +146,39 @@ export interface HousekeepingDailyMetrics {
   priority_turnover: number;
 }
 
+export interface ChecklistTemplateGroup {
+  id: number;
+  property_id: number;
+  template_id: number;
+  code?: string | null;
+  name: string;
+  description?: string | null;
+  sort_order: number;
+  is_active: boolean;
+  is_archived?: boolean;
+  created_at: string;
+  updated_at?: string;
+  items?: ChecklistTemplateItem[];
+}
+
 export interface ChecklistTemplateItem {
   id: number;
   template_id: number;
+  group_id?: number | null;
+  group_name?: string | null;
+  group_code?: string | null;
+  group_sort_order?: number;
   section: string;
   label: string;
+  description?: string | null;
   sort_order: number;
   is_required: boolean;
   requires_note: boolean;
   requires_photo: boolean;
   is_active: boolean;
+  is_archived?: boolean;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface ChecklistTemplate {
@@ -155,12 +186,17 @@ export interface ChecklistTemplate {
   property_id: number;
   code: string;
   name: string;
-  task_type: HkTaskType;
+  task_type: HkTaskType | string;
+  description?: string | null;
+  sort_order?: number;
+  is_system_template?: boolean;
   is_active: boolean;
+  is_archived?: boolean;
   requires_verification: boolean;
   created_at: string;
   updated_at: string;
   items?: ChecklistTemplateItem[];
+  groups?: ChecklistTemplateGroup[];
 }
 
 export interface PropertyHousekeepingSettings {
@@ -173,6 +209,7 @@ export interface PropertyHousekeepingSettings {
   default_room_cleaning_template_code?: string;
   default_checkout_template_code: string;
   default_checkout_inspection_template_code?: string;
+  default_final_inspection_template_code?: string;
   created_at: string;
   updated_at: string;
 }
@@ -204,6 +241,7 @@ export interface HousekeepingFindingType {
   photo_required: boolean;
   estimated_charge_allowed: boolean;
   supervisor_review_required: boolean;
+  block_room_ready: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -219,6 +257,7 @@ export interface CreateFindingTypePayload {
   photo_required?: boolean;
   estimated_charge_allowed?: boolean;
   supervisor_review_required?: boolean;
+  block_room_ready?: boolean;
 }
 
 export interface UpdateFindingTypePayload {
@@ -232,11 +271,103 @@ export interface UpdateFindingTypePayload {
   photo_required?: boolean;
   estimated_charge_allowed?: boolean;
   supervisor_review_required?: boolean;
+  block_room_ready?: boolean;
+}
+
+export interface HousekeepingTaskFinding {
+  id: number;
+  property_id: number;
+  task_id?: number | null;
+  room_id?: number | null;
+  room_number?: string | null;
+  reservation_id?: number | null;
+  finding_type_id?: number | null;
+  finding_type_code: string;
+  finding_type_label: string;
+  severity: FindingSeverity;
+  notes?: string | null;
+  photo_storage_key?: string | null;
+  estimated_charge?: number;
+  block_room_ready: boolean;
+  status: 'OPEN' | 'RESOLVED' | 'VERIFIED' | 'CANCELLED';
+  reported_by_user_id?: number | null;
+  reported_by_name?: string | null;
+  reported_by_role?: string | null;
+  reported_at: string;
+  resolved_by_user_id?: number | null;
+  resolved_by_name?: string | null;
+  resolved_by_role?: string | null;
+  resolved_at?: string | null;
+  resolution_note?: string | null;
+  verified_by_user_id?: number | null;
+  verified_by_name?: string | null;
+  verified_by_role?: string | null;
+  verified_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTaskFindingPayload {
+  finding_type_id?: number | null;
+  finding_type_code?: string;
+  finding_type_label?: string;
+  severity?: FindingSeverity;
+  notes?: string | null;
+  photo_storage_key?: string | null;
+  estimated_charge?: number;
+  block_room_ready?: boolean;
+}
+
+export interface ResolveFindingPayload {
+  resolution_note: string;
+}
+
+export interface VerifyFindingPayload {
+  verification_note?: string;
+}
+
+export interface CreateChecklistTemplatePayload {
+  code: string;
+  name: string;
+  task_type?: HkTaskType | string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+  requires_verification?: boolean;
+}
+
+export interface UpdateChecklistTemplatePayload {
+  name?: string;
+  task_type?: HkTaskType | string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+  is_archived?: boolean;
+  requires_verification?: boolean;
+}
+
+export interface CreateChecklistTemplateGroupPayload {
+  name: string;
+  code?: string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface UpdateChecklistTemplateGroupPayload {
+  name?: string;
+  code?: string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+  is_archived?: boolean;
 }
 
 export interface CreateChecklistTemplateItemPayload {
-  section: string;
+  group_id?: number | null;
+  section?: string;
   label: string;
+  description?: string | null;
   sort_order?: number;
   is_required?: boolean;
   requires_note?: boolean;
@@ -245,11 +376,14 @@ export interface CreateChecklistTemplateItemPayload {
 }
 
 export interface UpdateChecklistTemplateItemPayload {
+  group_id?: number | null;
   section?: string;
   label?: string;
+  description?: string | null;
   sort_order?: number;
   is_required?: boolean;
   requires_note?: boolean;
   requires_photo?: boolean;
   is_active?: boolean;
+  is_archived?: boolean;
 }

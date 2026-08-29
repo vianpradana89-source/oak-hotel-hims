@@ -525,25 +525,35 @@ th, td{border:1px solid #e6e6e6}
 .calendar-grid-shell .day-header-label { font-size: 11px; }
 .calendar-grid-shell .day-header-number { font-size: 15px; font-weight: 800; }
 
-.status-available-cell,
+.status-cell-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.15s ease-in-out;
+}
+
+.status-cell-wrap--clickable {
+  cursor: pointer;
+}
+
+.status-cell-wrap--clickable:hover {
+  background-color: rgba(52, 78, 65, 0.06);
+}
+
 .status-inactive-cell {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
-  min-height: 30px;
   font-size: 10px;
   font-weight: 600;
+  color: #888984;
 }
-
-.status-available-cell {
-  color: #557065;
-  background: #faf8f1;
-  border: 1px solid #e7e1d4;
-  border-radius: 5px;
-}
-
-.status-inactive-cell { color: #888984; }
 
 .res-cancelled {
   border: 1px dashed #b9aaa5;

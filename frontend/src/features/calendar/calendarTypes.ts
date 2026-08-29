@@ -48,9 +48,42 @@ export interface CellTurnoverInfo {
   } | null;
 }
 
+export type OperationalBlockType = 'OUT_OF_ORDER' | 'OUT_OF_SERVICE' | 'MAINTENANCE';
+export type OperationalBlockStatus = 'ACTIVE' | 'RELEASED' | 'CANCELLED';
+
+export interface RoomOperationalBlock {
+  id: number;
+  property_id: number;
+  room_id: number;
+  room_type_id: number;
+  block_type: OperationalBlockType;
+  start_date: string;
+  end_date: string;
+  reason: string;
+  maintenance_task_id: number | null;
+  status: OperationalBlockStatus;
+  created_by: string | null;
+  created_at: string;
+  released_by: string | null;
+  released_at: string | null;
+  notes?: string | null;
+}
+
+export interface BlockingFindingInfo {
+  id: number;
+  room_id: number;
+  finding_type_code: string;
+  finding_type_label: string;
+  severity: string;
+  notes: string | null;
+  created_at: string;
+  block_room_ready: boolean;
+}
+
 export interface CalendarCell {
   date: string;
   reservations: any[];
+  operational_blocks?: RoomOperationalBlock[];
   departures?: any[];
   arrivals?: any[];
   turnover?: CellTurnoverInfo | null;
@@ -78,6 +111,9 @@ export interface CalendarRoom {
   operational_status: string | null;
   future_reservation_count: number;
   next_future_check_in: string | null;
+  operational_blocks?: RoomOperationalBlock[];
+  blocking_findings?: BlockingFindingInfo[];
+  has_blocking_finding?: boolean;
   cells: CalendarCell[];
 }
 
@@ -108,7 +144,7 @@ export interface TapechartResponse {
   rooms: CalendarRoom[];
 }
 
-export type CalendarOperationalFilter = '' | 'Ready' | 'Kotor' | 'Occupied' | 'Maintenance';
+export type CalendarOperationalFilter = '' | 'Ready' | 'Cleaning' | 'Kotor' | 'Occupied' | 'Maintenance';
 export type ReservationLifecycleStatus = 'BOOKED' | 'CHECKED_IN' | 'CHECKED_OUT' | 'CANCELLED';
 
 export function normalizeReservationLifecycle(raw: unknown): {

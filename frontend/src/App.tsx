@@ -53,6 +53,8 @@ import { fetchPropertyBranding, savePropertyBranding } from './features/property
 import type { ActiveRoomReservation } from './features/roomMaster/roomMasterTypes';
 import CalendarFilters from './features/calendar/CalendarFilters';
 import ReservationBar from './features/calendar/ReservationBar';
+import OperationalBlockBar from './features/calendar/OperationalBlockBar';
+import OperationalBlockDetailModal from './features/calendar/OperationalBlockDetailModal';
 import RoomCategoryGroup from './features/calendar/RoomCategoryGroup';
 import RoomTypeGroup from './features/calendar/RoomTypeGroup';
 import { buildAvailabilityRequest, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
@@ -71,6 +73,7 @@ import {
   type CalendarOperationalFilter,
   type RoomCategoryCalendarGroup,
   type CalendarRoom,
+  type RoomOperationalBlock,
 } from './features/calendar/calendarTypes';
 import {
   additionalBookingChildOverrides,
@@ -114,6 +117,11 @@ function App() {
   const [reservations, setReservations] = useState<any[]>([]);
   const [rooms, setRooms] = useState<any[]>([]);
   const [selectedRes, setSelectedRes] = useState<any>(null);
+  const [selectedOperationalBlock, setSelectedOperationalBlock] = useState<{
+    block: RoomOperationalBlock;
+    roomNumber: string;
+    roomTypeName: string;
+  } | null>(null);
   const [selectedFolio, setSelectedFolio] = useState<any>(null);
   const [reservationAudit, setReservationAudit] = useState<any[]>([]);
   const [selectedBooking, setSelectedBooking] = useState<any>(null);
@@ -558,6 +566,46 @@ function App() {
     return map;
   }, [displayedReservations, days]);
 
+  const operationalBlockSpans = useMemo(() => {
+    const map: Record<string, Array<{ startIndex: number; span: number; block: RoomOperationalBlock }>> = {};
+
+    const getBlockSpan = (startDate: string, endDate: string) => {
+      const s = normalizeHotelDate(startDate);
+      const e = normalizeHotelDate(endDate);
+      if (!s || !e || s === e) return null;
+
+      const firstVisibleDate = days[0]?.date;
+      const visibleRangeEnd = days.length > 0 ? addHotelDays(days[days.length - 1].date, 1) : '';
+      if (!firstVisibleDate || !visibleRangeEnd || e <= firstVisibleDate || s >= visibleRangeEnd) return null;
+
+      const startIndex = days.findIndex(d => d.date === s);
+      const endIndex = days.findIndex(d => d.date === e);
+
+      const visibleStart = startIndex === -1 && s < firstVisibleDate ? 0 : startIndex;
+      const visibleEnd = endIndex === -1 && e >= visibleRangeEnd ? days.length : endIndex;
+      if (visibleStart < 0 || visibleEnd < 0 || visibleEnd <= visibleStart) return null;
+      const span = Math.max(1, visibleEnd - visibleStart);
+      return { startIndex: visibleStart, span };
+    };
+
+    for (const room of (rooms as CalendarRoom[])) {
+      const roomId = String(room.id);
+      const blocks = room.operational_blocks || [];
+      for (const block of blocks) {
+        if (block.status !== 'ACTIVE') continue;
+        const bSpan = getBlockSpan(block.start_date, block.end_date);
+        if (!bSpan) continue;
+        if (!map[roomId]) map[roomId] = [];
+        map[roomId].push({ startIndex: bSpan.startIndex, span: bSpan.span, block });
+      }
+    }
+
+    for (const k of Object.keys(map)) {
+      map[k].sort((a, b) => a.startIndex - b.startIndex);
+    }
+    return map;
+  }, [rooms, days]);
+
   // calendar helpers: build a month grid (6 rows x 7 cols) starting Monday
   const monthMatrix = (year: number, month: number) => {
     const first = new Date(year, month, 1);
@@ -604,9 +652,10 @@ function App() {
   const normalizeRoomStatus = (status: string | undefined) => {
     const value = String(status || '').toUpperCase();
     if (value === 'VACANT_DIRTY' || value === 'OCCUPIED_DIRTY' || value.includes('DIRTY') || value === 'KOTOR') return 'Kotor';
-    if (value === 'CLEANING' || value === 'OUT_OF_ORDER' || value === 'OUT_OF_SERVICE' || value.includes('MAINT')) return 'Maintenance';
+    if (value === 'CLEANING') return 'Cleaning';
+    if (value === 'OUT_OF_ORDER' || value === 'OUT_OF_SERVICE' || value.includes('MAINT')) return 'Maintenance';
     if (value === 'OCCUPIED_CLEAN' || value === 'OCCUPIED_DIRTY' || value.includes('OCC')) return 'Occupied';
-    if (value === 'VACANT_CLEAN' || value === 'INSPECTED') return 'Ready';
+    if (value === 'VACANT_CLEAN' || value === 'INSPECTED' || value === 'CLEAN') return 'Ready';
     return 'Ready';
   };
 
@@ -2120,7 +2169,7 @@ function App() {
       if (room.room_is_active === false || room.room_type_is_active === false) return false;
 
       const status = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
-      if (status === 'Maintenance' || status === 'Kotor') {
+      if (status === 'Maintenance') {
         return false;
       }
 
@@ -2326,7 +2375,7 @@ function App() {
           && room?.is_active !== false
           && room?.room_type_is_active !== false;
         const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.status || 'Ready');
-        const statusSellable = operationalStatus !== 'Maintenance' && operationalStatus !== 'Kotor';
+        const statusSellable = operationalStatus !== 'Maintenance';
         const roomTypeMatches = hasCanonicalRoomTypeId
           ? Number(roomTypeId) === childRoomTypeId
           : getRoomTypeName(room) === legacyRoomTypeName;
@@ -2511,6 +2560,9 @@ function App() {
   const renderRoomStatusButton = (room: any) => {
     const rawStatus = String(room.operational_status || room.status || '').toUpperCase();
     const currentStatus = normalizeRoomStatus(rawStatus);
+    const hasBlockingFinding = Boolean(room.has_blocking_finding || (room.blocking_findings && room.blocking_findings.length > 0));
+    const firstFinding = room.blocking_findings?.[0];
+
     const statusLabel: Record<string, string> = {
       VACANT_CLEAN: 'Vacant Clean',
       VACANT_DIRTY: 'Vacant Dirty',
@@ -2521,18 +2573,35 @@ function App() {
       CLEANING: 'Cleaning',
       INSPECTED: 'Vacant Clean',
     };
+
+    if (hasBlockingFinding && (currentStatus === 'Ready' || rawStatus === 'VACANT_CLEAN')) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border text-[10px] font-bold bg-amber-100 text-amber-900 border-amber-300 shadow-2xs"
+          title={`Not Ready: ${firstFinding?.finding_type_label || 'Temuan blocking aktif'} (${firstFinding?.notes || ''})`}
+        >
+          <span>⚠</span>
+          <span>Not Ready</span>
+        </span>
+      );
+    }
+
     const buttonClass = currentStatus === 'Kotor'
-      ? 'bg-red-100 text-red-600 border-red-200'
-      : currentStatus === 'Occupied'
-        ? 'bg-gray-100 text-gray-700 border-gray-200'
-        : currentStatus === 'Maintenance'
-          ? 'bg-amber-100 text-amber-700 border-amber-200'
-          : 'bg-blue-50 text-blue-600 border-blue-100';
+      ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+      : currentStatus === 'Cleaning'
+        ? 'bg-blue-50 text-blue-800 border-blue-200 hover:bg-blue-100'
+        : currentStatus === 'Occupied'
+          ? 'bg-stone-100 text-stone-700 border-stone-300 hover:bg-stone-200'
+          : currentStatus === 'Maintenance'
+            ? 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100'
+            : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100';
 
     return (
       <button
+        type="button"
         onClick={() => toggleStatus(room.id)}
-        className={`px-3 py-1 rounded border text-[10px] transition ${buttonClass}`}
+        className={`px-2.5 py-1 rounded border text-[10px] font-semibold transition shadow-2xs ${buttonClass}`}
+        title={`Status Kamar: ${statusLabel[rawStatus] || rawStatus || currentStatus}`}
       >
         {statusLabel[rawStatus] || rawStatus || currentStatus}
       </button>
@@ -2910,6 +2979,28 @@ function App() {
     };
   }, { subtotal: 0, discount: 0, paid: 0, total: 0, remaining: 0 });
 
+  const isDirectMobilePath = typeof window !== 'undefined' && (
+    window.location.pathname === '/employee' || window.location.pathname === '/housekeeping'
+  );
+
+  if (isDirectMobilePath) {
+    const activePropId = propertyId || (properties[0]?.id || 1);
+    const activePropName = properties.find((p: any) => p.id === activePropId)?.name || 'OAK Hotel Grand';
+    return (
+      <EmployeeMobileWorkspace
+        propertyId={activePropId}
+        propertyName={activePropName}
+        initialTab={window.location.pathname === '/housekeeping' ? 'TASKS' : 'HOME'}
+        currentUser={{
+          id: 1,
+          name: 'Siti Rahmawati',
+          role: 'Housekeeping',
+          department: 'Housekeeping'
+        }}
+      />
+    );
+  }
+
   return (
     <div className="hotel-app">
       <GlobalOperationsBar
@@ -3152,7 +3243,7 @@ function App() {
                     <tr className="bg-gray-100 border calendar-header-row">
                       <th className="p-3 border text-left calendar-sticky-corner" style={{ width: '220px', minWidth: '220px' }}>Kamar</th>
                       {days.map((d) => {
-                        const todayIso = hotelDateFromInstant(new Date());
+                        const todayIso = getOperationalDateKey();
                         const isToday = d.date === todayIso;
                         return (
                           <th
@@ -3204,10 +3295,13 @@ function App() {
                               </td>
                               {(() => {
                                 const spans = reservationSpans[String(room.id)] || [];
+                                const blockSpans = operationalBlockSpans[String(room.id)] || [];
                                 const cells = [];
                                 let i = 0;
                                 while (i < days.length) {
                                   const spanAt = spans.find(s => s.startIndex === i);
+                                  const blockSpanAt = blockSpans.find(b => b.startIndex === i);
+
                                   if (spanAt) {
                                     const r = spanAt.res;
                                     const reservationStyle = getReservationCardStyle(r);
@@ -3268,27 +3362,36 @@ function App() {
                                       />
                                     );
                                     i += spanAt.span;
+                                  } else if (blockSpanAt) {
+                                    cells.push(
+                                      <OperationalBlockBar
+                                        key={`${room.id}-block-${blockSpanAt.block.id}-${i}`}
+                                        block={blockSpanAt.block}
+                                        span={blockSpanAt.span}
+                                        roomNumber={room.room_number}
+                                        onOpen={(b) => setSelectedOperationalBlock({
+                                          block: b,
+                                          roomNumber: room.room_number,
+                                          roomTypeName: room.room_type_name || room.name
+                                        })}
+                                      />
+                                    );
+                                    i += blockSpanAt.span;
                                   } else {
                                     const day = days[i];
-                                    const operationalStatus = normalizeRoomStatus(roomStatuses[String(room.id)] || room.operational_status || room.status || undefined);
-                                    const isToday = day.date === getOperationalDateKey();
                                     const cellData = room.cells?.find(c => c.date === day.date);
-                                    const hasDepartures = Boolean(cellData?.departures && cellData.departures.length > 0);
-                                    const cellState = !masterActive
-                                      ? 'Inactive'
-                                      : operationalStatus === 'Maintenance'
-                                        ? 'Maintenance'
-                                        : isToday && operationalStatus === 'Kotor'
-                                          ? 'Kotor'
-                                          : isToday && operationalStatus === 'Occupied'
-                                            ? 'Occupied'
-                                            : 'Available';
+                                    const departures = cellData?.departures || [];
+                                    const arrivals = cellData?.arrivals || [];
+                                    const hasDepartures = departures.length > 0;
+                                    const hasArrivals = arrivals.length > 0;
+
+                                    const cellState = !masterActive ? 'Inactive' : 'Available';
                                     const canQuickBook = cellState === 'Available';
-                                    const canCleanDirtyNow = cellState === 'Kotor';
+
                                     cells.push(
-                                      <td key={`${room.id}-${day.date}`} className="p-2 border text-center h-14 align-middle">
+                                      <td key={`${room.id}-${day.date}`} className="p-1 border text-center h-14 align-middle">
                                         <div
-                                          className={`status-cell-wrap ${canQuickBook || canCleanDirtyNow ? 'status-cell-wrap--clickable' : ''}`}
+                                          className={`status-cell-wrap ${canQuickBook ? 'status-cell-wrap--clickable' : ''}`}
                                           onDragOver={(event) => { if (canQuickBook) event.preventDefault(); }}
                                           onDrop={async (event) => {
                                             if (!canQuickBook) return;
@@ -3318,25 +3421,32 @@ function App() {
                                           }}
                                           onClick={() => {
                                             if (canQuickBook) openQuickBooking(room, day.date, addHotelDays(day.date, 1));
-                                            if (canCleanDirtyNow) {
-                                              setDirtyConfirmRoomId(Number(room.id));
-                                              setDirtyConfirmDate(day.date);
-                                              setDirtyConfirmOpen(true);
-                                            }
                                           }}
                                         >
+                                          {/* Subtle, compact ARR / DEP edge chips on turnover boundary */}
                                           {hasDepartures && (
-                                            <div
-                                              className="text-[10px] font-bold text-amber-900 bg-amber-100/90 px-1 py-0.5 rounded border border-amber-300 mb-1 truncate select-none"
-                                              title={`Check-out hari ini: ${cellData?.departures?.map((d: any) => d.guest_name).join(', ')}`}
+                                            <span
+                                              className="absolute top-1 left-1 inline-flex items-center gap-0.5 text-[9px] font-extrabold text-amber-900 bg-amber-100/95 px-1 py-0.2 rounded border border-amber-300/90 shadow-2xs select-none pointer-events-auto"
+                                              title={`Check-out: ${departures.map((d: any) => d.guest_name).join(', ')}`}
                                             >
-                                              DEP: {cellData?.departures?.[0]?.guest_name}
+                                              DEP ↗
+                                            </span>
+                                          )}
+                                          {hasArrivals && (
+                                            <span
+                                              className="absolute top-1 right-1 inline-flex items-center gap-0.5 text-[9px] font-extrabold text-sky-900 bg-sky-100/95 px-1 py-0.2 rounded border border-sky-300/90 shadow-2xs select-none pointer-events-auto"
+                                              title={`Check-in: ${arrivals.map((a: any) => a.guest_name).join(', ')}`}
+                                            >
+                                              ARR ↘
+                                            </span>
+                                          )}
+
+                                          {/* Clean, neutral empty available cell with lightweight hover feedback */}
+                                          {cellState === 'Available' && (
+                                            <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-150 inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-100/90 px-2 py-0.5 rounded border border-emerald-300/80 shadow-2xs select-none">
+                                              <span>+ Booking</span>
                                             </div>
                                           )}
-                                          {cellState === 'Available' && <div className="status-available-cell">Tersedia</div>}
-                                          {cellState === 'Maintenance' && <div className="status-maintenance-cell">Maintenance</div>}
-                                          {cellState === 'Occupied' && <div className="status-occupied-cell">Occupied</div>}
-                                          {cellState === 'Kotor' && <div className="status-kotor-cell">Dirty</div>}
                                           {cellState === 'Inactive' && <div className="status-inactive-cell">Nonaktif</div>}
                                         </div>
                                       </td>
@@ -4069,12 +4179,15 @@ function App() {
             <div className="w-full max-w-md bg-[#fdfbf7] shadow-2xl rounded-3xl overflow-hidden border border-neutral-300">
               <EmployeeMobileWorkspace
                 propertyId={propertyId}
+                propertyName={properties.find((p: any) => p.id === propertyId)?.name}
+                isPreview={true}
                 currentUser={{
                   id: 1,
                   name: 'Siti Rahmawati (Crew HK)',
                   role: 'Housekeeping',
                   department: 'Housekeeping'
                 }}
+                onBackToDesktop={() => setSelectedMenu('Employee Mobile')}
               />
             </div>
           </div>
@@ -5541,6 +5654,18 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedOperationalBlock && (
+        <OperationalBlockDetailModal
+          block={selectedOperationalBlock.block}
+          roomNumber={selectedOperationalBlock.roomNumber}
+          roomTypeName={selectedOperationalBlock.roomTypeName}
+          onClose={() => setSelectedOperationalBlock(null)}
+          onRefresh={() => {
+            fetchDataRef.current();
+          }}
+        />
       )}
     </div>
   );

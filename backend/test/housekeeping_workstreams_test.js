@@ -24,18 +24,44 @@ async function runTest() {
 
   let testRoomId = null;
   let testRoomNumber = null;
+  let testRoomId2 = null;
+  let testRoomNumber2 = null;
+  let origRoom1Status = 'VACANT_CLEAN';
+  let origRoom2Status = 'VACANT_CLEAN';
   const createdTaskIds = [];
 
   try {
-    // 1. Get a test room from property 1
-    const roomRes = await pool.query(`
-      SELECT id, room_number FROM rooms WHERE property_id = 1 LIMIT 1
-    `);
-    if (roomRes.rows.length === 0) {
-      throw new Error('No physical room available for testing');
-    }
-    testRoomId = roomRes.rows[0].id;
-    testRoomNumber = roomRes.rows[0].room_number;
+    // 1. Setup isolated test rooms for Property 1
+    const catRes = await pool.query('SELECT id FROM room_categories WHERE property_id = 1 LIMIT 1');
+    const catId = catRes.rows[0]?.id || null;
+    const rtRes = await pool.query(
+      `INSERT INTO room_types (property_id, room_category_id, code, name, base_rate, capacity, is_active)
+       VALUES (1, $1, 'HK_3A_TYPE', 'HK 3A Test Type', 100000, 2, true)
+       ON CONFLICT (property_id, code) DO UPDATE SET is_active = true
+       RETURNING id`,
+      [catId]
+    );
+    const testRoomTypeId = rtRes.rows[0].id;
+
+    const r1 = await pool.query(
+      `INSERT INTO rooms (property_id, room_number, room_type_id, status)
+       VALUES (1, 'HK-3A-101', $1, 'VACANT_DIRTY')
+       ON CONFLICT (property_id, room_number) DO UPDATE SET status = 'VACANT_DIRTY', room_type_id = $1
+       RETURNING id`,
+      [testRoomTypeId]
+    );
+    testRoomId = r1.rows[0].id;
+    testRoomNumber = 'HK-3A-101';
+
+    const r2 = await pool.query(
+      `INSERT INTO rooms (property_id, room_number, room_type_id, status)
+       VALUES (1, 'HK-3A-102', $1, 'VACANT_DIRTY')
+       ON CONFLICT (property_id, room_number) DO UPDATE SET status = 'VACANT_DIRTY', room_type_id = $1
+       RETURNING id`,
+      [testRoomTypeId]
+    );
+    testRoomId2 = r2.rows[0].id;
+    testRoomNumber2 = 'HK-3A-102';
 
     // Clean any pre-existing test residue
     await pool.query(`
@@ -53,14 +79,14 @@ async function runTest() {
     const cleaningId = cleanInsert.rows[0].id;
     createdTaskIds.push(cleaningId);
 
-    // 2. Turnover ROOM_CLEANING (Turnover priority stays inside ROOM_CLEANING)
+    // 2. Turnover ROOM_CLEANING on room 2 (Turnover priority stays inside ROOM_CLEANING)
     const turnoverInsert = await pool.query(`
       INSERT INTO housekeeping_tasks (
         property_id, task_type, task_category, title, room_id, room_number, priority, status, source_type, notes
       ) VALUES (
         1, 'ROOM_CLEANING', 'ROOM_OPERATIONS', 'TEST_3A_CLEANING_TURNOVER', $1, $2, 'TURNOVER', 'ASSIGNED', 'SYSTEM_AUTO', 'TEST_3A'
       ) RETURNING id
-    `, [testRoomId, testRoomNumber]);
+    `, [testRoomId2, testRoomNumber2]);
     const turnoverId = turnoverInsert.rows[0].id;
     createdTaskIds.push(turnoverId);
 
@@ -250,6 +276,11 @@ async function runTest() {
       await pool.query('DELETE FROM housekeeping_tasks WHERE id = ANY($1::int[])', [createdTaskIds]);
     }
     await pool.query("DELETE FROM housekeeping_tasks WHERE title LIKE '%TEST_3A_%' OR notes LIKE '%TEST_3A_%'");
+    if (testRoomId || testRoomId2) {
+      const rids = [testRoomId, testRoomId2].filter(Boolean);
+      await pool.query('DELETE FROM rooms WHERE id = ANY($1::int[])', [rids]);
+      await pool.query("DELETE FROM room_types WHERE code = 'HK_3A_TYPE' AND property_id = 1");
+    }
   }
 }
 

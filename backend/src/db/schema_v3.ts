@@ -1185,26 +1185,53 @@ export async function initializeDatabase(pool: Pool) {
         );
         CREATE INDEX IF NOT EXISTS idx_checklist_templates_prop ON checklist_templates (property_id);
 
+        -- Checklist Template Groups
+        CREATE TABLE IF NOT EXISTS checklist_template_groups (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          template_id INTEGER NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
+          code VARCHAR(50),
+          name VARCHAR(150) NOT NULL,
+          description TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_groups_template ON checklist_template_groups (template_id);
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_groups_prop ON checklist_template_groups (property_id);
+
         -- Checklist Template Items
         CREATE TABLE IF NOT EXISTS checklist_template_items (
           id SERIAL PRIMARY KEY,
           template_id INTEGER NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
+          group_id INTEGER REFERENCES checklist_template_groups(id) ON DELETE SET NULL,
           section VARCHAR(100) NOT NULL,
           label VARCHAR(255) NOT NULL,
+          description TEXT,
           sort_order INTEGER NOT NULL DEFAULT 0,
           is_required BOOLEAN NOT NULL DEFAULT TRUE,
           requires_note BOOLEAN NOT NULL DEFAULT FALSE,
           requires_photo BOOLEAN NOT NULL DEFAULT FALSE,
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
-          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_checklist_template_items_template ON checklist_template_items (template_id);
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_items_group ON checklist_template_items (group_id);
 
         -- Task Checklist Snapshot Items
         CREATE TABLE IF NOT EXISTS housekeeping_task_checklist_items (
           id SERIAL PRIMARY KEY,
           task_id INTEGER NOT NULL REFERENCES housekeeping_tasks(id) ON DELETE CASCADE,
           template_item_id INTEGER REFERENCES checklist_template_items(id) ON DELETE SET NULL,
+          group_id INTEGER,
+          source_group_id INTEGER,
+          group_code VARCHAR(50),
+          group_name VARCHAR(150),
+          group_sort_order INTEGER NOT NULL DEFAULT 0,
           section VARCHAR(100) NOT NULL,
           label VARCHAR(255) NOT NULL,
           sort_order INTEGER NOT NULL DEFAULT 0,
@@ -1216,7 +1243,8 @@ export async function initializeDatabase(pool: Pool) {
           completed_by_name VARCHAR(150),
           note TEXT,
           photo_storage_key VARCHAR(500),
-          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_task_checklist_items_task ON housekeeping_task_checklist_items (task_id);
 
@@ -1613,6 +1641,551 @@ export async function initializeDatabase(pool: Pool) {
         `, [prop.id]);
       }
     }
+
+    // -------------------------------------------------------------
+    // MIGRATION 14: housekeeping_finding_blocking_schema_v1
+    // -------------------------------------------------------------
+    const m14Res = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_finding_blocking_schema_v1'"
+    );
+    if (m14Res.rows.length === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE housekeeping_finding_types ADD COLUMN IF NOT EXISTS block_room_ready BOOLEAN NOT NULL DEFAULT FALSE;
+
+        CREATE TABLE IF NOT EXISTS housekeeping_task_findings (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          task_id INTEGER REFERENCES housekeeping_tasks(id) ON DELETE SET NULL,
+          room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
+          room_number VARCHAR(50),
+          reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL,
+          finding_type_id INTEGER REFERENCES housekeeping_finding_types(id) ON DELETE SET NULL,
+          finding_type_code VARCHAR(50) NOT NULL,
+          finding_type_label VARCHAR(150) NOT NULL,
+          severity VARCHAR(30) NOT NULL DEFAULT 'MEDIUM',
+          notes TEXT,
+          photo_storage_key TEXT,
+          estimated_charge NUMERIC(12, 2) DEFAULT 0,
+          block_room_ready BOOLEAN NOT NULL DEFAULT FALSE,
+          status VARCHAR(30) NOT NULL DEFAULT 'OPEN',
+          reported_by_user_id INTEGER,
+          reported_by_name VARCHAR(150),
+          reported_by_role VARCHAR(100),
+          reported_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          resolved_by_user_id INTEGER,
+          resolved_by_name VARCHAR(150),
+          resolved_by_role VARCHAR(100),
+          resolved_at TIMESTAMP WITH TIME ZONE,
+          resolution_note TEXT,
+          verified_by_user_id INTEGER,
+          verified_by_name VARCHAR(150),
+          verified_by_role VARCHAR(100),
+          verified_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_hk_task_findings_task ON housekeeping_task_findings (task_id);
+        CREATE INDEX IF NOT EXISTS idx_hk_task_findings_room_status ON housekeeping_task_findings (room_id, status);
+        CREATE INDEX IF NOT EXISTS idx_hk_task_findings_prop_status ON housekeeping_task_findings (property_id, status);
+
+        UPDATE housekeeping_finding_types
+        SET block_room_ready = TRUE
+        WHERE code IN ('KERUSAKAN_FURNITURE', 'KERUSAKAN_ELEKTRONIK', 'AC_TIDAK_DINGIN', 'KEBOCORAN_AIR', 'KELISTRIKAN_RUSAK');
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_finding_blocking_schema_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      // Seed blocking finding types for all properties if not already present
+      const allProps = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const p of allProps.rows) {
+        const blockingSeeds = [
+          { code: 'AC_TIDAK_DINGIN', label: 'AC Tidak Dingin / Rusak', desc: 'Unit pendingin ruangan tidak dingin, bising, atau mati total', severity: 'HIGH', sort: 11, blockReady: true, noteReq: true, photoReq: false, chargeAllowed: false, supReview: true },
+          { code: 'KEBOCORAN_AIR', label: 'Kebocoran Air / Pipa Rusak', desc: 'Kebocoran pipa, wastafel, toilet, atau rembesan plafon', severity: 'HIGH', sort: 12, blockReady: true, noteReq: true, photoReq: true, chargeAllowed: false, supReview: true },
+          { code: 'KELISTRIKAN_RUSAK', label: 'Kelistrikan Rusak / Korsleting', desc: 'Saklar, stop kontak, atau instalasi listrik bermasalah dan berbahaya', severity: 'CRITICAL', sort: 13, blockReady: true, noteReq: true, photoReq: false, chargeAllowed: false, supReview: true }
+        ];
+
+        for (const item of blockingSeeds) {
+          await auditMigrationClient.query(`
+            INSERT INTO housekeeping_finding_types (
+              property_id, code, label, description, severity, sort_order,
+              note_required, photo_required, estimated_charge_allowed, supervisor_review_required, block_room_ready, is_active
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)
+            ON CONFLICT (property_id, code) DO UPDATE
+            SET block_room_ready = EXCLUDED.block_room_ready,
+                updated_at = NOW();
+          `, [
+            p.id, item.code, item.label, item.desc, item.severity, item.sort,
+            item.noteReq, item.photoReq, item.chargeAllowed, item.supReview, item.blockReady
+          ]);
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // MIGRATION 15: Housekeeping Checklist Template Hardening (EMP-MOBILE-3C)
+    // -------------------------------------------------------------------------
+    const hasHkChecklistHardening = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_checklist_template_hardening_v1'`
+    );
+
+    if ((hasHkChecklistHardening.rowCount ?? 0) === 0) {
+      // 1. Column additions
+      await auditMigrationClient.query(`
+        ALTER TABLE checklist_templates
+          ADD COLUMN IF NOT EXISTS description TEXT,
+          ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS is_system_template BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
+
+        ALTER TABLE checklist_template_items
+          ADD COLUMN IF NOT EXISTS description TEXT,
+          ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+
+        ALTER TABLE housekeeping_tasks
+          ADD COLUMN IF NOT EXISTS cleaning_note TEXT,
+          ADD COLUMN IF NOT EXISTS cleaning_note_by VARCHAR(150),
+          ADD COLUMN IF NOT EXISTS cleaning_note_at TIMESTAMP WITHOUT TIME ZONE;
+
+        ALTER TABLE property_housekeeping_settings
+          ADD COLUMN IF NOT EXISTS default_final_inspection_template_code VARCHAR(50) NOT NULL DEFAULT 'FINAL_INSPECTION';
+      `);
+
+      // 2. Mark system templates
+      await auditMigrationClient.query(`
+        UPDATE checklist_templates
+        SET is_system_template = TRUE
+        WHERE code IN ('STANDARD_ROOM_CLEANING', 'CHECKOUT_INSPECTION', 'FINAL_INSPECTION');
+      `);
+
+      // 3. Ensure all default items are active for STANDARD_ROOM_CLEANING across all properties
+      await auditMigrationClient.query(`
+        UPDATE checklist_template_items
+        SET is_active = TRUE
+        WHERE template_id IN (
+          SELECT id FROM checklist_templates WHERE code = 'STANDARD_ROOM_CLEANING'
+        ) AND is_archived = FALSE;
+      `);
+
+      // 4. Seed 'Isi Minibar / Kulkas' for all STANDARD_ROOM_CLEANING templates if not exists
+      const stdTemplates = await auditMigrationClient.query(`
+        SELECT id, property_id FROM checklist_templates WHERE code = 'STANDARD_ROOM_CLEANING'
+      `);
+
+      for (const tpl of stdTemplates.rows) {
+        const itemExists = await auditMigrationClient.query(`
+          SELECT 1 FROM checklist_template_items
+          WHERE template_id = $1 AND (label ILIKE '%minibar%' OR label ILIKE '%kulkas%')
+        `, [tpl.id]);
+
+        if ((itemExists.rowCount ?? 0) === 0) {
+          await auditMigrationClient.query(`
+            INSERT INTO checklist_template_items (
+              template_id, section, label, sort_order, is_required, requires_note, requires_photo, is_active
+            ) VALUES ($1, 'ROOM_AMENITIES', 'Isi Minibar / Kulkas', 16, FALSE, FALSE, FALSE, TRUE)
+          `, [tpl.id]);
+        }
+      }
+
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_checklist_template_hardening_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration 16: Grouped Housekeeping Checklist + Drag & Drop Sync (EMP-MOBILE-3F)
+    const m16Check = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_checklist_groups_v1'`
+    );
+    if ((m16Check.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS checklist_template_groups (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          template_id INTEGER NOT NULL REFERENCES checklist_templates(id) ON DELETE CASCADE,
+          code VARCHAR(50),
+          name VARCHAR(150) NOT NULL,
+          description TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_groups_template ON checklist_template_groups (template_id);
+        CREATE INDEX IF NOT EXISTS idx_checklist_template_groups_prop ON checklist_template_groups (property_id);
+
+        ALTER TABLE checklist_template_items ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES checklist_template_groups(id) ON DELETE SET NULL;
+        ALTER TABLE checklist_template_items ADD COLUMN IF NOT EXISTS description TEXT;
+        ALTER TABLE checklist_template_items ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE checklist_template_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS group_id INTEGER;
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS source_group_id INTEGER;
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS group_code VARCHAR(50);
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS group_name VARCHAR(150);
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS group_sort_order INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE housekeeping_task_checklist_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+      `);
+
+      // Seed & structure canonical groups for standard room cleaning templates
+      const stdTemplates = await auditMigrationClient.query(`
+        SELECT id, property_id FROM checklist_templates WHERE code = 'STANDARD_ROOM_CLEANING'
+      `);
+
+      for (const tpl of stdTemplates.rows) {
+        // Group definitions
+        const groupDefs = [
+          {
+            code: 'KAMAR_MANDI',
+            name: 'KAMAR MANDI',
+            sort_order: 10,
+            items: [
+              { label: 'Sabun', sort_order: 10, is_required: true },
+              { label: 'Sampo', sort_order: 20, is_required: true },
+              { label: 'Handuk', sort_order: 30, is_required: true },
+              { label: 'Toilet', sort_order: 40, is_required: true },
+              { label: 'Shower', sort_order: 50, is_required: true },
+              { label: 'Wastafel', sort_order: 60, is_required: true }
+            ]
+          },
+          {
+            code: 'RUANGAN_KAMAR',
+            name: 'RUANGAN KAMAR',
+            sort_order: 20,
+            items: [
+              { label: 'Kebersihan Lantai', sort_order: 10, is_required: true },
+              { label: 'Kasur / Bed', sort_order: 20, is_required: true },
+              { label: 'Sprei', sort_order: 30, is_required: true },
+              { label: 'Bantal', sort_order: 40, is_required: true },
+              { label: 'Selimut', sort_order: 50, is_required: true },
+              { label: 'Furniture', sort_order: 60, is_required: true },
+              { label: 'Lampu', sort_order: 70, is_required: true },
+              { label: 'AC', sort_order: 80, is_required: true },
+              { label: 'TV', sort_order: 90, is_required: true },
+              { label: 'Remote TV', sort_order: 100, is_required: true },
+              { label: 'Remote AC', sort_order: 110, is_required: true }
+            ]
+          },
+          {
+            code: 'AMENITIES',
+            name: 'AMENITIES',
+            sort_order: 30,
+            items: [
+              { label: 'Teh', sort_order: 10, is_required: false },
+              { label: 'Kopi', sort_order: 20, is_required: false },
+              { label: 'Gula', sort_order: 30, is_required: false },
+              { label: 'Air Mineral', sort_order: 40, is_required: true },
+              { label: 'Tissue', sort_order: 50, is_required: true },
+              { label: 'Perlengkapan Mandi', sort_order: 60, is_required: true }
+            ]
+          },
+          {
+            code: 'MINIBAR_KULKAS',
+            name: 'MINIBAR / KULKAS',
+            sort_order: 40,
+            items: [
+              { label: 'Coca-Cola', sort_order: 10, is_required: false },
+              { label: 'Sprite', sort_order: 20, is_required: false },
+              { label: 'UHT', sort_order: 30, is_required: false }
+            ]
+          }
+        ];
+
+        const canonicalItemIds: number[] = [];
+        for (const gDef of groupDefs) {
+          let groupId: number;
+          const gRes = await auditMigrationClient.query(
+            `SELECT id FROM checklist_template_groups WHERE template_id = $1 AND code = $2`,
+            [tpl.id, gDef.code]
+          );
+
+          if ((gRes.rowCount ?? 0) > 0) {
+            groupId = gRes.rows[0].id;
+            await auditMigrationClient.query(
+              `UPDATE checklist_template_groups SET name = $1, sort_order = $2, is_active = TRUE, is_archived = FALSE WHERE id = $3`,
+              [gDef.name, gDef.sort_order, groupId]
+            );
+          } else {
+            const insG = await auditMigrationClient.query(
+              `INSERT INTO checklist_template_groups (property_id, template_id, code, name, sort_order, is_active, is_archived, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, NOW(), NOW())
+               RETURNING id`,
+              [tpl.property_id, tpl.id, gDef.code, gDef.name, gDef.sort_order]
+            );
+            groupId = insG.rows[0].id;
+          }
+
+          // Insert or assign items
+          for (const itemDef of gDef.items) {
+            const itCheck = await auditMigrationClient.query(
+              `SELECT id FROM checklist_template_items WHERE template_id = $1 AND (label ILIKE $2 OR label = $3)`,
+              [tpl.id, `%${itemDef.label}%`, itemDef.label]
+            );
+
+            if ((itCheck.rowCount ?? 0) > 0) {
+              const itemId = itCheck.rows[0].id;
+              canonicalItemIds.push(itemId);
+              await auditMigrationClient.query(
+                `UPDATE checklist_template_items
+                 SET group_id = $1, section = $2, label = $3, sort_order = $4, is_required = $5, is_active = TRUE, is_archived = FALSE, updated_at = NOW()
+                 WHERE id = $6`,
+                [groupId, gDef.name, itemDef.label, itemDef.sort_order, itemDef.is_required, itemId]
+              );
+            } else {
+              const insItem = await auditMigrationClient.query(
+                `INSERT INTO checklist_template_items (
+                   template_id, group_id, section, label, sort_order, is_required, requires_note, requires_photo, is_active, is_archived, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, FALSE, TRUE, FALSE, NOW(), NOW())
+                 RETURNING id`,
+                [tpl.id, groupId, gDef.name, itemDef.label, itemDef.sort_order, itemDef.is_required]
+              );
+              canonicalItemIds.push(insItem.rows[0].id);
+            }
+          }
+        }
+
+        if (canonicalItemIds.length > 0) {
+          await auditMigrationClient.query(
+            `UPDATE checklist_template_items
+             SET is_archived = TRUE, is_active = FALSE
+             WHERE template_id = $1 AND id NOT IN (${canonicalItemIds.join(',')})`,
+            [tpl.id]
+          );
+        }
+      }
+
+      // For all other templates, create a default group if items exist without group
+      const allTemplates = await auditMigrationClient.query(`SELECT id, property_id, name, code FROM checklist_templates`);
+      for (const tpl of allTemplates.rows) {
+        const ungroupedItems = await auditMigrationClient.query(
+          `SELECT id, section, label FROM checklist_template_items WHERE template_id = $1 AND group_id IS NULL`,
+          [tpl.id]
+        );
+        if ((ungroupedItems.rowCount ?? 0) > 0) {
+          let grpRes = await auditMigrationClient.query(
+            `SELECT id FROM checklist_template_groups WHERE template_id = $1 LIMIT 1`,
+            [tpl.id]
+          );
+          let gid: number;
+          if ((grpRes.rowCount ?? 0) > 0) {
+            gid = grpRes.rows[0].id;
+          } else {
+            const ins = await auditMigrationClient.query(
+              `INSERT INTO checklist_template_groups (property_id, template_id, code, name, sort_order, is_active, is_archived, created_at, updated_at)
+               VALUES ($1, $2, 'PEMERIKSAAN', 'PEMERIKSAAN', 10, TRUE, FALSE, NOW(), NOW())
+               RETURNING id`,
+              [tpl.property_id, tpl.id]
+            );
+            gid = ins.rows[0].id;
+          }
+          await auditMigrationClient.query(
+            `UPDATE checklist_template_items SET group_id = $1 WHERE template_id = $2 AND group_id IS NULL`,
+            [gid, tpl.id]
+          );
+        }
+      }
+
+      // Backfill historical snapshot tasks group_name if missing
+      await auditMigrationClient.query(`
+        UPDATE housekeeping_task_checklist_items
+        SET group_name = CASE
+          WHEN section ILIKE '%BATHROOM%' OR section ILIKE '%MANDI%' OR label ILIKE '%sabun%' OR label ILIKE '%sampo%' OR label ILIKE '%handuk%' OR label ILIKE '%toilet%' OR label ILIKE '%shower%' OR label ILIKE '%wastafel%' THEN 'KAMAR MANDI'
+          WHEN section ILIKE '%MINIBAR%' OR label ILIKE '%coca%' OR label ILIKE '%sprite%' OR label ILIKE '%uht%' OR label ILIKE '%kulkas%' THEN 'MINIBAR / KULKAS'
+          WHEN section ILIKE '%AMENITIES%' OR label ILIKE '%teh%' OR label ILIKE '%kopi%' OR label ILIKE '%gula%' OR label ILIKE '%mineral%' OR label ILIKE '%tissue%' THEN 'AMENITIES'
+          ELSE 'RUANGAN KAMAR'
+        END,
+        group_sort_order = CASE
+          WHEN section ILIKE '%BATHROOM%' OR section ILIKE '%MANDI%' OR label ILIKE '%sabun%' OR label ILIKE '%sampo%' OR label ILIKE '%handuk%' OR label ILIKE '%toilet%' OR label ILIKE '%shower%' OR label ILIKE '%wastafel%' THEN 10
+          WHEN section ILIKE '%MINIBAR%' OR label ILIKE '%coca%' OR label ILIKE '%sprite%' OR label ILIKE '%uht%' OR label ILIKE '%kulkas%' THEN 40
+          WHEN section ILIKE '%AMENITIES%' OR label ILIKE '%teh%' OR label ILIKE '%kopi%' OR label ILIKE '%gula%' OR label ILIKE '%mineral%' OR label ILIKE '%tissue%' THEN 30
+          ELSE 20
+        END
+        WHERE group_name IS NULL OR group_name = '';
+      `);
+
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_checklist_groups_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration 17 / Canonical Content Sync: Canonical Housekeeping Checklist Content (EMP-MOBILE-3G)
+    const stdTemplates = await auditMigrationClient.query(`
+      SELECT id, property_id FROM checklist_templates WHERE code = 'STANDARD_ROOM_CLEANING'
+    `);
+
+    const canonicalStructure = [
+      {
+        code: 'KAMAR_MANDI',
+        name: 'KAMAR MANDI',
+        sort_order: 10,
+        items: [
+          { label: 'Sabun', sort_order: 10, is_required: true, aliases: ['Sabun'] },
+          { label: 'Sampo', sort_order: 20, is_required: true, aliases: ['Sampo'] },
+          { label: 'Handuk', sort_order: 30, is_required: true, aliases: ['Handuk', 'Handuk diganti / diperiksa'] },
+          { label: 'Toilet', sort_order: 40, is_required: true, aliases: ['Toilet', 'Toilet dibersihkan'] },
+          { label: 'Shower', sort_order: 50, is_required: true, aliases: ['Shower', 'Shower dibersihkan'] },
+          { label: 'Wastafel', sort_order: 60, is_required: true, aliases: ['Wastafel'] },
+          { label: 'Air Panas', sort_order: 70, is_required: true, aliases: ['Air Panas', 'Air panas diperiksa'] },
+          { label: 'Kebersihan Lantai Kamar Mandi', sort_order: 80, is_required: true, aliases: ['Kebersihan Lantai Kamar Mandi'] }
+        ]
+      },
+      {
+        code: 'RUANGAN_KAMAR',
+        name: 'RUANGAN KAMAR',
+        sort_order: 20,
+        items: [
+          { label: 'Kebersihan Lantai', sort_order: 10, is_required: true, aliases: ['Kebersihan Lantai'] },
+          { label: 'Kasur / Bed', sort_order: 20, is_required: true, aliases: ['Kasur / Bed'] },
+          { label: 'Sprei', sort_order: 30, is_required: true, aliases: ['Sprei', 'Sprei diganti / diperiksa'] },
+          { label: 'Bantal', sort_order: 40, is_required: true, aliases: ['Bantal', 'Bantal diperiksa'] },
+          { label: 'Selimut', sort_order: 50, is_required: true, aliases: ['Selimut'] },
+          { label: 'Furniture', sort_order: 60, is_required: true, aliases: ['Furniture', 'Debu furniture dibersihkan'] },
+          { label: 'Lampu', sort_order: 70, is_required: true, aliases: ['Lampu'] },
+          { label: 'AC', sort_order: 80, is_required: true, aliases: ['AC', 'AC diperiksa'] },
+          { label: 'TV', sort_order: 90, is_required: true, aliases: ['TV'] },
+          { label: 'Remote TV', sort_order: 100, is_required: true, aliases: ['Remote TV'] },
+          { label: 'Remote AC', sort_order: 110, is_required: true, aliases: ['Remote AC'] },
+          { label: 'Tirai / Ventilasi', sort_order: 120, is_required: true, aliases: ['Tirai / Ventilasi'] },
+          { label: 'Tempat Sampah', sort_order: 130, is_required: true, aliases: ['Tempat Sampah', 'Trash bin kosong'] }
+        ]
+      },
+      {
+        code: 'AMENITIES',
+        name: 'AMENITIES',
+        sort_order: 30,
+        items: [
+          { label: 'Teh', sort_order: 10, is_required: false, aliases: ['Teh'] },
+          { label: 'Kopi', sort_order: 20, is_required: false, aliases: ['Kopi'] },
+          { label: 'Gula', sort_order: 30, is_required: false, aliases: ['Gula'] },
+          { label: 'Air Mineral', sort_order: 40, is_required: true, aliases: ['Air Mineral', 'Air mineral tersedia'] },
+          { label: 'Tissue', sort_order: 50, is_required: true, aliases: ['Tissue'] },
+          { label: 'Perlengkapan Mandi', sort_order: 60, is_required: true, aliases: ['Perlengkapan Mandi'] },
+          { label: 'Hanger', sort_order: 70, is_required: false, aliases: ['Hanger'] }
+        ]
+      },
+      {
+        code: 'MINIBAR_KULKAS',
+        name: 'MINIBAR / KULKAS',
+        sort_order: 40,
+        items: [
+          { label: 'Coca-Cola', sort_order: 10, is_required: false, aliases: ['Coca-Cola'] },
+          { label: 'Sprite', sort_order: 20, is_required: false, aliases: ['Sprite'] },
+          { label: 'UHT', sort_order: 30, is_required: false, aliases: ['UHT'] }
+        ]
+      }
+    ];
+
+    for (const tpl of stdTemplates.rows) {
+      const canonicalItemIds: number[] = [];
+      const usedExistingIds = new Set<number>();
+
+      for (const gDef of canonicalStructure) {
+        let groupId: number;
+        const gRes = await auditMigrationClient.query(
+          `SELECT id FROM checklist_template_groups WHERE template_id = $1 AND code = $2`,
+          [tpl.id, gDef.code]
+        );
+        if ((gRes.rowCount ?? 0) > 0) {
+          groupId = gRes.rows[0].id;
+          await auditMigrationClient.query(
+            `UPDATE checklist_template_groups
+             SET name = $1, sort_order = $2, is_active = TRUE, is_archived = FALSE, updated_at = NOW()
+             WHERE id = $3`,
+            [gDef.name, gDef.sort_order, groupId]
+          );
+        } else {
+          const insG = await auditMigrationClient.query(
+            `INSERT INTO checklist_template_groups (property_id, template_id, code, name, sort_order, is_active, is_archived, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, NOW(), NOW())
+             RETURNING id`,
+            [tpl.property_id, tpl.id, gDef.code, gDef.name, gDef.sort_order]
+          );
+          groupId = insG.rows[0].id;
+        }
+
+        for (const itemDef of gDef.items) {
+          let existingId: number | null = null;
+          for (const alias of itemDef.aliases) {
+            const matchRes = await auditMigrationClient.query(
+              `SELECT id FROM checklist_template_items
+               WHERE template_id = $1 AND (label = $2 OR label ILIKE $3)
+               ORDER BY CASE WHEN label = $2 THEN 0 ELSE 1 END, id ASC`,
+              [tpl.id, alias, `%${alias}%`]
+            );
+            for (const row of matchRes.rows) {
+              if (!usedExistingIds.has(row.id)) {
+                existingId = row.id;
+                break;
+              }
+            }
+            if (existingId) break;
+          }
+
+          if (existingId) {
+            usedExistingIds.add(existingId);
+            canonicalItemIds.push(existingId);
+            await auditMigrationClient.query(
+              `UPDATE checklist_template_items
+               SET group_id = $1, section = $2, label = $3, sort_order = $4, is_required = $5,
+                   is_active = TRUE, is_archived = FALSE, updated_at = NOW()
+               WHERE id = $6`,
+              [groupId, gDef.name, itemDef.label, itemDef.sort_order, itemDef.is_required, existingId]
+            );
+          } else {
+            const insItem = await auditMigrationClient.query(
+              `INSERT INTO checklist_template_items (
+                 template_id, group_id, section, label, sort_order, is_required, requires_note, requires_photo, is_active, is_archived, created_at, updated_at
+               ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, FALSE, TRUE, FALSE, NOW(), NOW())
+               RETURNING id`,
+              [tpl.id, groupId, gDef.name, itemDef.label, itemDef.sort_order, itemDef.is_required]
+            );
+            const newId = insItem.rows[0].id;
+            usedExistingIds.add(newId);
+            canonicalItemIds.push(newId);
+          }
+        }
+      }
+
+      if (canonicalItemIds.length > 0) {
+        await auditMigrationClient.query(
+          `UPDATE checklist_template_items
+           SET is_archived = TRUE, is_active = FALSE, updated_at = NOW()
+           WHERE template_id = $1 AND id NOT IN (${canonicalItemIds.join(',')})`,
+          [tpl.id]
+        );
+      }
+    }
+
+    await auditMigrationClient.query(`
+      INSERT INTO schema_migrations (version)
+      VALUES ('housekeeping_canonical_checklist_content_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+
+    // Always ensure active system templates have active items
+    await auditMigrationClient.query(`
+      UPDATE checklist_template_items
+      SET is_active = TRUE, is_archived = FALSE
+      WHERE template_id IN (
+        SELECT id FROM checklist_templates WHERE is_system_template = TRUE AND is_archived = FALSE
+      ) AND is_archived = FALSE;
+
+      UPDATE housekeeping_finding_types
+      SET is_active = TRUE
+      WHERE code IN ('MINIBAR', 'REMOTE_TV_HILANG', 'REMOTE_AC_HILANG', 'HANDUK_KURANG', 'LINEN_RUSAK', 'BARANG_HILANG', 'KERUSAKAN_FURNITURE', 'KERUSAKAN_ELEKTRONIK', 'LOST_AND_FOUND', 'LAINNYA', 'AC_TIDAK_DINGIN', 'KEBOCORAN_AIR', 'KELISTRIKAN_RUSAK');
+
+      UPDATE housekeeping_finding_types
+      SET estimated_charge_allowed = TRUE
+      WHERE code IN ('MINIBAR', 'REMOTE_TV_HILANG', 'REMOTE_AC_HILANG', 'HANDUK_KURANG', 'LINEN_RUSAK', 'BARANG_HILANG', 'KERUSAKAN_FURNITURE', 'KERUSAKAN_ELEKTRONIK', 'LAINNYA');
+    `);
 
     await auditMigrationClient.query('COMMIT');
   } catch (err) {

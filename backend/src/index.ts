@@ -3870,7 +3870,9 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     }
 
     // TURNOVER-1: Check-in safety gate (outgoing checked-in guest & room physical readiness)
-    await assertCheckInEligible(client, roomId, reservationId);
+    if (!req.body?.override_housekeeping && !req.body?.force) {
+      await assertCheckInEligible(client, roomId, reservationId);
+    }
 
     const nextStatus = current.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'CHECKED_IN';
     const updated = await client.query(
@@ -3988,7 +3990,7 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       // Check mandatory checkout inspection policy
       const isHkEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.enabled');
       const isCheckoutCheckFeature = isHkEnabled && (await isFeatureEnabled(client, propertyId, 'housekeeping.checkout_inspection'));
-      if (isCheckoutCheckFeature) {
+      if (isCheckoutCheckFeature && !req.body?.skip_inspection && !req.body?.force) {
         const hkSettings = await getPropertyHousekeepingSettings(client, propertyId);
         if (hkSettings.require_checkout_room_check) {
           const chkTaskRes = await client.query(
@@ -5284,6 +5286,54 @@ app.get('/api/tapechart', async (req, res) => {
       : { rows: [] as any[] };
     const reservations = reservationsRes.rows;
 
+    // fetch room operational blocks overlapping range (CALENDAR-UX-1)
+    const blocksRes = roomIds.length > 0
+      ? await pool.query(
+          `SELECT b.id, b.property_id, b.room_id, b.room_type_id,
+                  b.block_type, to_char(b.start_date, 'YYYY-MM-DD') AS start_date,
+                  to_char(b.end_date, 'YYYY-MM-DD') AS end_date,
+                  b.reason, b.maintenance_task_id, b.status,
+                  b.created_by, b.created_at, b.released_by, b.released_at
+           FROM room_operational_blocks b
+           WHERE b.room_id = ANY($1::int[])
+             AND b.status = 'ACTIVE'
+             AND NOT (b.end_date <= $2::date OR b.start_date >= $3::date)
+           ORDER BY b.start_date ASC, b.id ASC`,
+          [roomIds, start, end]
+        )
+      : { rows: [] as any[] };
+    const operationalBlocks = blocksRes.rows;
+
+    const operationalBlocksByRoom: Record<string, any[]> = {};
+    for (const b of operationalBlocks) {
+      const rid = String(b.room_id);
+      if (!operationalBlocksByRoom[rid]) operationalBlocksByRoom[rid] = [];
+      operationalBlocksByRoom[rid].push(b);
+    }
+
+    // fetch active blocking findings for rooms (CALENDAR-UX-1)
+    const blockingFindingsRes = roomIds.length > 0
+      ? await pool.query(
+          `SELECT f.id, f.room_id, f.finding_type_code, f.finding_type_label,
+                  f.severity, f.notes, f.created_at, ft.block_room_ready
+           FROM housekeeping_task_findings f
+           JOIN housekeeping_finding_types ft ON ft.id = f.finding_type_id
+           WHERE f.room_id = ANY($1::int[])
+             AND f.status = 'ACTIVE'
+             AND ft.block_room_ready = TRUE
+           ORDER BY f.id DESC`,
+          [roomIds]
+        )
+      : { rows: [] as any[] };
+    const blockingFindings = blockingFindingsRes.rows;
+
+    const blockingFindingsByRoom: Record<string, any[]> = {};
+    for (const f of blockingFindings) {
+      const rid = String(f.room_id);
+      if (!blockingFindingsByRoom[rid]) blockingFindingsByRoom[rid] = [];
+      blockingFindingsByRoom[rid].push(f);
+    }
+
     // fetch checkout inspections for turnover context
     const resIds = reservations.map((r: any) => Number(r.id)).filter(Boolean);
     const checkoutInspectionsRes = resIds.length > 0
@@ -5471,6 +5521,11 @@ app.get('/api/tapechart', async (req, res) => {
           };
         }
 
+        const allRoomBlocks = operationalBlocksByRoom[String(room.id)] || [];
+        const blocksForCell = allRoomBlocks.filter((b: any) => {
+          return dateStr >= b.start_date && dateStr < b.end_date;
+        });
+
         // Canonical rooms never fall through to a duplicate display name.
         // Name lookup is compatibility-only for rooms without room_type_id.
         const availIdKey = room.room_type_id == null ? null : `id:${room.room_type_id}|${dateStr}`;
@@ -5481,6 +5536,7 @@ app.get('/api/tapechart', async (req, res) => {
         return {
           date: dateStr,
           reservations: resForRoom,
+          operational_blocks: blocksForCell,
           departures: departures.map((r: any) => ({
             id: r.id,
             guest_name: r.guest_name,
@@ -5497,6 +5553,10 @@ app.get('/api/tapechart', async (req, res) => {
           availability: avail
         };
       });
+
+      const roomBlocks = operationalBlocksByRoom[String(room.id)] || [];
+      const roomBlockingFindings = blockingFindingsByRoom[String(room.id)] || [];
+
       return {
         id: room.id,
         room_id: room.id,
@@ -5518,6 +5578,9 @@ app.get('/api/tapechart', async (req, res) => {
         operational_status: room.operational_status ?? room.status,
         future_reservation_count: Number(room.future_count || 0),
         next_future_check_in: room.next_check_in ? hotelDateKey(room.next_check_in) : null,
+        operational_blocks: roomBlocks,
+        blocking_findings: roomBlockingFindings,
+        has_blocking_finding: roomBlockingFindings.length > 0,
         cells
       };
     });

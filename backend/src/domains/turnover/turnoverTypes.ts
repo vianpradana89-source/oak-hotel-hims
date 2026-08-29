@@ -4,6 +4,7 @@ export type ReadinessReasonCode =
   | 'OUTGOING_NOT_CHECKED_OUT'
   | 'HOUSEKEEPING_IN_PROGRESS'
   | 'ROOM_OUT_OF_SERVICE'
+  | 'BLOCKING_FINDING_ACTIVE'
   | 'ROOM_NOT_READY';
 
 export interface OutgoingReservationInfo {

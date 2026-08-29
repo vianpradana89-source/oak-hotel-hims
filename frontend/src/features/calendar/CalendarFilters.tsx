@@ -48,9 +48,10 @@ export default function CalendarFilters(props: Props) {
         aria-label="Filter status operasional"
       >
         <option value="">Semua status operasional</option>
-        <option value="Ready">Vacant Clean</option>
-        <option value="Kotor">Vacant Dirty</option>
-        <option value="Occupied">Occupied Clean</option>
+        <option value="Ready">Vacant Clean (Siap)</option>
+        <option value="Cleaning">Cleaning (Dibersihkan)</option>
+        <option value="Kotor">Vacant Dirty (Kotor)</option>
+        <option value="Occupied">Occupied (Terisi)</option>
         <option value="Maintenance">Out of Order / Service</option>
       </select>
       <label className="calendar-filter-check">
