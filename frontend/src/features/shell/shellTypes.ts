@@ -1,13 +1,14 @@
-import React from 'react';
-
 export type MainNavKey =
   | 'Kalender'
   | 'Transaksi'
   | 'Housekeeping'
   | 'HRD'
+  | 'POS'
   | 'Mobile Portal'
   | 'Employee Mobile'
   | 'Laporan'
+  | 'Master Kamar'
+  | 'Master Produk'
   | 'Produk & Inventori'
   | 'Pelanggan'
   | 'Pengaturan';

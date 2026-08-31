@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import type {
   HousekeepingTaskRecord,
   TaskChecklistItem,
+  PropertyHousekeepingSettings,
   HkFindingType,
   HousekeepingTaskFinding
 } from '../housekeeping/housekeepingTypes';
@@ -135,6 +136,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   const [checklistLoading, setChecklistLoading] = useState(false);
   const [checklistError, setChecklistError] = useState<string | null>(null);
   const [cleaningNote, setCleaningNote] = useState('');
+  const [hkSettings, setHkSettings] = useState<PropertyHousekeepingSettings | null>(null);
 
   // Finding Types Catalog (Loaded dynamically from API)
   const [findingTypes, setFindingTypes] = useState<HkFindingType[]>([]);
@@ -210,9 +212,24 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     }
   };
 
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch(`/api/housekeeping/settings?property_id=${propertyId}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) {
+          setHkSettings(json.data);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch housekeeping settings for mobile:', err);
+    }
+  };
+
   useEffect(() => {
     fetchTasks();
     fetchFindingTypes();
+    fetchSettings();
   }, [propertyId]);
 
   // Load Checklist for a task
@@ -254,6 +271,42 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
       }
     } catch (err) {
       console.error('Failed to toggle checklist item:', err);
+    }
+  };
+
+  // Bulk Toggle Checklist Items in Category (Configured by Property Setting)
+  const handleBulkToggleCategory = async (
+    categoryName: string,
+    items: TaskChecklistItem[],
+    isCompleted: boolean,
+    targetTaskId?: number
+  ) => {
+    const taskId = targetTaskId || selectedTask?.id || activeCleaningTask?.id;
+    if (!taskId) return;
+    try {
+      const itemIds = items.map(it => it.id);
+      const res = await fetch(`/api/housekeeping/tasks/${taskId}/checklist/bulk-category`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          category: categoryName,
+          item_ids: itemIds,
+          is_completed: isCompleted,
+          checked_by: crewName
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const updatedRows: TaskChecklistItem[] = data.data?.updated_items || [];
+        const updatedMap = new Map<number, TaskChecklistItem>(updatedRows.map(r => [r.id, r]));
+        setChecklistItems(prev =>
+          prev.map(it => updatedMap.get(it.id) || it)
+        );
+        setChecklistError(null);
+      }
+    } catch (err) {
+      console.error('Failed to bulk toggle category checklist items:', err);
     }
   };
 
@@ -492,6 +545,9 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
           estimated_charge: '',
           photo_url: ''
         });
+        if (task.task_type === 'CHECKOUT_ROOM_CHECK') {
+          setActiveStream('CLEANING');
+        }
         await fetchTasks();
       } else {
         setChecklistError(data.message || (res.ok ? 'Pemeriksaan selesai' : 'Gagal mengirim hasil pemeriksaan.'));
@@ -999,22 +1055,6 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
         <div className="grid grid-cols-3 gap-1.5 p-1 bg-neutral-200/60 rounded-2xl border border-neutral-300/70">
           <button
             type="button"
-            onClick={() => setActiveStream('CLEANING')}
-            className={`py-2 px-1 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
-              activeStream === 'CLEANING'
-                ? 'bg-white text-neutral-900 shadow-xs border border-neutral-300/80'
-                : 'text-neutral-600 hover:text-neutral-900'
-            }`}
-          >
-            <span>Cleaning</span>
-            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-extrabold ${
-              activeStream === 'CLEANING' ? 'bg-[#1b4332] text-white' : 'bg-neutral-300 text-neutral-700'
-            }`}>
-              {countCleaning}
-            </span>
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveStream('CHECKOUT')}
             className={`py-2 px-1 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
               activeStream === 'CHECKOUT'
@@ -1027,6 +1067,22 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
               activeStream === 'CHECKOUT' ? 'bg-amber-600 text-white' : 'bg-neutral-300 text-neutral-700'
             }`}>
               {countCheckout}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveStream('CLEANING')}
+            className={`py-2 px-1 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+              activeStream === 'CLEANING'
+                ? 'bg-white text-neutral-900 shadow-xs border border-neutral-300/80'
+                : 'text-neutral-600 hover:text-neutral-900'
+            }`}
+          >
+            <span>Cleaning</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-extrabold ${
+              activeStream === 'CLEANING' ? 'bg-[#1b4332] text-white' : 'bg-neutral-300 text-neutral-700'
+            }`}>
+              {countCleaning}
             </span>
           </button>
           <button
@@ -1331,16 +1387,35 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
                   {groupedChecklist.map((group, gIdx) => {
                     const groupCompleted = group.items.filter(it => it.is_completed).length;
                     const groupTotal = group.items.length;
+                    const isAllGroupCompleted = groupTotal > 0 && groupCompleted === groupTotal;
 
                     return (
                       <div key={group.groupName + gIdx} className="space-y-1.5">
                         <div className="flex items-center justify-between px-1 py-0.5 border-b border-neutral-200">
-                          <span className="font-bold text-xs text-neutral-900 tracking-wide">
-                            {gIdx + 1}. {group.groupName}
-                          </span>
-                          <span className="text-[10px] font-mono font-bold text-neutral-600 bg-neutral-100 px-1.5 py-0.2 rounded border border-neutral-200">
-                            {groupCompleted}/{groupTotal}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs text-neutral-900 tracking-wide">
+                              {gIdx + 1}. {group.groupName}
+                            </span>
+                            <span className="text-[10px] font-mono font-bold text-neutral-600 bg-neutral-100 px-1.5 py-0.2 rounded border border-neutral-200">
+                              {groupCompleted}/{groupTotal}
+                            </span>
+                          </div>
+                          {hkSettings?.housekeeping_category_bulk_check_enabled && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleBulkToggleCategory(group.groupName, group.items, !isAllGroupCompleted);
+                              }}
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-colors cursor-pointer ${
+                                isAllGroupCompleted
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                  : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                              }`}
+                            >
+                              {isAllGroupCompleted ? '✓ Semua Dicentang' : '✓ Checklist Semua'}
+                            </button>
+                          )}
                         </div>
                         <div className="space-y-1.5">
                           {group.items.map(item => (
@@ -1785,16 +1860,35 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
                     groupedChecklist.map((group, gIdx) => {
                       const groupCompleted = group.items.filter(it => it.is_completed).length;
                       const groupTotal = group.items.length;
+                      const isAllGroupCompleted = groupTotal > 0 && groupCompleted === groupTotal;
 
                       return (
                         <div key={group.groupName + gIdx} className="space-y-1.5">
                           <div className="flex items-center justify-between px-1 py-0.5 border-b border-neutral-200">
-                            <span className="font-bold text-xs text-neutral-900 tracking-wide">
-                              {gIdx + 1}. {group.groupName}
-                            </span>
-                            <span className="text-[10px] font-mono font-bold text-neutral-600 bg-neutral-100 px-1.5 py-0.2 rounded border border-neutral-200">
-                              {groupCompleted}/{groupTotal}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-xs text-neutral-900 tracking-wide">
+                                {gIdx + 1}. {group.groupName}
+                              </span>
+                              <span className="text-[10px] font-mono font-bold text-neutral-600 bg-neutral-100 px-1.5 py-0.2 rounded border border-neutral-200">
+                                {groupCompleted}/{groupTotal}
+                              </span>
+                            </div>
+                            {hkSettings?.housekeeping_category_bulk_check_enabled && activeCleaningTask && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleBulkToggleCategory(group.groupName, group.items, !isAllGroupCompleted, activeCleaningTask.id);
+                                }}
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-colors cursor-pointer ${
+                                  isAllGroupCompleted
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                    : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                                }`}
+                              >
+                                {isAllGroupCompleted ? '✓ Semua Dicentang' : '✓ Checklist Semua'}
+                              </button>
+                            )}
                           </div>
                           <div className="space-y-1.5">
                             {group.items.map(item => (

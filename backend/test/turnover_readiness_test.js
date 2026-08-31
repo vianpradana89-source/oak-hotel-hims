@@ -109,6 +109,7 @@ async function runTests() {
   let client;
   let testRoom = null;
   let originalRoomStatus = 'VACANT_CLEAN';
+  let originalHkSettings = null;
   const createdCorrelations = [];
 
   try {
@@ -142,6 +143,13 @@ async function runTests() {
     originalRoomStatus = testRoom.status || 'VACANT_CLEAN';
 
     console.log(`Using test room: ID=${testRoom.id}, No=${testRoom.room_number}, Type=${testRoom.room_type_name}`);
+
+    // Isolate housekeeping settings for property 1
+    const hkSetRes = await client.query('SELECT require_checkout_room_check FROM property_housekeeping_settings WHERE property_id = $1', [testRoom.property_id]);
+    if (hkSetRes.rowCount > 0) {
+      originalHkSettings = hkSetRes.rows[0].require_checkout_room_check;
+      await client.query('UPDATE property_housekeeping_settings SET require_checkout_room_check = false WHERE property_id = $1', [testRoom.property_id]);
+    }
 
     // Ensure baseline room status is VACANT_CLEAN
     await client.query('UPDATE rooms SET status = $1 WHERE id = $2', ['VACANT_CLEAN', testRoom.id]);
@@ -178,6 +186,7 @@ async function runTests() {
     const resA = await request('POST', '/api/bookings', bookingAPayload, corrA);
     expect(resA.status === 201, `Guest A booking create failed: ${resA.status} ${resA.text}`);
     const resAId = resA.json.data.reservations[0].id;
+    await client.query(`UPDATE reservations SET identity_number = '3171012345670001', has_valid_identity = true, guest_phone = '081100010001' WHERE id = $1`, [resAId]);
 
     const corrB = `TURNOVER-B-${Date.now()}`;
     createdCorrelations.push(corrB);
@@ -206,6 +215,7 @@ async function runTests() {
     const resB = await request('POST', '/api/bookings', bookingBPayload, corrB);
     expect(resB.status === 201, `Guest B back-to-back booking create failed: ${resB.status} ${resB.text}`);
     const resBId = resB.json.data.reservations[0].id;
+    await client.query(`UPDATE reservations SET identity_number = '3171012345670002', has_valid_identity = true, guest_phone = '081100010002' WHERE id = $1`, [resBId]);
     console.log('PASS | Scenario 1: Back-to-Back booking creation succeeded.');
 
     // ==========================================
@@ -421,6 +431,7 @@ async function runTests() {
     }, corrC1);
     expect(createC1.status === 201, `Create C1 failed: ${createC1.status} ${createC1.text}`);
     const resC1Id = createC1.json.data.reservations[0].id;
+    await client.query(`UPDATE reservations SET identity_number = '3171012345670003', has_valid_identity = true, guest_phone = '081299990001' WHERE id = $1`, [resC1Id]);
 
     // Create Reservation C2 (2026-12-11 to 2026-12-12)
     const corrC2 = `TURNOVER-CONC2-${Date.now()}`;
@@ -441,6 +452,7 @@ async function runTests() {
     }, corrC2);
     expect(createC2.status === 201, `Create C2 failed: ${createC2.status} ${createC2.text}`);
     const resC2Id = createC2.json.data.reservations[0].id;
+    await client.query(`UPDATE reservations SET identity_number = '3171012345670004', has_valid_identity = true, guest_phone = '081299990002' WHERE id = $1`, [resC2Id]);
 
     // Ensure room is VACANT_CLEAN
     await client.query('UPDATE rooms SET status = $1 WHERE id = $2', ['VACANT_CLEAN', testRoom.id]);
@@ -639,6 +651,9 @@ async function runTests() {
     }
     if (testRoom && originalRoomStatus) {
       await pool.query('UPDATE rooms SET status = $1 WHERE id = $2', [originalRoomStatus, testRoom.id]);
+    }
+    if (testRoom && originalHkSettings !== null) {
+      await pool.query('UPDATE property_housekeeping_settings SET require_checkout_room_check = $1 WHERE property_id = $2', [originalHkSettings, testRoom.property_id]);
     }
     if (client) client.release();
     if (server) server.close();

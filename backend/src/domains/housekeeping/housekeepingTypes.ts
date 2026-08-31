@@ -144,6 +144,7 @@ export interface HousekeepingDailyMetrics {
   checkout_check: number;
   overdue: number;
   priority_turnover: number;
+  maintenance?: number;
 }
 
 export interface ChecklistTemplateGroup {
@@ -210,6 +211,7 @@ export interface PropertyHousekeepingSettings {
   default_checkout_template_code: string;
   default_checkout_inspection_template_code?: string;
   default_final_inspection_template_code?: string;
+  housekeeping_category_bulk_check_enabled?: boolean;
   created_at: string;
   updated_at: string;
 }

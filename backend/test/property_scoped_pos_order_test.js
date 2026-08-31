@@ -152,6 +152,13 @@ async function cleanup() {
   try {
     await client.query('BEGIN');
 
+    // 0. Delete transactions
+    await client.query(`
+      DELETE FROM transactions WHERE property_id IN (
+        SELECT id FROM properties WHERE property_code IN ('POCA', 'POCB')
+      )
+    `);
+
     // 1. Delete POS order items and POS orders for test properties
     await client.query(`
       DELETE FROM pos_order_items WHERE order_id IN (
@@ -192,7 +199,14 @@ async function cleanup() {
       ) OR bid LIKE 'BID-POCB-%'
     `);
 
-    // 4. Delete rooms, room types & categories
+    // 4. Delete rooms, availability_dates, room types & categories
+    await client.query(`
+      DELETE FROM availability_dates WHERE room_type_id IN (
+        SELECT id FROM room_types WHERE property_id IN (
+          SELECT id FROM properties WHERE property_code IN ('POCA', 'POCB')
+        )
+      )
+    `);
     await client.query(`
       DELETE FROM rooms WHERE property_id IN (
         SELECT id FROM properties WHERE property_code IN ('POCA', 'POCB')

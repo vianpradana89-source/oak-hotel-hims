@@ -134,9 +134,9 @@ async function setupFixtures() {
 
     // Initial charge for Reservation A
     await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, 'ROOM_CHARGE', 'Room Charge Night 1', 500000, 'DEBIT')`,
-      [resIdA]
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'ROOM_CHARGE', 'Room Charge Night 1', 500000, 'DEBIT')`,
+      [resIdA, propIdA]
     );
 
     // Booking & Reservation for Property B
@@ -155,14 +155,14 @@ async function setupFixtures() {
 
     // Initial charge and payment for Reservation B
     await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, 'ROOM_CHARGE', 'Room Charge Night 1', 600000, 'DEBIT')`,
-      [resIdB]
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'ROOM_CHARGE', 'Room Charge Night 1', 600000, 'DEBIT')`,
+      [resIdB, propIdB]
     );
     await client.query(
-      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, reference_code, status)
-       VALUES ($1, 'PAYMENT', 300000, 'BANK_TRANSFER', 'TXN-INIT-B', 'SUCCESS')`,
-      [resIdB]
+      `INSERT INTO payment_transactions (reservation_id, property_id, transaction_type, amount, payment_method, reference_code, status)
+       VALUES ($1, $2, 'PAYMENT', 300000, 'BANK_TRANSFER', 'TXN-INIT-B', 'SUCCESS')`,
+      [resIdB, propIdB]
     );
 
     // Cross-room reservation: booking belongs to Property B, but room is roomIdA (in Property A)

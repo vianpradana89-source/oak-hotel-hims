@@ -147,6 +147,7 @@ export interface HousekeepingDailyMetrics {
   checkout_check: number;
   overdue: number;
   priority_turnover: number;
+  maintenance?: number;
 }
 
 export interface ChecklistTemplateGroup {
@@ -213,6 +214,7 @@ export interface PropertyHousekeepingSettings {
   default_checkout_template_code: string;
   default_checkout_inspection_template_code?: string;
   default_final_inspection_template_code?: string;
+  housekeeping_category_bulk_check_enabled?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -279,6 +281,8 @@ export interface HousekeepingTaskFinding {
   task_id?: number | null;
   room_id?: number | null;
   room_number?: string | null;
+  room_type_name?: string | null;
+  room_current_status?: string | null;
   reservation_id?: number | null;
   finding_type_id?: number | null;
   finding_type_code: string;

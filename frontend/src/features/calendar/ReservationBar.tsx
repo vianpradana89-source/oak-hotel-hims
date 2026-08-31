@@ -29,7 +29,7 @@ interface Props {
   } | null;
   onDragStart: (event: any) => void;
   onDragEnd: (event: any) => void;
-  onOpen: () => void;
+  onOpen: (event: React.MouseEvent<HTMLDivElement>) => void;
   onResize: (event: ReactPointerEvent<HTMLButtonElement>) => void;
 }
 
@@ -37,6 +37,7 @@ export default function ReservationBar(props: Props) {
   const reservation = props.reservation;
   const turnover = props.turnoverInfo;
   const outgoingClearance = turnover?.outgoing_clearance;
+  const isShortSpan = props.span <= 2;
 
   return (
     <td colSpan={props.span} className="p-1 border align-middle h-14">
@@ -44,27 +45,37 @@ export default function ReservationBar(props: Props) {
         draggable
         onDragStart={props.onDragStart}
         onDragEnd={props.onDragEnd}
-        onClick={props.onOpen}
+        onClick={(e) => props.onOpen(e)}
         className={`reservation-card relative overflow-hidden ${props.cardClass} reservation-card--${props.density} ${props.searchMatch ? 'reservation-card--match' : 'reservation-card--dim'} cursor-pointer font-semibold shadow-xs hover:shadow-sm transition-shadow`}
       >
         <div className="reservation-card-stack">
           <div className="reservation-card-topline flex-wrap items-center gap-1">
-            {/* Arrival starting-edge indicator */}
-            <span
-              className="inline-flex items-center text-[9px] font-extrabold text-sky-900 bg-sky-100/90 px-1 py-0.2 rounded border border-sky-300/80 shadow-2xs select-none shrink-0"
-              title={`Check-in: ${reservation.check_in}`}
-            >
-              ARR ↘
-            </span>
+            {/* Arrival starting-edge indicator on longer stays */}
+            {!isShortSpan && (
+              <span
+                className="inline-flex items-center text-[10px] font-extrabold text-sky-900 bg-sky-100/90 px-1.5 py-0.5 rounded border border-sky-300/80 shadow-2xs select-none shrink-0"
+                title={`Check-in: ${reservation.check_in}`}
+              >
+                ARR ↘
+              </span>
+            )}
 
-            <div className="reservation-card-name truncate">{reservation.guest_name}</div>
-            <span className={`${props.badgeClass} shrink-0`}>{props.badge}</span>
-            <span className={`${props.segmentMeta.className} shrink-0`}>{props.segmentMeta.label}</span>
+            <div className="reservation-card-name truncate font-bold text-stone-900">{reservation.guest_name}</div>
+            {reservation.stay_type === 'DAY_USE' && (
+              <span
+                className="inline-flex items-center text-[10px] font-extrabold text-purple-900 bg-purple-100/90 px-1.5 py-0.5 rounded border border-purple-300 shadow-2xs shrink-0 select-none"
+                title={`Day Use Transit: ${reservation.start_at ? new Date(reservation.start_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '10:00'} - ${reservation.end_at ? new Date(reservation.end_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '16:00'}`}
+              >
+                ⚡ DAY USE
+              </span>
+            )}
+            {props.badge && !isShortSpan && <span className={`${props.badgeClass} shrink-0 text-[10px]`}>{props.badge}</span>}
+            {props.segmentMeta?.label && !isShortSpan && <span className={`${props.segmentMeta.className} shrink-0 text-[10px]`}>{props.segmentMeta.label}</span>}
 
             {/* Outgoing Checkout HK Clearance Indicator */}
-            {outgoingClearance && outgoingClearance.clearance_state === 'CLEAR' && (
+            {outgoingClearance && outgoingClearance.clearance_state === 'CLEAR' && !isShortSpan && (
               <span
-                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300/80 shadow-2xs shrink-0"
+                className="text-[10px] px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-800 border border-emerald-300/80 shadow-2xs shrink-0"
                 title="HK CLEAR: Pemeriksaan kamar checkout bersih"
               >
                 ✓ Clear
@@ -72,7 +83,7 @@ export default function ReservationBar(props: Props) {
             )}
             {outgoingClearance && outgoingClearance.clearance_state === 'ISSUE_FOUND' && (
               <span
-                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-rose-50 text-rose-800 border border-rose-300/80 shadow-2xs shrink-0"
+                className="text-[10px] px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5 bg-rose-50 text-rose-800 border border-rose-300/80 shadow-2xs shrink-0"
                 title={`HK ISSUE: ${outgoingClearance.issue_note || 'Ada temuan tagihan / kerusakan kamar'}`}
               >
                 ⚠ Issue
@@ -80,7 +91,7 @@ export default function ReservationBar(props: Props) {
             )}
             {outgoingClearance && (outgoingClearance.clearance_state === 'REQUESTED' || outgoingClearance.clearance_state === 'INSPECTING') && (
               <span
-                className="text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 bg-amber-50 text-amber-800 border border-amber-300/80 shadow-2xs shrink-0"
+                className="text-[10px] px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 bg-amber-50 text-amber-800 border border-amber-300/80 shadow-2xs shrink-0"
                 title="HK CEK: Pemeriksaan kamar sedang berlangsung"
               >
                 ⏳ Cek
@@ -90,7 +101,7 @@ export default function ReservationBar(props: Props) {
             {/* Incoming Room Readiness Indicator */}
             {turnover?.has_turnover && (
               <span
-                className={`text-[9px] px-1 py-0.2 rounded font-semibold inline-flex items-center gap-0.5 shadow-2xs shrink-0 ${
+                className={`text-[10px] px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 shadow-2xs shrink-0 ${
                   turnover.is_ready === false
                     ? 'bg-amber-50 text-amber-900 border border-amber-300/80'
                     : 'bg-emerald-50 text-emerald-900 border border-emerald-300/80'
@@ -101,9 +112,9 @@ export default function ReservationBar(props: Props) {
               </span>
             )}
           </div>
-          <div className="reservation-card-identity truncate">{props.identity}</div>
-          <div className="reservation-card-meta">
-            <span>{props.nights} malam</span>
+          <div className="reservation-card-identity truncate text-xs text-stone-600">{props.identity}</div>
+          <div className="reservation-card-meta text-xs">
+            <span>{reservation.stay_type === 'DAY_USE' ? 'Day Use' : `${props.nights} malam`}</span>
             <span>{props.statusLabel}{props.legacy ? ' · LEGACY' : ''}</span>
             {props.paymentLabel && <span>{props.paymentLabel}</span>}
           </div>

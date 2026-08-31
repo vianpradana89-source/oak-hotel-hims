@@ -24,17 +24,31 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
   const [nationality, setNationality] = useState<string>('Indonesia');
   const [phone, setPhone] = useState<string>('');
   const [email, setEmail] = useState<string>('');
+  const [identityType, setIdentityType] = useState<string>('KTP');
+  const [identityNumber, setIdentityNumber] = useState<string>('');
+  const [rtRw, setRtRw] = useState<string>('');
+  const [villageKelurahan, setVillageKelurahan] = useState<string>('');
+  const [districtKecamatan, setDistrictKecamatan] = useState<string>('');
+  const [religion, setReligion] = useState<string>('');
+  const [maritalStatus, setMaritalStatus] = useState<string>('');
+  const [occupation, setOccupation] = useState<string>('');
+  const [citizenship, setCitizenship] = useState<string>('WNI');
+  const [validUntil, setValidUntil] = useState<string>('SEUMUR HIDUP');
   const [address, setAddress] = useState<string>('');
   const [city, setCity] = useState<string>('');
   const [province, setProvince] = useState<string>('');
   const [country, setCountry] = useState<string>('Indonesia');
+  const [guestSegment, setGuestSegment] = useState<string>('Reguler');
   const [vipStatus, setVipStatus] = useState<VipStatus>('STANDARD');
+  const [preferences, setPreferences] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
 
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
 
   useEffect(() => {
+    setIsKtpPreviewOpen(false);
     if (guest) {
       setFullName(guest.full_name || '');
       setPreferredName(guest.preferred_name || '');
@@ -44,11 +58,23 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
       setNationality(guest.nationality || 'Indonesia');
       setPhone(guest.phone || '');
       setEmail(guest.email || '');
+      setIdentityType(guest.identity_type || 'KTP');
+      setIdentityNumber(guest.identity_number || '');
+      setRtRw(guest.rt_rw || '');
+      setVillageKelurahan(guest.village_kelurahan || '');
+      setDistrictKecamatan(guest.district_kecamatan || '');
+      setReligion(guest.religion || '');
+      setMaritalStatus(guest.marital_status || '');
+      setOccupation(guest.occupation || '');
+      setCitizenship(guest.citizenship || 'WNI');
+      setValidUntil(guest.valid_until || 'SEUMUR HIDUP');
       setAddress(guest.address || '');
       setCity(guest.city || '');
       setProvince(guest.province || '');
       setCountry(guest.country || 'Indonesia');
+      setGuestSegment(guest.guest_segment || 'Reguler');
       setVipStatus(guest.vip_status || 'STANDARD');
+      setPreferences(guest.preferences || '');
       setNotes(guest.notes || '');
     } else {
       setFullName('');
@@ -59,11 +85,23 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
       setNationality('Indonesia');
       setPhone('');
       setEmail('');
+      setIdentityType('KTP');
+      setIdentityNumber('');
+      setRtRw('');
+      setVillageKelurahan('');
+      setDistrictKecamatan('');
+      setReligion('');
+      setMaritalStatus('');
+      setOccupation('');
+      setCitizenship('WNI');
+      setValidUntil('SEUMUR HIDUP');
       setAddress('');
       setCity('');
       setProvince('');
       setCountry('Indonesia');
+      setGuestSegment('Reguler');
       setVipStatus('STANDARD');
+      setPreferences('');
       setNotes('');
     }
     setError(null);
@@ -90,11 +128,23 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
       nationality: nationality.trim() || null,
       phone: phone.trim() || null,
       email: email.trim() || null,
+      identity_type: identityType || 'KTP',
+      identity_number: identityNumber.trim() || null,
+      rt_rw: rtRw.trim() || null,
+      village_kelurahan: villageKelurahan.trim() || null,
+      district_kecamatan: districtKecamatan.trim() || null,
+      religion: religion.trim() || null,
+      marital_status: maritalStatus.trim() || null,
+      occupation: occupation.trim() || null,
+      citizenship: citizenship.trim() || null,
+      valid_until: validUntil.trim() || null,
       address: address.trim() || null,
       city: city.trim() || null,
       province: province.trim() || null,
       country: country.trim() || null,
+      guest_segment: guestSegment || 'Reguler',
       vip_status: vipStatus,
+      preferences: preferences.trim() || null,
       notes: notes.trim() || null,
       property_id: propertyId
     };
@@ -132,9 +182,16 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
       <div className="bg-white rounded-xl shadow-2xl border border-stone-200 w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in duration-150">
         {/* Header */}
         <div className="px-6 py-4 border-b border-stone-200 flex items-center justify-between bg-stone-50/50">
-          <h3 className="text-base font-bold text-stone-900">
-            {guest ? `Edit Profil: ${guest.full_name}` : 'Tambah Profil Tamu Baru'}
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-bold text-stone-900">
+              {guest ? `Edit Profil: ${guest.full_name}` : 'Tambah Profil Tamu Baru'}
+            </h3>
+            {guest?.guest_code && (
+              <span className="text-xs px-2 py-0.5 rounded bg-stone-100 text-stone-700 font-mono font-bold border border-stone-200">
+                {guest.guest_code}
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="p-1 text-stone-400 hover:text-stone-700 rounded-md transition-colors"
@@ -145,225 +202,361 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
           </button>
         </div>
 
-        {/* Body */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4">
+        {/* Form Body */}
+        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4 text-xs">
           {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+            <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700">
               {error}
             </div>
           )}
 
-          {/* Row 1: Nama Lengkap & Panggilan */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* Section: Identitas Utama */}
+          <div className="space-y-3">
+            <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
+              Identitas Tamu
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">
+                  Nama Lengkap <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="e.g. Budi Santoso"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">
+                  Nama Panggilan (Preferred Name)
+                </label>
+                <input
+                  type="text"
+                  value={preferredName}
+                  onChange={(e) => setPreferredName(e.target.value)}
+                  placeholder="e.g. Pak Budi"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Gender</label>
+                <select
+                  value={gender}
+                  onChange={(e) => setGender(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
+                >
+                  <option value="">-- Pilih --</option>
+                  <option value="MALE">Laki-laki</option>
+                  <option value="FEMALE">Perempuan</option>
+                  <option value="OTHER">Lainnya</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Tempat Lahir</label>
+                <input
+                  type="text"
+                  value={birthPlace}
+                  onChange={(e) => setBirthPlace(e.target.value)}
+                  placeholder="Kota kelahiran"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Tanggal Lahir</label>
+                <input
+                  type="date"
+                  value={birthDate}
+                  onChange={(e) => setBirthDate(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Jenis Identitas</label>
+                <select
+                  value={identityType}
+                  onChange={(e) => setIdentityType(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
+                >
+                  <option value="KTP">KTP</option>
+                  <option value="PASSPORT">Paspor</option>
+                  <option value="SIM">SIM</option>
+                </select>
+              </div>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block font-semibold text-stone-700">Nomor Identitas (NIK / Paspor)</label>
+                  {guest?.identity_path && (
+                    <button
+                      type="button"
+                      onClick={() => setIsKtpPreviewOpen(true)}
+                      className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:text-emerald-900 font-medium cursor-pointer"
+                      title="Lihat Foto KTP yang Diunggah"
+                    >
+                      <svg className="w-3.5 h-3.5 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      <span>Foto KTP</span>
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={identityNumber}
+                  onChange={(e) => setIdentityNumber(e.target.value)}
+                  placeholder="16 digit NIK atau nomor paspor"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Masa Berlaku KTP</label>
+                <input
+                  type="text"
+                  value={validUntil}
+                  onChange={(e) => setValidUntil(e.target.value)}
+                  placeholder="SEUMUR HIDUP / YYYY-MM-DD"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Agama</label>
+                <input
+                  type="text"
+                  value={religion}
+                  onChange={(e) => setReligion(e.target.value)}
+                  placeholder="e.g. ISLAM / KRISTEN"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Status Perkawinan</label>
+                <input
+                  type="text"
+                  value={maritalStatus}
+                  onChange={(e) => setMaritalStatus(e.target.value)}
+                  placeholder="e.g. KAWIN / BELUM KAWIN"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Pekerjaan</label>
+                <input
+                  type="text"
+                  value={occupation}
+                  onChange={(e) => setOccupation(e.target.value)}
+                  placeholder="e.g. Karyawan Swasta"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Kewarganegaraan</label>
+                <input
+                  type="text"
+                  value={citizenship}
+                  onChange={(e) => setCitizenship(e.target.value)}
+                  placeholder="WNI / WNA"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Kontak */}
+          <div className="space-y-3 pt-3 border-t border-stone-200">
+            <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
+              Kontak
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Nomor Telepon</label>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="e.g. 08123456789"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. tamu@example.com"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Alamat */}
+          <div className="space-y-3 pt-3 border-t border-stone-200">
+            <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
+              Alamat Lengkap KTP
+            </h4>
             <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Nama Lengkap <span className="text-red-500">*</span>
-              </label>
+              <label className="block font-semibold text-stone-700 mb-1">Alamat Jalan</label>
               <input
                 type="text"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="cth. Budi Santoso"
-                required
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="Jl. Nama Jalan No. XX"
+                className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
               />
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">RT / RW</label>
+                <input
+                  type="text"
+                  value={rtRw}
+                  onChange={(e) => setRtRw(e.target.value)}
+                  placeholder="001/002"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Kelurahan / Desa</label>
+                <input
+                  type="text"
+                  value={villageKelurahan}
+                  onChange={(e) => setVillageKelurahan(e.target.value)}
+                  placeholder="Kelurahan"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Kecamatan</label>
+                <input
+                  type="text"
+                  value={districtKecamatan}
+                  onChange={(e) => setDistrictKecamatan(e.target.value)}
+                  placeholder="Kecamatan"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Kota / Kab</label>
+                <input
+                  type="text"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="Kota"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Provinsi</label>
+                <input
+                  type="text"
+                  value={province}
+                  onChange={(e) => setProvince(e.target.value)}
+                  placeholder="Provinsi"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Negara</label>
+                <input
+                  type="text"
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  placeholder="Negara"
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Segmentasi & Preferensi CRM */}
+          <div className="space-y-3 pt-3 border-t border-stone-200">
+            <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
+              Klasifikasi & Preferensi CRM
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Status VIP</label>
+                <select
+                  value={vipStatus}
+                  onChange={(e) => setVipStatus(e.target.value as VipStatus)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
+                >
+                  <option value="STANDARD">STANDARD</option>
+                  <option value="VIP">VIP</option>
+                  <option value="VVIP">VVIP</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Segmentasi Tamu</label>
+                <select
+                  value={guestSegment}
+                  onChange={(e) => setGuestSegment(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
+                >
+                  <option value="Reguler">Reguler</option>
+                  <option value="Walk-in">Walk-in</option>
+                  <option value="Corporate">Corporate</option>
+                  <option value="Group">Group</option>
+                </select>
+              </div>
+            </div>
+
             <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Nama Panggilan
+              <label className="block font-semibold text-stone-700 mb-1">
+                Preferensi Tamu (Preferences)
               </label>
-              <input
-                type="text"
-                value={preferredName}
-                onChange={(e) => setPreferredName(e.target.value)}
-                placeholder="cth. Pak Budi"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
+              <textarea
+                rows={2}
+                value={preferences}
+                onChange={(e) => setPreferences(e.target.value)}
+                placeholder="Preferensi kamar, bantal ekstra, lantai atas, non-smoking, alergi, dsb..."
+                className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-stone-700 mb-1">
+                Catatan Khusus (CRM Notes)
+              </label>
+              <textarea
+                rows={2}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Catatan internal tim hotel mengenai tamu..."
+                className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
               />
             </div>
           </div>
 
-          {/* Row 2: Status VIP & Gender */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Status VIP
-              </label>
-              <select
-                value={vipStatus}
-                onChange={(e) => setVipStatus(e.target.value as VipStatus)}
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded bg-white focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              >
-                <option value="STANDARD">Standard</option>
-                <option value="VIP">VIP</option>
-                <option value="VVIP">VVIP</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Jenis Kelamin
-              </label>
-              <select
-                value={gender}
-                onChange={(e) => setGender(e.target.value)}
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded bg-white focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              >
-                <option value="">-- Pilih Gender --</option>
-                <option value="MALE">Laki-laki (Male)</option>
-                <option value="FEMALE">Perempuan (Female)</option>
-                <option value="OTHER">Lainnya</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Row 3: Kontak (Telepon & Email) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                No. Telepon / WhatsApp
-              </label>
-              <input
-                type="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="cth. 08123456789"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Email
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="cth. budi@domain.com"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Row 4: Kelahiran & Kewarganegaraan */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Tempat Lahir
-              </label>
-              <input
-                type="text"
-                value={birthPlace}
-                onChange={(e) => setBirthPlace(e.target.value)}
-                placeholder="cth. Jakarta"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Tanggal Lahir
-              </label>
-              <input
-                type="date"
-                value={birthDate}
-                onChange={(e) => setBirthDate(e.target.value)}
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Kewarganegaraan
-              </label>
-              <input
-                type="text"
-                value={nationality}
-                onChange={(e) => setNationality(e.target.value)}
-                placeholder="cth. Indonesia"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Row 5: Alamat Lengkap */}
-          <div>
-            <label className="block text-xs font-semibold text-stone-700 mb-1">
-              Alamat Lengkap
-            </label>
-            <input
-              type="text"
-              value={address}
-              onChange={(e) => setAddress(e.target.value)}
-              placeholder="cth. Jl. Sudirman No. 123"
-              className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-            />
-          </div>
-
-          {/* Row 6: Kota, Provinsi, Negara */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Kota
-              </label>
-              <input
-                type="text"
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                placeholder="cth. Surabaya"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Provinsi
-              </label>
-              <input
-                type="text"
-                value={province}
-                onChange={(e) => setProvince(e.target.value)}
-                placeholder="cth. Jawa Timur"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1">
-                Negara
-              </label>
-              <input
-                type="text"
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-                placeholder="cth. Indonesia"
-                className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Row 7: Catatan CRM & Preferensi */}
-          <div>
-            <label className="block text-xs font-semibold text-stone-700 mb-1">
-              Catatan CRM & Preferensi Tamu
-            </label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={3}
-              placeholder="cth. Preferensi kamar lantai tinggi, bantal bulu angsa, tidak merokok..."
-              className="w-full text-xs px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] focus:border-[#1E392A] outline-none"
-            />
-          </div>
-
-          {/* Footer */}
+          {/* Footer Actions */}
           <div className="pt-4 border-t border-stone-200 flex justify-end space-x-2">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold rounded transition-colors"
+              className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold rounded transition-colors"
             >
               Batal
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="px-4 py-2 bg-[#1E392A] hover:bg-[#162a1f] text-white text-xs font-semibold rounded shadow-xs transition-colors flex items-center space-x-1.5"
+              className="px-5 py-2 bg-[#1E392A] hover:bg-[#162a1f] text-white font-semibold rounded shadow-xs transition-colors flex items-center space-x-1.5"
             >
               {saving ? (
                 <>
@@ -377,6 +570,93 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
           </div>
         </form>
       </div>
+
+      {/* KTP Photo Preview Lightbox Modal */}
+      {isKtpPreviewOpen && guest?.identity_path && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setIsKtpPreviewOpen(false)}
+        >
+          <div
+            className="relative max-w-2xl w-full bg-white rounded-xl shadow-2xl overflow-hidden border border-stone-200 flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 bg-stone-900 text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-950 border border-emerald-700/60 flex items-center justify-center text-emerald-400">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold tracking-wide">
+                    Foto KTP Tamu — {guest.full_name}
+                  </h3>
+                  <p className="text-[11px] text-stone-400 font-mono">
+                    NIK: {guest.identity_number || '—'} {guest.guest_code ? `• ${guest.guest_code}` : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={guest.identity_path}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-2.5 py-1 text-stone-300 hover:text-white hover:bg-stone-800 rounded text-xs flex items-center gap-1.5 font-sans border border-stone-700 transition-colors"
+                  title="Buka di tab baru"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                  <span>Buka Tab Baru</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setIsKtpPreviewOpen(false)}
+                  className="p-1.5 text-stone-400 hover:text-white hover:bg-stone-800 rounded-lg transition-colors cursor-pointer"
+                  title="Tutup (ESC)"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Image Preview Body */}
+            <div className="p-4 bg-stone-950 flex flex-col items-center justify-center min-h-[280px] max-h-[68vh] overflow-auto">
+              <img
+                src={guest.identity_path}
+                alt={`KTP ${guest.full_name}`}
+                className="max-h-[60vh] max-w-full object-contain rounded-lg shadow-xl border border-stone-800 bg-stone-900"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  target.style.display = 'none';
+                  const parent = target.parentElement;
+                  if (parent && !parent.querySelector('.ktp-img-err')) {
+                    const errBox = document.createElement('div');
+                    errBox.className = 'ktp-img-err text-center p-8 text-stone-400 text-xs';
+                    errBox.innerHTML = '<div class="text-2xl mb-2">⚠️</div><p class="font-bold text-rose-400 mb-1">File Foto KTP Tidak Dapat Dimuat</p><p class="text-stone-500 text-[11px]">File mungkin telah dipindahkan atau tautan dokumen tidak lagi valid.</p>';
+                    parent.appendChild(errBox);
+                  }
+                }}
+              />
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-2.5 bg-stone-100 border-t border-stone-200 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setIsKtpPreviewOpen(false)}
+                className="px-4 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-800 rounded font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

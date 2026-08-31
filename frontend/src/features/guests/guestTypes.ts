@@ -17,6 +17,7 @@ export interface GuestStayStatistics {
 
 export interface Guest {
   id: number;
+  guest_code?: string | null;
   full_name: string;
   preferred_name?: string | null;
   gender?: 'MALE' | 'FEMALE' | 'OTHER' | null;
@@ -29,8 +30,27 @@ export interface Guest {
   city?: string | null;
   province?: string | null;
   country?: string | null;
+  guest_segment?: string | null;
   vip_status: VipStatus;
+  preferences?: string | null;
+  identity_type?: string | null;
+  identity_number?: string | null;
+  identity_path?: string | null;
+  has_valid_identity?: boolean | null;
+  rt_rw?: string | null;
+  village_kelurahan?: string | null;
+  district_kecamatan?: string | null;
+  religion?: string | null;
+  marital_status?: string | null;
+  occupation?: string | null;
+  citizenship?: string | null;
+  valid_until?: string | null;
+  ktp_ocr_confidence?: number | null;
+  ktp_ocr_provider?: string | null;
+  ktp_extracted_at?: string | null;
   notes?: string | null;
+  is_archived?: boolean;
+  is_active?: boolean;
   created_property_id?: number | null;
   created_at?: string;
   updated_at?: string;
@@ -46,12 +66,40 @@ export interface GuestStay {
   bid: string;
   room_number: string | null;
   room_type_name: string | null;
+  rate_plan_name?: string | null;
   check_in: string;
   check_out: string;
   status: string;
+  stay_type?: string;
+  total_price?: number;
+  guest_segment?: string;
+  booking_source?: string;
+  booking_channel?: string;
   role: string;
   is_legacy_inferred: boolean;
   identity_verified: boolean;
+}
+
+export interface DuplicateCandidate {
+  id: number;
+  guest_code: string | null;
+  full_name: string;
+  phone: string | null;
+  email: string | null;
+  identity_number: string | null;
+  birth_date: string | null;
+  guest_segment: string | null;
+  vip_status: VipStatus;
+  has_valid_identity: boolean;
+  visit_count?: number;
+  last_stay?: string | null;
+  match_strength: 'STRONG_PHONE' | 'STRONG_NIK' | 'STRONG_EMAIL' | 'SOFT_NAME_PHONE' | 'SOFT_NAME_DOB';
+  match_reason: string;
+}
+
+export interface DuplicateCheckResult {
+  has_duplicate: boolean;
+  candidates: DuplicateCandidate[];
 }
 
 export interface GuestDetail extends Guest {

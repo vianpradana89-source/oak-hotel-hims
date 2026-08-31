@@ -147,6 +147,15 @@ async function findSafeWindow(roomId, roomType, nights, minOffset, extraBufferNi
     if (availability.rows.length !== dates.length) {
       continue;
     }
+    if (offset === 0) {
+      const inHouse = await pool.query(
+        `SELECT 1 FROM reservations WHERE room_id = $1 AND status = 'CHECKED_IN'`,
+        [roomId]
+      );
+      if (inHouse.rows.length > 0) {
+        continue;
+      }
+    }
     const hasConflict = activeRanges.some((range) => {
       return start < range.end && safeEnd > range.start;
     });
@@ -161,6 +170,16 @@ async function findSafeWindow(roomId, roomType, nights, minOffset, extraBufferNi
 async function findSafeReservationContext(nights, minOffset, extraBufferNights = 0) {
   const rooms = await getRooms();
   for (const room of rooms) {
+    if (room.status !== 'VACANT_CLEAN' && room.status !== 'CLEAN' && room.status !== 'READY' && room.status !== 'AVAILABLE') {
+      continue;
+    }
+    const inHouse = await pool.query(
+      `SELECT 1 FROM reservations WHERE room_id = $1 AND status = 'CHECKED_IN'`,
+      [room.id]
+    );
+    if (inHouse.rows.length > 0) {
+      continue;
+    }
     try {
       const window = await findSafeWindow(room.id, room.roomType, nights, minOffset, extraBufferNights);
       return { room, window };
@@ -256,6 +275,11 @@ async function cleanupReservation(reservationId, roomStatusBaseline) {
       }
 
       await client.query('DELETE FROM audit_logs WHERE entity = $1 AND record_id = $2::text', ['RESERVATION', String(reservationId)]);
+      await client.query(`
+        DELETE FROM housekeeping_tasks 
+        WHERE reservation_id = $1
+           OR (source_type = 'CHECKOUT_EVENT' AND source_entity_id = $2::text)
+      `, [reservationId, String(reservationId)]);
       await client.query('DELETE FROM folio_entries WHERE reservation_id = $1', [reservationId]);
       await client.query('DELETE FROM payment_transactions WHERE reservation_id = $1', [reservationId]);
       await client.query('DELETE FROM reservations WHERE id = $1', [reservationId]);
@@ -379,7 +403,7 @@ async function main() {
       await ensureRoomStatusBaseline(checkedInContext.room.id, roomStatusBaseline);
       const checkedInWindow = checkedInContext.window;
       const checkedIn = await createReservation(checkedInContext.room.id, checkedInWindow.start, checkedInWindow.end, 'extend-checkedin');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'extend-checkedin-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'extend-checkedin-checkin');
       expect(checkinResponse.status === 200, `checkin setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const before = await getAvailabilityMap(checkedInContext.room.roomType, enumerateDates(checkedInWindow.start, addDays(checkedInWindow.end, 1)));
       const auditBefore = await countReservationAudits(checkedIn.id);
@@ -465,7 +489,7 @@ async function main() {
       await ensureRoomStatusBaseline(checkedInContext.room.id, roomStatusBaseline);
       const checkedInWindow = checkedInContext.window;
       const checkedIn = await createReservation(checkedInContext.room.id, checkedInWindow.start, checkedInWindow.end, 'shorten-checkedin');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'shorten-checkedin-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedIn.id}/checkin`, { property_id: checkedInContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'shorten-checkedin-checkin');
       expect(checkinResponse.status === 200, `checkin setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const rejected = await request('POST', `/api/reservations/${checkedIn.id}/shorten`, { property_id: checkedInContext.room.propertyId, new_check_out: addDays(checkedInWindow.end, -1) }, 'shorten-checkedin');
       expect(rejected.status === 409, `checked-in shorten should fail 409: ${rejected.status} ${rejected.text}`);
@@ -483,7 +507,7 @@ async function main() {
       // The adjacent conflict reservation must be created while the physical
       // room is still sellable (the check-in below flips it to OCCUPIED_CLEAN).
       const overlapConflict = await createReservation(checkedInContext.room.id, checkedInWindow.end, addDays(checkedInWindow.end, 1), 'checkedin-overlap-conflict');
-      const checkinResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/checkin`, { property_id: checkedInContext.room.propertyId }, 'checkedin-guards-checkin');
+      const checkinResponse = await request('POST', `/api/reservations/${checkedInReservation.id}/checkin`, { property_id: checkedInContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'checkedin-guards-checkin');
       expect(checkinResponse.status === 200, `checked-in setup failed: ${checkinResponse.status} ${checkinResponse.text}`);
       const checkedInBaseline = await fetchReservationRow(checkedInReservation.id);
 
@@ -502,7 +526,7 @@ async function main() {
       await ensureRoomStatusBaseline(capacityContext.room.id, roomStatusBaseline);
       const capacityWindow = capacityContext.window;
       const capacityReservation = await createReservation(capacityContext.room.id, capacityWindow.start, capacityWindow.end, 'checkedin-capacity');
-      const capacityCheckin = await request('POST', `/api/reservations/${capacityReservation.id}/checkin`, { property_id: capacityContext.room.propertyId }, 'checkedin-capacity-checkin');
+      const capacityCheckin = await request('POST', `/api/reservations/${capacityReservation.id}/checkin`, { property_id: capacityContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'checkedin-capacity-checkin');
       expect(capacityCheckin.status === 200, `checked-in capacity setup failed: ${capacityCheckin.status} ${capacityCheckin.text}`);
       const capacityBaseline = await fetchReservationRow(capacityReservation.id);
       const capacityAddedDate = capacityWindow.end;
@@ -536,7 +560,7 @@ async function main() {
       await ensureRoomStatusBaseline(missingContext.room.id, roomStatusBaseline);
       const missingWindow = missingContext.window;
       const missingReservation = await createReservation(missingContext.room.id, missingWindow.start, missingWindow.end, 'checkedin-missing-row');
-      const missingCheckin = await request('POST', `/api/reservations/${missingReservation.id}/checkin`, { property_id: missingContext.room.propertyId }, 'checkedin-missing-row-checkin');
+      const missingCheckin = await request('POST', `/api/reservations/${missingReservation.id}/checkin`, { property_id: missingContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'checkedin-missing-row-checkin');
       expect(missingCheckin.status === 200, `checked-in missing-row setup failed: ${missingCheckin.status} ${missingCheckin.text}`);
       const missingBaseline = await fetchReservationRow(missingReservation.id);
       const missingAddedDate = missingWindow.end;
@@ -568,8 +592,8 @@ async function main() {
       const checkedOutContext = await findSafeReservationContext(2, 120, 1);
       await ensureRoomStatusBaseline(checkedOutContext.room.id, roomStatusBaseline);
       const checkedOutReservation = await createReservation(checkedOutContext.room.id, checkedOutContext.window.start, checkedOutContext.window.end, 'checkedout-guard');
-      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkin`, { property_id: checkedOutContext.room.propertyId }, 'checkedout-guard-checkin')).status === 200, 'checked-out guard setup check-in failed');
-      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkout`, { property_id: checkedOutContext.room.propertyId }, 'checkedout-guard-checkout')).status === 200, 'checked-out guard checkout failed');
+      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkin`, { property_id: checkedOutContext.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'checkedout-guard-checkin')).status === 200, 'checked-out guard setup check-in failed');
+      expect((await request('POST', `/api/reservations/${checkedOutReservation.id}/checkout`, { property_id: checkedOutContext.room.propertyId, skip_inspection: true }, 'checkedout-guard-checkout')).status === 200, 'checked-out guard checkout failed');
       const checkedOutResponse = await request('POST', `/api/reservations/${checkedOutReservation.id}/extend`, { property_id: checkedOutContext.room.propertyId, new_check_out: addDays(checkedOutContext.window.end, 1) }, 'checkedout-guard');
       expect(checkedOutResponse.status === 409, `checked-out extend should fail 409: ${checkedOutResponse.status} ${checkedOutResponse.text}`);
       await cleanupReservation(checkedOutReservation.id, roomStatusBaseline);
@@ -634,7 +658,7 @@ async function main() {
       createdReservationIds.add(siblingTargetId);
       createdReservationIds.add(siblingOtherId);
       const siblingBaseline = await fetchReservationRow(siblingOtherId);
-      expect((await request('POST', `/api/reservations/${siblingTargetId}/checkin`, { property_id: siblingPrimary.room.propertyId }, 'sibling-target-checkin')).status === 200, 'sibling target check-in failed');
+      expect((await request('POST', `/api/reservations/${siblingTargetId}/checkin`, { property_id: siblingPrimary.room.propertyId, force: true, override_guest_identity: true, override_housekeeping: true }, 'sibling-target-checkin')).status === 200, 'sibling target check-in failed');
       const siblingExtendResponse = await request('POST', `/api/reservations/${siblingTargetId}/extend`, { property_id: siblingPrimary.room.propertyId, new_check_out: addDays(siblingPrimary.window.end, 1) }, 'sibling-target-extend');
       expect(siblingExtendResponse.status === 200, `sibling target extend failed: ${siblingExtendResponse.status} ${siblingExtendResponse.text}`);
       const siblingAfter = await fetchReservationRow(siblingOtherId);

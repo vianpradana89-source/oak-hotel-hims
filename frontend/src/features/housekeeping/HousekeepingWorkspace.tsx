@@ -5,6 +5,7 @@ import type {
   HousekeepingTab,
   ChecklistTemplate,
   TaskChecklistItem,
+  PropertyHousekeepingSettings,
   HkInspectionResult,
   HkIssueType,
   HkTaskCategory,
@@ -13,6 +14,107 @@ import type {
 } from './housekeepingTypes';
 import { HousekeepingTaskDetailDrawer } from './HousekeepingTaskDetailDrawer';
 import { CreateTaskModal } from './CreateTaskModal';
+import { MaintenanceIssuesModal } from './MaintenanceIssuesModal';
+
+export type MetricCardKey =
+  | 'DIRTY'
+  | 'CLEANING'
+  | 'WAITING_INSPECTION'
+  | 'READY'
+  | 'CHECKOUT_CHECK'
+  | 'MAINTENANCE'
+  | 'TURNOVER'
+  | 'OVERDUE';
+
+export interface MetricCardDef {
+  key: MetricCardKey;
+  label: string;
+  sublabel: string;
+  countKey: keyof HousekeepingDailyMetrics;
+  activeClass: string;
+  hoverClass: string;
+  textClass: string;
+}
+
+export const DEFAULT_METRIC_CARDS: MetricCardDef[] = [
+  {
+    key: 'CHECKOUT_CHECK',
+    label: 'Checkout Check',
+    sublabel: 'Minibar & Room Check',
+    countKey: 'checkout_check',
+    activeClass: 'bg-purple-100/70 border-purple-500 ring-2 ring-purple-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-purple-300',
+    textClass: 'text-purple-700'
+  },
+  {
+    key: 'DIRTY',
+    label: 'Kamar Kotor',
+    sublabel: 'Vacant/Occupied Dirty',
+    countKey: 'dirty',
+    activeClass: 'bg-amber-100/70 border-amber-500 ring-2 ring-amber-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-amber-300',
+    textClass: 'text-amber-700'
+  },
+  {
+    key: 'CLEANING',
+    label: 'Sedang Dibersihkan',
+    sublabel: 'In Progress HK',
+    countKey: 'cleaning',
+    activeClass: 'bg-blue-100/70 border-blue-500 ring-2 ring-blue-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-blue-300',
+    textClass: 'text-blue-700'
+  },
+  {
+    key: 'WAITING_INSPECTION',
+    label: 'Menunggu Inspeksi',
+    sublabel: 'Supervisor Check',
+    countKey: 'waiting_inspection',
+    activeClass: 'bg-indigo-100/70 border-indigo-500 ring-2 ring-indigo-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-indigo-300',
+    textClass: 'text-indigo-700'
+  },
+  {
+    key: 'READY',
+    label: 'Kamar Siap Huni',
+    sublabel: 'Clean / Inspected',
+    countKey: 'ready',
+    activeClass: 'bg-emerald-100/70 border-emerald-500 ring-2 ring-emerald-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-emerald-300',
+    textClass: 'text-emerald-700'
+  },
+  {
+    key: 'MAINTENANCE',
+    label: 'Kamar Maintenance',
+    sublabel: 'Kendala & Kerusakan',
+    countKey: 'maintenance',
+    activeClass: 'bg-amber-100/80 border-amber-600 ring-2 ring-amber-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-amber-400',
+    textClass: 'text-amber-800'
+  },
+  {
+    key: 'TURNOVER',
+    label: 'Priority Turnover',
+    sublabel: 'CO + Arrival Hari Ini',
+    countKey: 'priority_turnover',
+    activeClass: 'bg-red-100/70 border-red-500 ring-2 ring-red-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-red-300',
+    textClass: 'text-red-700'
+  },
+  {
+    key: 'OVERDUE',
+    label: 'Terlambat (Overdue)',
+    sublabel: 'Lewat Batas Waktu',
+    countKey: 'overdue',
+    activeClass: 'bg-rose-100/70 border-rose-500 ring-2 ring-rose-400',
+    hoverClass: 'bg-white border-neutral-200 hover:border-rose-300',
+    textClass: 'text-rose-700'
+  }
+];
+
+const METRIC_CARD_MAP = new Map<MetricCardKey, MetricCardDef>(
+  DEFAULT_METRIC_CARDS.map((c) => [c.key, c])
+);
+
 interface HousekeepingWorkspaceProps {
   propertyId: number;
   apiBaseUrl?: string;
@@ -35,6 +137,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [historyTasks, setHistoryTasks] = useState<HousekeepingTaskRecord[]>([]);
   const [templates, setTemplates] = useState<ChecklistTemplate[]>([]);
   const [rooms, setRooms] = useState<Array<{ id: number; room_number: string }>>([]);
+  const [hkSettings, setHkSettings] = useState<PropertyHousekeepingSettings | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -44,6 +147,82 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [metricFilter, setMetricFilter] = useState<string | null>(null);
+  const [isMaintenanceModalOpen, setIsMaintenanceModalOpen] = useState<boolean>(false);
+
+  // Metric Cards Custom Order State
+  const [cardOrder, setCardOrder] = useState<MetricCardKey[]>(() => {
+    try {
+      const saved = localStorage.getItem('oak_hk_metric_cards_order_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length === DEFAULT_METRIC_CARDS.length) {
+          const validKeys = new Set(DEFAULT_METRIC_CARDS.map((c) => c.key));
+          if (parsed.every((k: string) => validKeys.has(k as MetricCardKey))) {
+            return parsed as MetricCardKey[];
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_METRIC_CARDS.map((c) => c.key);
+  });
+
+  const [isReorderMode, setIsReorderMode] = useState<boolean>(false);
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+
+  const handleMoveCard = (index: number, direction: 'left' | 'right') => {
+    const targetIndex = direction === 'left' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= cardOrder.length) return;
+    const newOrder = [...cardOrder];
+    const temp = newOrder[index];
+    newOrder[index] = newOrder[targetIndex];
+    newOrder[targetIndex] = temp;
+    setCardOrder(newOrder);
+    try {
+      localStorage.setItem('oak_hk_metric_cards_order_v1', JSON.stringify(newOrder));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleResetCardOrder = () => {
+    const defaultOrder = DEFAULT_METRIC_CARDS.map((c) => c.key);
+    setCardOrder(defaultOrder);
+    try {
+      localStorage.removeItem('oak_hk_metric_cards_order_v1');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    if (draggedIndex === null || draggedIndex === dropIndex) {
+      setDraggedIndex(null);
+      return;
+    }
+    const newOrder = [...cardOrder];
+    const [draggedItem] = newOrder.splice(draggedIndex, 1);
+    newOrder.splice(dropIndex, 0, draggedItem);
+    setCardOrder(newOrder);
+    setDraggedIndex(null);
+    try {
+      localStorage.setItem('oak_hk_metric_cards_order_v1', JSON.stringify(newOrder));
+    } catch {
+      // ignore
+    }
+  };
 
   // Drawer & Modal State
   const [selectedTask, setSelectedTask] = useState<HousekeepingTaskRecord | null>(null);
@@ -142,6 +321,25 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
       console.error('Failed to fetch templates/rooms:', err);
     }
   }, [apiBaseUrl, propertyId]);
+
+  // Fetch housekeeping settings (for category bulk check, etc.)
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) {
+          setHkSettings(json.data);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch housekeeping settings:', err);
+    }
+  }, [apiBaseUrl, propertyId]);
+
+  useEffect(() => {
+    fetchSettings();
+  }, [fetchSettings]);
 
   // Fetch history tasks
   const fetchHistory = useCallback(async (preset = historyPreset, incArchived = includeArchived, customDate = dateStr) => {
@@ -311,6 +509,15 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         source = source.filter((t) => t.due_at && new Date(t.due_at) < now && t.status !== 'DONE' && t.status !== 'CANCELLED');
       } else if (metricFilter === 'TURNOVER') {
         source = source.filter((t) => t.priority === 'TURNOVER');
+      } else if (metricFilter === 'MAINTENANCE') {
+        source = source.filter(
+          (t) =>
+            t.room_status === 'OUT_OF_SERVICE' ||
+            t.room_status === 'OUT_OF_ORDER' ||
+            t.room_status === 'MAINTENANCE' ||
+            t.room_status === 'REPAIR' ||
+            t.task_category === 'ROOM_OPERATIONS'
+        );
       }
     }
 
@@ -406,6 +613,44 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         const newItems = (prev.checklist_items || []).map((i) =>
           i.id === item.id ? updatedItem : i
         );
+        return { ...prev, checklist_items: newItems };
+      });
+      fetchDailyOperations(true);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleBulkToggleCategory = async (
+    task: HousekeepingTaskRecord,
+    categoryName: string,
+    items: TaskChecklistItem[],
+    isCompleted: boolean
+  ) => {
+    try {
+      const itemIds = items.map((i) => i.id);
+      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist/bulk-category`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          category: categoryName,
+          item_ids: itemIds,
+          is_completed: isCompleted,
+          actor_name: 'Housekeeping Staff'
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || 'Gagal memperbarui checklist kategori');
+      }
+      const data = await res.json();
+      const updatedRows: TaskChecklistItem[] = data.data?.updated_items || [];
+      const updatedMap = new Map<number, TaskChecklistItem>(updatedRows.map((r) => [r.id, r]));
+
+      setSelectedTask((prev) => {
+        if (!prev) return null;
+        const newItems = (prev.checklist_items || []).map((i) => updatedMap.get(i.id) || i);
         return { ...prev, checklist_items: newItems };
       });
       fetchDailyOperations(true);
@@ -640,106 +885,136 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Daily Operational Metric Cards */}
+      {/* Daily Operational Metric Cards & Position Customizer */}
       {metrics && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'DIRTY' ? null : 'DIRTY')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'DIRTY'
-                ? 'bg-amber-100/70 border-amber-500 ring-2 ring-amber-400'
-                : 'bg-white border-neutral-200 hover:border-amber-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Kamar Kotor</div>
-            <div className="text-xl font-bold text-amber-700 mt-1">{metrics.dirty}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">Vacant/Occupied Dirty</div>
-          </button>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-neutral-700">Ringkasan Status Kamar</span>
+              {isReorderMode && (
+                <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md flex items-center gap-1">
+                  <svg className="w-3.5 h-3.5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  Mode Atur Posisi: Geser dengan tombol ◀ / ▶ atau seret (drag & drop)
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              {isReorderMode && (
+                <button
+                  type="button"
+                  onClick={handleResetCardOrder}
+                  className="px-2 py-1 text-xs text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors cursor-pointer border border-neutral-200"
+                  title="Kembalikan ke urutan standar"
+                >
+                  Reset ke Default
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsReorderMode(!isReorderMode)}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer border ${
+                  isReorderMode
+                    ? 'bg-emerald-700 text-white border-emerald-800 shadow-xs'
+                    : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-50'
+                }`}
+                title="Atur Urutan dan Posisi Kartu Metrik"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4" />
+                </svg>
+                {isReorderMode ? 'Selesai Atur' : 'Atur Posisi Kartu'}
+              </button>
+            </div>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'CLEANING' ? null : 'CLEANING')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'CLEANING'
-                ? 'bg-blue-100/70 border-blue-500 ring-2 ring-blue-400'
-                : 'bg-white border-neutral-200 hover:border-blue-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Sedang Dibersihkan</div>
-            <div className="text-xl font-bold text-blue-700 mt-1">{metrics.cleaning}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">In Progress HK</div>
-          </button>
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+            {cardOrder.map((key, index) => {
+              const def = METRIC_CARD_MAP.get(key);
+              if (!def) return null;
+              const countVal = metrics[def.countKey] ?? 0;
+              const isActive = metricFilter === def.key;
 
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'WAITING_INSPECTION' ? null : 'WAITING_INSPECTION')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'WAITING_INSPECTION'
-                ? 'bg-indigo-100/70 border-indigo-500 ring-2 ring-indigo-400'
-                : 'bg-white border-neutral-200 hover:border-indigo-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Menunggu Inspeksi</div>
-            <div className="text-xl font-bold text-indigo-700 mt-1">{metrics.waiting_inspection}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">Supervisor Check</div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'READY' ? null : 'READY')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'READY'
-                ? 'bg-emerald-100/70 border-emerald-500 ring-2 ring-emerald-400'
-                : 'bg-white border-neutral-200 hover:border-emerald-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Kamar Siap Huni</div>
-            <div className="text-xl font-bold text-emerald-700 mt-1">{metrics.ready}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">Clean / Inspected</div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'CHECKOUT_CHECK' ? null : 'CHECKOUT_CHECK')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'CHECKOUT_CHECK'
-                ? 'bg-purple-100/70 border-purple-500 ring-2 ring-purple-400'
-                : 'bg-white border-neutral-200 hover:border-purple-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Checkout Check</div>
-            <div className="text-xl font-bold text-purple-700 mt-1">{metrics.checkout_check}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">Minibar & Room Check</div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'TURNOVER' ? null : 'TURNOVER')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'TURNOVER'
-                ? 'bg-red-100/70 border-red-500 ring-2 ring-red-400'
-                : 'bg-white border-neutral-200 hover:border-red-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Priority Turnover</div>
-            <div className="text-xl font-bold text-red-700 mt-1">{metrics.priority_turnover}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">CO + Arrival Hari Ini</div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMetricFilter(metricFilter === 'OVERDUE' ? null : 'OVERDUE')}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              metricFilter === 'OVERDUE'
-                ? 'bg-rose-100/70 border-rose-500 ring-2 ring-rose-400'
-                : 'bg-white border-neutral-200 hover:border-rose-300'
-            }`}
-          >
-            <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Terlambat (Overdue)</div>
-            <div className="text-xl font-bold text-rose-700 mt-1">{metrics.overdue}</div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">Lewat Batas Waktu</div>
-          </button>
+              return (
+                <div
+                  key={def.key}
+                  draggable={isReorderMode}
+                  onDragStart={(e) => handleDragStart(e, index)}
+                  onDragOver={handleDragOver}
+                  onDrop={(e) => handleDrop(e, index)}
+                  onDragEnd={() => setDraggedIndex(null)}
+                  className={`relative rounded-xl border transition-all ${
+                    isReorderMode
+                      ? 'cursor-grab active:cursor-grabbing hover:shadow-md select-none bg-white border-amber-400 ring-1 ring-amber-300'
+                      : isActive
+                      ? def.activeClass
+                      : def.hoverClass
+                  } ${draggedIndex === index ? 'opacity-40 scale-95 border-dashed border-2 border-amber-600' : ''}`}
+                >
+                  {isReorderMode ? (
+                    <div className="p-2.5 flex flex-col justify-between h-full">
+                      <div className="flex items-center justify-between pb-1 border-b border-neutral-100">
+                        <span className="text-[10px] font-bold text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
+                          #{index + 1}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={index === 0}
+                            onClick={() => handleMoveCard(index, 'left')}
+                            className="p-1 rounded hover:bg-neutral-200 disabled:opacity-20 text-neutral-700 cursor-pointer disabled:cursor-not-allowed"
+                            title="Geser ke kiri"
+                          >
+                            ◀
+                          </button>
+                          <button
+                            type="button"
+                            disabled={index === cardOrder.length - 1}
+                            onClick={() => handleMoveCard(index, 'right')}
+                            className="p-1 rounded hover:bg-neutral-200 disabled:opacity-20 text-neutral-700 cursor-pointer disabled:cursor-not-allowed"
+                            title="Geser ke kanan"
+                          >
+                            ▶
+                          </button>
+                        </div>
+                      </div>
+                      <div className="pt-2">
+                        <div className="text-[11px] font-bold text-neutral-800 uppercase tracking-wider">{def.label}</div>
+                        <div className={`text-xl font-bold ${def.textClass} mt-0.5`}>{countVal}</div>
+                        <div className="text-[10px] text-neutral-400 mt-0.5">{def.sublabel}</div>
+                      </div>
+                      <div className="mt-2 pt-1 text-[9px] text-amber-700/80 font-medium text-center bg-amber-50/80 rounded py-0.5">
+                        ⋮⋮ Tarik (Drag)
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (def.key === 'MAINTENANCE') {
+                          setIsMaintenanceModalOpen(true);
+                        }
+                        setMetricFilter(isActive ? null : def.key);
+                      }}
+                      className="w-full h-full p-3 text-left cursor-pointer rounded-xl group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">{def.label}</div>
+                        {def.key === 'MAINTENANCE' && (
+                          <span className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity text-amber-700 font-bold">
+                            Buka ↗
+                          </span>
+                        )}
+                      </div>
+                      <div className={`text-xl font-bold ${def.textClass} mt-1`}>{countVal}</div>
+                      <div className="text-[10px] text-neutral-400 mt-0.5">{def.sublabel}</div>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -1077,6 +1352,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           onAcknowledge={handleAcknowledge}
           onStart={handleStart}
           onToggleChecklistItem={handleToggleChecklistItem}
+          onBulkToggleCategory={handleBulkToggleCategory}
+          categoryBulkCheckEnabled={Boolean(hkSettings?.housekeeping_category_bulk_check_enabled)}
           onComplete={handleComplete}
           isSubmitting={isActionSubmitting}
         />
@@ -1184,6 +1461,15 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           </div>
         </div>
       )}
+
+      {/* Maintenance & Room Findings Modal */}
+      <MaintenanceIssuesModal
+        isOpen={isMaintenanceModalOpen}
+        onClose={() => setIsMaintenanceModalOpen(false)}
+        propertyId={propertyId}
+        apiBaseUrl={apiBaseUrl}
+        onRefreshParent={() => fetchDailyOperations(true)}
+      />
     </div>
   );
 };

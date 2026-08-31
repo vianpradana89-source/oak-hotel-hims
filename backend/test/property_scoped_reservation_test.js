@@ -50,36 +50,87 @@ async function cleanup(client) {
     try { await client.query(sql, params); }
     catch (e) { cleanupErrors.push(`${label}: ${e.message}`); console.error(`  CLEANUP WARN: ${label}: ${e.message}`); }
   };
-  // FK-safe order: reservations first (they reference bookings AND rooms)
-  if (reservationAId) await safe('delete reservation', 'DELETE FROM reservations WHERE id = $1', [reservationAId]);
-  if (bookingAId) await safe('delete booking', 'DELETE FROM bookings WHERE id = $1', [bookingAId]);
+  // FK-safe deletion order for test property A
+  if (reservationAId) {
+    await safe('delete reservation_guests A', 'DELETE FROM reservation_guests WHERE reservation_id = $1', [reservationAId]);
+    await safe('delete folio_entries A', 'DELETE FROM folio_entries WHERE reservation_id = $1', [reservationAId]);
+    await safe('delete payment_evidences A', 'DELETE FROM payment_evidences WHERE reservation_id = $1', [reservationAId]);
+    await safe('delete payment_transactions A', 'DELETE FROM payment_transactions WHERE reservation_id = $1', [reservationAId]);
+    await safe('delete reservation A', 'DELETE FROM reservations WHERE id = $1', [reservationAId]);
+  }
+  if (bookingAId) await safe('delete booking A', 'DELETE FROM bookings WHERE id = $1', [bookingAId]);
   if (roomA2Id) await safe('delete room A2', 'DELETE FROM rooms WHERE id = $1', [roomA2Id]);
   if (roomA1Id) await safe('delete room A1', 'DELETE FROM rooms WHERE id = $1', [roomA1Id]);
   if (typeAId) {
-    await safe('delete locks', 'DELETE FROM availability_locks WHERE room_type_id = $1', [typeAId]);
-    await safe('delete avail dates', 'DELETE FROM availability_dates WHERE room_type_id = $1', [typeAId]);
-    await safe('delete room type', 'DELETE FROM room_types WHERE id = $1', [typeAId]);
+    await safe('delete locks A', 'DELETE FROM availability_locks WHERE room_type_id = $1', [typeAId]);
+    await safe('delete avail dates A', 'DELETE FROM availability_dates WHERE room_type_id = $1', [typeAId]);
+    await safe('delete room type A', 'DELETE FROM room_types WHERE id = $1', [typeAId]);
   }
-  if (catAId) await safe('delete category', 'DELETE FROM room_categories WHERE id = $1', [catAId]);
-  if (propAId) await safe('delete property A', 'DELETE FROM properties WHERE id = $1', [propAId]);
-  if (propBId) await safe('delete property B', 'DELETE FROM properties WHERE id = $1', [propBId]);
+  if (catAId) await safe('delete category A', 'DELETE FROM room_categories WHERE id = $1', [catAId]);
+  if (propAId) {
+    await safe('delete audit_logs A', 'DELETE FROM audit_logs WHERE property_id = $1', [propAId]);
+    await safe('delete HK settings A', 'DELETE FROM property_housekeeping_settings WHERE property_id = $1', [propAId]);
+    await safe('delete features A', 'DELETE FROM property_features WHERE property_id = $1', [propAId]);
+    await safe('delete brandings A', 'DELETE FROM property_brandings WHERE property_id = $1', [propAId]);
+    await safe('delete property A', 'DELETE FROM properties WHERE id = $1', [propAId]);
+  }
+  // FK-safe deletion order for test property B
+  if (propBId) {
+    await safe('delete audit_logs B', 'DELETE FROM audit_logs WHERE property_id = $1', [propBId]);
+    await safe('delete HK settings B', 'DELETE FROM property_housekeeping_settings WHERE property_id = $1', [propBId]);
+    await safe('delete features B', 'DELETE FROM property_features WHERE property_id = $1', [propBId]);
+    await safe('delete brandings B', 'DELETE FROM property_brandings WHERE property_id = $1', [propBId]);
+    await safe('delete property B', 'DELETE FROM properties WHERE id = $1', [propBId]);
+  }
 }
 
 async function verifyResidue(absent_client) {
-  const ids = [
-    reservationAId && { tbl: 'reservations', id: reservationAId },
-    bookingAId && { tbl: 'bookings', id: bookingAId },
-    roomA1Id && { tbl: 'rooms', id: roomA1Id },
-    roomA2Id && { tbl: 'rooms', id: roomA2Id },
-    typeAId && { tbl: 'room_types', id: typeAId },
-    catAId && { tbl: 'room_categories', id: catAId },
-    propAId && { tbl: 'properties', id: propAId },
-    propBId && { tbl: 'properties', id: propBId },
-  ].filter(Boolean);
   const residue = [];
-  for (const { tbl, id } of ids) {
-    const r = await absent_client.query(`SELECT 1 FROM ${tbl} WHERE id = $1`, [id]);
-    if (r.rowCount > 0) residue.push(`${tbl}#${id}`);
+  // Check property A and B
+  for (const [label, id] of [['propA', propAId], ['propB', propBId]]) {
+    if (!id) continue;
+    const checks = [
+      { tbl: 'properties', col: 'id' },
+      { tbl: 'property_features', col: 'property_id' },
+      { tbl: 'property_housekeeping_settings', col: 'property_id' },
+      { tbl: 'property_brandings', col: 'property_id' },
+    ];
+    for (const { tbl, col } of checks) {
+      const r = await absent_client.query(`SELECT 1 FROM ${tbl} WHERE ${col} = $1`, [id]);
+      if (r.rowCount > 0) residue.push(`${tbl}:${label}#${id}`);
+    }
+  }
+  // Check reservation A
+  if (reservationAId) {
+    const r = await absent_client.query('SELECT 1 FROM reservations WHERE id = $1', [reservationAId]);
+    if (r.rowCount > 0) residue.push(`reservations#${reservationAId}`);
+  }
+  // Check booking A
+  if (bookingAId) {
+    const r = await absent_client.query('SELECT 1 FROM bookings WHERE id = $1', [bookingAId]);
+    if (r.rowCount > 0) residue.push(`bookings#${bookingAId}`);
+  }
+  // Check room A1, A2
+  for (const rid of [roomA1Id, roomA2Id]) {
+    if (rid) {
+      const r = await absent_client.query('SELECT 1 FROM rooms WHERE id = $1', [rid]);
+      if (r.rowCount > 0) residue.push(`rooms#${rid}`);
+    }
+  }
+  // Check room type A
+  if (typeAId) {
+    const r = await absent_client.query('SELECT 1 FROM room_types WHERE id = $1', [typeAId]);
+    if (r.rowCount > 0) residue.push(`room_types#${typeAId}`);
+  }
+  // Check category A
+  if (catAId) {
+    const r = await absent_client.query('SELECT 1 FROM room_categories WHERE id = $1', [catAId]);
+    if (r.rowCount > 0) residue.push(`room_categories#${catAId}`);
+  }
+  // Also check for any test properties by code (catch-all)
+  const testProps = await absent_client.query("SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB')");
+  for (const row of testProps.rows) {
+    residue.push(`properties:orphan#${row.id}`);
   }
   return residue;
 }
@@ -93,15 +144,36 @@ async function main() {
   // Ensure is_active column exists on properties (added in BOOTSTRAP-1B)
   await p.query("ALTER TABLE properties ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE");
 
-  // Clean up any residue from prior runs
-  await p.query("DELETE FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB')))");
-  await p.query("DELETE FROM bookings WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB'))");
-  await p.query("DELETE FROM availability_locks WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB')))");
-  await p.query("DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB')))");
-  await p.query("DELETE FROM rooms WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB'))");
-  await p.query("DELETE FROM room_types WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB'))");
-  await p.query("DELETE FROM room_categories WHERE property_id IN (SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB'))");
-  await p.query("DELETE FROM properties WHERE property_code IN ('RVXA','RVXB')");
+  // Clean up any residue from prior runs (FK-safe order)
+  const residuePropIds = (await p.query("SELECT id FROM properties WHERE property_code IN ('RVXA','RVXB')")).rows.map(r => r.id);
+  if (residuePropIds.length > 0) {
+    const ids = residuePropIds;
+    await p.query("DELETE FROM reservation_guests WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON r.booking_id = b.id WHERE b.property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM folio_entries WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON r.booking_id = b.id WHERE b.property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM payment_evidences WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON r.booking_id = b.id WHERE b.property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM payment_transactions WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON r.booking_id = b.id WHERE b.property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM bookings WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM availability_locks WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id = ANY($1::int[]))", [ids]);
+    await p.query("DELETE FROM housekeeping_tasks WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM maintenance_tasks WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM rooms WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM room_types WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM room_categories WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM audit_logs WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM property_features WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM property_brandings WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM pos_menu_items WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM pos_menu_categories WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM pos_orders WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM accounting_gl_accounts WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM accounting_journal_entries WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM vendor_payables WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM guest_receivables WHERE property_id = ANY($1::int[])", [ids]);
+    await p.query("DELETE FROM properties WHERE property_code IN ('RVXA','RVXB')");
+  }
 
   server = await new Promise((resolve, reject) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));

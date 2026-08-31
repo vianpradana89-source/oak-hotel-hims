@@ -176,7 +176,27 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
                   <tr key={guest.id} className="hover:bg-stone-50/80 transition-colors">
                     {/* Tamu */}
                     <td className="py-3 px-4">
-                      <div className="font-bold text-stone-900">{guest.full_name}</div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-stone-900">{guest.full_name}</span>
+                        {guest.guest_code && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-stone-100 text-stone-700 font-mono font-medium border border-stone-200">
+                            {guest.guest_code}
+                          </span>
+                        )}
+                        {guest.has_valid_identity && (
+                          <span
+                            className="text-[9px] px-1 py-0.2 rounded bg-emerald-50 text-emerald-700 font-semibold border border-emerald-200"
+                            title="Identitas KTP Terverifikasi"
+                          >
+                            KTP ✓
+                          </span>
+                        )}
+                        {guest.is_archived && (
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-stone-200 text-stone-600 font-semibold">
+                            Arsip
+                          </span>
+                        )}
+                      </div>
                       {guest.preferred_name && (
                         <div className="text-[11px] text-stone-500">
                           Panggilan: &ldquo;{guest.preferred_name}&rdquo;

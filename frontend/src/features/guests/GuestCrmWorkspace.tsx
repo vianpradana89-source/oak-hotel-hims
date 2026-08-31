@@ -196,6 +196,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
           setSelectedGuestId(null);
           handleEditGuest(g);
         }}
+        onGuestUpdated={loadData}
       />
 
       <GuestEditModal

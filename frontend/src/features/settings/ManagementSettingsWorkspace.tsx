@@ -4,6 +4,8 @@ import { PropertyBrandingSettings } from '../propertySettings/PropertyBrandingSe
 import { HousekeepingSettingsTab } from '../housekeeping/HousekeepingSettingsTab';
 import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
+import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
+import { PropertyManagementTab } from './PropertyManagementTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 
 export type SettingsCategoryKey =
@@ -43,6 +45,8 @@ export interface ManagementSettingsWorkspaceProps {
   payroll: any[];
   initialCategory?: SettingsCategoryKey;
   apiBaseUrl?: string;
+  onSelectProperty?: (propertyId: number) => void;
+  onRefreshProperties?: () => void;
 }
 
 export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspaceProps> = ({
@@ -53,7 +57,9 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   employees,
   payroll,
   initialCategory = 'housekeeping',
-  apiBaseUrl = '/api'
+  apiBaseUrl = '/api',
+  onSelectProperty,
+  onRefreshProperties
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -229,10 +235,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     {
       key: 'front_office',
       label: 'Front Office',
-      description: 'Kebijakan check-in/out, night audit, rate plan defaults, dan alur tamu.',
-      status: 'CONFIGURED',
-      badgeLabel: 'Terkonfigurasi',
-      isImplemented: false,
+      description: 'Pengaturan Reservasi Cepat, Master Durasi Day Use, dan alur operasional Front Desk.',
+      status: 'ACTIVE',
+      badgeLabel: 'Aktif',
+      isImplemented: true,
       icon: ({ className }) => (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -655,35 +661,14 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
 
           {/* Active Category: Properti & Identitas */}
           {activeCategory === 'property' && (
-            <div className="bg-white rounded-2xl border border-neutral-200/90 p-6 space-y-5 shadow-xs">
-              <div className="pb-3 border-b border-neutral-200">
-                <h3 className="text-base font-bold text-neutral-900">Identitas Properti</h3>
-                <p className="text-xs text-neutral-500 mt-0.5">Informasi dasar hotel dan konfigurasi sistem persisten.</p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                <div className="p-3 bg-neutral-50 rounded-xl border border-neutral-200/80">
-                  <div className="text-neutral-500">Nama Properti</div>
-                  <div className="font-bold text-neutral-900 text-sm mt-0.5">{activeProperty?.name || 'OAK Hotel'}</div>
-                </div>
-
-                <div className="p-3 bg-neutral-50 rounded-xl border border-neutral-200/80">
-                  <div className="text-neutral-500">Kode Properti</div>
-                  <div className="font-mono font-bold text-neutral-900 text-sm mt-0.5">{activeProperty?.property_code || 'OAK'}</div>
-                </div>
-
-                <div className="p-3 bg-neutral-50 rounded-xl border border-neutral-200/80">
-                  <div className="text-neutral-500">Zona Waktu Hotel</div>
-                  <div className="font-bold text-emerald-800 text-sm mt-0.5">Asia/Jakarta (WIB)</div>
-                  <div className="text-[10px] text-neutral-400 mt-0.5">Hotel Date Semantics [Check-in, Check-out)</div>
-                </div>
-
-                <div className="p-3 bg-neutral-50 rounded-xl border border-neutral-200/80">
-                  <div className="text-neutral-500">Authoritative Relational Model</div>
-                  <div className="font-bold text-neutral-900 text-sm mt-0.5">PostgreSQL Single Source of Truth</div>
-                </div>
-              </div>
-            </div>
+            <PropertyManagementTab
+              currentPropertyId={propertyId}
+              onSelectProperty={onSelectProperty}
+              onPropertiesUpdated={() => {
+                if (onRefreshProperties) onRefreshProperties();
+              }}
+              apiBaseUrl={apiBaseUrl}
+            />
           )}
 
           {/* Active Category: HR & Karyawan */}
@@ -763,8 +748,13 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             </div>
           )}
 
+          {/* Active Category: Front Office */}
+          {activeCategory === 'front_office' && (
+            <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
+          )}
+
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

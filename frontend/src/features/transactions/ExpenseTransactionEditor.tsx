@@ -1,0 +1,457 @@
+import React, { useState, useEffect } from 'react';
+import type { CategoryOption, DepartmentOption, Supplier } from './transactionDomainTypes';
+import {
+  fetchCategoriesApi,
+  createExpenseTransactionApi,
+  uploadTransactionAttachmentApi
+} from './transactionClient';
+import { SupplierSelectorModal } from './SupplierSelectorModal';
+import { ExpenseCategoryManagerModal } from './ExpenseCategoryManagerModal';
+
+interface ExpenseTransactionEditorProps {
+  propertyId: number;
+  actorName?: string;
+  onBack: () => void;
+  onSuccess: (createdId: string | number) => void;
+}
+
+export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> = ({
+  propertyId,
+  actorName = 'Staff',
+  onBack,
+  onSuccess
+}) => {
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
+  const [departments, setDepartments] = useState<DepartmentOption[]>([]);
+
+  // Form State
+  const [txDate, setTxDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [categoryCode, setCategoryCode] = useState<string>('EXPENSE_UTILITIES');
+  const [departmentCode, setDepartmentCode] = useState<string>('MAINTENANCE');
+  const [partyName, setPartyName] = useState<string>('');
+  const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
+  const [showSupplierModal, setShowSupplierModal] = useState<boolean>(false);
+  const [showCategoryModal, setShowCategoryModal] = useState<boolean>(false);
+  const [description, setDescription] = useState<string>('');
+  const [amount, setAmount] = useState<number | string>('');
+  const [paymentMethod, setPaymentMethod] = useState<string>('CASH');
+  const [sourceRef, setSourceRef] = useState<string>('');
+  const [notes, setNotes] = useState<string>('');
+
+  // Upload Evidence
+  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
+
+  // Status
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadCategories();
+  }, [propertyId]);
+
+  const loadCategories = async () => {
+    try {
+      const data = await fetchCategoriesApi(propertyId);
+      const expenseCats = data.categories.filter((c) => c.type === 'EXPENSE' && c.is_active !== false);
+      setCategories(expenseCats);
+      setDepartments(data.departments);
+      if (expenseCats.length > 0) {
+        setCategoryCode(expenseCats[0].code);
+        setDepartmentCode(expenseCats[0].default_department || 'GENERAL');
+      }
+    } catch (err: any) {
+      console.error('Failed to load categories', err);
+    }
+  };
+
+  const handleCategoryChange = (code: string) => {
+    setCategoryCode(code);
+    const cat = categories.find((c) => c.code === code);
+    if (cat && cat.default_department) {
+      setDepartmentCode(cat.default_department);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const effectiveParty = selectedSupplier ? selectedSupplier.name : partyName.trim();
+    if (!effectiveParty) {
+      setError('Penerima / Vendor pengeluaran wajib diisi');
+      return;
+    }
+    if (!description.trim()) {
+      setError('Keterangan pengeluaran wajib diisi');
+      return;
+    }
+    const numAmount = Math.round(Number(amount) || 0);
+    if (numAmount <= 0) {
+      setError('Nominal pengeluaran harus lebih besar dari Rp 0');
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const cat = categories.find((c) => c.code === categoryCode);
+
+      const created = await createExpenseTransactionApi({
+        property_id: propertyId,
+        transaction_date: txDate,
+        category_code: categoryCode,
+        category_name: cat?.name || categoryCode,
+        department_code: departmentCode,
+        party_name: effectiveParty,
+        supplier_id: selectedSupplier?.id || null,
+        description: description.trim(),
+        amount: numAmount,
+        payment_method: paymentMethod,
+        source_reference: sourceRef.trim() || null,
+        notes: notes.trim() || null,
+        actor_name: actorName
+      });
+
+      // Upload Payment Proof Attachment
+      if (paymentProofFile) {
+        try {
+          await uploadTransactionAttachmentApi(
+            created.id,
+            propertyId,
+            paymentProofFile,
+            'PAYMENT_PROOF',
+            actorName
+          );
+        } catch (_e) {
+          console.error('Failed to upload expense payment proof', _e);
+        }
+      }
+
+      onSuccess(created.id);
+    } catch (err: any) {
+      setError(err.message || 'Gagal menyimpan transaksi pengeluaran');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-200">
+      {/* Top Header */}
+      <div className="flex items-center justify-between border-b border-slate-200/80 pb-4 bg-white px-6 py-4 rounded-2xl shadow-sm">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="p-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-600 transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+          </button>
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">Transaksi Pengeluaran Operasional</h2>
+            <p className="text-xs text-slate-500">
+              Catat biaya utilitas, gaji/upah harian, operasional front desk, marketing, perbaikan gedung, atau kas kecil
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-sm flex items-start gap-2.5">
+          <svg className="w-5 h-5 flex-shrink-0 text-rose-600 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+          </svg>
+          <div>
+            <div className="font-bold">Gagal Menyimpan Transaksi</div>
+            <div>{error}</div>
+          </div>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Section 1: Penerima & Identitas */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+          <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 border-b border-slate-100 pb-3">
+            <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+            1. Pihak Penerima / Vendor Pengeluaran
+          </h3>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Penerima Dana / Nama Pihak <span className="text-rose-500">*</span>
+              </label>
+              {selectedSupplier ? (
+                <div className="p-2.5 bg-emerald-50/60 border border-emerald-300 rounded-xl flex items-center justify-between">
+                  <div className="text-xs">
+                    <span className="font-bold text-emerald-900">{selectedSupplier.name}</span>
+                    <span className="text-emerald-700 text-[11px] block">{selectedSupplier.phone || 'Supplier Terdaftar'}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSupplier(null)}
+                    className="text-xs text-rose-600 hover:underline font-bold"
+                  >
+                    Batal Pilih
+                  </button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="Contoh: PLN Distribusi / Teknisi AC Bpk. Joko"
+                    value={partyName}
+                    onChange={(e) => setPartyName(e.target.value)}
+                    className="flex-1 px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSupplierModal(true)}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl whitespace-nowrap transition-colors"
+                  >
+                    Pilih Vendor...
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                No. Bukti / Kuitansi / Ref (Opsional)
+              </label>
+              <input
+                type="text"
+                placeholder="KW-2026-001 / No. Slip Tagihan"
+                value={sourceRef}
+                onChange={(e) => setSourceRef(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Section 2: Kategori & Keterangan */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+              <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+              </svg>
+              2. Klasifikasi & Rincian Pengeluaran
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowCategoryModal(true)}
+              className="text-xs text-emerald-700 font-bold hover:underline flex items-center gap-1"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              Kelola Kategori
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Tanggal Transaksi <span className="text-rose-500">*</span>
+              </label>
+              <input
+                type="date"
+                required
+                value={txDate}
+                onChange={(e) => setTxDate(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Kategori Pengeluaran <span className="text-rose-500">*</span>
+              </label>
+              <select
+                required
+                value={categoryCode}
+                onChange={(e) => handleCategoryChange(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
+              >
+                {categories.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Departemen Alokasi</label>
+              <select
+                value={departmentCode}
+                onChange={(e) => setDepartmentCode(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
+              >
+                {departments.map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Keterangan / Deskripsi Pengeluaran <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              required
+              placeholder="Contoh: Pembayaran Token Listrik Gedung Utama Periode Agustus 2026"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Section 3: Nominal, Pembayaran & Bukti */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Nominal & Method */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 border-b border-slate-100 pb-3">
+              <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+              </svg>
+              3. Nominal & Metode Pembayaran
+            </h3>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Nominal Pengeluaran (Rp) <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">Rp</span>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    step="1"
+                    placeholder="0"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 text-base font-extrabold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {Number(amount) > 0
+                    ? `Terbilang: Rp ${Number(amount).toLocaleString('id-ID')}`
+                    : 'Masukkan jumlah biaya riil yang dikeluarkan'}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Metode Pembayaran <span className="text-rose-500">*</span>
+                </label>
+                <select
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
+                >
+                  <option value="CASH">Kas Kecil (Cash / Petty Cash)</option>
+                  <option value="TRANSFER">Transfer Bank Operasional</option>
+                  <option value="QRIS">QRIS</option>
+                  <option value="EDC">Debit / Kartu Kredit Perusahaan</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Upload Bukti */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 border-b border-slate-100 pb-3">
+              <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              4. Lampiran Bukti Pembayaran
+            </h3>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Bukti Nota / Struk / Slip Transfer
+                </label>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,application/pdf"
+                  onChange={(e) => setPaymentProofFile(e.target.files?.[0] || null)}
+                  className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Catatan Tambahan</label>
+                <textarea
+                  rows={2}
+                  placeholder="Catatan tambahan untuk persetujuan supervisor / manajer keuangan..."
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center justify-end gap-3 pt-4">
+          <button
+            type="button"
+            onClick={onBack}
+            className="px-5 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+          >
+            Batal
+          </button>
+          <button
+            type="submit"
+            disabled={submitting}
+            className="px-6 py-2.5 bg-emerald-800 hover:bg-emerald-900 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+            </svg>
+            {submitting ? 'Menyimpan Pengeluaran...' : 'Simpan Transaksi Pengeluaran'}
+          </button>
+        </div>
+      </form>
+
+      {/* Supplier Selector Modal */}
+      <SupplierSelectorModal
+        isOpen={showSupplierModal}
+        propertyId={propertyId}
+        actorName={actorName}
+        selectedSupplierId={selectedSupplier?.id}
+        onSelect={(sup) => {
+          setSelectedSupplier(sup);
+          setPartyName(sup.name);
+        }}
+        onClose={() => setShowSupplierModal(false)}
+      />
+
+      {/* Custom Category Modal */}
+      <ExpenseCategoryManagerModal
+        isOpen={showCategoryModal}
+        propertyId={propertyId}
+        transactionType="EXPENSE"
+        actorName={actorName}
+        onClose={() => setShowCategoryModal(false)}
+        onCategoriesUpdated={loadCategories}
+      />
+    </div>
+  );
+};

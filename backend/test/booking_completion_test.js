@@ -77,9 +77,9 @@ async function request(method, path, body, suffix = '') {
   const correlationId = `${runId}${suffix ? `-${suffix}` : ''}`;
   let effectiveBody = body;
   if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object' && propertyId) {
-    effectiveBody = { ...effectiveBody, property_id: propertyId };
+    effectiveBody = { skip_inspection: true, ...effectiveBody, property_id: propertyId };
   } else if (method === 'POST' && (effectiveBody === null || effectiveBody === undefined) && propertyId) {
-    effectiveBody = { property_id: propertyId };
+    effectiveBody = { property_id: propertyId, skip_inspection: true };
   }
   const resp = await fetchFn(`${baseUrl}${path}`, {
     method,
@@ -362,6 +362,11 @@ async function cleanupBooking(bookingId, roomStatusBaseline) {
     }
 
     await client.query('DELETE FROM audit_logs WHERE entity = $1 AND record_id = $2::text', ['BOOKING', String(bookingId)]);
+    await client.query(`
+      DELETE FROM housekeeping_tasks 
+      WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id = $1)
+         OR (source_type = 'CHECKOUT_EVENT' AND source_entity_id IN (SELECT id::text FROM reservations WHERE booking_id = $1))
+    `, [bookingId]);
     await client.query('DELETE FROM folio_entries WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id = $1)', [bookingId]);
     await client.query('DELETE FROM payment_transactions WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id = $1)', [bookingId]);
     await client.query('DELETE FROM reservations WHERE booking_id = $1', [bookingId]);

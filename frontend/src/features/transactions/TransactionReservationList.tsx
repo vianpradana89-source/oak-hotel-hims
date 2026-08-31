@@ -398,7 +398,7 @@ export const TransactionReservationList: React.FC<TransactionReservationListProp
                       {/* Kamar */}
                       <td className="px-3 py-2.5">
                         <div className="font-semibold text-slate-800">
-                          {res.room_number ? `Kamar ${res.room_number}` : res.room_id ? `Room #${res.room_id}` : 'TBA'}
+                          {res.room_number ? `Kamar ${res.room_number}` : 'Belum Ditentukan'}
                         </div>
                         <div className="text-[11px] text-slate-500">{res.room_type || 'Standard'}</div>
                       </td>

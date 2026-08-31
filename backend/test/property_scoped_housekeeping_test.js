@@ -96,12 +96,20 @@ async function cleanup() {
       await safe(() => client.query('DELETE FROM rooms WHERE id = ANY($1::int[])', [tracked.rooms]));
     }
     if (tracked.properties.length > 0) {
+      await safe(() => client.query('DELETE FROM meal_plans WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM ota_sources WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_day_use_durations WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_quick_booking_rules WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_pricing_settings WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM property_brandings WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM stay_charge_rules WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM property_features WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM housekeeping_finding_types WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM checklist_template_items WHERE template_id IN (SELECT id FROM checklist_templates WHERE property_id = ANY($1::int[]))', [tracked.properties]));
       await safe(() => client.query('DELETE FROM checklist_templates WHERE property_id = ANY($1::int[])', [tracked.properties]));
+      await safe(() => client.query('DELETE FROM checklist_template_groups WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM audit_logs WHERE property_id = ANY($1::int[])', [tracked.properties]));
       await safe(() => client.query('DELETE FROM room_types WHERE property_id = ANY($1::int[])', [tracked.properties]));
     }

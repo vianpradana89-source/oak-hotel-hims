@@ -84,6 +84,19 @@ export async function planReservationCancellationInventory(
   if (!Number.isInteger(bookingId) || bookingId <= 0 || Number(reservation?.booking_id) !== bookingId) {
     return blocked('reservation is not canonically linked to the locked booking', occupiedDates);
   }
+
+  if (reservation?.stay_type === 'DAY_USE') {
+    return {
+      eligible: true,
+      mode: 'NORMAL',
+      reason: null,
+      occupiedDates: [],
+      normalReleases: [],
+      legacyNoLedgerDates: [],
+      evidence: null
+    };
+  }
+
   if (occupiedDates.length === 0) {
     return blocked('reservation stay range is invalid', occupiedDates);
   }

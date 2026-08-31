@@ -3,18 +3,23 @@ import { roomMasterApi } from './roomMasterApi';
 import RoomCategoriesView from './RoomCategoriesView';
 import RoomTypesView from './RoomTypesView';
 import PhysicalRoomsView from './PhysicalRoomsView';
+import RatePlansView from './RatePlansView';
+import RateCalendarView from './RateCalendarView';
+import LayananTambahanView from './LayananTambahanView';
 import type { ActiveRoomReservation, PhysicalRoom, RoomCategory, RoomType } from './roomMasterTypes';
 import './roomMaster.css';
 
-type Tab = 'categories' | 'types' | 'rooms';
+type Tab = 'categories' | 'types' | 'rooms' | 'rate-plans' | 'rate-calendar' | 'stay-charges';
 
 interface Props {
   propertyId: number | null;
   onViewReservation: (reservation: ActiveRoomReservation) => void | Promise<void>;
+  initialTab?: Tab;
 }
 
-export default function RoomMasterPage({ propertyId, onViewReservation }: Props) {
-  const [tab, setTab] = useState<Tab>('categories');
+export default function RoomMasterPage({ propertyId, onViewReservation, initialTab = 'categories' }: Props) {
+  const [tab, setTab] = useState<Tab>(initialTab);
+  const [selectedCalendarPlanId, setSelectedCalendarPlanId] = useState<number | null>(null);
   const [categories, setCategories] = useState<RoomCategory[]>([]);
   const [roomTypes, setRoomTypes] = useState<RoomType[]>([]);
   const [rooms, setRooms] = useState<PhysicalRoom[]>([]);
@@ -79,13 +84,18 @@ export default function RoomMasterPage({ propertyId, onViewReservation }: Props)
     setBanner({ kind: 'success', code: 'OK', message: 'Urutan kategori kamar disimpan.' });
   }
 
+  function handleOpenCalendarForPlan(planId: number) {
+    setSelectedCalendarPlanId(planId);
+    setTab('rate-calendar');
+  }
+
   return (
     <div className="rm-page">
       <div className="rm-page-head">
         <div>
-          <div className="rm-kicker">Produk &amp; Inventori</div>
-          <h3 className="rm-title">KAMAR</h3>
-          <p className="rm-subtitle">Kelola kategori, tipe / varian, dan kamar fisik hotel</p>
+          <div className="rm-kicker">Master Kamar</div>
+          <h3 className="rm-title">KAMAR &amp; PRICING</h3>
+          <p className="rm-subtitle">Kelola kategori, tipe / varian, kamar fisik, rate plan, dan kalender tarif</p>
         </div>
         <div className="rm-subnav" role="tablist" aria-label="Bagian Kamar">
           <button
@@ -114,6 +124,33 @@ export default function RoomMasterPage({ propertyId, onViewReservation }: Props)
             onClick={() => setTab('rooms')}
           >
             Kamar Fisik
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'rate-plans'}
+            className={tab === 'rate-plans' ? 'active' : ''}
+            onClick={() => setTab('rate-plans')}
+          >
+            Rate Plan
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'rate-calendar'}
+            className={tab === 'rate-calendar' ? 'active' : ''}
+            onClick={() => setTab('rate-calendar')}
+          >
+            Rate Calendar
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'stay-charges'}
+            className={tab === 'stay-charges' ? 'active' : ''}
+            onClick={() => setTab('stay-charges')}
+          >
+            Layanan Tambahan
           </button>
         </div>
       </div>
@@ -173,7 +210,7 @@ export default function RoomMasterPage({ propertyId, onViewReservation }: Props)
           bannerError={banner?.kind === 'error' ? { code: banner.code, message: banner.message } : null}
           onClearBanner={() => setBanner(null)}
         />
-      ) : (
+      ) : tab === 'rooms' ? (
         <PhysicalRoomsView
           propertyId={propertyId}
           rooms={rooms}
@@ -186,6 +223,26 @@ export default function RoomMasterPage({ propertyId, onViewReservation }: Props)
           bannerError={banner?.kind === 'error' ? { code: banner.code, message: banner.message } : null}
           onClearBanner={() => setBanner(null)}
           onViewReservation={onViewReservation}
+        />
+      ) : tab === 'rate-plans' ? (
+        <RatePlansView
+          propertyId={propertyId}
+          roomTypes={roomTypes}
+          onChanged={handleChanged}
+          onOpenCalendar={handleOpenCalendarForPlan}
+        />
+      ) : tab === 'rate-calendar' ? (
+        <RateCalendarView
+          propertyId={propertyId}
+          roomTypes={roomTypes}
+          initialRatePlanId={selectedCalendarPlanId}
+          onChanged={handleChanged}
+          onOpenRatePlans={() => setTab('rate-plans')}
+        />
+      ) : (
+        <LayananTambahanView
+          propertyId={propertyId || 1}
+          onChanged={handleChanged}
         />
       )}
     </div>

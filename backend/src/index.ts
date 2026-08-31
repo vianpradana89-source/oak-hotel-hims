@@ -14,6 +14,7 @@ import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
 import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
 import { createGuestsRouter, createReservationGuestsRouter } from './domains/guests/guestsRouter';
+import { createPropertiesRouter } from './domains/properties/propertiesRouter';
 import { createPropertyBrandingRouter } from './domains/propertyBranding/propertyBrandingRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
 import {
@@ -67,6 +68,17 @@ import { createHrdRouter } from './domains/hrd/hrdRouter';
 import { createFeatureRouter } from './domains/features/featureRouter';
 import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
+import { createPricingRouter } from './domains/pricing/pricingRouter';
+import { calculatePriceQuote, createReservationRateSnapshots } from './domains/pricing/pricingService';
+import { createStayChargesRouter } from './domains/stayCharges/stayChargesRouter';
+import { createTransactionsRouter } from './domains/transactions/transactionsRouter';
+import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
+import { createOtaRouter } from './domains/ota/otaRouter';
+import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
+import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
+import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
+import { previewReservationEdit, executeReservationEdit } from './domains/reservations/reservationEditService';
+import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 
 const app: any = express();
 app.use(cors());
@@ -144,17 +156,19 @@ async function assertPropertyExists(pool: any, propertyId: number): Promise<void
 
 async function assertReservationBelongsToProperty(pool: any, reservationId: number, propertyId: number): Promise<void> {
   const result = await pool.query(
-    `SELECT res.id, r.property_id AS room_property_id
+    `SELECT res.id, b.property_id AS booking_property_id, r.property_id AS room_property_id
      FROM reservations res
-     JOIN rooms r ON r.id = res.room_id
+     LEFT JOIN bookings b ON b.id = res.booking_id
+     LEFT JOIN rooms r ON r.id = res.room_id
      WHERE res.id = $1`,
     [reservationId]
   );
   if ((result.rowCount ?? 0) === 0) {
     throw { statusCode: 404, code: 'NOT_FOUND', message: `reservation ${reservationId} not found` };
   }
-  const roomPropertyId = result.rows[0].room_property_id;
-  if (roomPropertyId != null && Number(roomPropertyId) !== propertyId) {
+  const row = result.rows[0];
+  const effectivePropertyId = row.booking_property_id ?? row.room_property_id;
+  if (effectivePropertyId != null && Number(effectivePropertyId) !== propertyId) {
     throw { statusCode: 403, code: 'PROPERTY_MISMATCH', message: `reservation ${reservationId} does not belong to property ${propertyId}` };
   }
 }
@@ -267,6 +281,23 @@ app.use(async (req, res, next) => {
     // Attach idempotency key to request for later saving
     (req as any)._idempotency_key = idKey;
     (req as any)._request_hash = reqHash;
+
+    const originalSend = res.send.bind(res);
+    res.send = (body: any) => {
+      if (idKey) {
+        const statusCode = res.statusCode || 200;
+        const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+        let headersStr = '{}';
+        try {
+          headersStr = JSON.stringify(res.getHeaders ? res.getHeaders() : {});
+        } catch (_e) {}
+        pool.query(
+          'UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4',
+          [bodyStr, headersStr, statusCode, idKey]
+        ).catch((err: any) => console.error('Error persisting idempotency key', err));
+      }
+      return originalSend(body);
+    };
 
     return next();
   } catch (err) {
@@ -465,7 +496,8 @@ function isRoomStatusSellable(statusValue: any): boolean {
 }
 
 function isRoomOverlapViolation(err: any): boolean {
-  return String(err?.code || '') === ROOM_OVERLAP_SQLSTATE;
+  const code = String(err?.code || '');
+  return code === ROOM_OVERLAP_SQLSTATE || code === 'ROOM_OVERLAP';
 }
 
 function sendRoomOverlapConflict(res: express.Response) {
@@ -483,6 +515,7 @@ const RESERVATION_PATCH_CRITICAL_KEYS = new Set([
 ]);
 
 const RESERVATION_PATCH_ALLOWLIST = new Set([
+  'property_id',
   'guest_name',
   'guest_phone',
   'guest_segment',
@@ -494,6 +527,8 @@ const RESERVATION_PATCH_ALLOWLIST = new Set([
   'remaining_balance',
   'payment_status',
   'ktp_path',
+  'identity_number',
+  'has_valid_identity',
   'bukti_bayar_path',
   'booking_type'
 ]);
@@ -728,16 +763,53 @@ async function findActiveRoomOverlap(
   targetRoomId: number,
   requestedCheckIn: string | Date,
   requestedCheckOut: string | Date,
-  excludeReservationId: number | null = null
+  excludeReservationId: number | null = null,
+  options?: {
+    stayType?: string;
+    startAt?: string | Date | null;
+    endAt?: string | Date | null;
+    bufferMinutes?: number;
+  }
 ) {
+  const stayType = options?.stayType || 'OVERNIGHT';
+  if (stayType === 'DAY_USE' && options?.startAt && options?.endAt) {
+    const startTs = new Date(options.startAt).toISOString();
+    const endTs = new Date(options.endAt).toISOString();
+    const bufferMins = options.bufferMinutes || 60;
+    return client.query(
+      `SELECT existing.id, existing.booking_number, existing.check_in, existing.check_out, existing.status
+       FROM reservations existing
+       WHERE existing.room_id = $1
+         AND existing.status IN ('BOOKED','CHECKED_IN')
+         AND ($4::int IS NULL OR existing.id <> $4)
+         AND (
+           -- 1. Collision with another DAY_USE on same room with buffer
+           (existing.stay_type = 'DAY_USE' AND existing.start_at < ($3::timestamptz + ($5 || ' minutes')::interval) AND (existing.end_at + ($5 || ' minutes')::interval) > $2::timestamptz)
+           OR
+           -- 2. Collision with OVERNIGHT stay on same room
+           (existing.stay_type = 'OVERNIGHT' AND (
+             (existing.check_in < $2::date AND existing.check_out > $2::date)
+             OR (existing.check_in::date = $2::date AND $3::timestamptz > (existing.check_in::date + TIME '14:00:00' - ($5 || ' minutes')::interval))
+             OR (existing.check_out::date = $2::date AND $2::timestamptz < (existing.check_out::date + TIME '12:00:00' + ($5 || ' minutes')::interval))
+           ))
+         )
+       LIMIT 1
+       FOR UPDATE OF existing`,
+      [targetRoomId, startTs, endTs, excludeReservationId, bufferMins]
+    );
+  }
+
   return client.query(
-    `SELECT id
+    `SELECT existing.id, existing.booking_number, existing.check_in, existing.check_out, existing.status
      FROM reservations existing
      WHERE existing.room_id = $1
        AND existing.status IN ('BOOKED','CHECKED_IN')
-       AND existing.check_in < $2::date
-       AND existing.check_out > $3::date
        AND ($4::int IS NULL OR existing.id <> $4)
+       AND (
+         (existing.stay_type = 'OVERNIGHT' AND existing.check_in < $2::date AND existing.check_out > $3::date)
+         OR
+         (existing.stay_type = 'DAY_USE' AND existing.start_at::date >= $3::date AND existing.start_at::date < $2::date)
+       )
      LIMIT 1
      FOR UPDATE OF existing`,
     [targetRoomId, requestedCheckOut, requestedCheckIn, excludeReservationId]
@@ -782,8 +854,27 @@ async function getBlockedRoomsCountForTypeAndDate(
   return Number(res.rows[0]?.blocked_count || 0);
 }
 
-function normalizeBookingSourceValue(value: any): 'OTA' | 'WALKIN' {
-  return String(value || 'WALKIN').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
+const VALID_EXTENDED_BOOKING_SOURCES = [
+  'WALKIN',
+  'WALK_IN',
+  'DIRECT',
+  'WEBSITE',
+  'BOOKING_COM',
+  'AGODA',
+  'TRAVELOKA',
+  'TIKET_COM',
+  'OTA',
+  'OTHER'
+];
+
+function normalizeBookingSourceValue(value: any): string {
+  if (!value) return 'WALKIN';
+  const upper = String(value).trim().toUpperCase();
+  if (upper === 'WALK_IN') return 'WALKIN';
+  if (VALID_EXTENDED_BOOKING_SOURCES.includes(upper)) {
+    return upper;
+  }
+  return upper.includes('OTA') ? 'OTA' : 'WALKIN';
 }
 
 function normalizeGuestSegmentValue(value: any): string {
@@ -847,7 +938,12 @@ async function createBookingParentRecord(
     propertyCode: string;
     guestName: string;
     guestPhone: string | null;
+    bookerName?: string | null;
+    bookerPhone?: string | null;
+    bookingChannel?: string | null;
     bookingSource: string;
+    otaSourceId?: number | null;
+    referral?: string | null;
     channel: string | null;
     currencyCode: string;
     correlationId: string | null;
@@ -868,7 +964,12 @@ async function createBookingParentRecord(
           property_id,
           guest_name_snapshot,
           guest_phone_snapshot,
+          booker_name,
+          booker_phone,
+          booking_channel,
           booking_source,
+          ota_source_id,
+          referral,
           channel,
           booking_status,
           currency_code,
@@ -877,14 +978,19 @@ async function createBookingParentRecord(
           correlation_id,
           created_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
         RETURNING *;`,
         [
           bid,
           bookingPayload.propertyId,
           guestName,
           bookingPayload.guestPhone || null,
+          bookingPayload.bookerName || guestName,
+          bookingPayload.bookerPhone || bookingPayload.guestPhone || null,
+          bookingPayload.bookingChannel || (['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(bookingSource.toUpperCase()) ? 'OTA' : 'WALK_IN'),
           bookingSource,
+          bookingPayload.otaSourceId || null,
+          bookingPayload.referral || null,
           bookingPayload.channel || null,
           'ACTIVE',
           bookingPayload.currencyCode || 'IDR',
@@ -934,14 +1040,22 @@ async function createChildReservationRecord(
           room_id, guest_name, guest_phone, guest_segment, check_in, check_out,
           total_price, payment_status, discount_amount, discount_percent, amount_paid, remaining_balance,
           booking_number, booking_type, booking_id, stay_sequence, status, stay_status, correlation_id, ktp_path, bukti_bayar_path,
+          booker_name, booker_phone, ota_source_id, referral,
           booked_room_type_id_snapshot, booked_room_type_code_snapshot, booked_room_type_name_snapshot,
           booked_room_category_id_snapshot, booked_room_category_code_snapshot, booked_room_category_name_snapshot,
-          classification_snapshot_source, classification_snapshotted_at
+          classification_snapshot_source, classification_snapshotted_at,
+          stay_type, start_at, end_at,
+          rate_plan_id, subtotal_amount, tax_amount, service_amount,
+          is_manual_override, manual_override_reason
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
           'BOOKED', 'RESERVED', $17, $18, $19,
-          $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP
+          $20, $21, $22, $23,
+          $24, $25, $26, $27, $28, $29, $30, CURRENT_TIMESTAMP,
+          $31, $32, $33,
+          $34, $35, $36, $37,
+          $38, $39
         )
         RETURNING *;`,
         [
@@ -964,13 +1078,26 @@ async function createChildReservationRecord(
           params.correlationId || null,
           child.ktpPath || null,
           child.buktiBayarPath || null,
+          child.bookerName || null,
+          child.bookerPhone || null,
+          child.otaSourceId || null,
+          child.referral || null,
           child.roomTypeIdSnapshot,
           child.roomTypeCodeSnapshot,
           child.roomTypeNameSnapshot,
           child.roomCategoryIdSnapshot,
           child.roomCategoryCodeSnapshot,
           child.roomCategoryNameSnapshot,
-          child.classificationSnapshotSource
+          child.classificationSnapshotSource,
+          child.stayType || 'OVERNIGHT',
+          child.startAt || null,
+          child.endAt || null,
+          child.ratePlanId || null,
+          child.subtotalAmount || billingSummary.totalAfterDiscount,
+          child.taxAmount || 0,
+          child.serviceAmount || 0,
+          Boolean(child.isManualOverride),
+          child.manualOverrideReason || null
         ]
       );
 
@@ -994,9 +1121,29 @@ async function createCanonicalBooking(
     guest_name: any;
     guest_phone?: any;
     guest_segment?: any;
+    booker_name?: any;
+    booker_phone?: any;
+    booker_same_as_guest?: any;
+    booking_channel?: any;
     booking_source?: any;
+    ota_source_id?: any;
+    referral?: any;
+    guest_id?: any;
+    identity_number?: any;
+    ktp_path?: any;
+    has_valid_identity?: any;
+    payment_method?: any;
+    amount_paid?: any;
+    bukti_bayar_path?: any;
+    discount_reason?: any;
+    stay_charges?: any[];
+    require_strict_gates?: boolean;
+    strict_gates?: boolean;
+    same_as_booker?: any;
+    initial_payment?: any;
     channel?: any;
     currency_code?: any;
+    [key: string]: any;
   },
   reservationPayloads: any[],
   options: { requirePropertyId?: boolean } = {}
@@ -1014,21 +1161,106 @@ async function createCanonicalBooking(
     throw createHttpError(400, 'property_id is required');
   }
 
-  const guestName = String(bookingPayload.guest_name || '').trim();
-  if (!guestName) {
-    throw createHttpError(400, 'guest_name is required');
-  }
-
+  const guestName = String(bookingPayload.guest_name || rawReservationPayloads[0]?.guest_name || '').trim();
   const guestPhone = Object.prototype.hasOwnProperty.call(bookingPayload, 'guest_phone')
     ? String(bookingPayload.guest_phone || '').trim() || null
-    : null;
-  const guestSegment = normalizeGuestSegmentValue(bookingPayload.guest_segment);
+    : (rawReservationPayloads[0]?.guest_phone ? String(rawReservationPayloads[0]?.guest_phone).trim() : null);
+  const guestSegment = normalizeGuestSegmentValue(bookingPayload.guest_segment || rawReservationPayloads[0]?.guest_segment);
   const bookingSource = normalizeBookingSourceValue(bookingPayload.booking_source);
+  const bookingChannel = bookingPayload.booking_channel || (['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(bookingSource.toUpperCase()) ? 'OTA' : 'WALK_IN');
+  const bookerName = bookingPayload.booker_name ? String(bookingPayload.booker_name).trim() : guestName;
+  const bookerPhone = bookingPayload.booker_phone ? String(bookingPayload.booker_phone).trim() : guestPhone;
+  const otaSourceId = bookingPayload.ota_source_id ? Number(bookingPayload.ota_source_id) : null;
+  const referral = bookingPayload.referral ? String(bookingPayload.referral).trim() : null;
   const channel = Object.prototype.hasOwnProperty.call(bookingPayload, 'channel')
     ? String(bookingPayload.channel || '').trim() || null
     : null;
   const currencyCode = normalizeCurrencyCodeValue(bookingPayload.currency_code);
   const correlationId = String((req.headers && req.headers['x-correlation-id']) || req.headers?.['X-Correlation-Id'] || `CORR-${Date.now()}`);
+
+  const channelType: 'WALK_IN' | 'OTA' = (bookingChannel === 'OTA' || ['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(String(bookingSource).toUpperCase()) || otaSourceId) ? 'OTA' : 'WALK_IN';
+
+  let rulesMap: Record<string, string> = {};
+  try {
+    const rulesData = await getQuickBookingRules(pool, bookingPropertyId);
+    rulesMap = rulesData.rules[channelType] || {};
+  } catch (_err) {
+    rulesMap = channelType === 'OTA'
+      ? { booker_name: 'REQUIRED', guest_name: 'REQUIRED', rate_plan: 'REQUIRED' }
+      : { booker_name: 'REQUIRED', booker_phone: 'REQUIRED', guest_name: 'REQUIRED', guest_phone: 'REQUIRED', identity: 'REQUIRED', payment_method: 'REQUIRED', payment_evidence: 'REQUIRED', rate_plan: 'REQUIRED' };
+  }
+
+  // Dynamic validation against configured rules for this property and channel
+  const missingFields: string[] = [];
+
+  if (rulesMap['guest_name'] === 'REQUIRED' && !guestName && !rawReservationPayloads.some((r: any) => r.guest_name)) {
+    missingFields.push('guest_name');
+  }
+  if (rulesMap['guest_phone'] === 'REQUIRED' && !guestPhone && !rawReservationPayloads.some((r: any) => r.guest_phone)) {
+    missingFields.push('guest_phone');
+  }
+  if (rulesMap['booker_name'] === 'REQUIRED' && !bookerName) {
+    missingFields.push('booker_name');
+  }
+  if (rulesMap['booker_phone'] === 'REQUIRED' && !bookerPhone) {
+    missingFields.push('booker_phone');
+  }
+  if (rulesMap['guest_segment'] === 'REQUIRED' && !guestSegment) {
+    missingFields.push('guest_segment');
+  }
+  if (rulesMap['referral'] === 'REQUIRED' && !referral) {
+    missingFields.push('referral');
+  }
+  if (rulesMap['identity'] === 'REQUIRED') {
+    const hasIdentity = Boolean(
+      bookingPayload.ktp_path ||
+      bookingPayload.identity_number ||
+      bookingPayload.has_valid_identity ||
+      rawReservationPayloads.some((r: any) => r.ktp_path || r.identity_number || r.has_valid_identity)
+    );
+    if (!hasIdentity && !bookingPayload.guest_id) {
+      missingFields.push('identity');
+    }
+  }
+  if (rulesMap['payment_method'] === 'REQUIRED') {
+    const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
+    if (!paymentMethod) {
+      missingFields.push('payment_method');
+    }
+  }
+  if (rulesMap['payment_amount'] === 'REQUIRED') {
+    const totalAmountPaid = rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0);
+    if (totalAmountPaid <= 0) {
+      missingFields.push('payment_amount');
+    }
+  }
+  if (rulesMap['payment_evidence'] === 'REQUIRED') {
+    const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
+    const totalAmountPaid = rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0);
+    const paymentEvidence = bookingPayload.bukti_bayar_path || bookingPayload.initial_payment?.payment_evidence_path || rawReservationPayloads[0]?.bukti_bayar_path;
+    if (totalAmountPaid > 0 && String(paymentMethod).toUpperCase() !== 'CASH' && !paymentEvidence) {
+      missingFields.push('payment_evidence');
+    }
+  }
+  if (rulesMap['rate_plan'] === 'REQUIRED') {
+    const missingRatePlan = rawReservationPayloads.some((r: any) => !r.rate_plan_id && !bookingPayload.rate_plan_id);
+    if (missingRatePlan) {
+      missingFields.push('rate_plan');
+    }
+  }
+
+  // If missing fields exist according to configured rules
+  if (missingFields.length > 0) {
+    const err: any = new Error(`Data pemesanan belum lengkap untuk channel ${channelType}: ${missingFields.join(', ')}`);
+    err.statusCode = 400;
+    err.code = 'BOOKING_REQUIRED_FIELDS_MISSING';
+    err.channel = channelType;
+    err.missing = missingFields;
+    err.missing_fields = missingFields;
+    throw err;
+  } else if (!guestName) {
+    throw createHttpError(400, 'guest_name is required');
+  }
 
   const client = await pool.connect();
   try {
@@ -1048,7 +1280,12 @@ async function createCanonicalBooking(
       propertyCode,
       guestName,
       guestPhone,
+      bookerName,
+      bookerPhone,
+      bookingChannel,
       bookingSource,
+      otaSourceId,
+      referral,
       channel,
       currencyCode,
       correlationId
@@ -1072,8 +1309,15 @@ async function createCanonicalBooking(
         throw createHttpError(400, `reservations[${index}].check_out is invalid`);
       }
 
-      if (checkOut <= checkIn) {
-        throw createHttpError(400, `reservations[${index}].check_out must be after check_in`);
+      const stayType = child.stay_type || child.stayType || 'OVERNIGHT';
+      if (stayType === 'DAY_USE') {
+        if (checkOut < checkIn) {
+          throw createHttpError(400, `reservations[${index}].check_out must be on or after check_in for day use`);
+        }
+      } else {
+        if (checkOut <= checkIn) {
+          throw createHttpError(400, `reservations[${index}].check_out must be after check_in`);
+        }
       }
 
       normalizedChildren.push({
@@ -1081,17 +1325,33 @@ async function createCanonicalBooking(
         roomId,
         checkIn,
         checkOut,
+        stayType,
+        startAt: child.start_at || child.startAt || null,
+        endAt: child.end_at || child.endAt || null,
+        guestId: child.guest_id || child.guestId || bookingPayload.guest_id || null,
         guestName: String(child.guest_name || guestName).trim() || guestName,
         guestPhone: Object.prototype.hasOwnProperty.call(child, 'guest_phone')
           ? String(child.guest_phone || '').trim() || guestPhone
           : guestPhone,
         guestSegment: normalizeGuestSegmentValue(child.guest_segment || guestSegment),
+        bookerName: child.booker_name || child.bookerName || bookerName,
+        bookerPhone: child.booker_phone || child.bookerPhone || bookerPhone,
+        otaSourceId: child.ota_source_id || child.otaSourceId || otaSourceId,
+        referral: child.referral || referral,
         bookingType: normalizeBookingSourceValue(child.booking_type || child.bookingType || bookingSource),
         totalPrice: Number(child.total_price ?? child.subtotal_amount ?? 0),
+        subtotalAmount: Number(child.subtotal_amount ?? child.subtotalAmount ?? child.total_price ?? 0),
+        taxAmount: Number(child.tax_amount ?? child.taxAmount ?? 0),
+        serviceAmount: Number(child.service_amount ?? child.serviceAmount ?? 0),
+        isManualOverride: Boolean(child.is_manual_override || child.isManualOverride),
+        manualOverrideReason: child.manual_override_reason ? String(child.manual_override_reason).trim() : null,
         discountAmount: Number(child.discount_amount ?? 0),
         discountPercent: Number(child.discount_percent ?? 0),
-        amountPaid: Number(child.amount_paid ?? 0),
+        discountReason: child.discount_reason || child.discountReason || bookingPayload.discount_reason || null,
+        amountPaid: Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
+        paymentMethod: child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
         paymentStatus: child.payment_status || null,
+        stayCharges: child.stay_charges || child.stayCharges || (index === 0 ? bookingPayload.stay_charges : []) || [],
         quantity: (() => {
           const q = toPositiveInteger(child.qty ?? child.quantity ?? 1, 1);
           if (q > 1) {
@@ -1101,8 +1361,10 @@ async function createCanonicalBooking(
           }
           return q;
         })(),
-        ktpPath: child.ktp_path || null,
-        buktiBayarPath: child.bukti_bayar_path || null,
+        ktpPath: child.ktp_path || bookingPayload.ktp_path || null,
+        identityNumber: child.identity_number || bookingPayload.identity_number || null,
+        hasValidIdentity: Boolean(child.has_valid_identity || child.hasValidIdentity || bookingPayload.has_valid_identity || child.ktp_path || bookingPayload.ktp_path || child.identity_number || bookingPayload.identity_number),
+        buktiBayarPath: child.bukti_bayar_path || (index === 0 ? (bookingPayload.bukti_bayar_path || bookingPayload.initial_payment?.payment_evidence_path) : null) || null,
         roomType: null,
         roomTypeId: null,
         roomPropertyId: null,
@@ -1112,7 +1374,8 @@ async function createCanonicalBooking(
         roomCategoryIdSnapshot: null,
         roomCategoryCodeSnapshot: null,
         roomCategoryNameSnapshot: null,
-        classificationSnapshotSource: 'CANONICAL_ROOM_MASTER'
+        classificationSnapshotSource: 'CANONICAL_ROOM_MASTER',
+        ratePlanId: (child.rate_plan_id || child.ratePlanId) ? Number(child.rate_plan_id || child.ratePlanId) : null
       });
     }
 
@@ -1166,90 +1429,92 @@ async function createCanonicalBooking(
       if (!child.roomType) {
         throw createHttpError(409, `room type missing for room ${child.roomId}`);
       }
-      child.roomTypeId = roomInfo.canonical_room_type_id === null || roomInfo.canonical_room_type_id === undefined
-        ? null
-        : Number(roomInfo.canonical_room_type_id);
-      if (child.roomTypeId === null || !roomInfo.room_type_code) {
-        throw createHttpError(409, `room ${child.roomId} is not attached to a canonical room type`);
+      const canonicalRoomTypeId = Number(roomInfo.canonical_room_type_id);
+      if (!Number.isFinite(canonicalRoomTypeId) || canonicalRoomTypeId <= 0) {
+        throw createHttpError(409, `room ${child.roomId} is missing canonical room_type_id link`);
       }
+      child.roomTypeId = canonicalRoomTypeId;
       child.roomPropertyId = roomPropertyId;
-      child.roomTypeIdSnapshot = child.roomTypeId;
-      child.roomTypeCodeSnapshot = roomInfo.room_type_code === null || roomInfo.room_type_code === undefined
-        ? null
-        : String(roomInfo.room_type_code);
-      child.roomTypeNameSnapshot = child.roomType;
-      child.roomCategoryIdSnapshot = roomInfo.room_category_id === null || roomInfo.room_category_id === undefined
-        ? null
-        : Number(roomInfo.room_category_id);
-      child.roomCategoryCodeSnapshot = roomInfo.room_category_code === null || roomInfo.room_category_code === undefined
-        ? null
-        : String(roomInfo.room_category_code);
-      child.roomCategoryNameSnapshot = roomInfo.room_category_name === null || roomInfo.room_category_name === undefined
-        ? null
-        : String(roomInfo.room_category_name);
+      child.roomTypeIdSnapshot = canonicalRoomTypeId;
+      child.roomTypeCodeSnapshot = String(roomInfo.room_type_code || '').trim() || null;
+      child.roomTypeNameSnapshot = String(roomInfo.room_type || '').trim() || null;
+      child.roomCategoryIdSnapshot = roomInfo.room_category_id ? Number(roomInfo.room_category_id) : null;
+      child.roomCategoryCodeSnapshot = roomInfo.room_category_code ? String(roomInfo.room_category_code).trim() : null;
+      child.roomCategoryNameSnapshot = roomInfo.room_category_name ? String(roomInfo.room_category_name).trim() : null;
 
-      const windows = roomWindows.get(child.roomId) || [];
-      for (const previous of windows) {
-        if (previous.start < child.checkOut && previous.end > child.checkIn) {
-          duplicatePairs.push([previous.index, child.index]);
+      const windowList = roomWindows.get(child.roomId) || [];
+      for (const existingWindow of windowList) {
+        if (existingWindow.start < child.checkOut && existingWindow.end > child.checkIn) {
+          duplicatePairs.push([existingWindow.index, child.index]);
         }
       }
-      windows.push({ start: child.checkIn, end: child.checkOut, index: child.index });
-      roomWindows.set(child.roomId, windows);
+      windowList.push({ start: child.checkIn, end: child.checkOut, index: child.index });
+      roomWindows.set(child.roomId, windowList);
 
-      const dates = enumerateHotelDates(child.checkIn, child.checkOut);
-      for (const date of dates) {
-        const key = canonicalAvailabilityKey(child.roomTypeId, date);
+      const overlapResult = await findActiveRoomOverlap(
+        client,
+        child.roomId,
+        child.checkIn,
+        child.checkOut,
+        null,
+        {
+          stayType: child.stayType,
+          startAt: child.startAt,
+          endAt: child.endAt,
+          bufferMinutes: 60
+        }
+      );
+      if (hasRows(overlapResult)) {
+        const conflict = overlapResult.rows[0];
+        const conflictDetails = overlapResult.rows.map((r: any) => ({
+          reservation_id: r.id,
+          booking_number: r.booking_number || r.id,
+          check_in: r.check_in ? hotelDateKey(r.check_in) : child.checkIn,
+          check_out: r.check_out ? hotelDateKey(r.check_out) : child.checkOut,
+          status: r.status
+        }));
+        const err = createHttpError(
+          409,
+          `Kamar ${roomInfo.room_number || child.roomId} sudah terisi untuk tanggal ${child.checkIn} s/d ${child.checkOut} (Konflik dengan reservasi ${conflict.booking_number || conflict.id})`,
+          'ROOM_OVERLAP'
+        );
+        (err as any).conflictDetails = conflictDetails;
+        throw err;
+      }
+
+      const ident: RoomTypeIdentity = {
+        roomTypeId: canonicalRoomTypeId,
+        roomTypeName: child.roomType
+      };
+
+      const dates = child.stayType === 'DAY_USE' ? [] : enumerateHotelDates(child.checkIn, child.checkOut);
+      for (const stayDate of dates) {
+        const key = availabilityMapKey(ident, stayDate);
         const current = roomKeyMap.get(key);
         if (current) {
-          current.delta += child.quantity;
+          current.delta += 1;
         } else {
-          roomKeyMap.set(key, { ident: toRoomTypeIdentity(child.roomTypeId, child.roomType), date, delta: child.quantity });
+          roomKeyMap.set(key, { ident, date: stayDate, delta: 1 });
         }
       }
     }
 
     if (duplicatePairs.length > 0) {
-      const [firstA, firstB] = duplicatePairs[0];
-      throw createHttpError(
-        409,
-        `duplicate room usage inside the same request overlaps between reservations[${firstA}] and reservations[${firstB}]`
-      );
+      throw createHttpError(409, `duplicate room assignment within same booking for room ${duplicatePairs[0][0] + 1} and ${duplicatePairs[0][1] + 1}`);
     }
 
     const lockKeys = Array.from(roomKeyMap.values()).sort((a, b) => {
-      const aId = requireCanonicalRoomTypeId(a.ident, `booking availability on ${a.date}`);
-      const bId = requireCanonicalRoomTypeId(b.ident, `booking availability on ${b.date}`);
-      if (aId !== bId) {
-        return aId - bId;
-      }
-      if (a.ident.roomTypeName !== b.ident.roomTypeName) {
-        return a.ident.roomTypeName.localeCompare(b.ident.roomTypeName);
+      const typeComparison = requireCanonicalRoomTypeId(a.ident, 'booking lock sort') - requireCanonicalRoomTypeId(b.ident, 'booking lock sort');
+      if (typeComparison !== 0) {
+        return typeComparison;
       }
       return a.date.localeCompare(b.date);
     });
 
-    // C2C2: LOCK RESERVATIONS (overlap) BEFORE AVAILABILITY.
-    // Canonical lock order: ROOM → RESERVATION → AVAILABILITY
-    for (const child of normalizedChildren) {
-      const overlap = await findActiveRoomOverlap(client, child.roomId, child.checkIn, child.checkOut);
-      if (hasRows(overlap)) {
-        throw Object.assign(new Error(ROOM_OVERLAP_RESPONSE.message), {
-          statusCode: 409,
-          code: ROOM_OVERLAP_SQLSTATE
-        });
-      }
-      const blockOverlap = await findActiveOperationalBlockOverlap(client, child.roomId, child.checkIn, child.checkOut);
-      if (hasRows(blockOverlap)) {
-        throw createHttpError(409, `room is out of order or out of service during requested stay`);
-      }
-    }
-
-    // C2C2: LOCK AVAILABILITY after RESERVATION, using deterministic helper.
-    const availabilityRows = await lockAvailabilityRows(
+    const availabilityRows = await lockCanonicalAvailabilityRows(
       client,
       lockKeys.map(k => ({
-        roomTypeId: requireCanonicalRoomTypeId(k.ident, `booking availability on ${k.date}`),
+        roomTypeId: requireCanonicalRoomTypeId(k.ident, `booking availability row for ${k.date}`),
         roomTypeName: k.ident.roomTypeName,
         date: k.date
       }))
@@ -1308,12 +1573,442 @@ async function createCanonicalBooking(
         );
       }
 
-      if (Number(inserted.reservation.total_price || 0) > 0) {
-        await client.query(
-          `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-           VALUES ($1, $2, $3, $4, 'DEBIT')`,
-          [inserted.reservation.id, 'ROOM_CHARGE', 'Reservasi kamar', Number(inserted.reservation.total_price || 0)]
+      const bookingPropertyId = Number(bookingRecord.property_id || 1);
+
+      const roomTotalPrice = Number(inserted.reservation.total_price || 0);
+      if (roomTotalPrice > 0) {
+        const rcRes = await client.query(
+          `INSERT INTO folio_entries (reservation_id, property_id, entry_type, source_type, description, amount, base_amount, unit_price, quantity, direction)
+           VALUES ($1, $2, $3, $4, $5, $6, $6, $6, 1, 'DEBIT') RETURNING id`,
+          [inserted.reservation.id, bookingPropertyId, 'ROOM_CHARGE', 'ROOM_CHARGE', 'Reservasi kamar', roomTotalPrice]
         );
+        if ((rcRes.rowCount ?? 0) > 0) {
+          try {
+            await projectFolioEntryToTransaction(client, rcRes.rows[0].id, { propertyId: bookingPropertyId });
+          } catch (e: any) {
+            console.warn('[Transactions] Room charge projection warning:', e.message);
+          }
+        }
+      }
+
+      const stayChargesList = Array.isArray(child.stayCharges) ? child.stayCharges : [];
+      const stayDurationNights = child.stayType === 'DAY_USE' ? 1 : Math.max(1, enumerateHotelDates(child.checkIn, child.checkOut).length);
+      const roomSubtotal = Number(inserted.reservation.total_price || 0);
+
+      for (const sc of stayChargesList) {
+        const scType = sc.charge_type || sc.chargeType || 'EXTRA_BED';
+        const scQuantity = Math.max(1, Number(sc.quantity || 1));
+        let scDesc = sc.description || sc.name || `Biaya tambahan: ${scType}`;
+        let ruleId: number | null = sc.rule_id ? Number(sc.rule_id) : null;
+        let ruleCodeSnapshot: string | null = sc.rule_code_snapshot || sc.code || null;
+        let ruleNameSnapshot: string | null = sc.rule_name_snapshot || sc.name || null;
+        let calcMethodSnapshot: string | null = sc.calculation_method_snapshot || null;
+        let isOverride = Boolean(sc.is_override);
+        let originalRuleAmount: number | null = null;
+        let overrideAmount: number | null = null;
+        let overrideReason: string | null = sc.override_reason ? String(sc.override_reason).trim() : null;
+        let baseUnitPrice = 0;
+
+        // Resolve rule if rule_id or code provided
+        let rule: any = null;
+        if (ruleId) {
+          const rRes = await client.query('SELECT * FROM stay_charge_rules WHERE id = $1', [ruleId]);
+          if ((rRes.rowCount ?? 0) > 0) rule = rRes.rows[0];
+        }
+
+        if (rule) {
+          ruleCodeSnapshot = rule.code;
+          ruleNameSnapshot = rule.name;
+          calcMethodSnapshot = rule.charge_method;
+          if (!sc.description && !sc.name) scDesc = rule.name;
+
+          let ruleAuthoritativeAmount = 0;
+          if (rule.charge_method === 'FIXED_AMOUNT') {
+            ruleAuthoritativeAmount = Number(rule.default_amount || 0);
+          } else if (rule.charge_method === 'FREE') {
+            ruleAuthoritativeAmount = 0;
+          } else if (rule.charge_method === 'MANUAL') {
+            ruleAuthoritativeAmount = Number(sc.unit_price || sc.amount || 0);
+          } else if (rule.charge_method === 'FULL_NIGHT') {
+            const applicableRate = (stayDurationNights > 0) ? (roomSubtotal / stayDurationNights) : roomSubtotal;
+            ruleAuthoritativeAmount = applicableRate;
+          } else if (rule.charge_method === 'PERCENTAGE_OF_NIGHTLY_RATE') {
+            const applicableRate = (stayDurationNights > 0) ? (roomSubtotal / stayDurationNights) : roomSubtotal;
+            ruleAuthoritativeAmount = Math.round((applicableRate * Number(rule.percentage_rate || 0)) / 100);
+          }
+
+          if (rule.charge_method !== 'MANUAL') {
+            const requestedPrice = sc.override_amount !== undefined
+              ? Number(sc.override_amount)
+              : (sc.is_override && sc.unit_price !== undefined ? Number(sc.unit_price) : undefined);
+
+            if (sc.is_override || (requestedPrice !== undefined && requestedPrice !== ruleAuthoritativeAmount)) {
+              if (!overrideReason) {
+                throw new Error('Alasan override harga wajib diisi');
+              }
+              isOverride = true;
+              originalRuleAmount = ruleAuthoritativeAmount;
+              overrideAmount = requestedPrice!;
+              baseUnitPrice = requestedPrice!;
+            } else {
+              baseUnitPrice = ruleAuthoritativeAmount;
+            }
+          } else {
+            baseUnitPrice = ruleAuthoritativeAmount;
+          }
+        } else {
+          baseUnitPrice = Number(sc.unit_price || sc.amount || 0);
+        }
+
+        const scAmount = baseUnitPrice * scQuantity;
+        if (scAmount >= 0) {
+          const revCategory = scType === 'PENALTY' ? 'OTHER_INCOME' : 'ROOM_SALES';
+          const folioScRes = await client.query(
+            `INSERT INTO folio_entries (
+              reservation_id, property_id, entry_type, source_type, source_id,
+              rule_id, rule_code_snapshot, rule_name_snapshot, calculation_method_snapshot,
+              description, amount, direction, base_amount, unit_price, quantity,
+              tax_amount, service_amount, status, notes,
+              is_override, original_rule_amount, override_amount, override_reason, override_by, override_at,
+              revenue_category, actor_name_snapshot, actor_role_snapshot
+            ) VALUES (
+              $1, $2, $3, $4, $5,
+              $6, $7, $8, $9,
+              $10, $11, 'DEBIT', $12, $13, $14,
+              0, 0, 'POSTED', $15,
+              $16, $17, $18, $19, $20, $21,
+              $22, $23, $24
+            ) RETURNING id`,
+            [
+              inserted.reservation.id,
+              bookingPropertyId,
+              scType,
+              scType,
+              ruleId ? String(ruleId) : null,
+              ruleId,
+              ruleCodeSnapshot,
+              ruleNameSnapshot,
+              calcMethodSnapshot,
+              scDesc,
+              scAmount,
+              scAmount,
+              baseUnitPrice,
+              scQuantity,
+              sc.notes || sc.note || null,
+              isOverride,
+              originalRuleAmount,
+              overrideAmount,
+              overrideReason,
+              isOverride ? 'Front Desk' : null,
+              isOverride ? new Date() : null,
+              revCategory,
+              'Front Desk',
+              'STAFF'
+            ]
+          );
+          if ((folioScRes.rowCount ?? 0) > 0) {
+            try {
+              await projectFolioEntryToTransaction(client, folioScRes.rows[0].id, { propertyId: bookingPropertyId });
+            } catch (e: any) {
+              console.warn('[Transactions] Stay charge projection warning:', e.message);
+            }
+          }
+        }
+      }
+
+      if (Number(child.discountAmount || 0) > 0) {
+        const discountDesc = child.discountReason ? `Diskon: ${child.discountReason}` : 'Diskon Reservasi';
+        await client.query(
+          `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+           VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
+          [inserted.reservation.id, bookingPropertyId, 'DISCOUNT', discountDesc, Number(child.discountAmount || 0)]
+        );
+      }
+
+      if (Number(child.amountPaid || 0) > 0) {
+        const pMethod = child.paymentMethod || 'CASH';
+        const pTxRes = await client.query(
+          `INSERT INTO payment_transactions (
+             reservation_id, transaction_type, amount, payment_method, status, created_by, created_at
+           ) VALUES ($1, 'PAYMENT', $2, $3, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
+           RETURNING id`,
+          [inserted.reservation.id, Number(child.amountPaid || 0), pMethod]
+        );
+        const pTxId = pTxRes.rows[0].id;
+
+        if (child.buktiBayarPath) {
+          await client.query(
+            `INSERT INTO payment_evidences (
+               property_id, reservation_id, payment_transaction_id, evidence_type, storage_key, original_filename,
+               mime_type, file_size_bytes, note, is_active, uploaded_by_name_snapshot, created_at, updated_at
+             ) VALUES ($1, $2, $3, 'RECEIPT', $4, $5, 'image/jpeg', 0, 'Bukti bayar saat reservasi', TRUE, 'Front Office', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              bookingPropertyId,
+              inserted.reservation.id,
+              pTxId,
+              child.buktiBayarPath,
+              path.basename(child.buktiBayarPath)
+            ]
+          );
+        }
+
+        await client.query(
+          `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+           VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
+          [inserted.reservation.id, bookingPropertyId, 'PAYMENT', `Pembayaran awal (${pMethod})`, Number(child.amountPaid || 0)]
+        );
+      }
+
+      try {
+        let stayingGuestId: number | null = child.guestId
+          ? Number(child.guestId)
+          : (child.guest_id
+            ? Number(child.guest_id)
+            : (req.body.guest_id
+              ? Number(req.body.guest_id)
+              : (req.body.guestId ? Number(req.body.guestId) : null)));
+
+        const guestSegmentVal = child.guestSegment || req.body.guest_segment || 'Reguler';
+        const bPlace = child.birthPlace || child.birth_place || req.body.birth_place || null;
+        const bDate = child.birthDate || child.birth_date || req.body.birth_date || null;
+        const gGender = (child.gender === 'MALE' || child.gender === 'FEMALE' || req.body.gender === 'MALE' || req.body.gender === 'FEMALE')
+          ? (child.gender || req.body.gender) : null;
+        const gAddress = child.address || req.body.address || null;
+        const gRtRw = child.rtRw || child.rt_rw || req.body.rt_rw || null;
+        const gKelurahan = child.villageKelurahan || child.village_kelurahan || req.body.village_kelurahan || null;
+        const gKecamatan = child.districtKecamatan || child.district_kecamatan || req.body.district_kecamatan || null;
+        const gReligion = child.religion || req.body.religion || null;
+        const gMarital = child.maritalStatus || child.marital_status || req.body.marital_status || null;
+        const gOccupation = child.occupation || req.body.occupation || null;
+        const gCitizenship = child.citizenship || req.body.citizenship || null;
+        const gValidUntil = child.validUntil || child.valid_until || req.body.valid_until || null;
+        const gKtpConf = child.ktpConfidence || child.ktp_ocr_confidence || req.body.ktp_ocr_confidence || null;
+        const gKtpProv = child.ktpOcrProvider || child.ktp_ocr_provider || req.body.ktp_ocr_provider || null;
+
+        if (stayingGuestId) {
+          // Check that the guest actually exists
+          const existingCheck = await client.query('SELECT id, has_valid_identity, identity_number, identity_path FROM guests WHERE id = $1', [stayingGuestId]);
+          if ((existingCheck.rowCount ?? 0) === 0) {
+            stayingGuestId = null;
+          } else {
+            const cleanNik = (child.identityNumber || '').trim();
+            const normNik = cleanNik ? cleanNik.replace(/[^0-9A-Za-z]/g, '').toUpperCase() : null;
+            const hasValidId = Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity || existingCheck.rows[0].has_valid_identity);
+            await client.query(
+              `UPDATE guests
+               SET identity_path = COALESCE($1::TEXT, identity_path),
+                   identity_number = COALESCE(NULLIF($2, '')::VARCHAR, identity_number),
+                   normalized_identity_number = COALESCE(NULLIF($3, '')::VARCHAR, normalized_identity_number),
+                   has_valid_identity = $4::BOOLEAN,
+                   birth_place = COALESCE(NULLIF($5, '')::VARCHAR, birth_place),
+                   birth_date = COALESCE(NULLIF($6, '')::DATE, birth_date),
+                   gender = COALESCE($7::VARCHAR, gender),
+                   address = COALESCE(NULLIF($8, '')::TEXT, address),
+                   rt_rw = COALESCE(NULLIF($9, '')::VARCHAR, rt_rw),
+                   village_kelurahan = COALESCE(NULLIF($10, '')::VARCHAR, village_kelurahan),
+                   district_kecamatan = COALESCE(NULLIF($11, '')::VARCHAR, district_kecamatan),
+                   religion = COALESCE(NULLIF($12, '')::VARCHAR, religion),
+                   marital_status = COALESCE(NULLIF($13, '')::VARCHAR, marital_status),
+                   occupation = COALESCE(NULLIF($14, '')::VARCHAR, occupation),
+                   citizenship = COALESCE(NULLIF($15, '')::VARCHAR, citizenship),
+                   valid_until = COALESCE(NULLIF($16, '')::VARCHAR, valid_until),
+                   ktp_ocr_confidence = COALESCE($17::NUMERIC, ktp_ocr_confidence),
+                   ktp_ocr_provider = COALESCE(NULLIF($18, '')::VARCHAR, ktp_ocr_provider),
+                   ktp_extracted_at = CASE WHEN $1::TEXT IS NOT NULL OR $2::VARCHAR IS NOT NULL THEN NOW() ELSE ktp_extracted_at END,
+                   updated_at = NOW()
+               WHERE id = $19::INT`,
+              [
+                child.ktpPath || null, cleanNik || null, normNik || null, hasValidId,
+                bPlace, bDate, gGender, gAddress, gRtRw, gKelurahan, gKecamatan,
+                gReligion, gMarital, gOccupation, gCitizenship, gValidUntil,
+                gKtpConf, gKtpProv, stayingGuestId
+              ]
+            );
+          }
+        }
+
+        if (!stayingGuestId && child.guestPhone) {
+          const normPhone = child.guestPhone.replace(/\D/g, '');
+          const existingGuestRes = await client.query(
+            `SELECT id, has_valid_identity, identity_number, identity_path FROM guests WHERE phone = $1 OR normalized_phone = $2 LIMIT 1`,
+            [child.guestPhone, normPhone || null]
+          );
+          if (existingGuestRes.rowCount && existingGuestRes.rowCount > 0) {
+            stayingGuestId = existingGuestRes.rows[0].id;
+            const cleanNik = (child.identityNumber || '').trim();
+            const normNik = cleanNik ? cleanNik.replace(/[^0-9A-Za-z]/g, '').toUpperCase() : null;
+            const hasValidId = Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity || existingGuestRes.rows[0].has_valid_identity);
+            await client.query(
+              `UPDATE guests
+               SET identity_path = COALESCE($1::TEXT, identity_path),
+                   identity_number = COALESCE(NULLIF($2, '')::VARCHAR, identity_number),
+                   normalized_identity_number = COALESCE(NULLIF($3, '')::VARCHAR, normalized_identity_number),
+                   has_valid_identity = $4::BOOLEAN,
+                   birth_place = COALESCE(NULLIF($5, '')::VARCHAR, birth_place),
+                   birth_date = COALESCE(NULLIF($6, '')::DATE, birth_date),
+                   gender = COALESCE($7::VARCHAR, gender),
+                   address = COALESCE(NULLIF($8, '')::TEXT, address),
+                   rt_rw = COALESCE(NULLIF($9, '')::VARCHAR, rt_rw),
+                   village_kelurahan = COALESCE(NULLIF($10, '')::VARCHAR, village_kelurahan),
+                   district_kecamatan = COALESCE(NULLIF($11, '')::VARCHAR, district_kecamatan),
+                   religion = COALESCE(NULLIF($12, '')::VARCHAR, religion),
+                   marital_status = COALESCE(NULLIF($13, '')::VARCHAR, marital_status),
+                   occupation = COALESCE(NULLIF($14, '')::VARCHAR, occupation),
+                   citizenship = COALESCE(NULLIF($15, '')::VARCHAR, citizenship),
+                   valid_until = COALESCE(NULLIF($16, '')::VARCHAR, valid_until),
+                   ktp_ocr_confidence = COALESCE($17::NUMERIC, ktp_ocr_confidence),
+                   ktp_ocr_provider = COALESCE(NULLIF($18, '')::VARCHAR, ktp_ocr_provider),
+                   ktp_extracted_at = CASE WHEN $1::TEXT IS NOT NULL OR $2::VARCHAR IS NOT NULL THEN NOW() ELSE ktp_extracted_at END,
+                   updated_at = NOW()
+               WHERE id = $19::INT`,
+              [
+                child.ktpPath || null, cleanNik || null, normNik || null, hasValidId,
+                bPlace, bDate, gGender, gAddress, gRtRw, gKelurahan, gKecamatan,
+                gReligion, gMarital, gOccupation, gCitizenship, gValidUntil,
+                gKtpConf, gKtpProv, stayingGuestId
+              ]
+            );
+          }
+        }
+
+        if (!stayingGuestId) {
+          const normPhone = child.guestPhone ? child.guestPhone.replace(/\D/g, '') : null;
+          const cleanNik = child.identityNumber ? child.identityNumber.trim() : null;
+          const normNik = cleanNik ? cleanNik.replace(/[^0-9A-Za-z]/g, '').toUpperCase() : null;
+          const normName = (child.guestName || '').toLowerCase().trim();
+          const hasValidId = Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity);
+          const newGuestRes = await client.query(
+            `INSERT INTO guests (
+               full_name, normalized_name, phone, normalized_phone, identity_type, identity_number,
+               normalized_identity_number, identity_path, has_valid_identity, guest_segment, created_property_id,
+               birth_place, birth_date, gender, address, rt_rw, village_kelurahan, district_kecamatan,
+               religion, marital_status, occupation, citizenship, valid_until, ktp_ocr_confidence, ktp_ocr_provider,
+               ktp_extracted_at, created_at, updated_at
+             ) VALUES (
+               $1::VARCHAR, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, 'KTP', $5::VARCHAR,
+               $6::VARCHAR, $7::TEXT, $8::BOOLEAN, $9::VARCHAR, $10::INT,
+               $11::VARCHAR, NULLIF($12, '')::DATE, $13::VARCHAR, $14::TEXT, $15::VARCHAR, $16::VARCHAR, $17::VARCHAR,
+               $18::VARCHAR, $19::VARCHAR, $20::VARCHAR, $21::VARCHAR, $22::VARCHAR, $23::NUMERIC, $24::VARCHAR,
+               CASE WHEN $7::TEXT IS NOT NULL OR $5::VARCHAR IS NOT NULL THEN NOW() ELSE NULL END, NOW(), NOW()
+             )
+             RETURNING id`,
+            [
+              child.guestName,
+              normName,
+              child.guestPhone || null,
+              normPhone,
+              cleanNik,
+              normNik,
+              child.ktpPath || null,
+              hasValidId,
+              guestSegmentVal,
+              bookingPropertyId,
+              bPlace,
+              bDate,
+              gGender,
+              gAddress,
+              gRtRw,
+              gKelurahan,
+              gKecamatan,
+              gReligion,
+              gMarital,
+              gOccupation,
+              gCitizenship,
+              gValidUntil,
+              gKtpConf,
+              gKtpProv
+            ]
+          );
+          stayingGuestId = newGuestRes.rows[0].id;
+          const guestCode = `GST-${String(stayingGuestId).padStart(5, '0')}`;
+          await client.query(`UPDATE guests SET guest_code = $1 WHERE id = $2`, [guestCode, stayingGuestId]);
+        }
+
+        if (stayingGuestId) {
+          await client.query(
+            `INSERT INTO reservation_guests (
+               reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source
+             ) VALUES ($1, $2, 'PRIMARY_GUEST', 'SELF', TRUE, $3, 'CANONICAL_BOOKING')
+             ON CONFLICT (reservation_id) WHERE role = 'PRIMARY_GUEST' DO UPDATE
+             SET guest_id = EXCLUDED.guest_id, identity_verified = EXCLUDED.identity_verified`,
+            [
+              inserted.reservation.id,
+              stayingGuestId,
+              Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity)
+            ]
+          ).catch((e: any) => console.warn('[createCanonicalBooking] Note: reservation_guests PRIMARY_GUEST fallback', e?.message));
+        }
+
+        const bName = child.bookerName || bookerName;
+        const bPhone = child.bookerPhone || bookerPhone;
+        if (bName && bName.trim().toLowerCase() !== child.guestName.trim().toLowerCase()) {
+          let bookerGuestId: number | null = null;
+          if (bPhone) {
+            const normBPhone = bPhone.replace(/\D/g, '');
+            const existingBookerRes = await client.query(
+              `SELECT id FROM guests WHERE phone = $1 OR normalized_phone = $2 LIMIT 1`,
+              [bPhone, normBPhone || null]
+            );
+            if (existingBookerRes.rowCount && existingBookerRes.rowCount > 0) {
+              bookerGuestId = existingBookerRes.rows[0].id;
+            }
+          }
+          if (!bookerGuestId) {
+            const normBPhone = bPhone ? bPhone.replace(/\D/g, '') : null;
+            const normBName = (bName || '').toLowerCase().trim();
+            const newBookerRes = await client.query(
+              `INSERT INTO guests (
+                 full_name, normalized_name, phone, normalized_phone, created_property_id, created_at, updated_at
+               ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+               RETURNING id`,
+              [bName, normBName, bPhone || null, normBPhone, bookingPropertyId]
+            );
+            bookerGuestId = newBookerRes.rows[0].id;
+            const guestCode = `GST-${String(bookerGuestId).padStart(5, '0')}`;
+            await client.query(`UPDATE guests SET guest_code = $1 WHERE id = $2`, [guestCode, bookerGuestId]);
+          }
+          if (bookerGuestId) {
+            await client.query(
+              `INSERT INTO reservation_guests (
+                 reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source
+               ) VALUES ($1, $2, 'BOOKER', 'BOOKER', FALSE, FALSE, 'CANONICAL_BOOKING')
+               ON CONFLICT DO NOTHING`,
+              [inserted.reservation.id, bookerGuestId]
+            ).catch(() => {});
+          }
+        }
+      } catch (crmErr) {
+        console.warn('[createCanonicalBooking] Note: CRM guest auto-link fallback', crmErr);
+      }
+
+      try {
+        const quote = await calculatePriceQuote(client, {
+          property_id: bookingPropertyId,
+          room_type_id: child.roomTypeId!,
+          rate_plan_id: child.ratePlanId || undefined,
+          check_in: child.checkIn,
+          check_out: child.checkOut,
+          stay_type: child.stayType
+        });
+        if ((child.isManualOverride || (!child.ratePlanId && child.totalPrice > 0)) && child.totalPrice > 0) {
+          quote.room_subtotal = child.subtotalAmount || child.totalPrice;
+          quote.tax_amount = child.taxAmount || 0;
+          quote.service_amount = child.serviceAmount || 0;
+          quote.grand_total = child.totalPrice;
+          const nightlyShare = Math.round((child.subtotalAmount || child.totalPrice) / (quote.nightly_breakdown.length || 1));
+          quote.nightly_breakdown.forEach((n, idx) => {
+            n.final_room_rate = idx === quote.nightly_breakdown.length - 1
+              ? (child.subtotalAmount || child.totalPrice) - nightlyShare * (quote.nightly_breakdown.length - 1)
+              : nightlyShare;
+            n.total_amount = n.final_room_rate;
+          });
+        }
+        await createReservationRateSnapshots(client, inserted.reservation.id, bookingPropertyId, quote, {
+          isManualOverride: child.isManualOverride,
+          manualOverrideReason: child.manualOverrideReason
+        });
+      } catch (quoteErr) {
+        console.warn('[createCanonicalBooking] Note: price quote snapshot fallback', quoteErr);
       }
 
       insertedChildren.push({
@@ -1382,7 +2077,12 @@ async function createCanonicalBooking(
         property_id: bookingPropertyId,
         guest_name_snapshot: guestName,
         guest_phone_snapshot: guestPhone,
+        booker_name: bookerName,
+        booker_phone: bookerPhone,
+        booking_channel: bookingChannel,
         booking_source: bookingSource,
+        ota_source_id: otaSourceId,
+        referral: referral,
         channel,
         booking_status: 'ACTIVE',
         currency_code: currencyCode,
@@ -1481,6 +2181,37 @@ async function createReservationRecord(req: any, payload: any) {
   };
 }
 
+// Canonical joined reservation DTO helper
+async function getCanonicalReservationDto(clientOrPool: any, reservationId: number) {
+  const result = await clientOrPool.query(`
+    SELECT
+      r.*,
+      r.id AS reservation_id,
+      r.booking_number AS legacy_booking_number,
+      b.bid,
+      b.id AS booking_id_value,
+      b.property_id AS booking_property_id,
+      COALESCE(r.booker_name, b.booker_name) AS booker_name,
+      COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
+      ota.name AS ota_source_name,
+      ro.room_number,
+      ro.floor,
+      COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
+      COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
+      COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
+      COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code
+    FROM reservations r
+    LEFT JOIN bookings b ON b.id = r.booking_id
+    LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
+    LEFT JOIN rooms ro ON ro.id = r.room_id
+    LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+    WHERE r.id = $1
+  `, [reservationId]);
+
+  if (!hasRows(result)) return null;
+  return withReservationHotelDates(result.rows[0]);
+}
+
 // Authoritative property-scoped reservation listing
 app.get('/api/reservations', async (req, res) => {
   try {
@@ -1570,10 +2301,24 @@ app.get('/api/reservations', async (req, res) => {
         r.guest_name,
         r.guest_phone,
         r.guest_segment,
+        COALESCE(r.booker_name, b.booker_name) AS booker_name,
+        COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
+        r.ota_source_id,
+        ota.name AS ota_source_name,
+        r.referral,
+        r.ktp_path,
+        r.bukti_bayar_path,
+        r.discount_amount,
+        r.discount_percent,
+        r.discount_reason,
+        r.is_manual_override,
+        r.manual_override_reason,
         r.room_id,
         ro.room_number,
+        ro.floor,
         COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
         COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
         COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code,
         r.check_in,
         r.check_out,
@@ -1591,6 +2336,7 @@ app.get('/api/reservations', async (req, res) => {
       JOIN bookings b ON b.id = r.booking_id
       LEFT JOIN rooms ro ON ro.id = r.room_id
       LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+      LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
       WHERE ${whereClause}
       ORDER BY r.check_in DESC, r.id DESC
     `, params);
@@ -1630,9 +2376,21 @@ app.get('/api/reservations/:id', async (req, res) => {
         r.id as reservation_id,
         r.booking_number as legacy_booking_number,
         b.bid,
-        b.id as booking_id_value
+        b.id as booking_id_value,
+        COALESCE(r.booker_name, b.booker_name) AS booker_name,
+        COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
+        ota.name as ota_source_name,
+        ro.room_number,
+        ro.floor,
+        COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
+        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code
       FROM reservations r
       LEFT JOIN bookings b ON b.id = r.booking_id
+      LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
+      LEFT JOIN rooms ro ON ro.id = r.room_id
+      LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
       WHERE r.id = $1
     `, [reservationId]);
     if (!hasRows(result)) {
@@ -1640,6 +2398,20 @@ app.get('/api/reservations/:id', async (req, res) => {
     }
     const row = result.rows[0];
     const data = withReservationHotelDates(row);
+
+    let rate_snapshot: any = null;
+    try {
+      const nightlyRes = await pool.query(
+        `SELECT * FROM reservation_nightly_rates WHERE reservation_id = $1 ORDER BY stay_date ASC`,
+        [reservationId]
+      );
+      if (nightlyRes.rows.length > 0) {
+        rate_snapshot = {
+          reservation_id: reservationId,
+          nightly_rates: nightlyRes.rows
+        };
+      }
+    } catch (_snapErr) {}
     let readiness: RoomReadinessInfo | null = null;
     if (row.room_id) {
       readiness = await evaluateRoomReadiness(pool, Number(row.room_id), reservationId);
@@ -1673,7 +2445,47 @@ app.get('/api/reservations/:id', async (req, res) => {
       };
     }
 
-    res.json({ status: 'OK', data: { ...data, readiness, checkout_inspection } });
+    let requireCheckoutInspection = false;
+    try {
+      const isHkEnabled = await isFeatureEnabled(pool, propertyId, 'housekeeping.enabled');
+      const isCheckoutCheckFeature = isHkEnabled && (await isFeatureEnabled(pool, propertyId, 'housekeeping.checkout_inspection'));
+      if (isCheckoutCheckFeature) {
+        const hkSettings = await getPropertyHousekeepingSettings(pool, propertyId);
+        requireCheckoutInspection = Boolean(hkSettings.require_checkout_room_check);
+      }
+    } catch (_e) {}
+
+    let sibling_reservations: any[] = [];
+    if (row.booking_id) {
+      try {
+        const sibRes = await pool.query(
+          `SELECT r.id, r.booking_id, r.room_id, rm.room_number,
+                  r.check_in, r.check_out, r.status, r.stay_status, r.total_price,
+                  COALESCE(rt.name, rm.name, r.booked_room_type_name_snapshot) as room_type_name
+           FROM reservations r
+           LEFT JOIN rooms rm ON rm.id = r.room_id
+           LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot)
+           WHERE r.booking_id = $1
+           ORDER BY r.stay_sequence ASC, r.id ASC`,
+          [row.booking_id]
+        );
+        sibling_reservations = sibRes.rows.map(withReservationHotelDates);
+      } catch (sibErr) {
+        console.warn('[GET /api/reservations/:id] Sibling query error:', sibErr);
+      }
+    }
+
+    res.json({
+      status: 'OK',
+      data: {
+        ...data,
+        readiness,
+        checkout_inspection,
+        require_checkout_inspection: requireCheckoutInspection,
+        sibling_reservations,
+        rate_snapshot
+      }
+    });
   } catch (err: any) {
     if (err?.statusCode) {
       return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
@@ -2146,6 +2958,15 @@ app.patch('/api/reservations/:id', async (req, res) => {
     const existing = current.rows[0];
     const bookingRes = await client.query('SELECT property_id FROM bookings WHERE id = $1', [existing.booking_id]);
     const reservationPropertyId = bookingRes.rows[0]?.property_id ?? null;
+
+    const callerPropIdRaw = req.body?.property_id ?? req.query?.property_id;
+    if (callerPropIdRaw !== undefined && callerPropIdRaw !== null && String(callerPropIdRaw).trim() !== '') {
+      const callerPropertyId = Number(callerPropIdRaw);
+      if (reservationPropertyId != null && callerPropertyId !== Number(reservationPropertyId)) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_MISMATCH', message: `reservation does not belong to property ${callerPropertyId}` });
+      }
+    }
     const guestName = Object.prototype.hasOwnProperty.call(payload, 'guest_name') ? payload.guest_name : existing.guest_name;
     const guestPhone = Object.prototype.hasOwnProperty.call(payload, 'guest_phone') ? payload.guest_phone : existing.guest_phone;
     const guestSegmentValue = Object.prototype.hasOwnProperty.call(payload, 'guest_segment') ? payload.guest_segment : existing.guest_segment;
@@ -2183,6 +3004,12 @@ app.patch('/api/reservations/:id', async (req, res) => {
       ? payload.booking_type
       : existing.booking_type;
     const bookingSource = String(bookingTypeValue || 'walkin').toLowerCase() === 'ota' ? 'OTA' : 'WALKIN';
+    const identityNumber = Object.prototype.hasOwnProperty.call(payload, 'identity_number')
+      ? payload.identity_number
+      : existing.identity_number;
+    const hasValidIdentity = Object.prototype.hasOwnProperty.call(payload, 'has_valid_identity')
+      ? Boolean(payload.has_valid_identity)
+      : (Boolean(ktpPath || identityNumber) || Boolean(existing.has_valid_identity));
 
     const updated = await client.query(
       `UPDATE reservations
@@ -2197,8 +3024,10 @@ app.patch('/api/reservations/:id', async (req, res) => {
           remaining_balance = $9,
           ktp_path = $10,
           bukti_bayar_path = $11,
-          booking_type = $12
-      WHERE id = $13
+          booking_type = $12,
+          identity_number = $13,
+          has_valid_identity = $14
+      WHERE id = $15
       RETURNING *`,
       [
        guestName,
@@ -2213,9 +3042,23 @@ app.patch('/api/reservations/:id', async (req, res) => {
        ktpPath,
        buktiBayarPath,
        bookingSource,
+       identityNumber,
+       hasValidIdentity,
        reservationId
       ]
     );
+
+    // Sync guest details to linked guests table if exists
+    await client.query(
+      `UPDATE guests
+       SET phone = COALESCE($1, phone),
+           identity_number = COALESCE($2, identity_number),
+           full_name = COALESCE($3, full_name)
+       WHERE id IN (
+         SELECT guest_id FROM reservation_guests WHERE reservation_id = $4
+       )`,
+      [guestPhone || null, identityNumber || null, guestName || null, reservationId]
+    ).catch(() => {});
 
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
@@ -2231,7 +3074,8 @@ app.patch('/api/reservations/:id', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
-    res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated.rows[0]) });
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+    res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(updated.rows[0]) });
   } catch (err: any) {
     await client.query('ROLLBACK');
     if (isRoomOverlapViolation(err)) {
@@ -2251,6 +3095,54 @@ app.patch('/api/reservations/:id', async (req, res) => {
     client.release();
   }
 });
+
+// POST /api/reservations/:id/edit-preview
+app.post('/api/reservations/:id/edit-preview', async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
+    }
+
+    const preview = await previewReservationEdit(pool, reservationId, req.body || {});
+    res.json({ status: 'SUCCESS', data: preview });
+  } catch (err: any) {
+    const statusCode = err?.statusCode || 400;
+    res.status(statusCode).json({ status: 'ERROR', code: err.code, message: err.message || 'Gagal menghitung pratinjau edit reservasi' });
+  }
+});
+
+// POST & PUT /api/reservations/:id/edit
+const handleReservationEdit = async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
+    }
+
+    const actor = req.body?.actor || req.user?.username || 'USER';
+    const updated = await executeReservationEdit(pool, reservationId, req.body || {}, actor);
+
+    broadcastEvent('ReservationUpdated', {
+      reservation_id: reservationId,
+      room_id: updated.room_id,
+      guest_name: updated.guest_name,
+      timestamp: new Date().toISOString()
+    });
+
+    res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated) });
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
+    const statusCode = err?.statusCode || 400;
+    const message = String(err?.message || err);
+    res.status(statusCode).json({ status: 'ERROR', code: err.code, message });
+  }
+};
+
+app.post('/api/reservations/:id/edit', handleReservationEdit);
+app.put('/api/reservations/:id/edit', handleReservationEdit);
 
 app.post('/api/reservations/:id/cancel', async (req, res) => {
   const reservationId = Number(req.params.id);
@@ -2532,6 +3424,10 @@ app.post('/api/bookings', async (req, res) => {
     const statusCode = Number(err?.statusCode || (message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') ? 409 : 500));
     const responseObj: any = { status: responseStatusTextForCode(statusCode), message };
     if (err?.code) responseObj.code = err.code;
+    if (err?.missing_fields || err?.missing) {
+      responseObj.missing_fields = err.missing_fields || err.missing;
+      responseObj.missing = err.missing || err.missing_fields;
+    }
     await persistIdempotencyResult(req, res, statusCode, responseObj);
     return res.status(statusCode).json(responseObj);
   }
@@ -2906,6 +3802,72 @@ app.get('/api/pos/menu', async (req, res) => {
   }
 });
 
+app.post('/api/pos/menu/items', async (req, res) => {
+  try {
+    const { property_id, name, item_code, category_name, price, description } = req.body || {};
+    if (!property_id || !name || price === undefined) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id, name, and price are required' });
+    }
+    const propId = Number(property_id);
+    let categoryId = null;
+    if (category_name && String(category_name).trim()) {
+      const catCheck = await pool.query(
+        'SELECT id FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2)',
+        [propId, String(category_name).trim()]
+      );
+      if ((catCheck.rowCount ?? 0) > 0) {
+        categoryId = catCheck.rows[0].id;
+      } else {
+        const newCat = await pool.query(
+          'INSERT INTO pos_menu_categories (property_id, name) VALUES ($1, $2) RETURNING id',
+          [propId, String(category_name).trim()]
+        );
+        categoryId = newCat.rows[0].id;
+      }
+    }
+    const code = item_code && String(item_code).trim()
+      ? String(item_code).trim().toUpperCase()
+      : `PRD-${Date.now().toString().slice(-4)}`;
+
+    const result = await pool.query(
+      `INSERT INTO pos_menu_items (property_id, category_id, item_code, name, description, price, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+       RETURNING *`,
+      [propId, categoryId, code, String(name).trim(), description ? String(description).trim() : null, Number(price)]
+    );
+    res.status(201).json({ status: 'OK', data: { ...result.rows[0], category_name: category_name || 'Food & Beverage' } });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+app.delete('/api/pos/menu/items/:id', async (req, res) => {
+  try {
+    const itemId = Number(req.params.id);
+    const propertyIdRaw = req.query.property_id || req.body?.property_id;
+    if (!itemId) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid item id' });
+    }
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    const updateResult = await pool.query(
+      'UPDATE pos_menu_items SET is_active = FALSE WHERE id = $1 AND property_id = $2 RETURNING id',
+      [itemId, propertyId]
+    );
+    if ((updateResult.rowCount ?? 0) === 0) {
+      return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `menu item ${itemId} not found for property ${propertyId}` });
+    }
+    res.json({ status: 'OK', message: 'Item nonaktif' });
+  } catch (err: any) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
 app.get('/api/pos/orders', async (req, res) => {
   try {
     const propertyIdRaw = req.query.property_id;
@@ -3005,12 +3967,13 @@ app.post('/api/pos/orders', async (req, res) => {
       }
     }
 
+    const initialStatus = (req.body.status || 'OPEN').toUpperCase();
     const orderNumber = `POS-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Date.now().toString().slice(-6)}`;
     const orderInsert = await client.query(
       `INSERT INTO pos_orders (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status)
-       VALUES ($1, $2, $3, $4, $5, 0, 'OPEN')
+       VALUES ($1, $2, $3, $4, $5, 0, $6)
        RETURNING *`,
-      [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In', guest_name || 'Guest']
+      [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In', guest_name || 'Guest', initialStatus]
     );
 
     const orderId = orderInsert.rows[0].id;
@@ -3037,6 +4000,18 @@ app.post('/api/pos/orders', async (req, res) => {
       'UPDATE pos_orders SET total_amount = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [totalAmount, orderId]
     );
+
+    // Auto-project to canonical SALE transaction if order is in posted/paid state
+    if (['PAID', 'COMPLETED', 'POSTED', 'CLOSED'].includes(initialStatus)) {
+      try {
+        await projectPosOrderToTransaction(client, orderId, {
+          propertyId,
+          actorName: req.body.actor_name || 'Staff POS'
+        });
+      } catch (pErr: any) {
+        console.warn('[Transactions] POS order creation projection warning:', pErr.message);
+      }
+    }
 
     await client.query('COMMIT');
     broadcastEvent('PosOrderCreated', {
@@ -3082,10 +4057,21 @@ app.patch('/api/pos/orders/:id/status', async (req, res) => {
       return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_ORDER', message: 'order belongs to a different property' });
     }
 
+    const targetStatus = (status || 'OPEN').toUpperCase();
     const result = await pool.query(
       'UPDATE pos_orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-      [status || 'OPEN', orderId]
+      [targetStatus, orderId]
     );
+
+    // Auto-project or reverse canonical transaction based on updated status
+    try {
+      await projectPosOrderToTransaction(pool, orderId, {
+        propertyId,
+        actorName: req.body.actor_name || 'Staff POS'
+      });
+    } catch (pErr: any) {
+      console.warn('[Transactions] POS order status change projection warning:', pErr.message);
+    }
 
     res.json({ status: 'SUCCESS', data: result.rows[0] });
   } catch (err: any) {
@@ -3586,12 +4572,180 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       );
     }
 
-    const updatedReservation = await client.query(
+    // Determine nightly pricing for extension
+    let nightlyRate = 0;
+    const requestedNightlyRate = req.body?.additional_night_rate !== undefined
+      ? Number(req.body.additional_night_rate)
+      : (req.body?.nightly_rate !== undefined ? Number(req.body.nightly_rate) : undefined);
+
+    const isManual = Boolean(reservation.is_manual_override || req.body?.is_manual_override || reservation.ota_source_id || reservation.booking_type === 'OTA');
+    const manualReason = req.body?.manual_override_reason || reservation.manual_override_reason || (reservation.ota_source_id ? 'OTA Extension' : (isManual ? 'Manual Override' : null));
+
+    if (requestedNightlyRate !== undefined && !isNaN(requestedNightlyRate) && requestedNightlyRate >= 0) {
+      nightlyRate = Math.round(requestedNightlyRate);
+    } else {
+      // Lookup latest nightly rate snapshot
+      const prevRateRes = await client.query(
+        `SELECT final_room_rate, base_rate FROM reservation_nightly_rates
+         WHERE reservation_id = $1
+         ORDER BY stay_date DESC LIMIT 1`,
+        [reservationId]
+      );
+      if (prevRateRes.rows.length > 0) {
+        nightlyRate = Math.round(Number(prevRateRes.rows[0].final_room_rate || prevRateRes.rows[0].base_rate || 0));
+      } else {
+        const existingNights = enumerateHotelDates(checkIn, oldCheckOut).length || 1;
+        nightlyRate = Math.round(Number(reservation.total_price || 0) / existingNights);
+      }
+    }
+
+    const deltaCharge = nightlyRate * deltaDates.length;
+
+    // Idempotent Folio Charge Posting
+    const sourceId = `EXTEND-${reservationId}-${oldCheckOut}-${requestedCheckOut}`;
+    const existingFolioRes = await client.query(
+      `SELECT id FROM folio_entries
+       WHERE reservation_id = $1 AND source_type = 'STAY_EXTENSION' AND source_id = $2 AND is_voided = FALSE`,
+      [reservationId, sourceId]
+    );
+
+    let folioEntryId: number;
+    if (existingFolioRes.rows.length > 0) {
+      folioEntryId = Number(existingFolioRes.rows[0].id);
+      await client.query(
+        `UPDATE folio_entries
+         SET amount = $1, base_amount = $1, unit_price = $2, quantity = $3
+         WHERE id = $4`,
+        [deltaCharge, nightlyRate, deltaDates.length, folioEntryId]
+      );
+    } else {
+      const folioInsert = await client.query(
+        `INSERT INTO folio_entries (
+          reservation_id, property_id, entry_type, source_type, source_id,
+          description, amount, direction, base_amount, unit_price, quantity,
+          status, revenue_category, actor_name_snapshot, actor_role_snapshot
+        ) VALUES (
+          $1, $2, 'ROOM_CHARGE', 'STAY_EXTENSION', $3,
+          $4, $5, 'DEBIT', $5, $6, $7,
+          'POSTED', 'ROOM_SALES', $8, $9
+        ) RETURNING id`,
+        [
+          reservationId,
+          propertyId,
+          sourceId,
+          `Perpanjangan Menginap (${deltaDates.length} malam: ${oldCheckOut} s/d ${requestedCheckOut})`,
+          deltaCharge,
+          nightlyRate,
+          deltaDates.length,
+          req.body?.actor_name || 'Front Desk',
+          req.body?.actor_role || 'STAFF'
+        ]
+      );
+      folioEntryId = Number(folioInsert.rows[0].id);
+    }
+
+    // Canonical Transaction Projection (SALE)
+    try {
+      await projectFolioEntryToTransaction(client, folioEntryId, { propertyId });
+    } catch (projErr: any) {
+      console.warn('[Transactions] Stay extension projection warning:', projErr.message);
+    }
+
+    // Upsert nightly rates snapshots
+    for (const stayDate of deltaDates) {
+      await client.query(
+        `INSERT INTO reservation_nightly_rates (
+          reservation_id, property_id, stay_date,
+          room_type_id, room_type_code_snapshot, room_type_name_snapshot,
+          base_rate, applied_override_rate, final_room_rate,
+          service_amount, tax_amount, total_amount,
+          is_manual_override, manual_override_reason, created_at
+        ) VALUES (
+          $1, $2, $3,
+          $4, $5, $6,
+          $7, $8, $9,
+          0, 0, $10,
+          $11, $12, NOW()
+        )
+        ON CONFLICT (reservation_id, stay_date) DO UPDATE SET
+          room_type_id = EXCLUDED.room_type_id,
+          room_type_code_snapshot = EXCLUDED.room_type_code_snapshot,
+          room_type_name_snapshot = EXCLUDED.room_type_name_snapshot,
+          base_rate = EXCLUDED.base_rate,
+          applied_override_rate = EXCLUDED.applied_override_rate,
+          final_room_rate = EXCLUDED.final_room_rate,
+          total_amount = EXCLUDED.total_amount,
+          is_manual_override = EXCLUDED.is_manual_override,
+          manual_override_reason = EXCLUDED.manual_override_reason`,
+        [
+          reservationId,
+          propertyId,
+          stayDate,
+          roomType.roomTypeId,
+          null,
+          roomType.roomTypeName,
+          nightlyRate,
+          isManual ? nightlyRate : null,
+          nightlyRate,
+          nightlyRate,
+          isManual,
+          manualReason
+        ]
+      );
+    }
+
+    // Reconcile total price from nightly rates + stay charges
+    const sumRatesRes = await client.query(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total_stay_charge
+       FROM reservation_nightly_rates WHERE reservation_id = $1`,
+      [reservationId]
+    );
+    const newStaySubtotal = Number(sumRatesRes.rows[0].total_stay_charge) || (Number(reservation.total_price || 0) + deltaCharge);
+
+    // Sum other non-room charges if any
+    const otherChargesRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS other_charges
+       FROM folio_entries
+       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION') AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')`,
+      [reservationId]
+    );
+    const otherCharges = Number(otherChargesRes.rows[0].other_charges || 0);
+    const discountAmount = Number(reservation.discount_amount || 0);
+
+    const finalTotalPrice = Math.max(0, newStaySubtotal + otherCharges - discountAmount);
+
+    // Reconcile payments strictly from payment_transactions
+    const paymentsRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_paid
+       FROM payment_transactions
+       WHERE reservation_id = $1 AND status = 'SUCCESS' AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')`,
+      [reservationId]
+    );
+    const totalPaid = Number(paymentsRes.rows[0].total_paid || 0);
+    const newRemainingBalance = Math.max(0, finalTotalPrice - totalPaid);
+    const newPaymentStatus = totalPaid >= finalTotalPrice && finalTotalPrice > 0
+      ? 'PAID'
+      : (totalPaid > 0 ? 'PARTIAL' : 'UNPAID');
+
+    // Update reservation
+    await client.query(
       `UPDATE reservations
-       SET check_out = $1
-       WHERE id = $2
-       RETURNING *`,
-      [requestedCheckOut, reservationId]
+       SET check_out = $1,
+           subtotal_amount = $2,
+           total_price = $3,
+           amount_paid = $4,
+           remaining_balance = $5,
+           payment_status = $6
+       WHERE id = $7`,
+      [
+        requestedCheckOut,
+        newStaySubtotal + otherCharges,
+        finalTotalPrice,
+        totalPaid,
+        newRemainingBalance,
+        newPaymentStatus,
+        reservationId
+      ]
     );
 
     const bookingId = Number(reservation.booking_id || 0);
@@ -3612,6 +4766,11 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       new_check_out: requestedCheckOut,
       delta_dates: deltaDates,
       inventory_delta: deltaDates.length,
+      nightly_rate: nightlyRate,
+      delta_charge: deltaCharge,
+      new_total_price: finalTotalPrice,
+      amount_paid: totalPaid,
+      remaining_balance: newRemainingBalance,
       room_type: roomType.roomTypeName,
       room_type_id: roomType.roomTypeId
     };
@@ -3623,9 +4782,11 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     );
 
     await client.query('COMMIT');
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+
     return res.json({
       status: 'SUCCESS',
-      data: withReservationHotelDates(updatedReservation.rows[0]),
+      data: canonicalDto,
       meta: auditPayload
     });
   } catch (err: any) {
@@ -3698,9 +4859,10 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
 
     if (requestedCheckOut === oldCheckOut) {
       await client.query('COMMIT');
+      const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
       return res.json({
         status: 'SUCCESS',
-        data: withReservationHotelDates(reservation),
+        data: canonicalDto,
         meta: {
           operation: 'SHORTEN',
           no_op: true,
@@ -3743,12 +4905,111 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       );
     }
 
-    const updatedReservation = await client.query(
+    // Shortening logic
+    const removedRatesRes = await client.query(
+      `SELECT COALESCE(SUM(total_amount), 0) AS removed_amount
+       FROM reservation_nightly_rates
+       WHERE reservation_id = $1 AND stay_date >= $2 AND stay_date < $3`,
+      [reservationId, requestedCheckOut, oldCheckOut]
+    );
+    let shortenAmount = Number(removedRatesRes.rows[0].removed_amount || 0);
+    if (shortenAmount === 0) {
+      const oldNights = enumerateHotelDates(checkIn, oldCheckOut).length || 1;
+      const avgRate = Math.round(Number(reservation.total_price || 0) / oldNights);
+      shortenAmount = avgRate * deltaDates.length;
+    }
+
+    // Delete shortened nights from reservation_nightly_rates
+    await client.query(
+      `DELETE FROM reservation_nightly_rates
+       WHERE reservation_id = $1 AND stay_date >= $2 AND stay_date < $3`,
+      [reservationId, requestedCheckOut, oldCheckOut]
+    );
+
+    // Post Folio Adjustment / Credit Entry
+    const sourceId = `SHORTEN-${reservationId}-${requestedCheckOut}-${oldCheckOut}`;
+    const existingAdjRes = await client.query(
+      `SELECT id FROM folio_entries
+       WHERE reservation_id = $1 AND source_type = 'STAY_SHORTEN' AND source_id = $2 AND is_voided = FALSE`,
+      [reservationId, sourceId]
+    );
+
+    if (existingAdjRes.rows.length === 0) {
+      await client.query(
+        `INSERT INTO folio_entries (
+          reservation_id, property_id, entry_type, source_type, source_id,
+          description, amount, direction, base_amount, unit_price, quantity,
+          status, revenue_category, actor_name_snapshot, actor_role_snapshot
+        ) VALUES (
+          $1, $2, 'STAY_SHORTEN_ADJUSTMENT', 'STAY_SHORTEN', $3,
+          $4, $5, 'CREDIT', $5, $6, $7,
+          'POSTED', 'ROOM_SALES', $8, $9
+        )`,
+        [
+          reservationId,
+          propertyId,
+          sourceId,
+          `Pengurangan Masa Menginap (${deltaDates.length} malam: ${requestedCheckOut} s/d ${oldCheckOut})`,
+          shortenAmount,
+          Math.round(shortenAmount / (deltaDates.length || 1)),
+          deltaDates.length,
+          req.body?.actor_name || 'Front Desk',
+          req.body?.actor_role || 'STAFF'
+        ]
+      );
+    }
+
+    // Reconcile total price from remaining nightly rates
+    const sumRatesRes = await client.query(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total_stay_charge
+       FROM reservation_nightly_rates WHERE reservation_id = $1`,
+      [reservationId]
+    );
+    const newStaySubtotal = Number(sumRatesRes.rows[0].total_stay_charge) || Math.max(0, Number(reservation.total_price || 0) - shortenAmount);
+
+    const otherChargesRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS other_charges
+       FROM folio_entries
+       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION') AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')`,
+      [reservationId]
+    );
+    const otherCharges = Number(otherChargesRes.rows[0].other_charges || 0);
+    const discountAmount = Number(reservation.discount_amount || 0);
+
+    const finalTotalPrice = Math.max(0, newStaySubtotal + otherCharges - discountAmount);
+
+    // Reconcile payments strictly from payment_transactions
+    const paymentsRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_paid
+       FROM payment_transactions
+       WHERE reservation_id = $1 AND status = 'SUCCESS' AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')`,
+      [reservationId]
+    );
+    const totalPaid = Number(paymentsRes.rows[0].total_paid || 0);
+    const newRemainingBalance = Math.max(0, finalTotalPrice - totalPaid);
+    const newPaymentStatus = totalPaid > finalTotalPrice
+      ? 'OVERPAID'
+      : (totalPaid === finalTotalPrice && finalTotalPrice > 0 ? 'PAID' : (totalPaid > 0 ? 'PARTIAL' : 'UNPAID'));
+
+    // Update reservation
+    await client.query(
       `UPDATE reservations
-       SET check_out = $1
-       WHERE id = $2
-       RETURNING *`,
-      [requestedCheckOut, reservationId]
+       SET check_out = $1,
+           subtotal_amount = $2,
+           total_price = $3,
+           amount_paid = $4,
+           remaining_balance = $5,
+           payment_status = $6
+       WHERE id = $7`,
+      [
+        requestedCheckOut,
+        newStaySubtotal + otherCharges,
+        finalTotalPrice,
+        totalPaid,
+        newRemainingBalance,
+        newPaymentStatus,
+        reservationId
+      ]
     );
 
     const bookingId = Number(reservation.booking_id || 0);
@@ -3769,6 +5030,11 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       new_check_out: requestedCheckOut,
       delta_dates: deltaDates,
       inventory_delta: -deltaDates.length,
+      shorten_amount: shortenAmount,
+      new_total_price: finalTotalPrice,
+      amount_paid: totalPaid,
+      remaining_balance: newRemainingBalance,
+      overpayment: totalPaid > finalTotalPrice ? totalPaid - finalTotalPrice : 0,
       room_type: roomType.roomTypeName,
       room_type_id: roomType.roomTypeId
     };
@@ -3780,9 +5046,11 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     );
 
     await client.query('COMMIT');
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+
     return res.json({
       status: 'SUCCESS',
-      data: withReservationHotelDates(updatedReservation.rows[0]),
+      data: canonicalDto,
       meta: auditPayload
     });
   } catch (err: any) {
@@ -3869,6 +5137,54 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       });
     }
 
+    // PRE-CHECKIN MANDATORY GATE: Guest Phone and Guest Identity (KTP)
+    if (!req.body?.force && !req.body?.override_guest_identity) {
+      let hasPhone = Boolean(current.guest_phone && String(current.guest_phone).trim().length > 0);
+      let hasIdentity = Boolean(
+        current.has_valid_identity ||
+        (current.ktp_path && String(current.ktp_path).trim().length > 0) ||
+        (current.identity_number && String(current.identity_number).trim().length > 0)
+      );
+
+      if (!hasPhone || !hasIdentity) {
+        const linkedGuestRes = await client.query(
+          `SELECT g.phone, g.identity_number, g.identity_path, g.has_valid_identity
+           FROM reservation_guests rg
+           JOIN guests g ON rg.guest_id = g.id
+           WHERE rg.reservation_id = $1
+           LIMIT 1`,
+          [reservationId]
+        ).catch(() => ({ rowCount: 0, rows: [] as any[] }));
+
+        if (hasRows(linkedGuestRes)) {
+          const g = linkedGuestRes.rows[0];
+          if (!hasPhone && g.phone && String(g.phone).trim().length > 0) {
+            hasPhone = true;
+          }
+          if (!hasIdentity && (g.has_valid_identity || (g.identity_path && g.identity_path.trim().length > 0) || (g.identity_number && g.identity_number.trim().length > 0))) {
+            hasIdentity = true;
+          }
+        }
+      }
+
+      if (!hasPhone || !hasIdentity) {
+        await client.query('ROLLBACK');
+        const missingItems: string[] = [];
+        if (!hasPhone) missingItems.push('Nomor Telepon Tamu');
+        if (!hasIdentity) missingItems.push('Dokumen Identitas (KTP / NIK)');
+
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'CHECKIN_REQUIREMENTS_NOT_MET',
+          message: `Check-in gagal: ${missingItems.join(' dan ')} wajib dilengkapi sebelum melakukan check-in.`,
+          missing_fields: {
+            phone: !hasPhone,
+            identity: !hasIdentity
+          }
+        });
+      }
+    }
+
     // TURNOVER-1: Check-in safety gate (outgoing checked-in guest & room physical readiness)
     if (!req.body?.override_housekeeping && !req.body?.force) {
       await assertCheckInEligible(client, roomId, reservationId);
@@ -3903,7 +5219,8 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
-    res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated.rows[0]) });
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+    res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(updated.rows[0]) });
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     if (err?.statusCode) {
@@ -4033,8 +5350,10 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       if (!hasRows(roomTypeResult)) {
         throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservationId}`);
       }
-      const checkoutIdent = toRoomTypeIdentity(roomTypeResult.rows[0].room_type_id, roomTypeResult.rows[0].room_type);
-      await releaseReservationStayInventory(client, checkoutIdent, checkoutReservation.check_in, checkoutReservation.check_out);
+      if (checkoutReservation.stay_type !== 'DAY_USE') {
+        const checkoutIdent = toRoomTypeIdentity(roomTypeResult.rows[0].room_type_id, roomTypeResult.rows[0].room_type);
+        await releaseReservationStayInventory(client, checkoutIdent, checkoutReservation.check_in, checkoutReservation.check_out);
+      }
 
       await client.query(
         'UPDATE rooms SET status = $1 WHERE id = $2',
@@ -4104,7 +5423,8 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       });
     }
 
-    return res.json({ status: 'SUCCESS', data: withReservationHotelDates(checkoutReservation) });
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+    return res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(checkoutReservation) });
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     if (err?.statusCode) {
@@ -4453,15 +5773,15 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
 
     // 5. Folio entries (reversal DEBIT + replacement CREDIT)
     await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, 'PAYMENT_REVERSAL', $2, $3, 'DEBIT')`,
-      [reservationId, `Pembatalan pembayaran #${paymentId} (koreksi)`, oldAmount]
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'PAYMENT_REVERSAL', $3, $4, 'DEBIT')`,
+      [reservationId, propertyId, `Pembatalan pembayaran #${paymentId} (koreksi)`, oldAmount]
     );
 
     await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, 'PAYMENT', $2, $3, 'CREDIT')`,
-      [reservationId, `Pembayaran pengganti (koreksi #${paymentId})`, correctedAmount]
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'PAYMENT', $3, $4, 'CREDIT')`,
+      [reservationId, propertyId, `Pembayaran pengganti (koreksi #${paymentId})`, correctedAmount]
     );
 
     // 6. Update reservation
@@ -4664,9 +5984,9 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
 
     // 3. Folio entry (reversal DEBIT)
     await client.query(
-      `INSERT INTO folio_entries (reservation_id, entry_type, description, amount, direction)
-       VALUES ($1, 'PAYMENT_VOID', $2, $3, 'DEBIT')`,
-      [reservationId, `Pembatalan pembayaran #${paymentId}`, oldAmount]
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'PAYMENT_VOID', $3, $4, 'DEBIT')`,
+      [reservationId, propertyId, `Pembatalan pembayaran #${paymentId}`, oldAmount]
     );
 
     // 4. Update reservation
@@ -4780,6 +6100,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
         reservation: withReservationHotelDates(reservation.rows[0]),
         payments: payments.rows,
         folio: folio.rows,
+        entries: folio.rows,
         evidences: evidences.rows.map(toEvidenceMetadata)
       }
     });
@@ -5180,21 +6501,14 @@ app.post('/api/availability/lock', async (req, res) => {
   }
 });
 
-// Property list endpoint (used by frontend to resolve current property context)
-app.get('/api/properties', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT id, name, property_code, timezone, currency, is_active FROM properties ORDER BY id'
-    );
-    res.json({ status: 'OK', data: result.rows });
-  } catch (err: any) {
-    res.status(500).json({ status: 'ERROR', message: err.message });
-  }
-});
+// Property management routes (CRUD + list)
+app.use('/api/properties', createPropertiesRouter(pool));
 
-// Property branding & features routes
+// Property branding, features & front office settings routes
 app.use('/api/properties', createPropertyBrandingRouter(pool));
 app.use('/api/properties', createFeatureRouter(pool));
+app.use('/api/properties', createFrontOfficeSettingsRouter(pool));
+app.use('/api/front-office', createFrontOfficeSettingsRouter(pool));
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
@@ -5207,6 +6521,12 @@ app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
+app.use('/api/pricing', createPricingRouter(pool));
+app.use('/api/stay-charges', createStayChargesRouter(pool));
+app.use('/api/transactions', createTransactionsRouter(pool));
+app.use('/api/suppliers', createSuppliersRouter(pool));
+app.use('/api/ota-sources', createOtaRouter(pool));
+app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 
 
 
@@ -5651,6 +6971,7 @@ app.post('/api/reservations/:id/move', async (req, res) => {
       WHERE r.id = $1
     `, [targetRoomId]);
     if (!hasRows(toRoomRes)) throw new Error('target room not found');
+    await assertRoomBelongsToProperty(client, targetRoomId, propertyId);
     const moveTargetRow = toRoomRes.rows[0];
     if (moveTargetRow.room_is_active === false || moveTargetRow.room_type_is_active === false) {
       await client.query('ROLLBACK');
@@ -5750,7 +7071,8 @@ app.post('/api/reservations/:id/move', async (req, res) => {
       console.error('Failed to broadcast ReservationMoved', e);
     }
 
-    return res.json({ status: 'OK', message: 'moved', reservation_id: reservationId });
+    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
+    return res.json({ status: 'OK', message: 'moved', reservation_id: reservationId, data: canonicalDto });
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     if (err?.statusCode) {

@@ -74,6 +74,20 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_payment_evidences_uploaded_at ON payment_evidences (uploaded_at);
     CREATE INDEX IF NOT EXISTS idx_payment_evidences_active ON payment_evidences (is_active);
 
+    DO $$
+    BEGIN
+      ALTER TABLE properties ALTER COLUMN address DROP NOT NULL;
+    EXCEPTION
+      WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$
+    BEGIN
+      ALTER TABLE properties ALTER COLUMN phone DROP NOT NULL;
+    EXCEPTION
+      WHEN OTHERS THEN NULL;
+    END $$;
+
     CREATE TABLE IF NOT EXISTS property_brandings (
       id SERIAL PRIMARY KEY,
       property_id INTEGER NOT NULL UNIQUE REFERENCES properties(id) ON DELETE CASCADE,
@@ -445,6 +459,7 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS bukti_bayar_path VARCHAR(500);
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_reason VARCHAR(255);
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
 
@@ -1257,6 +1272,7 @@ export async function initializeDatabase(pool: Pool) {
           allow_calendar_room_status_override BOOLEAN NOT NULL DEFAULT FALSE,
           default_cleaning_template_code VARCHAR(50) NOT NULL DEFAULT 'STANDARD_ROOM_CLEANING',
           default_checkout_template_code VARCHAR(50) NOT NULL DEFAULT 'CHECKOUT_INSPECTION',
+          housekeeping_category_bulk_check_enabled BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
@@ -1752,7 +1768,8 @@ export async function initializeDatabase(pool: Pool) {
           ADD COLUMN IF NOT EXISTS cleaning_note_at TIMESTAMP WITHOUT TIME ZONE;
 
         ALTER TABLE property_housekeeping_settings
-          ADD COLUMN IF NOT EXISTS default_final_inspection_template_code VARCHAR(50) NOT NULL DEFAULT 'FINAL_INSPECTION';
+          ADD COLUMN IF NOT EXISTS default_final_inspection_template_code VARCHAR(50) NOT NULL DEFAULT 'FINAL_INSPECTION',
+          ADD COLUMN IF NOT EXISTS housekeeping_category_bulk_check_enabled BOOLEAN NOT NULL DEFAULT FALSE;
       `);
 
       // 2. Mark system templates
@@ -2187,6 +2204,925 @@ export async function initializeDatabase(pool: Pool) {
       WHERE code IN ('MINIBAR', 'REMOTE_TV_HILANG', 'REMOTE_AC_HILANG', 'HANDUK_KURANG', 'LINEN_RUSAK', 'BARANG_HILANG', 'KERUSAKAN_FURNITURE', 'KERUSAKAN_ELEKTRONIK', 'LAINNYA');
     `);
 
+    // -------------------------------------------------------------------------
+    // MIGRATION 18: Rate Plan & Room Pricing Foundation (RATE-1)
+    // -------------------------------------------------------------------------
+    const ratePlanMigRes = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'rate_plans_and_pricing_foundation_v1'`
+    );
+
+    if (ratePlanMigRes.rows.length === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Property Pricing Settings (Tax & Service Charge configuration)
+        CREATE TABLE IF NOT EXISTS property_pricing_settings (
+          property_id INTEGER PRIMARY KEY REFERENCES properties(id),
+          tax_percent NUMERIC(5, 2) NOT NULL DEFAULT 10.00,
+          service_charge_percent NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
+          prices_include_tax BOOLEAN NOT NULL DEFAULT false,
+          prices_include_service BOOLEAN NOT NULL DEFAULT false,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 2. Rate Plans master table
+        CREATE TABLE IF NOT EXISTS rate_plans (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id),
+          room_type_id INTEGER NOT NULL REFERENCES room_types(id),
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(150) NOT NULL,
+          description TEXT,
+          base_rate BIGINT NOT NULL CHECK (base_rate >= 0),
+          currency VARCHAR(10) NOT NULL DEFAULT 'IDR',
+          meal_plan VARCHAR(50) NOT NULL DEFAULT 'RO',
+          refundable BOOLEAN NOT NULL DEFAULT true,
+          cancellation_policy TEXT,
+          payment_policy TEXT,
+          valid_from DATE,
+          valid_until DATE,
+          min_stay INTEGER NOT NULL DEFAULT 1 CHECK (min_stay >= 1),
+          max_stay INTEGER CHECK (max_stay IS NULL OR max_stay >= min_stay),
+          min_advance_days INTEGER DEFAULT 0 CHECK (min_advance_days >= 0),
+          max_advance_days INTEGER CHECK (max_advance_days IS NULL OR max_advance_days >= min_advance_days),
+          extra_person_rate BIGINT NOT NULL DEFAULT 0 CHECK (extra_person_rate >= 0),
+          extra_bed_rate BIGINT NOT NULL DEFAULT 0 CHECK (extra_bed_rate >= 0),
+          days_of_week INTEGER[],
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          is_archived BOOLEAN NOT NULL DEFAULT false,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_by VARCHAR(100),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by VARCHAR(100),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_plans_prop_code_active 
+          ON rate_plans(property_id, UPPER(TRIM(code))) 
+          WHERE (is_archived = FALSE);
+
+        CREATE INDEX IF NOT EXISTS idx_rate_plans_property_room_type 
+          ON rate_plans(property_id, room_type_id, is_active, is_archived);
+
+        -- 3. Rate Calendar Overrides table
+        CREATE TABLE IF NOT EXISTS rate_overrides (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id),
+          rate_plan_id BIGINT NOT NULL REFERENCES rate_plans(id) ON DELETE CASCADE,
+          start_date DATE NOT NULL,
+          end_date DATE NOT NULL,
+          override_rate BIGINT NOT NULL CHECK (override_rate >= 0),
+          days_of_week INTEGER[],
+          reason VARCHAR(255),
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          is_archived BOOLEAN NOT NULL DEFAULT false,
+          created_by VARCHAR(100),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by VARCHAR(100),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_rate_overrides_date_range CHECK (end_date > start_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rate_overrides_plan_dates 
+          ON rate_overrides(property_id, rate_plan_id, start_date, end_date, is_active, is_archived);
+
+        -- 4. Reservation Nightly Rate Snapshots (Immutable Financial Ledger)
+        CREATE TABLE IF NOT EXISTS reservation_nightly_rates (
+          id BIGSERIAL PRIMARY KEY,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+          property_id INTEGER NOT NULL REFERENCES properties(id),
+          stay_date DATE NOT NULL,
+          room_type_id INTEGER NOT NULL REFERENCES room_types(id),
+          room_type_code_snapshot VARCHAR(50),
+          room_type_name_snapshot VARCHAR(150),
+          rate_plan_id BIGINT REFERENCES rate_plans(id),
+          rate_plan_code_snapshot VARCHAR(50),
+          rate_plan_name_snapshot VARCHAR(150),
+          base_rate BIGINT NOT NULL,
+          applied_override_rate BIGINT,
+          final_room_rate BIGINT NOT NULL,
+          service_amount BIGINT NOT NULL DEFAULT 0,
+          tax_amount BIGINT NOT NULL DEFAULT 0,
+          total_amount BIGINT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_reservation_stay_date UNIQUE (reservation_id, stay_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_res_nightly_rates_property_stay 
+          ON reservation_nightly_rates(property_id, stay_date);
+
+        -- 5. Extend reservations columns safely
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS rate_plan_id BIGINT REFERENCES rate_plans(id);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS rate_plan_code_snapshot VARCHAR(50);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS rate_plan_name_snapshot VARCHAR(150);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS subtotal_amount NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS service_amount NUMERIC(12, 2) DEFAULT 0;
+
+        -- 6. Seed Property Pricing Settings for all existing properties
+        INSERT INTO property_pricing_settings (property_id, tax_percent, service_charge_percent, prices_include_tax, prices_include_service)
+        SELECT p.id, 10.00, 0.00, false, false
+        FROM properties p
+        ON CONFLICT (property_id) DO NOTHING;
+
+        -- 7. Seed baseline BAR rate plans for active room types of Property 1 (if none exist)
+        INSERT INTO rate_plans (property_id, room_type_id, code, name, description, base_rate, meal_plan, refundable, is_active, is_archived, sort_order, created_by)
+        SELECT 
+          rt.property_id,
+          rt.id,
+          'BAR-' || UPPER(REPLACE(COALESCE(rt.code, 'RT' || rt.id), ' ', '-')),
+          COALESCE(rt.name, 'Room Type ' || rt.id) || ' - Best Available Rate',
+          'Standard Best Available Rate (Room Only)',
+          COALESCE(ROUND(rt.base_rate), 0)::BIGINT,
+          'RO',
+          TRUE,
+          TRUE,
+          FALSE,
+          COALESCE(rt.display_order, 0),
+          'SYSTEM_SEED'
+        FROM room_types rt
+        WHERE rt.property_id = 1 AND rt.is_active = TRUE
+          AND NOT EXISTS (
+            SELECT 1 FROM rate_plans rp WHERE rp.property_id = rt.property_id AND rp.room_type_id = rt.id
+          );
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('rate_plans_and_pricing_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // MIGRATION 19: Meal Plan Master & Rate Plan Relational Link (RATE-1C)
+    const mealPlanMigrationCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'meal_plans_and_rate_plan_relational_link_v1'"
+    );
+    if ((mealPlanMigrationCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Meal Plans Master table
+        CREATE TABLE IF NOT EXISTS meal_plans (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id),
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(150) NOT NULL,
+          description TEXT,
+          breakfast_included BOOLEAN NOT NULL DEFAULT false,
+          lunch_included BOOLEAN NOT NULL DEFAULT false,
+          dinner_included BOOLEAN NOT NULL DEFAULT false,
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          is_archived BOOLEAN NOT NULL DEFAULT false,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_by VARCHAR(100),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by VARCHAR(100),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_meal_plans_prop_code_active 
+          ON meal_plans(property_id, UPPER(TRIM(code))) 
+          WHERE (is_archived = FALSE);
+
+        CREATE INDEX IF NOT EXISTS idx_meal_plans_prop_active_archived
+          ON meal_plans(property_id, is_active, is_archived);
+
+        -- 2. Seed baseline standard meal plans for existing properties (e.g. Property 1)
+        INSERT INTO meal_plans (property_id, code, name, description, breakfast_included, lunch_included, dinner_included, is_active, is_archived, sort_order, created_by)
+        SELECT p.id, 'RO', 'Room Only', 'Hanya sewa kamar tanpa makan', false, false, false, true, false, 1, 'SYSTEM_SEED'
+        FROM properties p
+        WHERE NOT EXISTS (SELECT 1 FROM meal_plans mp WHERE mp.property_id = p.id AND mp.code = 'RO');
+
+        INSERT INTO meal_plans (property_id, code, name, description, breakfast_included, lunch_included, dinner_included, is_active, is_archived, sort_order, created_by)
+        SELECT p.id, 'BB', 'Bed & Breakfast', 'Kamar termasuk sarapan pagi (Breakfast)', true, false, false, true, false, 2, 'SYSTEM_SEED'
+        FROM properties p
+        WHERE NOT EXISTS (SELECT 1 FROM meal_plans mp WHERE mp.property_id = p.id AND mp.code = 'BB');
+
+        INSERT INTO meal_plans (property_id, code, name, description, breakfast_included, lunch_included, dinner_included, is_active, is_archived, sort_order, created_by)
+        SELECT p.id, 'HB', 'Half Board', 'Kamar termasuk sarapan pagi dan makan malam', true, false, true, true, false, 3, 'SYSTEM_SEED'
+        FROM properties p
+        WHERE NOT EXISTS (SELECT 1 FROM meal_plans mp WHERE mp.property_id = p.id AND mp.code = 'HB');
+
+        INSERT INTO meal_plans (property_id, code, name, description, breakfast_included, lunch_included, dinner_included, is_active, is_archived, sort_order, created_by)
+        SELECT p.id, 'FB', 'Full Board', 'Kamar termasuk sarapan, makan siang, dan makan malam', true, true, true, true, false, 4, 'SYSTEM_SEED'
+        FROM properties p
+        WHERE NOT EXISTS (SELECT 1 FROM meal_plans mp WHERE mp.property_id = p.id AND mp.code = 'FB');
+
+        INSERT INTO meal_plans (property_id, code, name, description, breakfast_included, lunch_included, dinner_included, is_active, is_archived, sort_order, created_by)
+        SELECT p.id, 'AI', 'All Inclusive', 'Kamar termasuk semua makan, camilan, dan minuman', true, true, true, true, false, 5, 'SYSTEM_SEED'
+        FROM properties p
+        WHERE NOT EXISTS (SELECT 1 FROM meal_plans mp WHERE mp.property_id = p.id AND mp.code = 'AI');
+
+        -- 3. Extend rate_plans with meal_plan_id relational foreign key
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS meal_plan_id BIGINT REFERENCES meal_plans(id);
+
+        -- Backward compatibility backfill: link existing rate_plans to meal_plans
+        UPDATE rate_plans rp
+        SET meal_plan_id = mp.id
+        FROM meal_plans mp
+        WHERE rp.meal_plan_id IS NULL
+          AND mp.property_id = rp.property_id
+          AND UPPER(TRIM(rp.meal_plan)) = UPPER(TRIM(mp.code));
+
+        -- 4. Extend reservation snapshots and reservations table for meal plan auditability
+        ALTER TABLE reservation_nightly_rates ADD COLUMN IF NOT EXISTS meal_plan_id BIGINT REFERENCES meal_plans(id);
+        ALTER TABLE reservation_nightly_rates ADD COLUMN IF NOT EXISTS meal_plan_code_snapshot VARCHAR(50);
+        ALTER TABLE reservation_nightly_rates ADD COLUMN IF NOT EXISTS meal_plan_name_snapshot VARCHAR(150);
+
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS meal_plan_id BIGINT REFERENCES meal_plans(id);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS meal_plan_code_snapshot VARCHAR(50);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS meal_plan_name_snapshot VARCHAR(150);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('meal_plans_and_rate_plan_relational_link_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration 20: Stay charges & Day Use / Transit foundation (STAY-CHARGE-1)
+    const stayChargeMigrationRes = await auditMigrationClient.query(
+      `SELECT version FROM schema_migrations WHERE version = 'stay_charge_and_day_use_foundation_v1'`
+    );
+    if (stayChargeMigrationRes.rowCount === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Extend reservations table with stay_type and datetime timestamps
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS stay_type VARCHAR(20) DEFAULT 'OVERNIGHT';
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS start_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS end_at TIMESTAMP WITH TIME ZONE;
+
+        ALTER TABLE reservations DROP CONSTRAINT IF EXISTS reservations_check_out_after_check_in;
+        ALTER TABLE reservations ADD CONSTRAINT reservations_check_out_after_check_in CHECK ((stay_type = 'DAY_USE' AND check_out >= check_in) OR (check_out > check_in)) NOT VALID;
+
+        CREATE INDEX IF NOT EXISTS idx_reservations_stay_type ON reservations (stay_type);
+        CREATE INDEX IF NOT EXISTS idx_reservations_room_time ON reservations (room_id, start_at, end_at);
+
+        -- 2. Extend rate_plans table with Day Use rate configuration
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS rate_type VARCHAR(20) NOT NULL DEFAULT 'OVERNIGHT';
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS duration_minutes INTEGER;
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS earliest_start_time VARCHAR(10);
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS latest_start_time VARCHAR(10);
+        ALTER TABLE rate_plans ADD COLUMN IF NOT EXISTS turnaround_buffer_minutes INTEGER DEFAULT 60;
+        CREATE INDEX IF NOT EXISTS idx_rate_plans_rate_type ON rate_plans (property_id, rate_type, is_active, is_archived);
+
+        -- 3. Create stay_charge_rules table
+        CREATE TABLE IF NOT EXISTS stay_charge_rules (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          charge_type VARCHAR(30) NOT NULL, -- EXTRA_BED, EXTRA_PERSON, EARLY_CHECKIN, LATE_CHECKOUT, PENALTY
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(150) NOT NULL,
+          description TEXT,
+          charge_method VARCHAR(30) NOT NULL DEFAULT 'FIXED_AMOUNT', -- FIXED_AMOUNT, PERCENTAGE_OF_NIGHTLY_RATE, FULL_NIGHT, FREE, MANUAL
+          default_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+          percentage_rate NUMERIC(5, 2) DEFAULT 0,
+          cutoff_time VARCHAR(10),
+          taxable BOOLEAN NOT NULL DEFAULT TRUE,
+          service_chargeable BOOLEAN NOT NULL DEFAULT TRUE,
+          requires_note BOOLEAN NOT NULL DEFAULT FALSE,
+          requires_photo BOOLEAN NOT NULL DEFAULT FALSE,
+          requires_supervisor_approval BOOLEAN NOT NULL DEFAULT FALSE,
+          approval_threshold NUMERIC(12, 2) DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_by VARCHAR(100),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_by VARCHAR(100),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_stay_charge_rules_property_code 
+          ON stay_charge_rules (property_id, UPPER(TRIM(code))) 
+          WHERE is_archived = FALSE;
+
+        CREATE INDEX IF NOT EXISTS idx_stay_charge_rules_property_type 
+          ON stay_charge_rules (property_id, charge_type, is_active, is_archived);
+
+        -- 4. Extend folio_entries with financial & source metadata
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS source_type VARCHAR(50);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS source_id VARCHAR(100);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS unit_price NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS quantity NUMERIC(6, 2) DEFAULT 1;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS service_amount NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS actor_user_id VARCHAR(100);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS actor_name_snapshot VARCHAR(150);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS actor_role_snapshot VARCHAR(100);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS is_voided BOOLEAN DEFAULT FALSE;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS void_reason TEXT;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS voided_by VARCHAR(100);
+
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_res_type ON folio_entries (reservation_id, entry_type, is_voided);
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_prop_source ON folio_entries (property_id, source_type);
+
+        -- 5. Seed baseline stay charge rules for Property 1
+        INSERT INTO stay_charge_rules (
+          property_id, charge_type, code, name, description, charge_method,
+          default_amount, percentage_rate, taxable, service_chargeable, requires_note, sort_order, created_by
+        ) VALUES
+          (1, 'EXTRA_BED', 'EXTRA_BED_STD', 'Extra Bed Standar', 'Kasur tambahan dewasa standar dengan sprei dan bantal', 'FIXED_AMOUNT', 150000, 0, true, true, false, 1, 'SYSTEM'),
+          (1, 'EXTRA_PERSON', 'EXTRA_PERSON_ADULT', 'Extra Person Dewasa', 'Tamu tambahan dewasa tanpa kasur tambahan', 'FIXED_AMOUNT', 100000, 0, true, true, false, 2, 'SYSTEM'),
+          (1, 'EARLY_CHECKIN', 'EARLY_CHECKIN_STD', 'Early Check-in Standar', 'Biaya masuk lebih awal (sebelum 14:00)', 'PERCENTAGE_OF_NIGHTLY_RATE', 0, 50.00, true, true, false, 3, 'SYSTEM'),
+          (1, 'LATE_CHECKOUT', 'LATE_CHECKOUT_STD', 'Late Check-out Standar', 'Biaya perpanjangan jam keluar (setelah 12:00)', 'PERCENTAGE_OF_NIGHTLY_RATE', 0, 50.00, true, true, false, 4, 'SYSTEM'),
+          (1, 'PENALTY', 'PENALTY_LOST_KEY', 'Kartu Kunci Hilang', 'Penggantian kartu kunci RFID hilang / rusak', 'FIXED_AMOUNT', 50000, 0, false, false, false, 5, 'SYSTEM'),
+          (1, 'PENALTY', 'PENALTY_SMOKING', 'Denda Merokok (Smoking Charge)', 'Denda merokok di dalam kamar non-smoking', 'FIXED_AMOUNT', 500000, 0, false, false, true, 6, 'SYSTEM'),
+          (1, 'PENALTY', 'PENALTY_DAMAGE', 'Kerusakan Kamar / Properti', 'Penggantian / perbaikan kerusakan fasilitas kamar', 'MANUAL', 0, 0, false, false, true, 7, 'SYSTEM')
+        ON CONFLICT DO NOTHING;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('stay_charge_and_day_use_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: stay_charge_financial_ledger_safety_v1
+    const stayChargeSafetyCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'stay_charge_financial_ledger_safety_v1'`
+    );
+    if ((stayChargeSafetyCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Extend folio_entries with reversal & correction linkages
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS reversal_of_entry_id INTEGER REFERENCES folio_entries(id) ON DELETE SET NULL;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS correction_group_id VARCHAR(100);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS base_amount NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'POSTED';
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS notes TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_reversal_of ON folio_entries (reversal_of_entry_id);
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_corr_group ON folio_entries (correction_group_id);
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_status ON folio_entries (status);
+
+        -- Backfill base_amount for existing entries where base_amount is 0
+        UPDATE folio_entries
+        SET base_amount = COALESCE(unit_price * quantity, amount)
+        WHERE (base_amount IS NULL OR base_amount = 0) AND amount > 0;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('stay_charge_financial_ledger_safety_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: rate_plan_quick_booking_integration_v1
+    const ratePlanQuickBookingCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'rate_plan_quick_booking_integration_v1'`
+    );
+    if ((ratePlanQuickBookingCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS is_manual_override BOOLEAN DEFAULT FALSE;
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS manual_override_reason TEXT;
+        ALTER TABLE reservation_nightly_rates ADD COLUMN IF NOT EXISTS is_manual_override BOOLEAN DEFAULT FALSE;
+        ALTER TABLE reservation_nightly_rates ADD COLUMN IF NOT EXISTS manual_override_reason TEXT;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('rate_plan_quick_booking_integration_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: booking_ux_ota_identity_gate_v1
+    const bookingUxOtaIdentityCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'booking_ux_ota_identity_gate_v1'`
+    );
+    if ((bookingUxOtaIdentityCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS ota_sources (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          display_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (property_id, code)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ota_sources_property ON ota_sources (property_id);
+        CREATE INDEX IF NOT EXISTS idx_ota_sources_active ON ota_sources (is_active, is_archived);
+
+        -- Add columns to guests table for CRM Identity
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_type VARCHAR(30) DEFAULT 'KTP';
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_number VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_path TEXT;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS has_valid_identity BOOLEAN DEFAULT FALSE;
+
+        -- Add columns to bookings table
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booker_name VARCHAR(150);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booker_phone VARCHAR(50);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_channel VARCHAR(50);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS ota_source_id INTEGER REFERENCES ota_sources(id) ON DELETE SET NULL;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral VARCHAR(100);
+
+        -- Add columns to reservations table
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booker_name VARCHAR(150);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booker_phone VARCHAR(50);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_channel VARCHAR(50);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS ota_source_id INTEGER REFERENCES ota_sources(id) ON DELETE SET NULL;
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS referral VARCHAR(100);
+
+        -- Seed standard OTA sources for all existing properties
+        INSERT INTO ota_sources (property_id, code, name, display_order)
+        SELECT p.id, s.code, s.name, s.display_order
+        FROM properties p
+        CROSS JOIN (
+          VALUES 
+            ('TIKET_COM', 'Tiket.com', 1),
+            ('BOOKING_COM', 'Booking.com', 2),
+            ('AGODA', 'Agoda', 3)
+        ) AS s(code, name, display_order)
+        ON CONFLICT (property_id, code) DO NOTHING;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('booking_ux_ota_identity_gate_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    const appliedBookingUxV2 = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'booking_ux_ota_channel_v2' LIMIT 1;`
+    );
+    if (!appliedBookingUxV2.rows.length) {
+      await auditMigrationClient.query(`
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_channel VARCHAR(50);
+        ALTER TABLE reservations ADD COLUMN IF NOT EXISTS booking_channel VARCHAR(50);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('booking_ux_ota_channel_v2')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    const appliedBookingUxV3 = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'booking_ux_ota_fields_v3' LIMIT 1;`
+    );
+    if (!appliedBookingUxV3.rows.length) {
+      await auditMigrationClient.query(`
+        ALTER TABLE ota_sources ADD COLUMN IF NOT EXISTS description TEXT;
+        ALTER TABLE ota_sources ADD COLUMN IF NOT EXISTS commission_rate_percent NUMERIC(5,2);
+
+        -- Delete unreferenced TRAVELOKA seed if it has 0 bookings/reservations
+        DELETE FROM ota_sources
+        WHERE code = 'TRAVELOKA'
+          AND id NOT IN (SELECT ota_source_id FROM bookings WHERE ota_source_id IS NOT NULL)
+          AND id NOT IN (SELECT ota_source_id FROM reservations WHERE ota_source_id IS NOT NULL);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('booking_ux_ota_fields_v3')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    const appliedBookingUxV4 = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'booking_ux_property_rules_v4' LIMIT 1;`
+    );
+    if (!appliedBookingUxV4.rows.length) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS property_quick_booking_rules (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          channel_type VARCHAR(32) NOT NULL,
+          field_key VARCHAR(64) NOT NULL,
+          field_mode VARCHAR(16) NOT NULL DEFAULT 'REQUIRED',
+          created_by VARCHAR(64),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by VARCHAR(64),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_prop_booking_rules UNIQUE (property_id, channel_type, field_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_prop_booking_rules_lookup ON property_quick_booking_rules (property_id, channel_type);
+
+        -- Seed default rules for all properties
+        -- WALK-IN defaults
+        INSERT INTO property_quick_booking_rules (property_id, channel_type, field_key, field_mode)
+        SELECT p.id, 'WALK_IN', f.key, f.mode
+        FROM properties p
+        CROSS JOIN (
+          VALUES
+            ('booker_name', 'REQUIRED'),
+            ('booker_phone', 'REQUIRED'),
+            ('guest_name', 'REQUIRED'),
+            ('guest_phone', 'REQUIRED'),
+            ('guest_segment', 'OPTIONAL'),
+            ('referral', 'OPTIONAL'),
+            ('identity', 'REQUIRED'),
+            ('payment_method', 'REQUIRED'),
+            ('payment_amount', 'OPTIONAL'),
+            ('payment_evidence', 'REQUIRED'),
+            ('rate_plan', 'REQUIRED')
+        ) AS f(key, mode)
+        ON CONFLICT (property_id, channel_type, field_key) DO NOTHING;
+
+        -- OTA defaults
+        INSERT INTO property_quick_booking_rules (property_id, channel_type, field_key, field_mode)
+        SELECT p.id, 'OTA', f.key, f.mode
+        FROM properties p
+        CROSS JOIN (
+          VALUES
+            ('booker_name', 'REQUIRED'),
+            ('booker_phone', 'OPTIONAL'),
+            ('guest_name', 'REQUIRED'),
+            ('guest_phone', 'OPTIONAL'),
+            ('guest_segment', 'OPTIONAL'),
+            ('referral', 'OPTIONAL'),
+            ('identity', 'OPTIONAL'),
+            ('payment_method', 'OPTIONAL'),
+            ('payment_amount', 'OPTIONAL'),
+            ('payment_evidence', 'OPTIONAL'),
+            ('rate_plan', 'REQUIRED')
+        ) AS f(key, mode)
+        ON CONFLICT (property_id, channel_type, field_key) DO NOTHING;
+
+        -- Day Use Durations Master Table
+        CREATE TABLE IF NOT EXISTS property_day_use_durations (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          name VARCHAR(64) NOT NULL,
+          duration_minutes INTEGER NOT NULL CHECK (duration_minutes > 0),
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          created_by VARCHAR(64),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by VARCHAR(64),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_prop_day_use_durations UNIQUE (property_id, duration_minutes)
+        );
+        CREATE INDEX IF NOT EXISTS idx_prop_day_use_durations_lookup ON property_day_use_durations (property_id, is_active, is_archived);
+
+        -- Seed default Day Use presets
+        INSERT INTO property_day_use_durations (property_id, name, duration_minutes, sort_order)
+        SELECT p.id, d.name, d.mins, d.ord
+        FROM properties p
+        CROSS JOIN (
+          VALUES
+            ('3 Jam', 180, 1),
+            ('4 Jam', 240, 2),
+            ('6 Jam', 360, 3),
+            ('8 Jam', 480, 4),
+            ('12 Jam', 720, 5)
+        ) AS d(name, mins, ord)
+        ON CONFLICT (property_id, duration_minutes) DO NOTHING;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('booking_ux_property_rules_v4')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: stay_charge_authoritative_override_snapshot_v1
+    const stayChargeSnapshotCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'stay_charge_authoritative_override_snapshot_v1'`
+    );
+    if ((stayChargeSnapshotCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Extend folio_entries with snapshot and override columns
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS rule_id INTEGER REFERENCES stay_charge_rules(id) ON DELETE SET NULL;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS rule_code_snapshot VARCHAR(50);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS rule_name_snapshot VARCHAR(200);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS calculation_method_snapshot VARCHAR(50);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS original_rule_amount NUMERIC(12, 2);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS is_override BOOLEAN DEFAULT FALSE;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_amount NUMERIC(12, 2);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_reason TEXT;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_by VARCHAR(100);
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS revenue_category VARCHAR(50) DEFAULT 'ROOM_SALES';
+
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_rule ON folio_entries (rule_id);
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_rev_cat ON folio_entries (revenue_category);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('stay_charge_authoritative_override_snapshot_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: crm_guest_canonicalization_v1
+    const crmGuestCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'crm_guest_canonicalization_v1'`
+    );
+    if ((crmGuestCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Extend guests with canonical CRM fields
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS guest_code VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(255);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS normalized_phone VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS normalized_email VARCHAR(255);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS normalized_identity_number VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS preferences TEXT;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS guest_segment VARCHAR(50) DEFAULT 'Reguler';
+
+        -- 2. Populate guest_code and normalized values for existing records
+        UPDATE guests SET guest_code = 'GST-' || LPAD(id::text, 5, '0') WHERE guest_code IS NULL;
+        UPDATE guests SET normalized_phone = REGEXP_REPLACE(phone, '[^0-9]', '', 'g') WHERE normalized_phone IS NULL AND phone IS NOT NULL;
+        UPDATE guests SET normalized_identity_number = UPPER(REGEXP_REPLACE(identity_number, '[^0-9A-Za-z]', '', 'g')) WHERE normalized_identity_number IS NULL AND identity_number IS NOT NULL;
+        UPDATE guests SET normalized_name = LOWER(TRIM(full_name)) WHERE normalized_name IS NULL AND full_name IS NOT NULL;
+        UPDATE guests SET normalized_email = LOWER(TRIM(email)) WHERE normalized_email IS NULL AND email IS NOT NULL;
+
+        -- 3. Indexes for high-performance CRM searches & duplicate detection
+        CREATE INDEX IF NOT EXISTS idx_guests_normalized_phone ON guests (normalized_phone);
+        CREATE INDEX IF NOT EXISTS idx_guests_normalized_identity ON guests (normalized_identity_number);
+        CREATE INDEX IF NOT EXISTS idx_guests_guest_code ON guests (guest_code);
+        CREATE INDEX IF NOT EXISTS idx_guests_is_archived ON guests (is_archived);
+        CREATE INDEX IF NOT EXISTS idx_guests_is_active ON guests (is_active);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('crm_guest_canonicalization_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: crm_guest_ktp_details_v1
+    const crmGuestKtpCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'crm_guest_ktp_details_v1'`
+    );
+    if ((crmGuestKtpCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Extend guests with full KTP fields
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS rt_rw VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS village_kelurahan VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS district_kecamatan VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS religion VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS marital_status VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS occupation VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS citizenship VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS valid_until VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS ktp_extracted_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS ktp_ocr_provider VARCHAR(50);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS ktp_ocr_confidence NUMERIC(4,2);
+
+        -- 2. Indexes for search
+        CREATE INDEX IF NOT EXISTS idx_guests_district_kecamatan ON guests (district_kecamatan);
+        CREATE INDEX IF NOT EXISTS idx_guests_has_valid_identity ON guests (has_valid_identity);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('crm_guest_ktp_details_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: transaction_domain_foundation_v1
+    const txDomainCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'transaction_domain_foundation_v1'`
+    );
+    if ((txDomainCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Create transaction_daily_sequences table for atomic transaction numbering
+        CREATE TABLE IF NOT EXISTS transaction_daily_sequences (
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          date_key VARCHAR(8) NOT NULL, -- 'YYMMDD'
+          last_seq INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (property_id, date_key)
+        );
+
+        -- 2. Create canonical transactions table
+        CREATE TABLE IF NOT EXISTS transactions (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          transaction_no VARCHAR(50) NOT NULL UNIQUE,
+          transaction_date DATE NOT NULL,
+          transaction_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          transaction_type VARCHAR(20) NOT NULL, -- 'SALE', 'PURCHASE', 'EXPENSE', 'INCOME'
+          source_type VARCHAR(50) NOT NULL, -- 'ROOM_CHARGE', 'DAY_USE_ROOM', 'EXTRA_BED', 'EXTRA_PERSON', 'EARLY_CHECKIN', 'LATE_CHECKOUT', 'PENALTY', 'POS', 'MANUAL_INCOME', 'MANUAL_EXPENSE', 'MANUAL_PURCHASE', 'MANUAL_SALE', 'OTHER_SALE'
+          source_id VARCHAR(100),
+          source_reference VARCHAR(100),
+          category_code VARCHAR(50) NOT NULL,
+          category_name VARCHAR(150) NOT NULL,
+          department_code VARCHAR(50) NOT NULL DEFAULT 'FRONT_OFFICE',
+          description TEXT NOT NULL,
+          amount BIGINT NOT NULL DEFAULT 0,
+          discount_amount BIGINT NOT NULL DEFAULT 0,
+          service_amount BIGINT NOT NULL DEFAULT 0,
+          tax_amount BIGINT NOT NULL DEFAULT 0,
+          net_amount BIGINT NOT NULL DEFAULT 0,
+          payment_status VARCHAR(30) NOT NULL DEFAULT 'UNPAID',
+          payment_method VARCHAR(50),
+          transaction_status VARCHAR(30) NOT NULL DEFAULT 'POSTED', -- 'POSTED', 'VOIDED', 'REVERSED', 'CORRECTED'
+          guest_id INTEGER REFERENCES guests(id) ON DELETE SET NULL,
+          guest_name_snapshot VARCHAR(150),
+          room_number_snapshot VARCHAR(50),
+          reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL,
+          booking_id BIGINT REFERENCES bookings(id) ON DELETE SET NULL,
+          reversal_of_transaction_id BIGINT REFERENCES transactions(id) ON DELETE SET NULL,
+          correction_group_id VARCHAR(100),
+          notes TEXT,
+          metadata JSONB DEFAULT '{}'::jsonb,
+          created_by VARCHAR(100),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_by VARCHAR(100),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_prop_source 
+          ON transactions (property_id, source_type, source_id) 
+          WHERE source_id IS NOT NULL AND reversal_of_transaction_id IS NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_type_date 
+          ON transactions (property_id, transaction_type, transaction_date DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_res 
+          ON transactions (property_id, reservation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_status 
+          ON transactions (property_id, transaction_status);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_cat 
+          ON transactions (property_id, category_code);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_dept 
+          ON transactions (property_id, department_code);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('transaction_domain_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Migration: transaction_domain_attachments_v1
+    const txAttCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'transaction_domain_attachments_v1'`
+    );
+    if ((txAttCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- Add party_name to transactions if not present
+        ALTER TABLE transactions ADD COLUMN IF NOT EXISTS party_name VARCHAR(150);
+
+        -- Create transaction_attachments table
+        CREATE TABLE IF NOT EXISTS transaction_attachments (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          transaction_id BIGINT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+          file_name VARCHAR(255) NOT NULL,
+          original_name VARCHAR(255) NOT NULL,
+          mime_type VARCHAR(100) NOT NULL,
+          file_size BIGINT NOT NULL,
+          storage_path VARCHAR(500) NOT NULL,
+          uploaded_by VARCHAR(100),
+          uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transaction_attachments_tx 
+          ON transaction_attachments (property_id, transaction_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('transaction_domain_attachments_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // 25. Transaction-2D: Canonical Suppliers, Transaction Lines, Custom Categories, Verification & Multi-Purpose Attachments
+    const tx2dMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'transaction_2d_operational_workflow_v1'"
+    );
+    if ((tx2dMarkerCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- Canonical Suppliers Master
+        CREATE TABLE IF NOT EXISTS suppliers (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          name VARCHAR(255) NOT NULL,
+          phone VARCHAR(50),
+          bank_name VARCHAR(100),
+          bank_account VARCHAR(100),
+          address TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_suppliers_property ON suppliers(property_id, is_active);
+
+        -- Transaction Line Items (Multi-line purchases, integer IDR math with decimal quantity)
+        CREATE TABLE IF NOT EXISTS transaction_lines (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          transaction_id BIGINT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+          product_id BIGINT DEFAULT NULL,
+          description_snapshot VARCHAR(255) NOT NULL,
+          quantity NUMERIC(12, 3) NOT NULL DEFAULT 1,
+          unit VARCHAR(50) NOT NULL DEFAULT 'pcs',
+          unit_price BIGINT NOT NULL DEFAULT 0,
+          discount_amount BIGINT NOT NULL DEFAULT 0,
+          line_total BIGINT NOT NULL DEFAULT 0,
+          sort_order INT NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_tx_lines_transaction ON transaction_lines(transaction_id);
+
+        -- Custom Operational Categories
+        CREATE TABLE IF NOT EXISTS transaction_custom_categories (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          transaction_type VARCHAR(20) NOT NULL,
+          department_code VARCHAR(50) NOT NULL DEFAULT 'GENERAL',
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_property_category_code UNIQUE (property_id, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tx_custom_cat_property ON transaction_custom_categories(property_id, transaction_type);
+
+        -- Extend transactions table
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS supplier_id BIGINT REFERENCES suppliers(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS receiving_status VARCHAR(50) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) NOT NULL DEFAULT 'UNVERIFIED',
+          ADD COLUMN IF NOT EXISTS verified_by_user_id VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS verified_by_name_snapshot VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS verification_note TEXT DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS rounding_amount BIGINT NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS phone VARCHAR(50) DEFAULT NULL;
+
+        -- Extend transaction_attachments table
+        ALTER TABLE transaction_attachments
+          ADD COLUMN IF NOT EXISTS attachment_purpose VARCHAR(50) NOT NULL DEFAULT 'RECEIPT';
+
+        -- Extend payment_transactions table for non-folio transaction settlement linkage
+        ALTER TABLE payment_transactions
+          ADD COLUMN IF NOT EXISTS transaction_id BIGINT REFERENCES transactions(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE;
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_tx ON payment_transactions (transaction_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('transaction_2d_operational_workflow_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // TRANSACTION-2E: ANKA Operational Lifecycle Sheets (PROSES, SELESAI, BATAL, HAPUS) & Soft Delete Support
+    const tx2eMarkerCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'transaction_2e_operational_lifecycle_sheets_v1'"
+    );
+    if ((tx2eMarkerCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- Soft Delete Support for transactions
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS deleted_by_user_id VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS deleted_by_name_snapshot VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS delete_reason TEXT DEFAULT NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_deleted ON transactions (property_id, deleted_at);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('transaction_2e_operational_lifecycle_sheets_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // FOLIO PROPERTY ID BACKFILL & NOT NULL NORMALIZATION
+    const folioPropCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'folio_entries_property_id_backfill_and_not_null_v1'"
+    );
+    if ((folioPropCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Idempotent historical backfill from reservations -> bookings
+        UPDATE folio_entries fe
+        SET property_id = b.property_id
+        FROM reservations r
+        JOIN bookings b ON r.booking_id = b.id
+        WHERE fe.reservation_id = r.id
+          AND fe.property_id IS NULL
+          AND b.property_id IS NOT NULL;
+
+        -- 2. Fallback safety backfill for any isolated rows
+        UPDATE folio_entries
+        SET property_id = 1
+        WHERE property_id IS NULL;
+
+        -- 3. Enforce NOT NULL on property_id
+        ALTER TABLE folio_entries ALTER COLUMN property_id SET NOT NULL;
+
+        -- 4. Ensure FK and indexes exist
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_property_id ON folio_entries(property_id);
+        CREATE INDEX IF NOT EXISTS idx_folio_entries_prop_source ON folio_entries(property_id, source_type);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('folio_entries_property_id_backfill_and_not_null_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // HOUSEKEEPING: Category Bulk Check Setting
+    const hkBulkCheckMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_category_bulk_check_v1'"
+    );
+    if ((hkBulkCheckMarker.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE property_housekeeping_settings
+          ADD COLUMN IF NOT EXISTS housekeeping_category_bulk_check_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('housekeeping_category_bulk_check_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});
@@ -2194,6 +3130,14 @@ export async function initializeDatabase(pool: Pool) {
   } finally {
     auditMigrationClient.release();
   }
+
+  // Ensure reservations constraint allows DAY_USE stays
+  await pool.query(`
+    ALTER TABLE reservations DROP CONSTRAINT IF EXISTS reservations_check_out_after_check_in;
+    ALTER TABLE reservations ADD CONSTRAINT reservations_check_out_after_check_in CHECK ((stay_type = 'DAY_USE' AND check_out >= check_in) OR (check_out > check_in)) NOT VALID;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS identity_number VARCHAR(100);
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS has_valid_identity BOOLEAN DEFAULT FALSE;
+  `).catch((e) => console.warn('reservations identity and constraint migration warning:', e.message));
 
   // GL accounts & guest seeds removed — fresh DB must remain data-neutral (Rule 11)
 

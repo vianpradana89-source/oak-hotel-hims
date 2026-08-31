@@ -479,7 +479,20 @@ async function main() {
         await pool.query('DELETE FROM room_types WHERE id = ANY($1::int[])', [[fixtures.roomType1, fixtures.roomType2].filter(Boolean)]);
       }
       if (fixtures.property1 || fixtures.property2) {
-        await pool.query('DELETE FROM properties WHERE id = ANY($1::int[])', [[fixtures.property1, fixtures.property2].filter(Boolean)]);
+        const propIds = [fixtures.property1, fixtures.property2].filter(Boolean);
+        await pool.query('DELETE FROM meal_plans WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM ota_sources WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_day_use_durations WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_quick_booking_rules WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_pricing_settings WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_brandings WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM stay_charge_rules WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM property_features WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM housekeeping_finding_types WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM audit_logs WHERE property_id = ANY($1::int[])', [propIds]);
+        await pool.query('DELETE FROM properties WHERE id = ANY($1::int[])', [propIds]);
       }
     } catch (cleanErr) {
       console.error('Fixture cleanup error:', cleanErr);

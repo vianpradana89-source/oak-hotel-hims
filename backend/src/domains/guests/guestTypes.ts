@@ -4,22 +4,46 @@ export type MatchClassification = 'POSSIBLE_MATCH' | 'NEW_GUEST';
 
 export interface Guest {
   id: number;
+  guest_code?: string | null;
   full_name: string;
+  normalized_name?: string | null;
   preferred_name: string | null;
   gender: 'MALE' | 'FEMALE' | 'OTHER' | null;
   birth_place: string | null;
   birth_date: string | null;
   nationality: string | null;
   phone: string | null;
+  normalized_phone?: string | null;
   email: string | null;
+  normalized_email?: string | null;
   address: string | null;
   city: string | null;
   province: string | null;
   country: string | null;
+  guest_segment?: string | null;
   vip_status: VipStatus;
+  preferences?: string | null;
   is_blacklisted: boolean;
   blacklist_reason: string | null;
+  identity_type?: string | null;
+  identity_number?: string | null;
+  normalized_identity_number?: string | null;
+  identity_path?: string | null;
+  has_valid_identity?: boolean;
+  rt_rw?: string | null;
+  village_kelurahan?: string | null;
+  district_kecamatan?: string | null;
+  religion?: string | null;
+  marital_status?: string | null;
+  occupation?: string | null;
+  citizenship?: string | null;
+  valid_until?: string | null;
+  ktp_ocr_confidence?: number | null;
+  ktp_ocr_provider?: string | null;
+  ktp_extracted_at?: string | null;
   notes: string | null;
+  is_archived?: boolean;
+  is_active?: boolean;
   created_property_id?: number | null;
   created_at: string;
   updated_at: string;
@@ -29,6 +53,7 @@ export interface Guest {
 
 export interface GuestCreateInput {
   property_id: number;
+  guest_code?: string | null;
   full_name: string;
   preferred_name?: string | null;
   gender?: 'MALE' | 'FEMALE' | 'OTHER' | null;
@@ -37,17 +62,36 @@ export interface GuestCreateInput {
   nationality?: string | null;
   phone?: string | null;
   email?: string | null;
+  identity_type?: string | null;
+  identity_number?: string | null;
+  identity_path?: string | null;
+  has_valid_identity?: boolean;
   address?: string | null;
+  rt_rw?: string | null;
+  village_kelurahan?: string | null;
+  district_kecamatan?: string | null;
+  religion?: string | null;
+  marital_status?: string | null;
+  occupation?: string | null;
+  citizenship?: string | null;
+  valid_until?: string | null;
+  ktp_ocr_confidence?: number | null;
+  ktp_ocr_provider?: string | null;
   city?: string | null;
   province?: string | null;
   country?: string | null;
+  guest_segment?: string | null;
   vip_status?: VipStatus;
+  preferences?: string | null;
   notes?: string | null;
+  is_archived?: boolean;
+  is_active?: boolean;
   created_by?: string | null;
 }
 
 export interface GuestUpdateInput {
   property_id: number;
+  guest_code?: string | null;
   full_name?: string;
   preferred_name?: string | null;
   gender?: 'MALE' | 'FEMALE' | 'OTHER' | null;
@@ -56,14 +100,64 @@ export interface GuestUpdateInput {
   nationality?: string | null;
   phone?: string | null;
   email?: string | null;
+  identity_type?: string | null;
+  identity_number?: string | null;
+  identity_path?: string | null;
+  has_valid_identity?: boolean;
   address?: string | null;
+  rt_rw?: string | null;
+  village_kelurahan?: string | null;
+  district_kecamatan?: string | null;
+  religion?: string | null;
+  marital_status?: string | null;
+  occupation?: string | null;
+  citizenship?: string | null;
+  valid_until?: string | null;
+  ktp_ocr_confidence?: number | null;
+  ktp_ocr_provider?: string | null;
   city?: string | null;
   province?: string | null;
   country?: string | null;
+  guest_segment?: string | null;
   vip_status?: VipStatus;
+  preferences?: string | null;
   is_blacklisted?: boolean;
   blacklist_reason?: string | null;
   notes?: string | null;
+  is_archived?: boolean;
+  is_active?: boolean;
+}
+
+export interface DuplicateCheckInput {
+  property_id: number;
+  phone?: string | null;
+  nik?: string | null;
+  email?: string | null;
+  name?: string | null;
+  birth_date?: string | null;
+  exclude_guest_id?: number | null;
+}
+
+export interface DuplicateCandidate {
+  id: number;
+  guest_code: string | null;
+  full_name: string;
+  phone: string | null;
+  email: string | null;
+  identity_number: string | null;
+  birth_date: string | null;
+  guest_segment: string | null;
+  vip_status: VipStatus;
+  has_valid_identity: boolean;
+  visit_count?: number;
+  last_stay?: string | null;
+  match_strength: 'STRONG_PHONE' | 'STRONG_NIK' | 'STRONG_EMAIL' | 'SOFT_NAME_PHONE' | 'SOFT_NAME_DOB';
+  match_reason: string;
+}
+
+export interface DuplicateCheckResult {
+  has_duplicate: boolean;
+  candidates: DuplicateCandidate[];
 }
 
 export interface ReservationGuest {

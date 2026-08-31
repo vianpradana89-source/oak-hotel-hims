@@ -38,6 +38,7 @@ export function formatSettingsRecord(row: any): PropertyHousekeepingSettings {
     require_final_inspection: Boolean(row.require_final_inspection),
     require_checkout_room_check: Boolean(row.require_checkout_room_check),
     allow_calendar_room_status_override: Boolean(row.allow_calendar_room_status_override),
+    housekeeping_category_bulk_check_enabled: Boolean(row.housekeeping_category_bulk_check_enabled),
     default_cleaning_template_code: row.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING',
     default_room_cleaning_template_code: row.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING',
     default_checkout_template_code: row.default_checkout_template_code || 'CHECKOUT_INSPECTION',
@@ -65,10 +66,11 @@ export async function getPropertyHousekeepingSettings(
        require_final_inspection,
        require_checkout_room_check,
        allow_calendar_room_status_override,
+       housekeeping_category_bulk_check_enabled,
        default_cleaning_template_code,
        default_checkout_template_code
      )
-     VALUES ($1, false, false, false, 'STANDARD_ROOM_CLEANING', 'CHECKOUT_INSPECTION')
+     VALUES ($1, false, false, false, false, 'STANDARD_ROOM_CLEANING', 'CHECKOUT_INSPECTION')
      ON CONFLICT (property_id) DO UPDATE SET updated_at = NOW()
      RETURNING *`,
     [propertyId]
@@ -96,6 +98,10 @@ export async function updatePropertyHousekeepingSettings(
   const allowCalendarOverride = typeof settings.allow_calendar_room_status_override === 'boolean'
     ? settings.allow_calendar_room_status_override
     : current.allow_calendar_room_status_override;
+
+  const categoryBulkCheckEnabled = typeof settings.housekeeping_category_bulk_check_enabled === 'boolean'
+    ? settings.housekeeping_category_bulk_check_enabled
+    : Boolean(current.housekeeping_category_bulk_check_enabled);
 
   // 2. Default template code resolution & validation against active templates of this property
   const inputCleaningTemplate = settings.default_room_cleaning_template_code || settings.default_cleaning_template_code;
@@ -140,20 +146,22 @@ export async function updatePropertyHousekeepingSettings(
        require_final_inspection,
        require_checkout_room_check,
        allow_calendar_room_status_override,
+       housekeeping_category_bulk_check_enabled,
        default_cleaning_template_code,
        default_checkout_template_code,
        updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
      ON CONFLICT (property_id) DO UPDATE
      SET require_final_inspection = EXCLUDED.require_final_inspection,
          require_checkout_room_check = EXCLUDED.require_checkout_room_check,
          allow_calendar_room_status_override = EXCLUDED.allow_calendar_room_status_override,
+         housekeeping_category_bulk_check_enabled = EXCLUDED.housekeeping_category_bulk_check_enabled,
          default_cleaning_template_code = EXCLUDED.default_cleaning_template_code,
          default_checkout_template_code = EXCLUDED.default_checkout_template_code,
          updated_at = NOW()
      RETURNING *`,
-    [propertyId, requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, defaultCleaningTemplate, defaultCheckoutTemplate]
+    [propertyId, requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, categoryBulkCheckEnabled, defaultCleaningTemplate, defaultCheckoutTemplate]
   );
 
   const formatted = formatSettingsRecord(res.rows[0]);
@@ -706,13 +714,27 @@ export async function getHousekeepingDailyOperations(
   let checkoutCheckCount = 0;
   let overdueCount = 0;
   let priorityTurnoverCount = 0;
+  let maintenanceCount = 0;
+
+  // Query rooms with active OPEN findings
+  const activeFindingsRoomsRes = await client.query(
+    `SELECT DISTINCT room_id FROM housekeeping_task_findings
+     WHERE property_id = $1 AND status = 'OPEN' AND room_id IS NOT NULL`,
+    [propertyId]
+  );
+  const activeFindingRoomIds = new Set<number>(activeFindingsRoomsRes.rows.map((r: any) => Number(r.room_id)));
 
   for (const r of rooms) {
     const s = String(r.status || '').toUpperCase();
+    const hasActiveFinding = activeFindingRoomIds.has(Number(r.id));
     if (s === 'VACANT_DIRTY' || s === 'OCCUPIED_DIRTY') dirtyCount++;
     else if (s === 'CLEANING') cleaningCount++;
     else if (s === 'VACANT_CLEAN') vacantCleanCount++;
     else if (s === 'INSPECTED') inspectedCount++;
+
+    if (s === 'OUT_OF_ORDER' || s === 'OUT_OF_SERVICE' || s === 'MAINTENANCE' || s === 'REPAIR' || hasActiveFinding) {
+      maintenanceCount++;
+    }
   }
   readyCount = vacantCleanCount + inspectedCount;
 
@@ -738,7 +760,8 @@ export async function getHousekeepingDailyOperations(
       ready: readyCount,
       checkout_check: checkoutCheckCount,
       overdue: overdueCount,
-      priority_turnover: priorityTurnoverCount
+      priority_turnover: priorityTurnoverCount,
+      maintenance: maintenanceCount
     },
     tasks: enrichedTasks
   };
@@ -1318,6 +1341,100 @@ export async function updateTaskChecklistItem(
   return res.rows[0];
 }
 
+export async function bulkUpdateCategoryChecklistItems(
+  client: PoolClient,
+  propertyId: number,
+  taskId: number,
+  payload: {
+    category?: string;
+    group_name?: string;
+    group_id?: number | null;
+    section?: string;
+    item_ids?: number[];
+    is_completed: boolean;
+  },
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<TaskChecklistItem[]> {
+  const hkEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.enabled');
+  if (!hkEnabled) {
+    throw Object.assign(new Error('Modul Housekeeping sedang dinonaktifkan untuk properti ini.'), { statusCode: 403, code: 'FEATURE_DISABLED' });
+  }
+
+  const taskCheck = await client.query('SELECT id, status FROM housekeeping_tasks WHERE id = $1 AND property_id = $2 FOR UPDATE', [taskId, propertyId]);
+  if (!hasRows(taskCheck)) {
+    throw Object.assign(new Error('Task not found in this property'), { statusCode: 404 });
+  }
+
+  const task = taskCheck.rows[0];
+  if (task.status === 'DONE' || task.status === 'VERIFIED' || task.status === 'CANCELLED') {
+    throw Object.assign(new Error('Tugas yang sudah selesai atau dibatalkan tidak dapat diubah.'), { statusCode: 400, code: 'TASK_FINALIZED' });
+  }
+
+  let targetItemIds: number[] = [];
+  if (Array.isArray(payload.item_ids) && payload.item_ids.length > 0) {
+    targetItemIds = payload.item_ids.map(Number).filter((n) => !isNaN(n) && n > 0);
+  } else {
+    const catName = payload.category || payload.group_name || payload.section;
+    if (!catName) {
+      throw Object.assign(new Error('Kategori atau daftar ID butir checklist wajib disertakan.'), { statusCode: 400, code: 'CATEGORY_REQUIRED' });
+    }
+    const catItems = await client.query(
+      `SELECT id FROM housekeeping_task_checklist_items
+       WHERE task_id = $1
+         AND (
+           group_name = $2 OR
+           section = $2 OR
+           (group_id IS NOT NULL AND group_id::text = $2)
+         )`,
+      [taskId, catName]
+    );
+    targetItemIds = catItems.rows.map((r: any) => Number(r.id));
+  }
+
+  if (targetItemIds.length === 0) {
+    return [];
+  }
+
+  const isCompleted = payload.is_completed === true;
+  const actorName = actor?.name || 'Staff';
+
+  const res = await client.query(
+    `UPDATE housekeeping_task_checklist_items
+     SET is_completed = $1,
+         completed_at = CASE WHEN $1 = true THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+         completed_by_name = CASE WHEN $1 = true THEN COALESCE(completed_by_name, $2) ELSE NULL END
+     WHERE task_id = $3 AND id = ANY($4::int[])
+     RETURNING *`,
+    [isCompleted, actorName, taskId, targetItemIds]
+  );
+
+  const updatedRows = res.rows;
+
+  // Record audit log
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HOUSEKEEPING',
+      'HK_CHECKLIST_CATEGORY_BULK_CHECK',
+      'CHECKLIST_CATEGORY',
+      String(taskId),
+      JSON.stringify({
+        task_id: taskId,
+        category: payload.category || payload.group_name || payload.section || 'BULK',
+        item_ids: updatedRows.map((r: any) => r.id),
+        count: updatedRows.length,
+        is_completed: isCompleted,
+        performed_by: actorName
+      }),
+      actorName,
+      propertyId
+    ]
+  );
+
+  return updatedRows;
+}
+
 export async function completeHousekeepingTask(
   client: PoolClient,
   propertyId: number,
@@ -1549,6 +1666,18 @@ export async function completeHousekeepingTask(
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         ['PMS', actionCode, 'RESERVATION', String(task.reservation_id), JSON.stringify({ task_id: taskId, inspection_result: inspectionResult, issue_type: issueType, issue_note: issueNote, estimated_charge: estimatedCharge }), actor?.name || 'Housekeeping Staff', propertyId]
       );
+
+      if (task.room_id) {
+        const roomStatusRes = await client.query('SELECT status FROM rooms WHERE id = $1', [task.room_id]);
+        const roomStatus = roomStatusRes.rows[0]?.status;
+        if (roomStatus === 'VACANT_DIRTY' || roomStatus === 'DIRTY') {
+          await ensureDirtyRoomCleaningTask(client, propertyId, task.room_id, {
+            sourceType: 'CHECKOUT_EVENT',
+            sourceEntityId: task.reservation_id ? String(task.reservation_id) : undefined,
+            actor
+          });
+        }
+      }
     }
   }
 
@@ -2041,11 +2170,36 @@ export async function getRoomActiveFindings(
   return res.rows;
 }
 
+export async function getAllFindings(
+  client: PoolClient | Pool,
+  propertyId: number,
+  status?: string
+): Promise<any[]> {
+  let sql = `
+    SELECT f.*,
+           r.room_number,
+           r.status as room_current_status,
+           COALESCE(rt.name, r.name) as room_type_name
+    FROM housekeeping_task_findings f
+    LEFT JOIN rooms r ON r.id = f.room_id
+    LEFT JOIN room_types rt ON rt.id = r.room_type_id
+    WHERE f.property_id = $1
+  `;
+  const params: any[] = [propertyId];
+  if (status && status.toUpperCase() !== 'ALL') {
+    sql += ` AND f.status = $2`;
+    params.push(status.toUpperCase());
+  }
+  sql += ` ORDER BY CASE WHEN f.status = 'OPEN' THEN 1 ELSE 2 END, f.id DESC`;
+  const res = await client.query(sql, params);
+  return res.rows;
+}
+
 export async function resolveFinding(
   client: PoolClient,
   propertyId: number,
   findingId: number,
-  payload: { resolution_note: string },
+  payload: { resolution_note: string; target_room_status?: string; ready_room?: boolean },
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<HousekeepingTaskFinding> {
   const findingRes = await client.query(
@@ -2055,6 +2209,7 @@ export async function resolveFinding(
   if (!hasRows(findingRes)) {
     throw Object.assign(new Error('Temuan kendala tidak ditemukan.'), { statusCode: 404, code: 'FINDING_NOT_FOUND' });
   }
+  const findingRow = findingRes.rows[0];
 
   const res = await client.query(
     `UPDATE housekeeping_task_findings
@@ -2071,6 +2226,21 @@ export async function resolveFinding(
   );
 
   const resolved: HousekeepingTaskFinding = res.rows[0];
+
+  // If user requested to ready the room or set specific physical room status
+  if (findingRow.room_id) {
+    if (payload.ready_room || payload.target_room_status === 'VACANT_CLEAN' || payload.target_room_status === 'READY') {
+      await client.query(
+        `UPDATE rooms SET status = 'VACANT_CLEAN', updated_at = NOW() WHERE id = $1 AND property_id = $2`,
+        [findingRow.room_id, propertyId]
+      );
+    } else if (payload.target_room_status) {
+      await client.query(
+        `UPDATE rooms SET status = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3`,
+        [payload.target_room_status, findingRow.room_id, propertyId]
+      );
+    }
+  }
 
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)

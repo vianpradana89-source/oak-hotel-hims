@@ -591,6 +591,12 @@ async function cleanupRun(client, roomStatusBaseline, availabilityBaseline) {
         [reservationIds]
       );
 
+      await client.query(`
+        DELETE FROM housekeeping_tasks 
+        WHERE reservation_id = ANY($1::int[])
+           OR (source_type = 'CHECKOUT_EVENT' AND source_entity_id = ANY($2::text[]))
+      `, [reservationIds, reservationIds.map(String)]);
+
       await client.query(
         'DELETE FROM reservations WHERE id = ANY($1::int[])',
         [reservationIds]
@@ -784,7 +790,7 @@ async function run() {
       await establishSellableRoomStatus(client, scenarioDRoom.id);
       const base = await createReservation(scenarioDRoom.id, day(15), day(17), 'D1');
       expect(base.status === 201, `D1 create failed: ${base.status} ${base.text}`);
-      const checkout = await request('POST', `/api/reservations/${base.json?.data?.id}/checkout`, { property_id: scenarioDRoom.property_id }, 'D1-checkout');
+      const checkout = await request('POST', `/api/reservations/${base.json?.data?.id}/checkout`, { property_id: scenarioDRoom.property_id, skip_inspection: true }, 'D1-checkout');
       expect(checkout.status === 200, `D1 checkout failed: ${checkout.status} ${checkout.text}`);
       trackCheckoutRelease(base.json?.data?.id);
       await establishSellableRoomStatus(client, scenarioDRoom.id);
@@ -797,7 +803,7 @@ async function run() {
     {
       const base = await createReservation(roomA.id, day(20), day(22), 'E1');
       expect(base.status === 201, `E1 create failed: ${base.status} ${base.text}`);
-      const checkin = await request('POST', `/api/reservations/${base.json?.data?.id}/checkin`, { property_id: roomA.property_id }, 'E1-checkin');
+      const checkin = await request('POST', `/api/reservations/${base.json?.data?.id}/checkin`, { property_id: roomA.property_id, force: true, override_guest_identity: true, override_housekeeping: true }, 'E1-checkin');
       expect(checkin.status === 200, `E1 checkin failed: ${checkin.status} ${checkin.text}`);
       const overlapCheckedIn = await createReservation(roomA.id, day(21), day(23), 'E2');
       expect(overlapCheckedIn.status === 409, `E2 must fail over CHECKED_IN, got ${overlapCheckedIn.status}`);
@@ -842,7 +848,7 @@ async function run() {
       await establishSellableRoomStatus(client, roomA.id);
       const occupied = await createReservation(roomA.id, day(35), day(37), 'H1');
       expect(occupied.status === 201, `H1 occupied create failed: ${occupied.status} ${occupied.text}`);
-      const checkinOccupied = await request('POST', `/api/reservations/${occupied.json?.data?.id}/checkin`, { property_id: roomA.property_id }, 'H1-checkin');
+      const checkinOccupied = await request('POST', `/api/reservations/${occupied.json?.data?.id}/checkin`, { property_id: roomA.property_id, force: true, override_guest_identity: true, override_housekeeping: true }, 'H1-checkin');
       expect(checkinOccupied.status === 200, `H1 checkin failed: ${checkinOccupied.status} ${checkinOccupied.text}`);
 
       const candidate = await createReservation(roomB.id, day(35), day(37), 'H2');
@@ -850,7 +856,7 @@ async function run() {
       const setCancelled = await request('POST', `/api/reservations/${candidate.json?.data?.id}/cancel`, { property_id: roomB.property_id }, 'H2-cancel');
       expect(setCancelled.status === 200, `H2 cancel setup failed: ${setCancelled.status} ${setCancelled.text}`);
       trackCancellationRelease(candidate.json?.data?.id);
-      const checkinCandidate = await request('POST', `/api/reservations/${candidate.json?.data?.id}/checkin`, { property_id: roomB.property_id }, 'H2-checkin');
+      const checkinCandidate = await request('POST', `/api/reservations/${candidate.json?.data?.id}/checkin`, { property_id: roomB.property_id, force: true, override_guest_identity: true, override_housekeeping: true }, 'H2-checkin');
       expect(checkinCandidate.status === 409, `H checkin overlap must fail 409, got ${checkinCandidate.status}`);
       markScenario('H', true);
     }

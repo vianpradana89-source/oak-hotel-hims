@@ -8,6 +8,7 @@ import {
   startHousekeepingTask,
   getTaskChecklistItems,
   updateTaskChecklistItem,
+  bulkUpdateCategoryChecklistItems,
   completeHousekeepingTask,
   getChecklistTemplates,
   createChecklistTemplate,
@@ -26,6 +27,7 @@ import {
   createTaskFinding,
   getTaskFindings,
   getRoomActiveFindings,
+  getAllFindings,
   resolveFinding,
   verifyFinding,
   addChecklistTemplateItem,
@@ -743,6 +745,51 @@ export function createHousekeepingRouter(pool: Pool): Router {
       client.release();
     }
   };
+
+  // 7b. Bulk Update Category Checklist Items (must be declared before :itemId route)
+  const bulkUpdateCategoryChecklistHandler = async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const taskId = Number(req.params.id || req.body.task_id || req.body.taskId);
+      const propertyId = await resolvePropertyId(req, undefined, taskId);
+      await assertPropertyExists(propertyId);
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id,
+        name: req.body.actor_name || req.body.checked_by || 'Staff',
+        role: req.body.actor_role || 'Staff'
+      };
+      const items = await bulkUpdateCategoryChecklistItems(
+        client,
+        propertyId,
+        taskId,
+        {
+          category: req.body.category,
+          group_name: req.body.group_name,
+          group_id: req.body.group_id,
+          section: req.body.section,
+          item_ids: req.body.item_ids,
+          is_completed: req.body.is_completed === true
+        },
+        actor
+      );
+      await client.query('COMMIT');
+
+      res.json({ status: 'OK', success: true, data: { updated_items: items, count: items.length } });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+  router.patch('/tasks/:id/checklist/bulk-category', bulkUpdateCategoryChecklistHandler);
+  router.post('/tasks/:id/checklist/bulk-category', bulkUpdateCategoryChecklistHandler);
+  router.patch('/tasks/:id/checklist-items/bulk-category', bulkUpdateCategoryChecklistHandler);
+  router.post('/tasks/:id/checklist-items/bulk-category', bulkUpdateCategoryChecklistHandler);
+
   router.patch('/tasks/:id/checklist-items/:itemId', updateChecklistItemHandler);
   router.post('/tasks/:id/checklist-items/:itemId', updateChecklistItemHandler);
   router.patch('/tasks/:id/checklist/:itemId', updateChecklistItemHandler);
@@ -1175,7 +1222,7 @@ export function createHousekeepingRouter(pool: Pool): Router {
     }
   });
 
-  router.patch('/settings', async (req: Request, res: Response) => {
+  const updateSettingsHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
@@ -1198,7 +1245,9 @@ export function createHousekeepingRouter(pool: Pool): Router {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/settings', updateSettingsHandler);
+  router.put('/settings', updateSettingsHandler);
 
   // 12. Finding Types (Jenis Temuan) Catalog
   router.get('/finding-types', async (req: Request, res: Response) => {
@@ -1312,8 +1361,9 @@ export function createHousekeepingRouter(pool: Pool): Router {
         return res.json({ status: 'OK', data: findings || [] });
       }
 
-      // If neither task_id nor room_id is specified, return empty array safely (never 404)
-      return res.json({ status: 'OK', data: [] });
+      const statusFilter = req.query.status ? String(req.query.status).toUpperCase() : undefined;
+      const findings = await getAllFindings(pool, propertyId, statusFilter);
+      return res.json({ status: 'OK', data: findings || [] });
     } catch (err: any) {
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });

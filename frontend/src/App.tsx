@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { TransactionReservationList } from './features/transactions/TransactionReservationList.tsx';
+import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { TransactionWorkspace } from './features/transactions/TransactionWorkspace.tsx';
 import {
   formatIdrInput,
   parseIdrInput,
@@ -44,6 +44,9 @@ import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeM
 import { HrdWorkspace } from './features/hrd/HrdWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
+import RoomMasterPage from './features/roomMaster/RoomMasterPage';
+import ProductMasterPage from './features/products/ProductMasterPage';
+import PosWorkspace from './features/pos/PosWorkspace';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
@@ -57,6 +60,9 @@ import OperationalBlockBar from './features/calendar/OperationalBlockBar';
 import OperationalBlockDetailModal from './features/calendar/OperationalBlockDetailModal';
 import RoomCategoryGroup from './features/calendar/RoomCategoryGroup';
 import RoomTypeGroup from './features/calendar/RoomTypeGroup';
+import QuickBookingModal from './features/booking/QuickBookingModal';
+import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
+import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { buildAvailabilityRequest, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
 import {
   addHotelDays,
@@ -117,6 +123,12 @@ function App() {
   const [reservations, setReservations] = useState<any[]>([]);
   const [rooms, setRooms] = useState<any[]>([]);
   const [selectedRes, setSelectedRes] = useState<any>(null);
+  const [quickReservation, setQuickReservation] = useState<{
+    reservation: any;
+    anchorRect: DOMRect | null;
+    anchorPoint: { x: number; y: number } | null;
+  } | null>(null);
+  const isDraggingRef = useRef(false);
   const [selectedOperationalBlock, setSelectedOperationalBlock] = useState<{
     block: RoomOperationalBlock;
     roomNumber: string;
@@ -350,23 +362,26 @@ function App() {
     bookingComposerChildrenRef.current = bookingComposerChildren;
   }, [bookingComposerChildren]);
 
-  useEffect(() => {
+  const fetchProperties = useCallback(() => {
     fetch('/api/properties')
       .then(r => r.json())
       .then(d => {
         if (d.status === 'OK' && Array.isArray(d.data)) {
           const list = d.data.filter((p: any) => p.is_active !== false);
           setProperties(list);
-          if (list.length === 1) {
-            setPropertyId(list[0].id);
-          } else if (list.length === 0) {
+          if (list.length === 0) {
             setPropertyId(null);
+          } else if (propertyId === null || !list.some((p: any) => p.id === propertyId)) {
+            setPropertyId(list[0].id);
           }
-          // multiple: propertyId stays null until user selects
         }
       })
       .catch(() => {});
-  }, []);
+  }, [propertyId]);
+
+  useEffect(() => {
+    fetchProperties();
+  }, [fetchProperties]);
   // Anchor date for the grid window and handlers to shift the window
   const [anchorDate, setAnchorDate] = useState<Date>(new Date());
   const [windowSize, setWindowSize] = useState<number>(7);
@@ -426,6 +441,7 @@ function App() {
 
   // drag preview using setDragImage + cleanup element
   const handleDragStart = (e: any, r: any, fromRoomId: any) => {
+    isDraggingRef.current = true;
     try {
       const target = e.target as HTMLElement | null;
       if (target && target.closest && target.closest('.reservation-card-resize-handle')) {
@@ -456,6 +472,9 @@ function App() {
     } catch (err) { /* ignore */ }
   };
   const handleDragEnd = (e: any) => {
+    setTimeout(() => {
+      isDraggingRef.current = false;
+    }, 150);
     try {
       (e.currentTarget as any)?.classList?.remove('dragging');
       const img = (e.currentTarget as any)?._dragImageEl;
@@ -2614,21 +2633,44 @@ function App() {
   const activePaymentStatus = getPaymentStatusLabel(selectedRes?.payment_status);
   const bookingChildren = [...selectedBookingChildren].sort((a, b) => Number(a?.stay_sequence || 0) - Number(b?.stay_sequence || 0));
   const selectedStayLabel = selectedRes?.stay_sequence ? `R${String(selectedRes.stay_sequence).padStart(2, '0')}` : 'R01';
-  const selectedRoomLabel = selectedRes?.room_number || selectedRes?.room_id || '—';
-  const selectedRoomTypeLabel = selectedRes?.room_variant || selectedBooking?.room_type || selectedBooking?.room_variant || '—';
+  const selectedRoomLabel = selectedRes?.room_number ? `Kamar ${selectedRes.room_number}` : 'Belum Ditentukan';
+  const selectedRoomTypeLabel = selectedRes?.room_type_name || selectedRes?.room_variant || selectedBooking?.room_type || selectedBooking?.room_variant || '—';
   const selectedBookingIdentity = selectedRes?.bid || selectedBooking?.bid || selectedRes?.booking_number || `#${selectedRes?.id ?? '-'}`;
   const selectedBookingLegacy = selectedRes?.booking_number || selectedBooking?.booking_number || '';
   const selectedBookingSource = selectedBooking?.booking_source || selectedRes?.booking_source || '';
   const selectedBookingChannel = selectedBooking?.channel || selectedRes?.channel || '';
-  const [stayChangeState, setStayChangeState] = useState<{ open: boolean; type: 'extend' | 'shorten'; reservationId: number | null; newCheckOut: string }>({
+  const [stayChangeState, setStayChangeState] = useState<{
+    open: boolean;
+    type: 'extend' | 'shorten';
+    reservationId: number | null;
+    newCheckOut: string;
+    additionalNightRate: number;
+    submitting?: boolean;
+    loading?: boolean;
+    reservationDto?: any;
+    currentTotalCharge: number;
+    currentAmountPaid: number;
+    currentOutstanding: number;
+    existingNightlyRate: number;
+    pricingSource: string;
+  }>({
     open: false,
     type: 'extend',
     reservationId: null,
-    newCheckOut: ''
+    newCheckOut: '',
+    additionalNightRate: 0,
+    submitting: false,
+    loading: false,
+    reservationDto: null,
+    currentTotalCharge: 0,
+    currentAmountPaid: 0,
+    currentOutstanding: 0,
+    existingNightlyRate: 0,
+    pricingSource: ''
   });
   const stayChangeReservation = useMemo(
-    () => reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes,
-    [reservations, stayChangeState.reservationId, selectedRes]
+    () => stayChangeState.reservationDto || (selectedRes && Number(selectedRes.id) === stayChangeState.reservationId ? selectedRes : null) || reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes,
+    [stayChangeState.reservationDto, stayChangeState.reservationId, reservations, selectedRes]
   );
   const selectedNights = Math.max(
     1,
@@ -2636,7 +2678,7 @@ function App() {
   );
   const stayChangeNightsDelta = (() => {
     if (!stayChangeState.open || !stayChangeState.reservationId) return 0;
-    const reservation = reservations.find((item) => Number(item.id) === stayChangeState.reservationId) || selectedRes;
+    const reservation = stayChangeReservation;
     if (!reservation) return 0;
     const currentCheckOut = normalizeHotelDate(reservation.check_out);
     const nextCheckOut = stayChangeState.newCheckOut;
@@ -2676,18 +2718,76 @@ function App() {
     return { valid: true, reason: '' };
   };
 
-  const openStayChangePrompt = (type: 'extend' | 'shorten', reservationId: number, overrideNewCheckOut?: string) => {
-    const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
-    if (!reservation) {
+  const computeStayChangeFinancialContext = (dto: any) => {
+    if (!dto) return null;
+    const checkIn = normalizeHotelDate(dto.check_in);
+    const checkOut = normalizeHotelDate(dto.check_out);
+    const existingNights = (checkIn && checkOut) ? (hotelNightsBetween(checkIn, checkOut) || 1) : 1;
+
+    const currentTotalCharge = Number(dto.total_price ?? 0);
+    const currentAmountPaid = Number(dto.amount_paid ?? 0);
+    const currentOutstanding = dto.remaining_balance !== undefined
+      ? Number(dto.remaining_balance)
+      : Math.max(0, currentTotalCharge - currentAmountPaid);
+
+    // Determine latest/existing nightly rate
+    let existingNightlyRate = 0;
+    const ratesList = dto.rate_snapshot?.nightly_rates || dto.nightly_rates;
+    if (Array.isArray(ratesList) && ratesList.length > 0) {
+      const lastRate = ratesList[ratesList.length - 1];
+      existingNightlyRate = Math.round(Number(lastRate.final_room_rate || lastRate.base_rate || 0));
+    }
+    if (!existingNightlyRate && currentTotalCharge > 0) {
+      existingNightlyRate = Math.round(currentTotalCharge / existingNights);
+    }
+
+    // Determine pricing source label
+    const bookingSource = String(dto.booking_source || dto.booking_type || dto.bookingType || '').toUpperCase();
+    const otaName = dto.ota_source_name || dto.channel || dto.ota_source || dto.otaSource;
+    let pricingSource = 'Standar';
+    if (bookingSource === 'OTA' || otaName) {
+      pricingSource = `OTA Manual — ${otaName || 'OTA'}`;
+    } else if (dto.rate_plan_name) {
+      pricingSource = `Rate Plan — ${dto.rate_plan_name}`;
+    } else if (bookingSource === 'DIRECT') {
+      pricingSource = 'Direct Manual / Standar';
+    } else if (bookingSource) {
+      pricingSource = bookingSource;
+    }
+
+    return {
+      currentTotalCharge,
+      currentAmountPaid,
+      currentOutstanding,
+      existingNightlyRate,
+      pricingSource
+    };
+  };
+
+  const openStayChangePrompt = async (
+    type: 'extend' | 'shorten',
+    reservationId: number,
+    overrideNewCheckOut?: string,
+    initialDto?: any
+  ) => {
+    let candidate = initialDto || (selectedRes && Number(selectedRes.id) === reservationId ? selectedRes : null);
+    if (!candidate || candidate.total_price === undefined || candidate.amount_paid === undefined) {
+      const found = reservations.find((item) => Number(item.id) === reservationId);
+      if (found) {
+        candidate = { ...found, ...(candidate || {}) };
+      }
+    }
+
+    if (!candidate) {
       console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'reservation missing before confirmation', reservationId, type });
       return;
     }
 
-    const currentCheckOut = normalizeHotelDate(reservation.check_out) || hotelDateFromInstant(new Date());
+    const currentCheckOut = normalizeHotelDate(candidate.check_out) || hotelDateFromInstant(new Date());
     const suggestedCheckOut = type === 'extend' ? addDaysToIso(currentCheckOut, 1) : addDaysToIso(currentCheckOut, -1);
     const nextCheckOut = overrideNewCheckOut || suggestedCheckOut || currentCheckOut;
 
-    const validation = validateStayChangeCandidate(reservation, nextCheckOut);
+    const validation = validateStayChangeCandidate(candidate, nextCheckOut);
     if (!validation.valid) {
       console.log('RESIZE_INVALID_DATE', {
         reservationId,
@@ -2707,19 +2807,56 @@ function App() {
       return;
     }
 
-    console.log('RESIZE_CONFIRM_OPEN', {
-      operation: type.toUpperCase(),
-      oldCheckOut: currentCheckOut,
-      newCheckOut: nextCheckOut,
-      reservationId
-    });
+    const initialContext = computeStayChangeFinancialContext(candidate);
+    const needsFetch = !initialContext || candidate.total_price === undefined || candidate.amount_paid === undefined;
 
     setStayChangeState({
       open: true,
       type,
       reservationId,
-      newCheckOut: nextCheckOut
+      newCheckOut: nextCheckOut,
+      additionalNightRate: initialContext?.existingNightlyRate || 0,
+      submitting: false,
+      loading: needsFetch,
+      reservationDto: candidate,
+      currentTotalCharge: initialContext?.currentTotalCharge || 0,
+      currentAmountPaid: initialContext?.currentAmountPaid || 0,
+      currentOutstanding: initialContext?.currentOutstanding || 0,
+      existingNightlyRate: initialContext?.existingNightlyRate || 0,
+      pricingSource: initialContext?.pricingSource || (needsFetch ? 'Memuat...' : 'Standar')
     });
+
+    try {
+      const propId = propertyId || candidate?.property_id || 1;
+      const res = await fetch(`/api/reservations/${reservationId}?property_id=${propId}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) {
+          const fullDto = json.data;
+          const fullContext = computeStayChangeFinancialContext(fullDto);
+          if (fullContext) {
+            setStayChangeState((prev) => {
+              if (!prev.open || prev.reservationId !== reservationId) return prev;
+              const rateToUse = prev.additionalNightRate > 0 ? prev.additionalNightRate : fullContext.existingNightlyRate;
+              return {
+                ...prev,
+                loading: false,
+                reservationDto: fullDto,
+                currentTotalCharge: fullContext.currentTotalCharge,
+                currentAmountPaid: fullContext.currentAmountPaid,
+                currentOutstanding: fullContext.currentOutstanding,
+                existingNightlyRate: fullContext.existingNightlyRate,
+                pricingSource: fullContext.pricingSource,
+                additionalNightRate: rateToUse
+              };
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch full reservation detail for stay change', err);
+      setStayChangeState((prev) => ({ ...prev, loading: false }));
+    }
   };
 
   useEffect(() => {
@@ -2814,7 +2951,7 @@ function App() {
           return;
         }
         const type = previewCheckOut > previousCheckOut ? 'extend' : 'shorten';
-        openStayChangePrompt(type, reservationId, previewCheckOut);
+        openStayChangePrompt(type, reservationId, previewCheckOut, reservation);
       } else if (reservation && previousCheckOut === previewCheckOut) {
         console.log('RESIZE_NOOP', {
           reservationId,
@@ -2847,14 +2984,28 @@ function App() {
       delete reservationResizePreviewRef.current[String(reservationId)];
     }
     setReservationResizePreview(reservationResizePreviewRef.current);
-    setStayChangeState({ open: false, type: 'extend', reservationId: null, newCheckOut: '' });
+    setStayChangeState({
+      open: false,
+      type: 'extend',
+      reservationId: null,
+      newCheckOut: '',
+      additionalNightRate: 0,
+      submitting: false,
+      loading: false,
+      reservationDto: null,
+      currentTotalCharge: 0,
+      currentAmountPaid: 0,
+      currentOutstanding: 0,
+      existingNightlyRate: 0,
+      pricingSource: ''
+    });
   };
 
   const confirmStayChange = async () => {
     if (!stayChangeState.open || stayChangeState.reservationId === null) return;
 
     const reservationId = stayChangeState.reservationId;
-    const reservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
+    const reservation = stayChangeState.reservationDto || reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
     if (!reservation) {
       closeStayChangePrompt();
       return;
@@ -2868,11 +3019,21 @@ function App() {
       return;
     }
 
+    const payload: any = {
+      property_id: propertyId,
+      new_check_out: requestedCheckOut
+    };
+    if (stayChangeState.type === 'extend') {
+      payload.additional_night_rate = Number(stayChangeState.additionalNightRate) || 0;
+    }
+
+    setStayChangeState((prev) => ({ ...prev, submitting: true }));
+
     try {
       const response = await fetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ property_id: propertyId, new_check_out: requestedCheckOut })
+        body: JSON.stringify(payload)
       });
       const data = await response.json().catch(() => ({}));
 
@@ -2892,7 +3053,7 @@ function App() {
 
       closeStayChangePrompt();
       alert(stayChangeState.type === 'extend' ? 'Perpanjangan masa inap berhasil.' : 'Pemendekan masa inap berhasil.');
-    } catch (error) {
+    } catch (error: any) {
       reservationResizePreviewRef.current = {
         ...reservationResizePreviewRef.current
       };
@@ -2900,7 +3061,8 @@ function App() {
       setReservationResizePreview(reservationResizePreviewRef.current);
       await fetchData();
       await fetchOperationsData();
-      closeStayChangePrompt();
+      setStayChangeState((prev) => ({ ...prev, submitting: false }));
+      alert(error?.message || `Gagal melakukan ${stayChangeState.type === 'extend' ? 'perpanjangan' : 'pemendekan'} masa inap.`);
       console.error(`${stayChangeState.type} stay failed`, error);
     }
   };
@@ -2921,8 +3083,8 @@ function App() {
       onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin')
     },
     { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
-    { key: 'extend', label: 'Extend', enabled: canExtend, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id)) },
-    { key: 'shorten', label: 'Shorten', enabled: canShorten, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id)) },
+    { key: 'extend', label: 'Extend', enabled: canExtend, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id), undefined, selectedRes) },
+    { key: 'shorten', label: 'Shorten', enabled: canShorten, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id), undefined, selectedRes) },
     { key: 'cancel', label: 'Cancel', enabled: canCancel, disabled: false, title: undefined, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
     {
       key: 'payment',
@@ -2979,6 +3141,47 @@ function App() {
     };
   }, { subtotal: 0, discount: 0, paid: 0, total: 0, remaining: 0 });
 
+    // Suppress unused locals for modularized sub-components
+  void [
+    calculateRemainingBalancePreview,
+    isPaymentEligibleForCorrection,
+    getPaymentEvidenceStatus,
+    canonicalBookingChildRoomId,
+    canonicalRoomClassification,
+    reservationAudit,
+    bidCopyState,
+    paymentFeedback,
+    activePaymentMenuId,
+    childRoomAvailability,
+    bookingAvailabilityState,
+    bookingSubmitting,
+    setBookingSubmitting,
+    ktpFile,
+    buktiBayarFile,
+    handleRequestCheckoutRoomCheck,
+    openPaymentDetailModal,
+    openPaymentCorrectionModal,
+    openPaymentVoidModal,
+    updateBookingChild,
+    addBookingChild,
+    removeBookingChild,
+    activeStayStatus,
+    activeBookingStatus,
+    activePaymentStatus,
+    bookingChildren,
+    selectedStayLabel,
+    selectedRoomLabel,
+    selectedRoomTypeLabel,
+    selectedBookingIdentity,
+    selectedBookingLegacy,
+    selectedBookingSource,
+    selectedBookingChannel,
+    selectedNights,
+    quickActionButtons,
+    copyBookingBid,
+    bookingComposerTotals,
+  ];
+
   const isDirectMobilePath = typeof window !== 'undefined' && (
     window.location.pathname === '/employee' || window.location.pathname === '/housekeeping'
   );
@@ -3021,7 +3224,7 @@ function App() {
           role: 'Owner',
           avatarInitials: 'VP',
         }}
-        onOpenPos={() => setSelectedMenu('Produk & Inventori')}
+        onOpenPos={() => setSelectedMenu('POS')}
         propertyBranding={activeBranding}
       />
 
@@ -3354,9 +3557,14 @@ function App() {
                                         turnoverInfo={turnoverInfo}
                                         onDragStart={(event) => handleDragStart(event, r, room.id)}
                                         onDragEnd={handleDragEnd}
-                                        onOpen={() => {
-                                          setSelectedRes(r);
-                                          fetchReservationFolio(Number(r.id));
+                                        onOpen={(event) => {
+                                          if (isDraggingRef.current) return;
+                                          const rect = (event?.currentTarget as HTMLElement)?.getBoundingClientRect?.() || null;
+                                          setQuickReservation({
+                                            reservation: r,
+                                            anchorRect: rect,
+                                            anchorPoint: event ? { x: event.clientX, y: event.clientY } : null
+                                          });
                                         }}
                                         onResize={(event) => handleReservationResizeMouseDown(event, r)}
                                       />
@@ -3527,498 +3735,79 @@ function App() {
                  </div>
              </div>
             )}
-
-            {/* Create reservation quick modal */}
-            {createResOpen && (
-              <div className="booking-modal-backdrop">
-                <div className="booking-modal">
-                  <div className="booking-modal-header">
-                    <h4 className="booking-modal-title">Tambah Booking</h4>
-                    <button onClick={() => { setCreateResOpen(false); setKtpFile(null); setBuktiBayarFile(null); resetQuickBookingForm(); }} className="booking-modal-close" aria-label="Tutup dialog booking">×</button>
-                  </div>
-
-                  <div className="booking-type-switch" role="tablist" aria-label="Tipe booking">
-                    <button
-                      type="button"
-                      className={bookingType === 'walkin' ? 'active' : ''}
-                      onClick={() => setBookingType('walkin')}
-                    >
-                      Walk-in
-                    </button>
-                    <button
-                      type="button"
-                      className={bookingType === 'ota' ? 'active' : ''}
-                      onClick={() => setBookingType('ota')}
-                    >
-                      OTA
-                    </button>
-                  </div>
-
-                  <div className="booking-form-layout">
-                    <div className="booking-main-panel">
-                      <div className="booking-field booking-field--full">
-                        <label>Nama Pelanggan</label>
-                        <input
-                          value={quickBooking.guestName}
-                          onChange={(e) => setQuickBooking(prev => ({ ...prev, guestName: e.target.value }))}
-                          placeholder="Ketik nama pelanggan..."
-                        />
-                      </div>
-
-                      <div className="booking-field booking-field--full">
-                        <label>Nomor HP *</label>
-                        <input
-                          value={quickBooking.guestPhone}
-                          onChange={(e) => setQuickBooking(prev => ({ ...prev, guestPhone: e.target.value }))}
-                          placeholder="Ketik nomor HP..."
-                        />
-                      </div>
-
-                      <div className="booking-field booking-field--full">
-                        <label>Segment Tamu</label>
-                        <select value={guestSegment} onChange={(e) => setGuestSegment(e.target.value as 'Reguler' | 'Group' | 'Corporate')}>
-                          <option value="Reguler">Reguler</option>
-                          <option value="Group">Group</option>
-                          <option value="Corporate">Corporate</option>
-                        </select>
-                      </div>
-
-                      <div className="booking-field booking-field--full" style={{ marginTop: 12 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-                          <label style={{ marginBottom: 0 }}>Reservasi Kamar</label>
-                          <button type="button" className="booking-add-btn" onClick={addBookingChild}>+ Tambah Kamar</button>
-                        </div>
-
-                        {bookingComposerChildren.length === 0 ? (
-                          <div className="border border-dashed border-slate-200 rounded-xl p-4 text-xs text-slate-500 text-center">Belum ada kamar yang ditambahkan.</div>
-                        ) : (
-                          bookingComposerChildren.map((child, index) => (
-                            <div key={child.id} className="border border-slate-200/90 rounded-xl p-3.5 bg-slate-50/70 mb-3">
-                              <div className="flex items-center justify-between mb-2.5">
-                                <strong className="text-xs font-bold text-slate-800">R{String(index + 1).padStart(2, '0')}</strong>
-                                {bookingComposerChildren.length > 1 && (
-                                  <button type="button" onClick={() => removeBookingChild(child.id)} className="text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-md transition-colors cursor-pointer">Hapus</button>
-                                )}
-                              </div>
-
-                              <div className="booking-row two-col">
-                                <div className="booking-field">
-                                  <label>Ruangan *</label>
-                                  {(() => {
-                                  const availabilityKey = getAvailabilityKey(child);
-                                  const cachedRows = availabilityKey ? availabilityCache[availabilityKey] : undefined;
-                                  const derivedRooms = cachedRows
-                                    ? getFilteredAvailabilityRooms(cachedRows, availabilityKey, child)
-                                    : (childRoomAvailability[child.id] || []);
-                                  const derivedState = cachedRows
-                                    ? (derivedRooms.length > 0 ? 'success' : 'empty')
-                                    : bookingAvailabilityState[child.id];
-                                  const isLoading = derivedState === 'loading' && !cachedRows;
-                                  return (
-                                  <select
-                                    value={child.room_id ?? ''}
-                                    onChange={(e) => {
-                                      const roomId = e.target.value ? Number(e.target.value) : null;
-                                      const selectedRoom = roomId === null
-                                        ? null
-                                        : rooms.find((room: any) => Number(room.id) === roomId);
-                                      updateBookingChild(child.id, selectedRoom
-                                        ? canonicalCalendarRoomBinding(selectedRoom)
-                                        : { room_id: null, room_number: null });
-                                    }}
-                                    disabled={isLoading}
-                                  >
-                                    <option value="">
-                                      {isLoading
-                                        ? 'Memuat kamar tersedia...'
-                                        : derivedState === 'empty'
-                                          ? 'Tidak ada kamar tersedia untuk tanggal ini.'
-                                          : derivedState === 'error'
-                                            ? 'Gagal memuat ketersediaan kamar. Coba lagi.'
-                                          : 'Pilih ruang'}
-                                    </option>
-                                    {derivedRooms.map((room: any) => (
-                                      <option key={room.id} value={room.id}>
-                                        {room.room_number} {room.name ? `(${room.name})` : ''}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  );
-                                  })()}
-                                </div>
-                                <div className="booking-field">
-                                  <label>Tipe Kamar *</label>
-                                  <select
-                                    value={child.room_type_id ?? ''}
-                                    onChange={(e) => {
-                                      const roomTypeId = Number(e.target.value);
-                                       const representative = rooms.find((room: any) => Number(room.room_type_id) === roomTypeId);
-                                       updateBookingChild(child.id, {
-                                         ...(representative
-                                           ? canonicalRoomClassification(representative)
-                                           : { room_type_id: roomTypeId }),
-                                         room_variant: representative?.room_type_name || representative?.name || '',
-                                         room_id: null,
-                                         room_number: null,
-                                       });
-                                    }}
-                                  >
-                                    <option value="">Pilih tipe kamar</option>
-                                    {calendarTypeOptions.map((option) => (
-                                      <option key={option.id} value={option.id}>{option.label}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                              </div>
-
-                              <div className="booking-row two-col booking-date-row">
-                                <div className="booking-field">
-                                  <label>Check In</label>
-                                  <input
-                                    type="date"
-                                    value={child.check_in || selectedRange.start || localDateISO(anchorDate)}
-                                    onChange={(e) => updateBookingChild(child.id, { check_in: e.target.value })}
-                                  />
-                                </div>
-                                <div className="booking-field">
-                                  <label>Check Out</label>
-                                  <input
-                                    type="date"
-                                    value={child.check_out || selectedRange.end || addHotelDays(localDateISO(anchorDate), 1)}
-                                    onChange={(e) => updateBookingChild(child.id, { check_out: e.target.value })}
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="booking-field booking-field--full">
-                                <label>Harga Kamar</label>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="1000"
-                                  value={Number(child.subtotal_amount || 0)}
-                                  onChange={(e) => {
-                                    const nextSubtotal = Number(e.target.value || 0);
-                                    updateBookingChild(child.id, {
-                                      subtotal_amount: nextSubtotal,
-                                      total_price: nextSubtotal,
-                                      discount_amount: child.discount_type === 'nominal' ? Number(child.discount_amount || 0) : 0,
-                                    });
-                                  }}
-                                  placeholder="0"
-                                />
-                              </div>
-
-                              <div className="booking-field booking-field--full">
-                                <label>Diskon</label>
-                                <div className="booking-discount-control">
-                                  <select
-                                    value={child.discount_type || 'nominal'}
-                                    onChange={(e) => {
-                                      const nextType = e.target.value as 'nominal' | 'percent';
-                                      updateBookingChild(child.id, { discount_type: nextType, discount_percent: nextType === 'percent' ? Number(child.discount_percent || 0) : 0 });
-                                    }}
-                                  >
-                                    <option value="nominal">Rp</option>
-                                    <option value="percent">%</option>
-                                  </select>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step={child.discount_type === 'percent' ? '1' : '1000'}
-                                    value={child.discount_type === 'percent' ? Number(child.discount_percent || 0) : Number(child.discount_amount || 0)}
-                                    onChange={(e) => {
-                                      const nextValue = Number(e.target.value || 0);
-                                      if (child.discount_type === 'percent') {
-                                        updateBookingChild(child.id, { discount_percent: nextValue, discount_amount: 0 });
-                                      } else {
-                                        updateBookingChild(child.id, { discount_amount: nextValue, discount_percent: 0 });
-                                      }
-                                    }}
-                                    placeholder={child.discount_type === 'percent' ? '0' : '50000'}
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="booking-field booking-field--full">
-                                <label>Jumlah Dibayar / DP</label>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="1000"
-                                  value={Number(child.amount_paid || 0)}
-                                  onChange={(e) => updateBookingChild(child.id, { amount_paid: Number(e.target.value || 0) })}
-                                  placeholder="0"
-                                />
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="booking-side-panel">
-                      <div className="booking-side-summary">
-                        <div className="booking-summary-row">
-                          <span>Status</span>
-                          <strong>Booked</strong>
-                        </div>
-                        <div className="booking-summary-row">
-                          <span>Kamar</span>
-                          <strong>{bookingComposerChildren.length} kamar</strong>
-                        </div>
-                        <div className="booking-summary-row">
-                          <span>Total</span>
-                          <strong>{formatCurrency(bookingComposerTotals.total)}</strong>
-                        </div>
-                        <div className="booking-summary-row">
-                          <span>Bayar</span>
-                          <strong>{formatCurrency(bookingComposerTotals.paid)}</strong>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="booking-document-section">
-                    <div className="booking-subtitle">Upload Dokumen</div>
-                    <div className="booking-doc-row">
-                      <div className="booking-doc-field">
-                        <label>Upload KTP</label>
-                        <input
-                          type="file"
-                          accept=".jpg,.jpeg,.png,.pdf"
-                          onChange={(e) => setKtpFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-                        />
-                        {ktpFile && <span className="booking-file-name">{ktpFile.name}</span>}
-                      </div>
-                      <div className="booking-doc-field">
-                        <label>Bukti Bayar</label>
-                        <input
-                          type="file"
-                          accept=".jpg,.jpeg,.png,.pdf"
-                          onChange={(e) => setBuktiBayarFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-                        />
-                        {buktiBayarFile && <span className="booking-file-name">{buktiBayarFile.name}</span>}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="booking-modal-actions">
-                    <button onClick={() => {
-                      setCreateResOpen(false);
-                      setKtpFile(null);
-                      setBuktiBayarFile(null);
-                      resetQuickBookingForm();
-                    }} className="booking-cancel-btn">Batal</button>
-                    <button
-                      disabled={bookingComposerChildren.length === 0 || bookingSubmitting}
-                      onClick={async () => {
-                         if (bookingSubmitting) return;
-                         if (propertyId === null) {
-                           alert('Pilih properti terlebih dahulu');
-                           return;
-                         }
-                         const name = quickBooking.guestName.trim() || 'Tamu';
-                         const phone = quickBooking.guestPhone.trim();
-
-                         if (bookingComposerChildren.length === 0) { alert('Pilih setidaknya satu kamar'); return; }
-                         const incompleteChildIndex = bookingComposerChildren.findIndex((child) => canonicalBookingChildRoomId(child) === null);
-                         if (incompleteChildIndex !== -1) {
-                           alert(`Pilih ruangan untuk R${String(incompleteChildIndex + 1).padStart(2, '0')}`);
-                           return;
-                         }
-                         const validChildren = bookingComposerChildren;
-                         if (!phone) { alert('Nomor HP tamu wajib diisi'); return; }
-
-                         for (const child of validChildren) {
-                           const checkIn = child.check_in || '';
-                           const checkOut = child.check_out || '';
-                           if (!checkIn || !checkOut) { alert('Isi check-in dan check-out untuk setiap kamar'); return; }
-                           if (new Date(checkOut) <= new Date(checkIn)) { alert(`Check-out harus setelah check-in pada kamar ${child.room_id}`); return; }
-                        }
-
-                         const overlapMap = new Map<number, Array<{ start: string; end: string }>>();
-                         for (const child of validChildren) {
-                           const roomId = canonicalBookingChildRoomId(child)!;
-                          const childPeriod = { start: child.check_in, end: child.check_out };
-                          const existing = overlapMap.get(roomId) || [];
-                          for (const existingPeriod of existing) {
-                            const startA = new Date(existingPeriod.start).getTime();
-                            const endA = new Date(existingPeriod.end).getTime();
-                            const startB = new Date(childPeriod.start).getTime();
-                            const endB = new Date(childPeriod.end).getTime();
-                            if (startB < endA && startA < endB) {
-                              const roomNumber = rooms.find((room) => Number(room.id) === roomId)?.room_number || roomId;
-                              alert(`Kamar ${roomNumber} memiliki tanggal yang tumpang tindih. Periksa kembali check-in dan check-out.`);
-                              return;
-                            }
-                          }
-                          existing.push(childPeriod);
-                          overlapMap.set(roomId, existing);
-                        }
-
-                        const payload = {
-                          property_id: propertyId,
-                          guest_name: name,
-                          guest_phone: phone,
-                          guest_segment: guestSegment,
-                          booking_source: bookingType,
-                          channel: bookingType === 'ota' ? 'OTA' : 'WALKIN',
-                          currency_code: 'IDR',
-                          reservations: validChildren.map((child) => {
-                            const subtotal = Number(child.subtotal_amount || 0);
-                            const discountAmount = child.discount_type === 'percent'
-                              ? 0
-                              : Number(child.discount_amount || 0);
-                            const discountPercent = child.discount_type === 'percent'
-                              ? Number(child.discount_percent || 0)
-                              : 0;
-                            const amountPaid = Number(child.amount_paid || 0);
-                            const totalPrice = Number(child.total_price ?? child.subtotal_amount ?? subtotal);
-                             const totalAfterDiscount = Math.max(totalPrice - (child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount), 0);
-                             return {
-                               room_id: canonicalBookingChildRoomId(child)!,
-                              guest_name: child.guest_name || name,
-                              guest_phone: child.guest_phone || phone,
-                              guest_segment: child.guest_segment || guestSegment,
-                              booking_type: child.booking_type || bookingType,
-                              check_in: child.check_in,
-                              check_out: child.check_out,
-                              subtotal_amount: subtotal,
-                              total_price: totalPrice,
-                              discount_amount: child.discount_type === 'percent' ? totalPrice * (discountPercent / 100) : discountAmount,
-                              discount_percent: discountPercent,
-                              amount_paid: amountPaid,
-                              payment_status: amountPaid > 0 ? (amountPaid >= totalAfterDiscount ? 'PAID' : 'PARTIAL') : 'UNPAID',
-                              qty: 1,
-                              room_variant: child.room_variant || quickBooking.roomVariant
-                            };
-                          })
-                        };
-
-                        try {
-                          setBookingSubmitting(true);
-                          setBookingComposerChildren((prev) => prev.map((child: any) => ({ ...child, payment_status: Number(child.amount_paid || 0) > 0 ? 'PAID' : 'UNPAID' })));
-                          const res = await fetch('/api/bookings', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload)
-                          });
-                          const data = await res.json();
-
-                          if (!res.ok) {
-                            throw new Error(data.message || 'Gagal membuat booking');
-                          }
-
-                          const bid = String(data?.data?.bid || '').trim();
-                          const roomCount = Array.isArray(data?.data?.reservations) ? data.data.reservations.length : validChildren.length;
-                          if (bid && navigator.clipboard && navigator.clipboard.writeText) {
-                            try { await navigator.clipboard.writeText(bid); } catch (copyErr) { console.warn('Copy BID failed', copyErr); }
-                          }
-                          fetchData();
-                          fetchOperationsData();
-                          setCreateResOpen(false);
-                          setSelectedRange({});
-                          setKtpFile(null);
-                          setBuktiBayarFile(null);
-                          resetQuickBookingForm();
-                          alert(`Booking berhasil dibuat\nBID: ${bid}\n${roomCount} kamar berhasil dipesan`);
-                        } catch (error) {
-                          console.error('Booking creation failed', error);
-                          alert(`Gagal membuat booking: ${error instanceof Error ? error.message : 'Unknown error'}`);
-                        } finally {
-                          setBookingSubmitting(false);
-                        }
-                      }}
-                      className="booking-submit-btn"
-                    >
-                      {bookingSubmitting ? 'Menyimpan...' : (bookingComposerChildren.length > 1 ? 'Simpan Booking' : 'Simpan Reservasi')}
-                    </button>
-                  </div>
-                 </div>
-               </div>
-             )}
-
-          </>
+            </>
         )}
 
-        {selectedMenu === 'Transaksi' && (
-          <div className="space-y-4">
-            <TransactionReservationList
-              propertyId={propertyId}
-              todayHotelDate={hotelDateFromInstant(new Date())}
-              reservations={transactionReservations}
-              isLoading={transactionLoading}
-              error={transactionError}
-              onRefresh={(start, end) => fetchTransactionReservations(propertyId, start, end)}
-              onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin')}
-              onCheckout={(res) => openCheckoutConfirmation(Number(res.id))}
-              onOpenDetail={(res) => {
-                setSelectedRes(res);
-                fetchReservationFolio(Number(res.id));
+            {/* Quick Booking Modal (Shared across Calendar and Transactions) */}
+            <QuickBookingModal
+              isOpen={createResOpen}
+              onClose={() => {
+                setCreateResOpen(false);
+                setKtpFile(null);
+                setBuktiBayarFile(null);
+                resetQuickBookingForm();
               }}
-              onEdit={(res) => openReservationEditor(res)}
-              onMove={(res) => openReservationEditor(res)}
-              onExtend={(res) => {
-                setSelectedRes(res);
-                openStayChangePrompt('extend', Number(res.id));
+              propertyId={propertyId || 1}
+              rooms={rooms}
+              roomTypes={calendarTypeOptions.map((t) => ({ id: t.id, name: t.label }))}
+              initialRoomId={quickBooking.roomId}
+              initialDate={quickBooking.checkIn}
+              onBookingSuccess={() => {
+                fetchData();
+                fetchOperationsData();
+                if (propertyId) {
+                  const todayStr = hotelDateFromInstant(new Date());
+                  fetchTransactionReservations(propertyId, todayStr, todayStr);
+                }
+                setCreateResOpen(false);
+                setSelectedRange({});
+                setKtpFile(null);
+                setBuktiBayarFile(null);
+                resetQuickBookingForm();
               }}
-              onCancel={(res) => handleReservationCancel(Number(res.id))}
-              onViewFolio={(res) => {
-                setSelectedRes(res);
-                fetchReservationFolio(Number(res.id));
-              }}
-              onViewAudit={(res) => {
-                setSelectedRes(res);
-                fetchReservationAudit(Number(res.id));
-              }}
-              formatCurrency={formatCurrency}
-              getPaymentStatusLabel={getPaymentStatusLabel}
-              getPaymentBadgeClass={getPaymentBadgeClass}
             />
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm text-slate-800">POS / F&B</h3>
-                  <button onClick={createPosOrder} className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer shadow-xs">Create Demo Order</button>
-                </div>
-                <div className="space-y-2 max-h-52 overflow-y-auto">
-                  {(posMenu || []).slice(0, 6).map((item: any) => (
-                    <div key={item.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
-                      <div>
-                        <div className="font-semibold text-slate-800">{item.name}</div>
-                        <div className="text-slate-500 text-[11px] mt-0.5">{item.category_name}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-semibold text-slate-800">Rp {Number(item.price).toLocaleString('id-ID')}</div>
-                        <div className="text-slate-500 text-[11px] mt-0.5">{item.item_code}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm text-slate-800">Recent POS Orders</h3>
-                  <span className="text-xs bg-purple-50 text-purple-700 border border-purple-200/80 px-2.5 py-0.5 rounded-full font-semibold">{posOrders.length}</span>
-                </div>
-                <div className="space-y-2 max-h-52 overflow-y-auto">
-                  {posOrders.slice(0, 5).map((order: any) => (
-                    <div key={order.id} className="border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
-                      <div className="flex justify-between items-center">
-                        <div className="font-semibold text-slate-800">{order.order_number}</div>
-                        <span className="bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded text-[11px] font-semibold">{order.status}</span>
-                      </div>
-                      <div className="text-slate-600 mt-1">Table {order.table_number} • {order.guest_name}</div>
-                      <div className="font-semibold mt-1 text-slate-800">Rp {Number(order.total_amount || 0).toLocaleString('id-ID')}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+        {selectedMenu === 'Transaksi' && propertyId && (
+          <TransactionWorkspace
+            propertyId={propertyId}
+            currentStaffName="Front Desk Staff"
+            onOpenQuickBooking={() => setCreateResOpen(true)}
+            reservations={transactionReservations}
+            reservationLoading={transactionLoading}
+            reservationError={transactionError}
+            onRefreshReservations={(start, end) => fetchTransactionReservations(propertyId, start, end)}
+            onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin')}
+            onCheckout={(res) => openCheckoutConfirmation(Number(res.id))}
+            onOpenReservationDetail={(res) => {
+              setSelectedRes(res);
+              fetchReservationFolio(Number(res.id));
+            }}
+            onEditReservation={(res) => openReservationEditor(res)}
+            onMoveReservation={(res) => openReservationEditor(res)}
+            onExtendReservation={(res) => {
+              setSelectedRes(res);
+              openStayChangePrompt('extend', Number(res.id), undefined, res);
+            }}
+            onCancelReservation={(res) => handleReservationCancel(Number(res.id))}
+            onViewReservationFolio={(res) => {
+              setSelectedRes(res);
+              fetchReservationFolio(Number(res.id));
+            }}
+            onViewReservationAudit={(res) => {
+              setSelectedRes(res);
+              fetchReservationAudit(Number(res.id));
+            }}
+            formatCurrency={formatCurrency}
+            getPaymentStatusLabel={getPaymentStatusLabel}
+            getPaymentBadgeClass={getPaymentBadgeClass}
+            onNavigateToReservation={(resId) => {
+              const target = reservations.find((r) => Number(r.id) === Number(resId));
+              if (target) {
+                setSelectedRes(target);
+                fetchReservationFolio(Number(resId));
+              }
+            }}
+          />
         )}
 
         {selectedMenu === 'Laporan' && (
@@ -4208,6 +3997,31 @@ function App() {
           />
         )}
 
+        {selectedMenu === 'Master Kamar' && (
+          <RoomMasterPage
+            propertyId={propertyId}
+            onViewReservation={viewRoomMasterReservation}
+          />
+        )}
+
+        {selectedMenu === 'Master Produk' && (
+          <ProductMasterPage
+            propertyId={propertyId}
+            items={posMenu}
+            onRefresh={() => void fetchOperationsData()}
+          />
+        )}
+
+        {selectedMenu === 'POS' && (
+          <PosWorkspace
+            propertyId={propertyId}
+            posMenu={posMenu}
+            posOrders={posOrders}
+            onCreateDemoOrder={createPosOrder}
+            onRefresh={() => void fetchOperationsData()}
+          />
+        )}
+
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
             propertyId={propertyId}
@@ -4230,6 +4044,8 @@ function App() {
             employees={employees}
             payroll={payroll}
             initialCategory={initialSettingsCategory}
+            onSelectProperty={(id) => setPropertyId(id)}
+            onRefreshProperties={fetchProperties}
           />
         )}
         </main>
@@ -4372,559 +4188,50 @@ function App() {
         </div>
       )}
 
+      {quickReservation && (
+        <QuickReservationDetail
+          reservation={quickReservation.reservation}
+          anchorRect={quickReservation.anchorRect}
+          anchorPoint={quickReservation.anchorPoint}
+          propertyId={propertyId ?? quickReservation.reservation?.property_id ?? null}
+          onClose={() => setQuickReservation(null)}
+          onOpenFullDetail={(res) => {
+            const target = res || quickReservation.reservation;
+            setQuickReservation(null);
+            setSelectedRes(target);
+            fetchReservationFolio(Number(target.id));
+          }}
+          onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
+          onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
+          onCancel={(resId) => handleReservationCancel(resId)}
+          onOpenStayChange={(res, mode) => openStayChangePrompt(mode || 'extend', Number(res.id), undefined, res)}
+          onRefresh={() => {
+            fetchData();
+            fetchOperationsData();
+          }}
+        />
+      )}
+
       {selectedRes && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="reservation-detail-modal bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[88vh] overflow-y-auto">
-            <div className="reservation-detail-header">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500 font-bold">Reservasi</div>
-                <h3 className="reservation-detail-title">Detail Reservasi</h3>
-              </div>
-              <button onClick={() => { setSelectedRes(null); setSelectedFolio(null); setPaymentDraft(''); setPaymentFeedback(null); setPaymentSubmitting(false); setBidCopyState({ kind: 'idle', message: '' }); }} className="reservation-detail-close">Tutup</button>
-            </div>
-
-            <div className="reservation-detail-body">
-              <div className="reservation-detail-topbar">
-                <div className="booking-identity-block">
-                  <div className="booking-identity-label">Booking Identity</div>
-                  <div className="booking-identity-bid-row">
-                    <div className="booking-identity-bid">{selectedBookingIdentity}</div>
-                    <button type="button" className="booking-copy-btn" onClick={copyBookingBid}>Copy</button>
-                  </div>
-                  <div className="booking-identity-name">{selectedRes.guest_name}</div>
-                  {bidCopyState.kind !== 'idle' && (
-                    <div className={`booking-copy-state booking-copy-state--${bidCopyState.kind}`}>
-                      {bidCopyState.message}
-                    </div>
-                  )}
-                  <div className="booking-identity-line">
-                    {selectedStayLabel} · Room {selectedRoomLabel} · {selectedRoomTypeLabel}
-                  </div>
-                  <div className="booking-identity-secondary">
-                    <span>Legacy: {selectedBookingLegacy || '—'}</span>
-                    <span>Reservation ID: {selectedRes.id}</span>
-                  </div>
-                </div>
-
-                <div className="reservation-detail-badges reservation-detail-badges--stacked">
-                  <div className="status-grid">
-                    <div className="status-pill">
-                      <span className="status-pill__label">Booking</span>
-                      <span className="status-pill__value">{activeBookingStatus || '—'}</span>
-                    </div>
-                    <div className="status-pill">
-                      <span className="status-pill__label">Reservation</span>
-                      <span className="status-pill__value">{activeReservationStatus || '—'}</span>
-                    </div>
-                    <div className="status-pill">
-                      <span className="status-pill__label">Stay</span>
-                      <span className="status-pill__value">{activeStayStatus || '—'}</span>
-                    </div>
-                    <div className="status-pill">
-                      <span className="status-pill__label">Payment</span>
-                      <span className="status-pill__value">{activePaymentStatus}</span>
-                    </div>
-                  </div>
-                  <div className="source-channel-grid">
-                    <div className="mini-meta">
-                      <span className="mini-meta__label">Booking Source</span>
-                      <strong className="mini-meta__value">{selectedBookingSource || '—'}</strong>
-                    </div>
-                    <div className="mini-meta">
-                      <span className="mini-meta__label">Channel</span>
-                      <strong className="mini-meta__value">{selectedBookingChannel || '—'}</strong>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {selectedRes.readiness && !selectedRes.readiness.is_ready && (
-                <div className="mb-4 p-3.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 flex items-start gap-3 shadow-xs">
-                  <div className="text-lg leading-none mt-0.5 select-none">⚠️</div>
-                  <div className="flex-1 text-xs">
-                    <div className="font-bold uppercase tracking-wider text-amber-900 mb-0.5">
-                      Kamar Belum Siap (Kamar {selectedRoomLabel || selectedRes.room_id})
-                    </div>
-                    <div className="text-amber-800 leading-relaxed font-medium">
-                      {selectedRes.readiness.reason_message || 'Kamar sedang dipersiapkan dan belum dapat di-check-in.'}
-                    </div>
-                    {selectedRes.readiness.outgoing_reservation && (
-                      <div className="mt-1.5 text-[11px] text-amber-700 bg-amber-100/70 p-1.5 rounded-md">
-                        Tamu sebelumnya: <strong>{selectedRes.readiness.outgoing_reservation.guest_name}</strong> (Check-out: {formatCompactHotelDate(selectedRes.readiness.outgoing_reservation.check_out)})
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {bookingChildren.length > 1 && (
-                <div className="detail-section">
-                  <div className="detail-section-title">Rooms in this booking</div>
-                  <div className="booking-child-list">
-                    {bookingChildren.map((child: any) => {
-                      const childStay = child.stay_sequence ? `R${String(child.stay_sequence).padStart(2, '0')}` : 'R--';
-                      const childActive = Number(child.id) === Number(selectedRes.id);
-                      return (
-                        <button
-                          key={child.id}
-                          type="button"
-                          className={`booking-child-item booking-child-item--button ${childActive ? 'booking-child-item--active' : ''}`}
-                          onClick={() => {
-                            if (childActive) return;
-                            setSelectedRes(child);
-                            fetchReservationFolio(Number(child.id));
-                          }}
-                        >
-                          <div className="booking-child-item__top">
-                            <strong>{childStay} · Room {child.room_number || child.room_id || '—'}</strong>
-                            <span className="booking-child-status">{child.status || '—'}</span>
-                          </div>
-                          <div className="booking-child-item__meta">
-                            <span>{child.room_variant || child.room_type || '—'}</span>
-                            <span>{normalizeHotelDate(child.check_in) || '—'}</span>
-                            <span>{normalizeHotelDate(child.check_out) || '—'}</span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <div className="detail-section">
-                <div className="detail-section-title">Quick Actions</div>
-                <div className="reservation-action-row reservation-action-row--dense">
-                  {quickActionButtons.map((button) => (
-                    <button
-                      key={button.key}
-                      type="button"
-                      disabled={button.disabled}
-                      title={button.title}
-                      className={`reservation-action-button reservation-action-button--${button.variant} ${button.disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (!button.disabled) {
-                          button.onClick();
-                        }
-                      }}
-                    >
-                      {button.label}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Checkout Inspection Status / Request (HK-OPS-1) */}
-                {propertyFeatures['housekeeping.enabled'] !== false && propertyFeatures['housekeeping.checkout_inspection'] !== false && (
-                  selectedRes.checkout_inspection ? (
-                    <div className={`mt-3 p-3 rounded-xl border text-xs ${
-                      selectedRes.checkout_inspection.clearance_state === 'CLEAR'
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                        : selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND'
-                        ? 'bg-rose-50 border-rose-300 text-rose-950'
-                        : 'bg-amber-50 border-amber-200 text-amber-900'
-                    }`}>
-                      <div className="flex items-center justify-between font-bold">
-                        <span className="flex items-center gap-1.5">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                          </svg>
-                          Pemeriksaan Kamar (Checkout Inspection)
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          selectedRes.checkout_inspection.clearance_state === 'CLEAR'
-                            ? 'bg-emerald-200 text-emerald-900'
-                            : selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND'
-                            ? 'bg-rose-200 text-rose-900'
-                            : 'bg-amber-200 text-amber-900 animate-pulse'
-                        }`}>
-                          {selectedRes.checkout_inspection.clearance_state === 'CLEAR' ? 'CLEAR (AMAN)' :
-                           selectedRes.checkout_inspection.clearance_state === 'ISSUE_FOUND' ? 'ADA TEMUAN' :
-                           selectedRes.checkout_inspection.clearance_state === 'INSPECTING' ? 'SEDANG DIPERIKSA' : 'DIMINTA (PENDING)'}
-                        </span>
-                      </div>
-
-                      {selectedRes.checkout_inspection.issue_type && (
-                        <div className="mt-1.5 p-2 bg-white/80 rounded border border-rose-200 text-rose-900">
-                          <div className="font-semibold text-xs">
-                            Temuan: <span className="font-bold">{selectedRes.checkout_inspection.issue_type}</span>
-                          </div>
-                          {selectedRes.checkout_inspection.issue_note && (
-                            <div className="mt-0.5 italic">{selectedRes.checkout_inspection.issue_note}</div>
-                          )}
-                          {Number(selectedRes.checkout_inspection.estimated_charge || 0) > 0 && (
-                            <div className="mt-1 font-bold text-rose-800">
-                              Estimasi Biaya Tambahan: {formatCurrency(Number(selectedRes.checkout_inspection.estimated_charge))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    selectedRes.status === 'CHECKED_IN' && (
-                      <button
-                        type="button"
-                        onClick={handleRequestCheckoutRoomCheck}
-                        className="mt-3 w-full py-2 px-3 text-xs font-bold text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                      >
-                        <svg className="w-4 h-4 text-purple-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                        </svg>
-                        Minta Pemeriksaan Kamar ke Housekeeping
-                      </button>
-                    )
-                  )
-                )}
-              </div>
-
-              <div className="detail-section">
-                <div className="detail-section-title">Stay information</div>
-                <div className="detail-info-grid">
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Check-in</div>
-                    <div className="detail-card-value">{normalizeHotelDate(selectedRes.check_in) || '—'}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Check-out</div>
-                    <div className="detail-card-value">{normalizeHotelDate(selectedRes.check_out) || '—'}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Nights</div>
-                    <div className="detail-card-value">{selectedNights}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Room</div>
-                    <div className="detail-card-value">{selectedRoomLabel}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Room Type</div>
-                    <div className="detail-card-value">{selectedRoomTypeLabel}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Guest Segment</div>
-                    <div className="detail-card-value">{selectedRes.guest_segment || '—'}</div>
-                  </div>
-                  <div className="detail-info-card">
-                    <div className="detail-card-label">Phone</div>
-                    <div className="detail-card-value">{selectedRes.guest_phone || '—'}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="detail-section">
-                <div className="detail-section-title">Financial summary</div>
-                <div className="detail-summary-grid">
-                  <div className="summary-box summary-box--compact">
-                    <div className="summary-box-row"><span>Subtotal</span><strong>{formatCurrency(Number(selectedRes.subtotal_amount || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Discount</span><strong>{formatCurrency(Number(selectedRes.discount_amount || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Total</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Paid</span><strong>{formatCurrency(Number(selectedRes.amount_paid || 0))}</strong></div>
-                    <div className="summary-box-row total"><span>Remaining Balance</span><strong>{formatCurrency(Number(selectedRes.remaining_balance || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Payment Status</span><strong>{activePaymentStatus}</strong></div>
-                  </div>
-                  <div className="summary-box summary-box--compact">
-                    <div className="summary-box-head">Folio snapshot</div>
-                    <div className="summary-box-row"><span>Total tagihan</span><strong>{formatCurrency(Number(selectedRes.total_price || 0))}</strong></div>
-                    <div className="summary-box-row"><span>Sudah dibayar</span><strong>{formatCurrency(Number(selectedRes.amount_paid || 0))}</strong></div>
-                    <div className="summary-box-row total"><span>Sisa</span><strong>{formatCurrency(Number(selectedRes.remaining_balance || 0))}</strong></div>
-                  </div>
-                </div>
-              </div>
-
-              {(selectedRes.ktp_path || selectedRes.bukti_bayar_path) && (
-                <div className="detail-section">
-                  <div className="detail-section-title">Documents</div>
-                  <div className="reservation-doc-grid">
-                    {selectedRes.ktp_path && (
-                      <a
-                        href={selectedRes.ktp_path.startsWith('http') ? selectedRes.ktp_path : `http://localhost:5000${selectedRes.ktp_path}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="reservation-doc-link"
-                      >
-                        <span className="reservation-doc-tag">KTP</span>
-                        <span>Lihat KTP</span>
-                      </a>
-                    )}
-                    {selectedRes.bukti_bayar_path && (
-                      <a
-                        href={selectedRes.bukti_bayar_path.startsWith('http') ? selectedRes.bukti_bayar_path : `http://localhost:5000${selectedRes.bukti_bayar_path}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="reservation-doc-link"
-                      >
-                        <span className="reservation-doc-tag">Bayar</span>
-                        <span>Lihat Bukti Bayar</span>
-                      </a>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div className="detail-section">
-
-                {selectedRes.room_id && (
-                  <div className="reservation-turnover-row reservation-turnover-row--spaced">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold">Room status</div>
-                      <div className="font-bold text-slate-800">
-                        {normalizeRoomStatus(roomStatuses[String(selectedRes.room_id)] || 'Ready')}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="reservation-turnover-button"
-                      onClick={() => toggleStatus(String(selectedRes.room_id))}
-                    >
-                      {normalizeRoomStatus(roomStatuses[String(selectedRes.room_id)] || 'Ready') === 'Kotor'
-                        ? 'Tandai siap pakai'
-                        : 'Tandai kamar kotor'}
-                    </button>
-                  </div>
-                )}
-
-                <div className="reservation-payment-panel space-y-2.5 p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                  {(() => {
-                    const panelRemaining = Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0))));
-                    const validation = validateIdrPaymentInput(paymentDraft, panelRemaining);
-                    const hasInput = paymentDraft.trim().length > 0;
-
-                    return (
-                      <>
-                        <div className="flex items-center justify-between">
-                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Pembayaran Baru</label>
-                          <span className="text-xs text-slate-500">
-                            Sisa tagihan: <strong className="text-slate-800 font-bold">{formatCurrency(panelRemaining)}</strong>
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="relative flex-1">
-                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 select-none pointer-events-none">Rp</span>
-                            <input
-                              ref={paymentInputRef}
-                              type="text"
-                              inputMode="numeric"
-                              value={paymentDraft}
-                              onChange={(e) => {
-                                setPaymentFeedback(null);
-                                setPaymentDraft(formatIdrInput(e.target.value));
-                              }}
-                              placeholder="0"
-                              disabled={paymentSubmitting}
-                              className="w-full bg-white border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-700 disabled:bg-slate-100"
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handlePayment}
-                            disabled={paymentSubmitting || !validation.isValid || !paymentEvidenceForm.file}
-                            className={`px-4 py-2 rounded-lg text-sm font-bold text-white transition-all shadow-sm ${
-                              paymentSubmitting || !validation.isValid || !paymentEvidenceForm.file
-                                ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
-                                : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 cursor-pointer'
-                            }`}
-                          >
-                            {paymentSubmitting ? 'Memproses...' : 'Bayar'}
-                          </button>
-                        </div>
-
-                        {/* Integrated Payment Evidence Uploader */}
-                        <PaymentEvidenceUploader
-                          state={paymentEvidenceForm}
-                          onChange={setPaymentEvidenceForm}
-                          disabled={paymentSubmitting}
-                          isRequired={true}
-                        />
-
-                        {!paymentEvidenceForm.file && !paymentFeedback && (
-                          <p className="text-[11px] text-slate-500 italic">
-                            * Bukti pembayaran wajib dilampirkan sebelum memproses transaksi.
-                          </p>
-                        )}
-
-                        {validation.isValid && (
-                          <div className="text-xs flex items-center justify-between px-3 py-2 bg-white rounded-lg border border-slate-200 text-slate-600">
-                            <span>Sisa setelah pembayaran (estimasi):</span>
-                            <strong className={
-                              calculateRemainingBalancePreview(panelRemaining, paymentDraft) <= 0
-                                ? 'text-emerald-700 font-bold'
-                                : 'text-slate-800 font-bold'
-                            }>
-                              {formatCurrency(
-                                calculateRemainingBalancePreview(panelRemaining, paymentDraft)
-                              )}
-                              {calculateRemainingBalancePreview(panelRemaining, paymentDraft) <= 0 && ' (Lunas)'}
-                            </strong>
-                          </div>
-                        )}
-
-                        {paymentFeedback ? (
-                          <div className={`text-xs px-3 py-2 rounded-lg border font-medium ${
-                            paymentFeedback.type === 'success'
-                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                              : 'bg-rose-50 border-rose-200 text-rose-800'
-                          }`}>
-                            {paymentFeedback.message}
-                          </div>
-                        ) : hasInput && !validation.isValid ? (
-                          <div className="text-xs px-3 py-2 rounded-lg border font-medium bg-rose-50 border-rose-200 text-rose-800">
-                            {validation.error}
-                          </div>
-                        ) : null}
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-
-              <div className="detail-history-grid">
-                <div className="reservation-folio-panel">
-                  <div className="reservation-doc-title">Riwayat Pembayaran</div>
-                  {selectedFolio?.payments?.length ? (
-                    <div className="space-y-2 text-xs">
-                      {selectedFolio.payments.map((p: any) => {
-                        const visual = getPaymentStatusVisual(p.status, p.transaction_type);
-                        const eligible = isPaymentEligibleForCorrection(p);
-                        const isMenuOpen = activePaymentMenuId === Number(p.id);
-                        const evidenceBadge = getPaymentEvidenceStatus(selectedFolio?.evidences, Number(p.id));
-
-                        return (
-                          <div
-                            key={p.id}
-                            className="p-2.5 bg-white border border-slate-200 rounded-lg flex items-center justify-between gap-2 shadow-xs relative"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className={`font-bold ${visual.strikeThrough ? 'line-through text-slate-400' : p.transaction_type === 'REVERSAL' ? 'text-rose-700' : 'text-slate-800'}`}>
-                                  {p.transaction_type === 'REVERSAL' ? 'Reversal' : p.transaction_type === 'CORRECTION_REPLACEMENT' ? 'Pengganti' : 'Pembayaran'} {p.payment_method || 'CASH'}
-                                </span>
-                                <span className={`font-mono font-bold ${visual.strikeThrough ? 'line-through text-slate-400' : p.transaction_type === 'REVERSAL' ? 'text-rose-700' : 'text-emerald-700'}`}>
-                                  {p.transaction_type === 'REVERSAL' ? '-' : ''}{formatCurrency(Number(p.amount || 0))}
-                                </span>
-                                <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded border ${visual.bgColor} ${visual.textColor} ${visual.borderColor}`}>
-                                  {visual.label}
-                                </span>
-                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${evidenceBadge.badgeClass}`}>
-                                  📎 {evidenceBadge.label}
-                                </span>
-                              </div>
-                              <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
-                                <span>{formatHotelTimestamp(p.created_at)}</span>
-                                {p.reason_code && (
-                                  <span className="text-amber-700 font-medium truncate">
-                                    • {getReasonLabel(p.reason_code)}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="relative">
-                              <button
-                                type="button"
-                                onClick={() => setActivePaymentMenuId(isMenuOpen ? null : Number(p.id))}
-                                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded text-xs cursor-pointer tracking-wider"
-                                title="Aksi pembayaran"
-                              >
-                                ⋯
-                              </button>
-
-                              {isMenuOpen && (
-                                <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1 text-xs">
-                                  <button
-                                    type="button"
-                                    onClick={() => openPaymentDetailModal(p)}
-                                    className="w-full text-left px-3 py-1.5 hover:bg-slate-50 text-slate-700 cursor-pointer flex items-center gap-2"
-                                  >
-                                    <span>🔍</span> Detail Pembayaran
-                                  </button>
-                                  {eligible && (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => openPaymentCorrectionModal(p)}
-                                        className="w-full text-left px-3 py-1.5 hover:bg-amber-50 text-amber-800 font-medium cursor-pointer flex items-center gap-2"
-                                      >
-                                        <span>✏️</span> Koreksi Pembayaran
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => openPaymentVoidModal(p)}
-                                        className="w-full text-left px-3 py-1.5 hover:bg-rose-50 text-rose-700 font-medium cursor-pointer flex items-center gap-2"
-                                      >
-                                        <span>🚫</span> Batalkan Pembayaran
-                                      </button>
-                                    </>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-slate-400 italic py-2">Belum ada transaksi pembayaran</div>
-                  )}
-                </div>
-
-                <div className="reservation-audit-panel">
-                  <div className="reservation-doc-title">Reservation Activity</div>
-                  <div className="reservation-audit-list">
-                    {reservationAudit.slice(0, 8).map((audit: any) => (
-                      <div key={`${audit.audit_id || audit.id}-${audit.timestamp}`} className="reservation-audit-item">
-                        <div className="reservation-audit-icon">
-                          {String(audit.action || 'UPDATE').slice(0, 1).toUpperCase()}
-                        </div>
-                        <div className="reservation-audit-copy">
-                          <div className="font-semibold text-slate-800">{audit.action || 'UPDATE'}</div>
-                          <div className="text-[11px] text-slate-500">
-                            {audit.module || 'PMS'} • {formatHotelTimestamp(audit.timestamp)}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedFolio?.folio?.length ? (
-                  <div className="reservation-folio-panel">
-                    <div className="reservation-doc-title">Folio History</div>
-                    <div className="space-y-2 text-xs">
-                      {selectedFolio.folio.map((entry: any, idx: number) => (
-                        <div key={idx} className="flex justify-between border-b pb-1 last:border-0">
-                          <span>{entry.description || 'Entry'}</span>
-                          <span className={Number(entry.amount || 0) > 0 ? 'text-slate-700' : 'text-red-600'}>
-                            {formatCurrency(Number(entry.amount || 0))}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {reservationAudit.length ? (
-                  <div className="reservation-audit-panel">
-                    <div className="reservation-doc-title">Audit Trail</div>
-                    <div className="reservation-audit-list">
-                      {reservationAudit.slice(0, 8).map((audit: any) => (
-                        <div key={`${audit.audit_id || audit.id}-${audit.timestamp}-trail`} className="reservation-audit-item">
-                          <div className="reservation-audit-icon">
-                            {String(audit.action || 'UPDATE').slice(0, 1).toUpperCase()}
-                          </div>
-                          <div className="reservation-audit-copy">
-                            <div className="font-semibold text-slate-800">{audit.action || 'UPDATE'}</div>
-                            <div className="text-[11px] text-slate-500">
-                              {audit.module || 'PMS'} • {formatHotelTimestamp(audit.timestamp)}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
+        <ReservationDetailDrawer
+          reservation={selectedRes}
+          propertyId={propertyId ?? selectedRes?.property_id ?? null}
+          onClose={() => {
+            setSelectedRes(null);
+            setSelectedFolio(null);
+            setPaymentDraft('');
+            setPaymentFeedback(null);
+            setPaymentSubmitting(false);
+          }}
+          onRefresh={() => {
+            fetchData();
+            fetchOperationsData();
+          }}
+          onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
+          onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
+          onCancel={(resId) => handleReservationCancel(resId)}
+          onOpenStayChange={(res, mode) => openStayChangePrompt(mode || 'extend', Number(res.id), undefined, res)}
+        />
       )}
 
       {checkoutConfirmOpen && (
@@ -4947,46 +4254,206 @@ function App() {
 
       {stayChangeState.open && (
         <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
-          <div className="checkout-confirm-modal">
+          <div className="checkout-confirm-modal max-w-lg w-full">
             <div className="checkout-confirm-icon">{stayChangeState.type === 'extend' ? '↗' : '↘'}</div>
-            <h3 className="checkout-confirm-title">{stayChangeState.type === 'extend' ? 'Perpanjang masa menginap?' : 'Perpendek masa menginap?'}</h3>
+            <h3 className="checkout-confirm-title">
+              {stayChangeState.type === 'extend' ? 'Perpanjang Masa Menginap' : 'Ubah Tanggal Check-out'}
+            </h3>
             <p className="checkout-confirm-text">
               {stayChangeState.type === 'extend'
-                ? 'Konfirmasi perpanjangan hingga tanggal check-out baru.'
-                : 'Konfirmasi pemendekan hingga tanggal check-out baru.'}
+                ? 'Konfirmasi perpanjangan malam menginap dan tentukan tarif per malam tambahan.'
+                : 'Konfirmasi perubahan tanggal check-out ke tanggal lebih awal.'}
             </p>
-            <div className="reservation-payment-panel" style={{ marginTop: 8 }}>
-              <div className="text-xs text-slate-600 mb-2">
-                BID: <strong>{String(stayChangeReservation?.bid || selectedBooking?.bid || selectedRes?.bid || '—')}</strong>
+
+            <div className="reservation-payment-panel space-y-2.5 mt-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs text-stone-700">
+              <div className="flex justify-between py-1 border-b border-stone-200">
+                <span className="text-stone-500">Nomor Reservasi / BID:</span>
+                <strong className="font-mono">{String(stayChangeReservation?.bid || selectedBooking?.bid || stayChangeReservation?.id || '—')}</strong>
               </div>
-              <div className="text-xs text-slate-600 mb-2">
-                Kamar: <strong>{stayChangeReservation?.room_number || stayChangeReservation?.room_id || '—'}</strong>
+              <div className="flex justify-between py-1 border-b border-stone-200">
+                <span className="text-stone-500">Kamar:</span>
+                <strong className="text-stone-900">
+                  {stayChangeReservation?.room_number ? `Kamar ${stayChangeReservation.room_number}` : 'Belum Ditentukan'}
+                </strong>
               </div>
-              <div className="text-xs text-slate-600 mb-2">
-                Check-out saat ini: <strong>{(() => {
-                return normalizeHotelDate(stayChangeReservation?.check_out) || '—';
-                })()}</strong>
+              <div className="flex justify-between py-1 border-b border-stone-200">
+                <span className="text-stone-500">Tipe Kamar:</span>
+                <strong className="text-stone-900">
+                  {stayChangeReservation?.room_type_name || stayChangeReservation?.room_type || stayChangeReservation?.room_variant || 'Standard Room'}
+                </strong>
               </div>
-              <div className="text-xs text-slate-600 mb-2">
-                Check-out baru: <strong>{stayChangeState.newCheckOut || '—'}</strong>
+              <div className="flex justify-between py-1 border-b border-stone-200">
+                <span className="text-stone-500">Nama Tamu:</span>
+                <strong>{stayChangeReservation?.guest_name || '—'}</strong>
               </div>
-              <div className="text-xs text-slate-600 mb-2">
-                Perubahan malam: <strong>{stayChangeNightsDelta > 0 ? `+${stayChangeNightsDelta}` : stayChangeNightsDelta < 0 ? `${stayChangeNightsDelta}` : '0'}</strong>
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <div>
+                  <span className="text-stone-500 block text-[11px]">Check-out Saat Ini:</span>
+                  <strong className="font-mono text-sm">{normalizeHotelDate(stayChangeReservation?.check_out) || '—'}</strong>
+                </div>
+                <div>
+                  <span className="text-stone-500 block text-[11px]">Check-out Baru:</span>
+                  <input
+                    type="date"
+                    value={stayChangeState.newCheckOut}
+                    onChange={(event) => setStayChangeState((prev) => ({ ...prev, newCheckOut: event.target.value }))}
+                    className="w-full border border-stone-300 rounded px-2 py-1 text-xs font-mono font-bold bg-white"
+                  />
+                </div>
               </div>
-              <label className="text-xs font-semibold text-slate-700">New check-out</label>
-              <input
-                type="date"
-                value={stayChangeState.newCheckOut}
-                onChange={(event) => setStayChangeState((prev) => ({ ...prev, newCheckOut: event.target.value }))}
-                className="mt-2 flex-1 border rounded px-3 py-2 text-sm w-full"
-              />
+
+              <div className="flex justify-between py-1 border-t border-stone-200">
+                <span className="text-stone-500">Perubahan Malam:</span>
+                <strong className={stayChangeNightsDelta > 0 ? 'text-emerald-700 font-bold' : 'text-amber-700 font-bold'}>
+                  {stayChangeNightsDelta > 0 ? `+${stayChangeNightsDelta} malam` : `${stayChangeNightsDelta} malam`}
+                </strong>
+              </div>
+
+              {/* Status Finansial Saat Ini */}
+              <div className="p-2.5 bg-stone-100 rounded-lg border border-stone-200 text-xs space-y-1">
+                <div className="font-semibold text-stone-700 pb-1 border-b border-stone-200 flex justify-between items-center">
+                  <span>Status Finansial Saat Ini</span>
+                  {stayChangeState.loading && (
+                    <span className="text-[10px] text-amber-700 font-normal italic">Memuat data...</span>
+                  )}
+                </div>
+                <div className="flex justify-between text-stone-600">
+                  <span>Tagihan Saat Ini:</span>
+                  <strong className="font-mono text-stone-900">
+                    {stayChangeState.loading ? '...' : `Rp ${stayChangeState.currentTotalCharge.toLocaleString('id-ID')}`}
+                  </strong>
+                </div>
+                <div className="flex justify-between text-stone-600">
+                  <span>Sudah Dibayar:</span>
+                  <strong className="font-mono text-emerald-700">
+                    {stayChangeState.loading ? '...' : `Rp ${stayChangeState.currentAmountPaid.toLocaleString('id-ID')}`}
+                  </strong>
+                </div>
+                <div className="flex justify-between text-stone-600">
+                  <span>Sisa Saat Ini:</span>
+                  <strong className="font-mono text-amber-700">
+                    {stayChangeState.loading ? '...' : `Rp ${stayChangeState.currentOutstanding.toLocaleString('id-ID')}`}
+                  </strong>
+                </div>
+              </div>
+
+              {stayChangeState.type === 'extend' && stayChangeNightsDelta > 0 && (
+                <div className="pt-2 border-t border-stone-200 space-y-2">
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="block text-[11px] font-semibold text-stone-800">
+                        Tarif per Malam Tambahan (Rp) <span className="text-rose-600">*</span>
+                      </label>
+                      {stayChangeState.pricingSource && (
+                        <span className="text-[10px] bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200 font-medium">
+                          {stayChangeState.pricingSource}
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="number"
+                      step="1000"
+                      min="0"
+                      value={stayChangeState.additionalNightRate}
+                      onChange={(e) => setStayChangeState((prev) => ({ ...prev, additionalNightRate: Math.max(0, Number(e.target.value) || 0) }))}
+                      className="w-full border border-emerald-300 focus:border-emerald-600 rounded px-3 py-1.5 text-xs font-mono font-bold bg-white"
+                    />
+                    <span className="text-[10px] text-stone-500 block mt-0.5">
+                      * Tarif sebelumnya: Rp {stayChangeState.existingNightlyRate.toLocaleString('id-ID')} / malam
+                    </span>
+                  </div>
+
+                  {/* Financial calculation preview */}
+                  {(() => {
+                    const currentTotal = stayChangeState.currentTotalCharge;
+                    const currentPaid = stayChangeState.currentAmountPaid;
+                    const deltaCharge = stayChangeNightsDelta * (stayChangeState.additionalNightRate || 0);
+                    const newTotal = currentTotal + deltaCharge;
+                    const newOutstanding = Math.max(0, newTotal - currentPaid);
+
+                    return (
+                      <div className="p-2.5 bg-white rounded-lg border border-emerald-200 text-xs space-y-1">
+                        <div className="flex justify-between text-stone-600">
+                          <span>Tambahan Tagihan ({stayChangeNightsDelta} malam):</span>
+                          <span className="font-mono font-semibold text-emerald-800">+Rp {deltaCharge.toLocaleString('id-ID')}</span>
+                        </div>
+                        <div className="flex justify-between text-stone-700 font-semibold border-t border-stone-100 pt-1">
+                          <span>Total Tagihan Baru:</span>
+                          <span className="font-mono font-bold text-stone-900">Rp {newTotal.toLocaleString('id-ID')}</span>
+                        </div>
+                        <div className="flex justify-between text-stone-600">
+                          <span>Sudah Dibayar:</span>
+                          <span className="font-mono text-emerald-700">Rp {currentPaid.toLocaleString('id-ID')}</span>
+                        </div>
+                        <div className="flex justify-between text-stone-800 pt-1 border-t border-stone-100 font-bold">
+                          <span>Sisa Tagihan Baru:</span>
+                          <span className="font-mono text-amber-700">Rp {newOutstanding.toLocaleString('id-ID')}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {stayChangeState.type === 'shorten' && stayChangeNightsDelta < 0 && (
+                <div className="pt-2 border-t border-stone-200 space-y-2">
+                  {(() => {
+                    const currentTotal = stayChangeState.currentTotalCharge;
+                    const currentPaid = stayChangeState.currentAmountPaid;
+                    const shortenNights = Math.abs(stayChangeNightsDelta);
+                    const shortenAdjustment = shortenNights * stayChangeState.existingNightlyRate;
+                    const newTotal = Math.max(0, currentTotal - shortenAdjustment);
+                    const newOutstanding = Math.max(0, newTotal - currentPaid);
+                    const overpaidCredit = Math.max(0, currentPaid - newTotal);
+
+                    return (
+                      <div className="p-2.5 bg-white rounded-lg border border-amber-200 text-xs space-y-1">
+                        <div className="flex justify-between text-stone-600">
+                          <span>Penyesuaian Tagihan ({shortenNights} malam):</span>
+                          <span className="font-mono font-semibold text-amber-800">-Rp {shortenAdjustment.toLocaleString('id-ID')}</span>
+                        </div>
+                        <div className="flex justify-between text-stone-700 font-semibold border-t border-stone-100 pt-1">
+                          <span>Total Tagihan Baru:</span>
+                          <span className="font-mono font-bold text-stone-900">Rp {newTotal.toLocaleString('id-ID')}</span>
+                        </div>
+                        <div className="flex justify-between text-stone-600">
+                          <span>Sudah Dibayar:</span>
+                          <span className="font-mono text-emerald-700">Rp {currentPaid.toLocaleString('id-ID')}</span>
+                        </div>
+                        {overpaidCredit > 0 ? (
+                          <div className="flex justify-between text-emerald-900 pt-1 border-t border-stone-100 font-bold">
+                            <span>Potensi Lebih Bayar (Kredit Tamu):</span>
+                            <span className="font-mono text-emerald-700">Rp {overpaidCredit.toLocaleString('id-ID')}</span>
+                          </div>
+                        ) : (
+                          <div className="flex justify-between text-stone-800 pt-1 border-t border-stone-100 font-bold">
+                            <span>Sisa Tagihan Baru:</span>
+                            <span className="font-mono text-amber-700">Rp {newOutstanding.toLocaleString('id-ID')}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
-            <div className="checkout-confirm-actions">
-              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--secondary" onClick={closeStayChangePrompt}>
+
+            <div className="checkout-confirm-actions mt-4 flex gap-2 justify-end">
+              <button
+                type="button"
+                className="checkout-confirm-btn checkout-confirm-btn--secondary"
+                onClick={closeStayChangePrompt}
+                disabled={stayChangeState.submitting}
+              >
                 Batal
               </button>
-              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--primary" onClick={confirmStayChange}>
-                {stayChangeState.type === 'extend' ? 'Confirm Extend' : 'Confirm Shorten'}
+              <button
+                type="button"
+                className="checkout-confirm-btn checkout-confirm-btn--primary"
+                onClick={confirmStayChange}
+                disabled={stayChangeState.submitting || stayChangeNightsDelta === 0}
+              >
+                {stayChangeState.submitting ? 'Memproses...' : (stayChangeState.type === 'extend' ? 'Konfirmasi Perpanjangan' : 'Konfirmasi Pemendekan')}
               </button>
             </div>
           </div>

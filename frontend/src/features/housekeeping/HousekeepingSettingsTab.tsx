@@ -40,6 +40,9 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const [allowCalendarOverride, setAllowCalendarOverride] = useState<boolean>(
     Boolean(settings?.allow_calendar_room_status_override)
   );
+  const [categoryBulkCheckEnabled, setCategoryBulkCheckEnabled] = useState<boolean>(
+    Boolean(settings?.housekeeping_category_bulk_check_enabled)
+  );
   const [cleaningTemplateCode, setCleaningTemplateCode] = useState<string>(
     settings?.default_cleaning_template_code ||
     settings?.default_room_cleaning_template_code ||
@@ -166,6 +169,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       setRequireFinalInspection(Boolean(settings.require_final_inspection));
       setRequireCheckoutRoomCheck(Boolean(settings.require_checkout_room_check));
       setAllowCalendarOverride(Boolean(settings.allow_calendar_room_status_override));
+      setCategoryBulkCheckEnabled(Boolean(settings.housekeeping_category_bulk_check_enabled));
       setCleaningTemplateCode(
         settings.default_cleaning_template_code ||
         settings.default_room_cleaning_template_code ||
@@ -241,6 +245,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
         require_final_inspection: requireFinalInspection,
         require_checkout_room_check: requireCheckoutRoomCheck,
         allow_calendar_room_status_override: allowCalendarOverride,
+        housekeeping_category_bulk_check_enabled: categoryBulkCheckEnabled,
         default_cleaning_template_code: cleaningTemplateCode,
         default_room_cleaning_template_code: cleaningTemplateCode,
         default_checkout_template_code: checkoutTemplateCode,
@@ -1057,6 +1062,19 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
                 <div>
                   <div className="text-xs font-bold text-neutral-800">Izinkan Kalender Mengubah Status Kesiapan Kamar (Override)</div>
                   <p className="text-xs text-neutral-500 mt-0.5">Default: <span className="font-semibold text-neutral-700">Nonaktif</span>. Housekeeping adalah otoritas tunggal kesiapan fisik kamar.</p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={categoryBulkCheckEnabled}
+                  onChange={(e) => setCategoryBulkCheckEnabled(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-500"
+                />
+                <div>
+                  <div className="text-xs font-bold text-neutral-800">Checklist Semua per Kategori</div>
+                  <p className="text-xs text-neutral-500 mt-0.5">Memungkinkan petugas menandai seluruh item yang memenuhi syarat dalam satu kategori sekaligus. Tugas tetap harus diselesaikan dengan tombol Submit Selesai.</p>
                 </div>
               </label>
 

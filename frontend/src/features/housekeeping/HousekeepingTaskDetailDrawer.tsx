@@ -15,6 +15,8 @@ interface HousekeepingTaskDetailDrawerProps {
   onAcknowledge: (task: HousekeepingTaskRecord) => Promise<void>;
   onStart: (task: HousekeepingTaskRecord) => Promise<void>;
   onToggleChecklistItem: (task: HousekeepingTaskRecord, item: TaskChecklistItem, isCompleted: boolean) => Promise<void>;
+  onBulkToggleCategory?: (task: HousekeepingTaskRecord, categoryName: string, items: TaskChecklistItem[], isCompleted: boolean) => Promise<void>;
+  categoryBulkCheckEnabled?: boolean;
   onComplete: (
     task: HousekeepingTaskRecord,
     payload: {
@@ -35,6 +37,8 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
   onAcknowledge,
   onStart,
   onToggleChecklistItem,
+  onBulkToggleCategory,
+  categoryBulkCheckEnabled = false,
   onComplete,
   isSubmitting = false
 }) => {
@@ -223,42 +227,66 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                   </span>
                 </div>
 
-                {Object.entries(sections).map(([secName, items]) => (
-                  <div key={secName} className="space-y-2">
-                    <div className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">{secName}</div>
-                    <div className="space-y-1.5 bg-neutral-50/60 p-2.5 rounded-lg border border-neutral-200/60">
-                      {items.map((item) => (
-                        <label
-                          key={item.id}
-                          className={`flex items-start gap-2.5 p-1.5 rounded transition-colors text-xs cursor-pointer select-none ${
-                            item.is_completed ? 'bg-emerald-50/50 text-neutral-700' : 'hover:bg-white text-neutral-900'
-                          } ${isComplete ? 'cursor-default pointer-events-none' : ''}`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={item.is_completed}
-                            disabled={isComplete || isSubmitting}
-                            onChange={(e) => onToggleChecklistItem(task, item, e.target.checked)}
-                            className="mt-0.5 h-4 w-4 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-500"
-                          />
-                          <div className="flex-1">
-                            <span className={item.is_completed ? 'line-through text-neutral-500' : 'font-medium'}>
-                              {item.label}
-                            </span>
-                            {item.is_required && (
-                              <span className="text-red-500 ml-1 font-bold" title="Wajib diselesaikan">*</span>
-                            )}
-                            {item.completed_by_name && item.is_completed && (
-                              <span className="text-[10px] text-neutral-400 block">
-                                oleh {item.completed_by_name}
+                {Object.entries(sections).map(([secName, items]) => {
+                  const secCompleted = items.filter((i) => i.is_completed).length;
+                  const isAllSecCompleted = items.length > 0 && secCompleted === items.length;
+
+                  return (
+                    <div key={secName} className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">{secName}</span>
+                          <span className="text-[10px] font-mono text-neutral-400 font-semibold">({secCompleted}/{items.length})</span>
+                        </div>
+                        {categoryBulkCheckEnabled && !isComplete && (
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => onBulkToggleCategory?.(task, secName, items, !isAllSecCompleted)}
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border transition-colors cursor-pointer ${
+                              isAllSecCompleted
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                            }`}
+                          >
+                            {isAllSecCompleted ? '✓ Semua Dicentang' : '✓ Checklist Semua'}
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5 bg-neutral-50/60 p-2.5 rounded-lg border border-neutral-200/60">
+                        {items.map((item) => (
+                          <label
+                            key={item.id}
+                            className={`flex items-start gap-2.5 p-1.5 rounded transition-colors text-xs cursor-pointer select-none ${
+                              item.is_completed ? 'bg-emerald-50/50 text-neutral-700' : 'hover:bg-white text-neutral-900'
+                            } ${isComplete ? 'cursor-default pointer-events-none' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={item.is_completed}
+                              disabled={isComplete || isSubmitting}
+                              onChange={(e) => onToggleChecklistItem(task, item, e.target.checked)}
+                              className="mt-0.5 h-4 w-4 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-500"
+                            />
+                            <div className="flex-1">
+                              <span className={item.is_completed ? 'line-through text-neutral-500' : 'font-medium'}>
+                                {item.label}
                               </span>
-                            )}
-                          </div>
-                        </label>
-                      ))}
+                              {item.is_required && (
+                                <span className="text-red-500 ml-1 font-bold" title="Wajib diselesaikan">*</span>
+                              )}
+                              {item.completed_by_name && item.is_completed && (
+                                <span className="text-[10px] text-neutral-400 block">
+                                  oleh {item.completed_by_name}
+                                </span>
+                              )}
+                            </div>
+                          </label>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 

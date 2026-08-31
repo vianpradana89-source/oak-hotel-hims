@@ -110,6 +110,11 @@ async function cleanupCorrelation(corr, identName, identId, dates) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`
+      DELETE FROM housekeeping_tasks 
+      WHERE reservation_id IN (SELECT id FROM reservations WHERE correlation_id = $1)
+         OR (source_type = 'CHECKOUT_EVENT' AND source_entity_id IN (SELECT id::text FROM reservations WHERE correlation_id = $1))
+    `, [corr]);
     await client.query('DELETE FROM folio_entries WHERE reservation_id IN (SELECT id FROM reservations WHERE correlation_id = $1)', [corr]);
     await client.query('DELETE FROM payment_transactions WHERE reservation_id IN (SELECT id FROM reservations WHERE correlation_id = $1)', [corr]);
     await client.query('DELETE FROM audit_logs WHERE correlation_id = $1', [corr]);
@@ -288,14 +293,14 @@ async function testCheckoutReleasesInventoryDriftFix() {
   expect(create.status === 201, `create for checkout failed: ${create.text}`);
   const reservationId = Number(create.json.data.id);
 
-  const checkin = await request('POST', `/api/reservations/${reservationId}/checkin`, {}, `${corr}-CI`);
+  const checkin = await request('POST', `/api/reservations/${reservationId}/checkin`, { property_id: room.property_id, force: true, override_guest_identity: true, override_housekeeping: true }, `${corr}-CI`);
   expect(checkin.status === 200, `checkin failed: ${checkin.text}`);
 
   const duringStay = await availabilityRow(room.room_type_id, start);
   expect(duringStay && Number(duringStay.reserved_qty) >= 1, 'in-stay night not counted');
 
   // RM-1B root-cause regression: checkout MUST release reserved_qty per occupied night.
-  const checkout = await request('POST', `/api/reservations/${reservationId}/checkout`, {}, `${corr}-CO`);
+  const checkout = await request('POST', `/api/reservations/${reservationId}/checkout`, { property_id: room.property_id, skip_inspection: true }, `${corr}-CO`);
   expect(checkout.status === 200, `checkout failed: ${checkout.text}`);
 
   const afterCheckoutA = await availabilityRow(room.room_type_id, start);

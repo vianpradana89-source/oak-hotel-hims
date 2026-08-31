@@ -197,14 +197,16 @@ export async function createPaymentCore(
     await client.query(`
       INSERT INTO folio_entries (
         reservation_id,
+        property_id,
         entry_type,
         description,
         amount,
         direction
       )
-      VALUES ($1, $2, $3, $4, 'CREDIT')
+      VALUES ($1, $2, $3, $4, $5, 'CREDIT')
     `, [
       reservationId,
+      propertyId,
       transactionType,
       'Pembayaran tamu',
       paymentAmount

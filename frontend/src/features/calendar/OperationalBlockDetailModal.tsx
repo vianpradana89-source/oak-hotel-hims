@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { safeFetchJson } from './calendarApi';
 import type { RoomOperationalBlock } from './calendarTypes';
 
 interface Props {
@@ -22,20 +23,23 @@ export default function OperationalBlockDetailModal({ block, roomNumber, roomTyp
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch(`/api/room-operational-blocks/${block.id}/release`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: block.property_id,
-          released_by: 'Front Office'
-        })
-      });
-      const data = await res.json();
-      if (res.ok && data.status === 'OK') {
+      const result = await safeFetchJson<{ status?: string; message?: string }>(
+        `/api/room-operational-blocks/${block.id}/release`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: block.property_id,
+            released_by: 'Front Office'
+          })
+        },
+        'Gagal menyelesaikan blok operasional'
+      );
+      if (result.ok && result.data?.status === 'OK') {
         onRefresh?.();
         onClose();
       } else {
-        setErrorMsg(data.message || 'Gagal menyelesaikan blok operasional');
+        setErrorMsg(result.errorMessage || 'Gagal menyelesaikan blok operasional');
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Terjadi kesalahan jaringan');
@@ -51,21 +55,24 @@ export default function OperationalBlockDetailModal({ block, roomNumber, roomTyp
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch(`/api/room-operational-blocks/${block.id}/cancel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: block.property_id,
-          cancelled_by: 'Front Office',
-          reason: 'Dibatalkan dari Kalender'
-        })
-      });
-      const data = await res.json();
-      if (res.ok && data.status === 'OK') {
+      const result = await safeFetchJson<{ status?: string; message?: string }>(
+        `/api/room-operational-blocks/${block.id}/cancel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: block.property_id,
+            cancelled_by: 'Front Office',
+            reason: 'Dibatalkan dari Kalender'
+          })
+        },
+        'Gagal membatalkan blok operasional'
+      );
+      if (result.ok && result.data?.status === 'OK') {
         onRefresh?.();
         onClose();
       } else {
-        setErrorMsg(data.message || 'Gagal membatalkan blok operasional');
+        setErrorMsg(result.errorMessage || 'Gagal membatalkan blok operasional');
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Terjadi kesalahan jaringan');

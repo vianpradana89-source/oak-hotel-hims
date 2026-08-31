@@ -18,3 +18,23 @@ backend/src/move_handler_temp.txt
 
 # Private evidence storage (multi-property runtime files)
 backend/storage/
+backend/uploads/
+
+# Python Virtual Environments & Cache
+.venv/
+backend/ocr/.venv/
+__pycache__/
+*.pyc
+.paddleocr/
+.paddlex/
+# Database dumps / migration artifacts
+*.sql
+
+# Local environment / credential backups
+*-env-*.txt
+.env*
+!.env.example
+
+# Local backup artifacts
+*.bak
+*.backup

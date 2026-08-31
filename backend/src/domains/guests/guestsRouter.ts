@@ -2,7 +2,10 @@ import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
   addReservationGuest,
+  archiveGuest,
+  checkGuestDuplicates,
   createGuest,
+  deleteGuest,
   deleteReservationGuest,
   getCrmSummary,
   getDuplicateCandidates,
@@ -11,6 +14,7 @@ import {
   listReservationGuests,
   matchGuest,
   parsePropertyId,
+  restoreGuest,
   searchGuests,
   updateGuest,
   updateReservationGuest
@@ -67,16 +71,64 @@ export function createGuestsRouter(pool: Pool) {
     }
   });
 
+  // POST /api/guests/duplicate-check
+  router.post('/duplicate-check', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const result = await checkGuestDuplicates(pool, {
+        property_id: propertyId,
+        phone: req.body?.phone,
+        nik: req.body?.nik || req.body?.identity_number,
+        email: req.body?.email,
+        name: req.body?.name || req.body?.full_name,
+        birth_date: req.body?.birth_date,
+        exclude_guest_id: req.body?.exclude_guest_id ? Number(req.body.exclude_guest_id) : null
+      });
+      return res.json({
+        status: 'SUCCESS',
+        data: result
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // GET /api/guests/search?property_id=X&q=... (convenience alias for quick booking autocomplete)
+  router.get('/search', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      const search = typeof req.query.q === 'string' ? req.query.q : (typeof req.query.search === 'string' ? req.query.search : undefined);
+      const limit = req.query.limit !== undefined ? Number(req.query.limit) : 20;
+      const offset = req.query.offset !== undefined ? Number(req.query.offset) : 0;
+      const includeArchived = req.query.include_archived === 'true';
+
+      const result = await searchGuests(pool, propertyId, search, limit, offset, undefined, includeArchived);
+      return res.json({
+        status: 'OK',
+        success: true,
+        data: result.guests,
+        meta: {
+          total: result.total,
+          limit: Math.max(1, Math.min(limit, 100)),
+          offset: Math.max(0, offset)
+        }
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
   // GET /api/guests?property_id=X&search=...&limit=...&offset=...&vip_status=...
   router.get('/', async (req: any, res: any) => {
     try {
       const propertyId = parsePropertyId(req.query.property_id, 'property_id');
-      const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+      const search = typeof req.query.search === 'string' ? req.query.search : (typeof req.query.q === 'string' ? req.query.q : undefined);
       const vipStatus = typeof req.query.vip_status === 'string' ? req.query.vip_status : undefined;
       const limit = req.query.limit !== undefined ? Number(req.query.limit) : 50;
       const offset = req.query.offset !== undefined ? Number(req.query.offset) : 0;
+      const includeArchived = req.query.include_archived === 'true';
 
-      const result = await searchGuests(pool, propertyId, search, limit, offset, vipStatus);
+      const result = await searchGuests(pool, propertyId, search, limit, offset, vipStatus, includeArchived);
       return res.json({
         status: 'SUCCESS',
         data: result.guests,
@@ -154,6 +206,63 @@ export function createGuestsRouter(pool: Pool) {
       return res.json({
         status: 'SUCCESS',
         data: guest
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/:id/archive
+  router.post('/:id/archive', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id || req.query.property_id, 'property_id');
+      const guestId = Number(req.params.id);
+      if (!Number.isInteger(guestId) || guestId <= 0) {
+        throw httpError(400, 'VALIDATION_ERROR', 'invalid guest id');
+      }
+      const correlationId = getCorrelationId(req);
+      const guest = await archiveGuest(pool, guestId, propertyId, correlationId);
+      return res.json({
+        status: 'SUCCESS',
+        data: guest
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/:id/restore
+  router.post('/:id/restore', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id || req.query.property_id, 'property_id');
+      const guestId = Number(req.params.id);
+      if (!Number.isInteger(guestId) || guestId <= 0) {
+        throw httpError(400, 'VALIDATION_ERROR', 'invalid guest id');
+      }
+      const correlationId = getCorrelationId(req);
+      const guest = await restoreGuest(pool, guestId, propertyId, correlationId);
+      return res.json({
+        status: 'SUCCESS',
+        data: guest
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // DELETE /api/guests/:id
+  router.delete('/:id', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.body?.property_id, 'property_id');
+      const guestId = Number(req.params.id);
+      if (!Number.isInteger(guestId) || guestId <= 0) {
+        throw httpError(400, 'VALIDATION_ERROR', 'invalid guest id');
+      }
+      const correlationId = getCorrelationId(req);
+      const result = await deleteGuest(pool, guestId, propertyId, correlationId);
+      return res.json({
+        status: 'SUCCESS',
+        data: result
       });
     } catch (err: any) {
       return handleRouterError(err, res);

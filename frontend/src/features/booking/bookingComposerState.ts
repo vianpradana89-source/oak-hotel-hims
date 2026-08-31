@@ -70,12 +70,19 @@ export function additionalBookingChildOverrides(
     room_variant: baseChild.room_variant ?? fallback.room_variant ?? '',
     check_in: baseChild.check_in ?? fallback.check_in ?? '',
     check_out: baseChild.check_out ?? fallback.check_out ?? '',
+    rate_plan_id: baseChild.rate_plan_id ?? fallback.rate_plan_id ?? null,
+    rate_plan_code: baseChild.rate_plan_code ?? fallback.rate_plan_code ?? null,
+    rate_plan_name: baseChild.rate_plan_name ?? fallback.rate_plan_name ?? null,
     total_price: 0,
     subtotal_amount: 0,
+    tax_amount: 0,
+    service_amount: 0,
     discount_amount: 0,
     discount_percent: 0,
     amount_paid: 0,
     payment_status: 'UNPAID',
+    is_manual_override: false,
+    manual_override_reason: '',
   };
 }
 
