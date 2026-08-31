@@ -1,0 +1,55 @@
+﻿steps:
+  # 1. Build production multi-stage container image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '-t'
+      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+      - '-t'
+      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+
+  # 2. Push commit-tagged image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-commit-image'
+    args:
+      - 'push'
+      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+
+  # 3. Push latest-tagged image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest-image'
+    args:
+      - 'push'
+      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+
+  # 4. Deploy automatically to Google Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image=$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+      - '--region=$_REGION'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--port=8080'
+
+images:
+  - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+  - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+
+substitutions:
+  _SERVICE_NAME: 'oak-hotel-hims'
+  _REGION: 'asia-southeast2'
+  _AR_LOCATION: 'asia-southeast2'
+  _AR_REPOSITORY: 'oak-repo'
+  _IMAGE_NAME: 'oak-hotel-hims'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

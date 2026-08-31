@@ -88,6 +88,16 @@ const uploadDir = path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 app.use('/uploads', express.static(uploadDir));
 
+const frontendDist = process.env.FRONTEND_DIST_DIR
+  ? path.resolve(process.env.FRONTEND_DIST_DIR)
+  : fs.existsSync(path.resolve(__dirname, '../../frontend/dist'))
+    ? path.resolve(__dirname, '../../frontend/dist')
+    : path.resolve(__dirname, '../frontend/dist');
+
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+}
+
 const memoryUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -347,8 +357,9 @@ async function startServer() {
     sweepSummary,
     reconciliation
   });
-  app.listen(5000, () => {
-    console.log('Backend running on port 5000');
+  const port = Number(process.env.PORT) || 5000;
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Backend running on port ${port}`);
   });
 }
 
@@ -7087,6 +7098,16 @@ app.post('/api/reservations/:id/move', async (req, res) => {
     client.release();
   }
 });
+
+// SPA fallback for non-API client routes
+if (fs.existsSync(frontendDist)) {
+  app.get('*', (req: any, res: any, next: any) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
 
 // Release expired canonical temporary holds. NULL-ID holds remain classified
 // and untouched for explicit historical handling.
