@@ -4,12 +4,12 @@
 FROM node:20-slim AS frontend-builder
 WORKDIR /app
 
-# Copy root and workspace package manifests
+# Copy package manifests
 COPY package.json package-lock.json ./
 COPY frontend/package.json ./frontend/
 
-# Install dependencies for frontend
-RUN npm ci --workspace=frontend
+# Install dependencies with platform-specific optional binaries for Linux
+RUN npm --prefix frontend install --include=optional
 
 # Copy frontend source code
 COPY frontend/ ./frontend/
@@ -23,12 +23,12 @@ RUN npm --prefix frontend run build
 FROM node:20-slim AS backend-builder
 WORKDIR /app
 
-# Copy root and workspace package manifests
+# Copy package manifests
 COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/
 
 # Install dependencies for backend
-RUN npm ci --workspace=backend
+RUN npm --prefix backend install --include=optional
 
 # Copy backend source code
 COPY backend/ ./backend/
@@ -48,7 +48,7 @@ ENV PORT=8080
 # Install production dependencies only
 COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/
-RUN npm ci --workspace=backend --omit=dev && npm cache clean --force
+RUN npm --prefix backend install --omit=dev && npm cache clean --force
 
 # Copy compiled backend output
 COPY --from=backend-builder /app/backend/dist ./backend/dist
