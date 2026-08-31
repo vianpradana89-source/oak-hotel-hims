@@ -1,7 +1,7 @@
 ﻿# ==========================================
 # Stage 1: Build Frontend
 # ==========================================
-FROM node:20-alpine AS frontend-builder
+FROM node:20-slim AS frontend-builder
 WORKDIR /app
 
 # Copy root and workspace package manifests
@@ -20,7 +20,7 @@ RUN npm --prefix frontend run build
 # ==========================================
 # Stage 2: Build Backend
 # ==========================================
-FROM node:20-alpine AS backend-builder
+FROM node:20-slim AS backend-builder
 WORKDIR /app
 
 # Copy root and workspace package manifests
@@ -39,7 +39,7 @@ RUN npm --prefix backend run build
 # ==========================================
 # Stage 3: Production Runner
 # ==========================================
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
