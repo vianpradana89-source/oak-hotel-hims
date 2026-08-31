@@ -5,28 +5,28 @@
     args:
       - 'build'
       - '-t'
-      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
       - '-t'
-      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
       - '-f'
       - 'Dockerfile'
       - '.'
 
-  # 2. Push commit-tagged image to Artifact Registry
+  # 2. Push commit-tagged image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-commit-image'
     args:
       - 'push'
-      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
 
-  # 3. Push latest-tagged image to Artifact Registry
+  # 3. Push latest-tagged image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-latest-image'
     args:
       - 'push'
-      - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
 
-  # 4. Deploy automatically to Google Cloud Run
+  # 4. Deploy automatically to Google Cloud Run (us-central1)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
     entrypoint: 'gcloud'
@@ -34,22 +34,20 @@
       - 'run'
       - 'deploy'
       - '$_SERVICE_NAME'
-      - '--image=$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
+      - '--image=gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
       - '--region=$_REGION'
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--port=8080'
 
 images:
-  - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:$COMMIT_SHA'
-  - '$_AR_LOCATION-docker.pkg.dev/$PROJECT_ID/$_AR_REPOSITORY/$_IMAGE_NAME:latest'
+  - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
 
 substitutions:
-  _SERVICE_NAME: 'oak-hotel-hims'
-  _REGION: 'asia-southeast2'
-  _AR_LOCATION: 'asia-southeast2'
-  _AR_REPOSITORY: 'oak-repo'
-  _IMAGE_NAME: 'oak-hotel-hims'
+  _SERVICE_NAME: 'oak-hims-staging1'
+  _REGION: 'us-central1'
+  _IMAGE_NAME: 'oak-hims-staging1'
 
 options:
   logging: CLOUD_LOGGING_ONLY
