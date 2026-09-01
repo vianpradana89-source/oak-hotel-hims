@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { OtaSource } from '../ota/otaTypes';
 import { fetchOtaSources } from '../ota/otaApi';
 import { fetchStayChargeRules } from '../stayCharges/stayChargesApi';
@@ -150,7 +150,41 @@ export default function QuickBookingModal({
     return otaSources.find(o => Number(o.id) === Number(selectedOtaSourceId))?.name || '';
   }, [otaSources, selectedOtaSourceId]);
 
-  // --- Multi-Room State: Array of RoomDrafts ---
+  // --- Initial Room Draft for a fresh booking session (always WALKIN default) ---
+  const createInitialRoomDraft = useCallback((index: number, initRId: number | null = null): RoomDraft => {
+    let defaultTypeId = roomTypes.length > 0 ? roomTypes[0].id : null;
+    if (initRId) {
+      const match = rooms.find(r => Number(r.id) === Number(initRId));
+      if (match) {
+        defaultTypeId = match.room_type_id || match.canonical_room_type_id || defaultTypeId;
+      }
+    }
+
+    return {
+      id: 'room-' + Date.now() + '-' + index + '-' + Math.random().toString(36).substring(2, 6),
+      roomTypeId: defaultTypeId,
+      roomId: initRId,
+      stayType: 'OVERNIGHT',
+      checkIn: initialDate || todayStr,
+      checkOut: tomorrowStr,
+      dayUseHours: 6,
+      dayUseStartTime: '10:00',
+      adults: 1,
+      children: 0,
+      ratePlanId: null,
+      roomNightlyRate: 0,
+      isManualOverride: false,
+      manualOverridePrice: 0,
+      manualOverrideReason: '',
+      quoteLoading: false,
+      stayCharges: [],
+      discountType: 'NOMINAL',
+      discountValue: 0,
+      discountReason: ''
+    };
+  }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr]);
+
+  // --- Live Room Draft for adding additional rooms during an active session ---
   const createNewRoomDraft = useCallback((index: number, initRId: number | null = null): RoomDraft => {
     let defaultTypeId = roomTypes.length > 0 ? roomTypes[0].id : null;
     if (initRId) {
@@ -186,7 +220,7 @@ export default function QuickBookingModal({
     };
   }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr, channelType, selectedOtaSourceName]);
 
-  const [roomsList, setRoomsList] = useState<RoomDraft[]>([createNewRoomDraft(0, initialRoomId)]);
+  const [roomsList, setRoomsList] = useState<RoomDraft[]>([createInitialRoomDraft(0, initialRoomId)]);
 
   // Auto-synchronize OTA manual override mode on roomsList when switching channels or OTA platform
   useEffect(() => {
@@ -308,15 +342,25 @@ export default function QuickBookingModal({
     setChargeWarningMap({});
   }, []);
 
+  const prevIsOpenRef = useRef(false);
+  const prevInitialRoomIdRef = useRef<number | null>(null);
+
   // Reset entirely on open/close for fresh new booking session
   useEffect(() => {
+    const wasOpen = prevIsOpenRef.current;
+    const prevInitialRoomId = prevInitialRoomIdRef.current;
+    prevIsOpenRef.current = isOpen;
+    prevInitialRoomIdRef.current = initialRoomId;
+
     if (isOpen) {
-      resetQuickBookingState();
-      setRoomsList([createNewRoomDraft(0, initialRoomId)]);
-    } else {
+      if (!wasOpen || initialRoomId !== prevInitialRoomId) {
+        resetQuickBookingState();
+        setRoomsList([createInitialRoomDraft(0, initialRoomId)]);
+      }
+    } else if (wasOpen) {
       resetQuickBookingState();
     }
-  }, [isOpen, initialRoomId, createNewRoomDraft, resetQuickBookingState]);
+  }, [isOpen, initialRoomId, createInitialRoomDraft, resetQuickBookingState]);
 
   // Multi-room management actions
   const handleAddRoom = () => {
