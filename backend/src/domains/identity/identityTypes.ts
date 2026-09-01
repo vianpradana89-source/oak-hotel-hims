@@ -10,6 +10,7 @@ export type IdentityOcrProviderType =
   | 'LOCAL_PADDLE_OCR'
   | 'GOOGLE_VISION'
   | 'GEMINI'
+  | 'TESSERACT'
   | 'MANUAL';
 
 export interface IdentityCandidateData {

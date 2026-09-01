@@ -278,7 +278,11 @@ export default function IdentityExtractionModal({
       };
 
       setExtractedData(data);
-      setScanSuccessBanner('Data KTP berhasil dipindai!');
+      if (recognizedCount > 0) {
+        setScanSuccessBanner('Data KTP berhasil dipindai!');
+      } else {
+        setScanSuccessBanner(null);
+      }
 
       // Auto-fill form state
       setFormName(data.full_name);
@@ -296,8 +300,8 @@ export default function IdentityExtractionModal({
       setFormCitizenship(data.citizenship || '');
       setFormValidUntil(data.valid_until || '');
 
-      // Send to parent component immediately for auto-fill
-      if (onScanSuccess) {
+      // Send to parent component immediately for auto-fill if fields recognized
+      if (recognizedCount > 0 && onScanSuccess) {
         onScanSuccess(data);
       }
 
@@ -485,7 +489,7 @@ export default function IdentityExtractionModal({
             </div>
           )}
 
-          {scanSuccessBanner && (
+          {scanSuccessBanner && (extractedData?.recognized_fields_count || 0) > 0 && (
             <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs flex items-center justify-between animate-in fade-in slide-in-from-top-1 shadow-2xs">
               <div className="flex items-center gap-2.5">
                 <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">

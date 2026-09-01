@@ -4,7 +4,7 @@ import { IdentityCandidateData } from './identityTypes';
  * Standard Indonesian KTP deterministic parser
  */
 
-const KTP_LABELS_REGEX = /^(?:NIK|N1K|NlK|NO\.?\s*KTP|Nama|Narna|Narne|Name|Tempat|Tpt|TgLahir|Tgl|Tanggal|Lahir|Jenis|Kelamin|Sex|Gender|Alamat|Ala\s*mat|Alarnat|Address|RT|RW|RTAW|RTRW|Kel|Desa|Kelurahan|Kecamatan|Kec|Agama|Status|Perkawinan|Perkawinar|Pekerjaan|Kewarganegaraan|Berlaku|Masa|Gol|Darah)/i;
+const KTP_LABELS_REGEX = /^(?:NIK|N1K|NlK|NO\.?\s*KTP|Nama|Narna|Narne|Name|Tempat|Tpt|TgLahir|Tgl|Tanggal|Lahir|Jenis|Kelamin|Sex|Gender|Alamat|Ala\s*mat|Alarnat|Aamat|Address|RT|RW|RTAW|RTRW|RIAN|Kel|Desa|Kelurahan|Kecamatan|Kec|Agama|Status|Perkawinan|Perkawinar|Pekerjaan|Kewarganegaraan|Berlaku|Masa|Gol|Darah)/i;
 
 export function normalizeNik(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -32,16 +32,31 @@ export function normalizeDate(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim();
 
-  // Pattern 1: DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY or DD MM YYYY (with mixed separators)
+  // Pattern 1: DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY or DD MM YYYY
   const m1 = s.match(/\b(\d{1,2})[\s\-\/\.]+(\d{1,2})[\s\-\/\.]+(\d{4})\b/);
   if (m1) {
     const day = m1[1].padStart(2, '0');
     const month = m1[2].padStart(2, '0');
-    const year = m1[3];
+    let year = parseInt(m1[3]);
+    if (year < 1920 && year >= 1800) {
+      year += 100;
+    }
     return `${year}-${month}-${day}`;
   }
 
-  // Pattern 2: Textual month Indonesian (e.g. 12 Mei 1990)
+  // Pattern 2: DDMM-YYYY or DDMM YYYY (e.g. 1205-1990)
+  const m1b = s.match(/\b(\d{2})(\d{2})[\s\-\/\.]+(\d{4})\b/);
+  if (m1b) {
+    const day = m1b[1];
+    const month = m1b[2];
+    let year = parseInt(m1b[3]);
+    if (year < 1920 && year >= 1800) {
+      year += 100;
+    }
+    return `${year}-${month}-${day}`;
+  }
+
+  // Pattern 3: Textual month Indonesian (e.g. 12 Mei 1990)
   const indonesianMonths: Record<string, string> = {
     januari: '01', jan: '01',
     februari: '02', feb: '02',
@@ -61,7 +76,10 @@ export function normalizeDate(raw: string | null | undefined): string | null {
   if (m2) {
     const day = m2[1].padStart(2, '0');
     const monthStr = m2[2].toLowerCase();
-    const year = m2[3];
+    let year = parseInt(m2[3]);
+    if (year < 1920 && year >= 1800) {
+      year += 100;
+    }
     const month = indonesianMonths[monthStr];
     if (month) {
       return `${year}-${month}-${day}`;
@@ -74,10 +92,10 @@ export function normalizeDate(raw: string | null | undefined): string | null {
 export function normalizeGender(raw: string | null | undefined): 'MALE' | 'FEMALE' | null {
   if (!raw) return null;
   const s = raw.trim().toUpperCase();
-  if (/\b(?:LAKI[\-\s]*LAKI|PRIA|LAK1[\-\s]*LAK1|LAK[I1l!])\b/i.test(s)) {
+  if (/\b(?:LAKI[\-\s]*LAKI|PRIA|LAK1[\-\s]*LAK1|LAK[\s\-\_]*LAK|LAK[I1l!]|MALE)\b/i.test(s) || /LAK\s*LAK/i.test(s)) {
     return 'MALE';
   }
-  if (/\b(?:PEREMPUAN|WANITA|PERE[\s\w]*AN)\b/i.test(s)) {
+  if (/\b(?:PEREMPUAN|WANITA|PERE[\s\w]*AN|FEMALE|PERENPUAN|PEREMP)\b/i.test(s)) {
     return 'FEMALE';
   }
   return null;
@@ -101,14 +119,14 @@ export function normalizeMaritalStatus(raw: string | null | undefined): string |
   if (/\b(?:BELUM|SELuM|BLM|BELM)\s*KAW[I1l!A-Za-z]*/i.test(s) || /\bBELUM\s*MENIKAH\b/i.test(s)) return 'BELUM KAWIN';
   if (/\b(?:CERAI\s*HIDUP)\b/i.test(s)) return 'CERAI HIDUP';
   if (/\b(?:CERAI\s*MATI)\b/i.test(s)) return 'CERAI MATI';
-  if (/\b(?:KAWIN|KAwIN|MENIKAH)\b/i.test(s)) return 'KAWIN';
+  if (/\b(?:KAWIN|KAwIN|KAWI|MENIKAH)\b/i.test(s)) return 'KAWIN';
   return null;
 }
 
 export function normalizeCitizenship(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const s = raw.trim().toUpperCase();
-  if (/\b(?:WNI|INDONESIA|\/NI)\b/i.test(s) || /Kewargane[a-z]*N?I/i.test(s)) return 'WNI';
+  if (/\b(?:WNI|INDONESIA|\/NI|WII|W1N|W11)\b/i.test(s) || /Kewargane[a-z]*N?I/i.test(s)) return 'WNI';
   if (/\b(?:WNA|ASING)\b/i.test(s)) return 'WNA';
   return null;
 }
@@ -122,6 +140,20 @@ export function normalizeValidUntil(raw: string | null | undefined): string | nu
   const dateIso = normalizeDate(s);
   if (dateIso) {
     return dateIso;
+  }
+  return null;
+}
+
+export function normalizeRtRw(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  const m1 = s.match(/\b(\d{1,3})\s*[\/\.\-\s]\s*(\d{1,3})\b/);
+  if (m1) {
+    return `${m1[1].padStart(3, '0')}/${m1[2].padStart(3, '0')}`;
+  }
+  const m2 = s.match(/\b(\d{3})(\d{2,3})\b/);
+  if (m2) {
+    return `${m2[1]}/${m2[2].padStart(3, '0')}`;
   }
   return null;
 }
@@ -235,9 +267,9 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
 
     if (val) {
       // Date pattern
-      const dateMatch = val.match(/(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})/);
+      const dateMatch = val.match(/(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})/) || val.match(/(\d{2})(\d{2})[\s\-\/\.]+(\d{4})/);
       if (dateMatch) {
-        result.birth_date = normalizeDate(dateMatch[1]);
+        result.birth_date = normalizeDate(dateMatch[0]);
       }
       // Place pattern
       const placeMatch = val.match(/^([A-Za-z\s]+?)(?:[,\.\:\-]|\d{1,2})/);
@@ -256,10 +288,10 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
   if (!result.birth_date || !result.birth_place) {
     for (const l of cleanLines) {
       if (!/Berlaku|16-10|Kewarganegaraan|Kewarganecaran/i.test(l)) {
-        const dateMatch = l.match(/\b(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})\b/);
+        const dateMatch = l.match(/\b(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})\b/) || l.match(/\b(\d{2})(\d{2})[\s\-\/\.]+(\d{4})\b/);
         if (dateMatch) {
           if (!result.birth_date) {
-            result.birth_date = normalizeDate(dateMatch[1]);
+            result.birth_date = normalizeDate(dateMatch[0]);
           }
           if (!result.birth_place) {
             const cityMatch = l.match(/(?:^|.*?)\b([A-Za-z]+)\s*[\.\,\s]\s*\d{1,2}[\s\-\/\.]/);
@@ -286,23 +318,37 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
 
   // 5. RT/RW & Address from same line
   for (const l of cleanLines) {
-    const m = l.match(/\b(?:RT[\s\/\.\-]*[A-Z0-9]*[\/\.\-]*RW|RT|RTAW|RTRW)\s*[:;=\-\s]*(\d{2,3}\s*[\/\.\-]\s*\d{2,3})/i);
+    const m = l.match(/\b(?:RT[\s\/\.\-]*[A-Z0-9]*[\/\.\-]*RW|RT|RTAW|RTRW|RIAN)\s*[:;=\-\s]*([0-9\/\.\-\s]{3,10})/i);
     if (m) {
-      result.rt_rw = m[1].replace(/\s+/g, '');
-      const afterRtRw = l.slice(l.indexOf(m[0]) + m[0].length).trim();
-      if (afterRtRw && !isLabelHeader(afterRtRw)) {
-        result.address = afterRtRw.replace(/^[:;=\-\s]+/, '').toUpperCase();
+      const parsedRtRw = normalizeRtRw(m[1]);
+      if (parsedRtRw) {
+        result.rt_rw = parsedRtRw;
+        const afterRtRw = l.slice(l.indexOf(m[0]) + m[0].length).trim();
+        if (afterRtRw && !isLabelHeader(afterRtRw)) {
+          result.address = afterRtRw.replace(/^[:;=\-\s]+/, '').toUpperCase();
+        }
+        break;
       }
-      break;
     }
   }
 
-  // If address still null, extract from Alamat line
+  // Fallback standalone RT/RW digits
+  if (!result.rt_rw) {
+    for (const l of cleanLines) {
+      const r = normalizeRtRw(l);
+      if (r && !/^\d{4}/.test(l) && !/SEUMUR/i.test(l)) {
+        result.rt_rw = r;
+        break;
+      }
+    }
+  }
+
+  // If address still null, extract from Alamat / Aamat line
   if (!result.address) {
     for (let i = 0; i < cleanLines.length; i++) {
       const l = cleanLines[i];
-      if (/(?:Al[aA4]m[aA4]t|Ala\s*mat|Alarnat|Address)/i.test(l)) {
-        const m = l.match(/(?:Al[aA4]m[aA4]t|Ala\s*mat|Alarnat|Address)\s*[:;=\-\s]+\s*([A-Za-z0-9\s\.\,\-]+)/i);
+      if (/(?:Al[aA4]m[aA4]t|Ala\s*mat|Alarnat|Aamat|Address)/i.test(l)) {
+        const m = l.match(/(?:Al[aA4]m[aA4]t|Ala\s*mat|Alarnat|Aamat|Address)\s*[:;=\-\s]+\s*([A-Za-z0-9\s\.\,\-]+)/i);
         if (m) {
           const val = m[1].split(/\s+(?=(?:Jenis|Kelamin|RT|Kel|Desa|Kecamatan|Agama|Gol)\b)/i)[0].trim();
           if (val && !isLabelHeader(val)) {
@@ -320,17 +366,28 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
     }
   }
 
+  // Standalone address heuristic (e.g. JL SUDIRMAN NO 45)
+  if (!result.address) {
+    for (const l of cleanLines) {
+      const m = l.match(/\b((?:JL|JLN|JALAN|GG|GANG|DUSUN|KP|KAMPUNG|KOMPLEK|BLOK)\s+[A-Za-z0-9\s\.\,\-]+)/i);
+      if (m && m[1].length > 4 && !isLabelHeader(m[1])) {
+        result.address = m[1].trim().toUpperCase();
+        break;
+      }
+    }
+  }
+
   // 6. Kelurahan / Desa
   for (let i = 0; i < cleanLines.length; i++) {
     const l = cleanLines[i];
-    const m = l.match(/(?:^|.*?\b)(?:Kel(?:urahan)?[\s\/\.\-]+Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa)\s*[:;=\-\s]+([A-Za-z\s]+)/i);
+    const m = l.match(/(?:^|.*?\b)(?:Kel(?:urahan)?[\s\/\.\-]+Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa|Kellbesa)\s*[:;=\-\s]+([A-Za-z\s]+)/i);
     if (m) {
       const val = m[1].split(/\s+(?=(?:Kecamatan|Agama|RT|Status)\b)/i)[0].trim();
       if (val && !isLabelHeader(val) && !/Kelamin/i.test(val)) {
         result.village_kelurahan = val.replace(/^[:;=\-\s]+/, '').toUpperCase();
         break;
       }
-    } else if (/(?:^|\b)(?:Kel(?:urahan)?[\s\/\.\-]*Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa)$/i.test(l)) {
+    } else if (/(?:^|\b)(?:Kel(?:urahan)?[\s\/\.\-]*Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa|Kellbesa)$/i.test(l)) {
       if (i + 1 < cleanLines.length && !isLabelHeader(cleanLines[i + 1])) {
         const val = cleanLines[i + 1].trim().replace(/^[:;=\-\s]+/, '');
         if (val && !isLabelHeader(val) && !/Kelamin/i.test(val)) {

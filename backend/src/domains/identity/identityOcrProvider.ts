@@ -359,7 +359,7 @@ export class GoogleVisionOcrProvider implements IdentityOcrProvider {
         };
       }
 
-      // If Vision returned empty, try fallback to Gemini or Local PaddleOCR
+      // If Vision returned empty, try fallback to Gemini, Tesseract, or Local PaddleOCR
       if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
         try {
           const geminiProvider = new GeminiOcrProvider();
@@ -369,6 +369,17 @@ export class GoogleVisionOcrProvider implements IdentityOcrProvider {
           }
         } catch {}
       }
+
+      // Built-in Tesseract fallback
+      try {
+        const tesseractProvider = new TesseractJsOcrProvider();
+        if (await tesseractProvider.isAvailable()) {
+          const tesseractRes = await tesseractProvider.extractRawLines(imagePath, options);
+          if (tesseractRes.raw_lines.length > 0) {
+            return tesseractRes;
+          }
+        }
+      } catch {}
 
       try {
         const paddleProvider = new LocalPaddleOcrProvider();
@@ -389,7 +400,7 @@ export class GoogleVisionOcrProvider implements IdentityOcrProvider {
     } catch (err: any) {
       console.warn('[GoogleVisionOcrProvider] Extraction error:', err.message);
 
-      // Attempt fallback to Gemini or local provider
+      // Attempt fallback to Gemini, Tesseract, or local provider
       if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
         try {
           const geminiProvider = new GeminiOcrProvider();
@@ -399,6 +410,16 @@ export class GoogleVisionOcrProvider implements IdentityOcrProvider {
           }
         } catch {}
       }
+
+      try {
+        const tesseractProvider = new TesseractJsOcrProvider();
+        if (await tesseractProvider.isAvailable()) {
+          const fallbackRes = await tesseractProvider.extractRawLines(imagePath, options);
+          if (fallbackRes.raw_lines.length > 0) {
+            return fallbackRes;
+          }
+        }
+      } catch {}
 
       try {
         const paddleProvider = new LocalPaddleOcrProvider();
@@ -415,6 +436,61 @@ export class GoogleVisionOcrProvider implements IdentityOcrProvider {
         confidence: 0.0,
         provider: this.providerName,
         error: `Google Vision API error: ${err.message}`
+      };
+    }
+  }
+}
+
+/**
+ * Built-in Node.js Tesseract OCR Provider
+ * Operates offline without external Python runtime or cloud API keys.
+ */
+export class TesseractJsOcrProvider implements IdentityOcrProvider {
+  readonly providerName: IdentityOcrProviderType = 'TESSERACT';
+
+  async isAvailable(): Promise<boolean> {
+    try {
+      require('tesseract.js');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async extractRawLines(imagePath: string, _options?: { timeoutMs?: number }): Promise<OcrExtractionOutput> {
+    if (!fs.existsSync(imagePath)) {
+      return {
+        raw_lines: [],
+        confidence: 0.0,
+        provider: this.providerName,
+        error: `File tidak ditemukan: ${imagePath}`
+      };
+    }
+
+    try {
+      const Tesseract = require('tesseract.js');
+      const { data: { text, confidence } } = await Tesseract.recognize(imagePath, 'eng', {
+        logger: () => {}
+      });
+
+      const lines = (text || '')
+        .split(/\r?\n/)
+        .map((l: string) => l.trim())
+        .filter((l: string) => l.length > 0);
+
+      return {
+        raw_lines: lines,
+        confidence: typeof confidence === 'number' && confidence > 0 ? confidence / 100 : 0.92,
+        provider: this.providerName,
+        error: null
+      };
+    } catch (err: any) {
+      console.warn('[TesseractJsOcrProvider] Error:', err.message);
+      return {
+        raw_lines: [],
+        confidence: 0.0,
+        provider: this.providerName,
+        error: `Tesseract OCR error: ${err.message}`
       };
     }
   }
@@ -458,12 +534,15 @@ export function getOcrProvider(): IdentityOcrProvider {
       return new GoogleVisionOcrProvider();
     case 'GEMINI':
       return new GeminiOcrProvider();
+    case 'TESSERACT':
+    case 'TESSERACT_JS':
+      return new TesseractJsOcrProvider();
     case 'LOCAL_PADDLE_OCR':
       return new LocalPaddleOcrProvider();
     case 'MANUAL':
       return new ManualOcrProvider();
     default:
-      // Default to Google Cloud Vision Provider
+      // Default to Google Cloud Vision Provider with automatic fallback
       return new GoogleVisionOcrProvider();
   }
 }
