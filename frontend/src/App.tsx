@@ -50,6 +50,8 @@ import PosWorkspace from './features/pos/PosWorkspace';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
+import { AuthProvider, useAuth } from './features/auth/AuthContext';
+import { ProtectedRoute } from './features/auth/ProtectedRoute';
 import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
@@ -117,7 +119,8 @@ function localDateISO(value: Date | string | undefined) {
   return `${year}-${month}-${day}`;
 }
 
-function App() {
+function AppContent() {
+  const { user, logout } = useAuth();
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
@@ -3219,11 +3222,18 @@ function App() {
         }}
         isSidebarCollapsed={isSidebarCollapsed}
         currentUser={{
-          name: 'Vian Pradana',
-          email: 'vian.pradana89@gmail.com',
-          role: 'Owner',
-          avatarInitials: 'VP',
+          name: user?.full_name || 'Super Admin OAK',
+          email: user?.email || 'info@oaklawang.com',
+          role: user?.role || 'Super Admin',
+          avatarInitials: (user?.full_name || 'SA')
+            .split(' ')
+            .filter(Boolean)
+            .map((w: string) => w[0])
+            .join('')
+            .toUpperCase()
+            .slice(0, 2) || 'SA',
         }}
+        onLogout={logout}
         onOpenPos={() => setSelectedMenu('POS')}
         propertyBranding={activeBranding}
       />
@@ -5149,4 +5159,12 @@ function StatCard({ title, value, color }: any) {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AuthProvider>
+      <ProtectedRoute>
+        <AppContent />
+      </ProtectedRoute>
+    </AuthProvider>
+  );
+}

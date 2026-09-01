@@ -79,6 +79,9 @@ import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOffi
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { previewReservationEdit, executeReservationEdit } from './domains/reservations/reservationEditService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
+import { createAuthRouter } from './domains/auth/authRouter';
+import { seedSuperAdmin } from './domains/auth/authService';
+import { createUsersRouter } from './domains/users/usersRouter';
 
 const app: any = express();
 app.use(cors());
@@ -351,6 +354,7 @@ app.get('/api/events', (req, res) => {
 
 async function startServer() {
   await initializeDatabase(pool);
+  await seedSuperAdmin(pool);
   const sweepSummary = await sweepExpiredLocks();
   const reconciliation = await reconcileCanonicalAvailability(pool);
   console.log('Database connected, expired holds swept, and canonical availability reconciled.', {
@@ -6538,6 +6542,8 @@ app.use('/api/transactions', createTransactionsRouter(pool));
 app.use('/api/suppliers', createSuppliersRouter(pool));
 app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
+app.use('/api/auth', createAuthRouter(pool));
+app.use('/api/users', createUsersRouter(pool));
 
 
 
