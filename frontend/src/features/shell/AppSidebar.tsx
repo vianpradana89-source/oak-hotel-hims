@@ -16,6 +16,7 @@ export interface AppSidebarProps {
   activeProperty: ShellPropertyItem | null;
   propertyBranding?: PropertyBrandingConfig | null;
   featureFlags?: Record<string, boolean>;
+  customPermissionsMap?: Record<string, string[]> | null;
 }
 
 export const AppSidebar: React.FC<AppSidebarProps> = ({
@@ -28,6 +29,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   activeProperty,
   propertyBranding,
   featureFlags,
+  customPermissionsMap,
 }) => {
   const { user } = useAuth();
   const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
@@ -169,7 +171,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   const filteredGroups: NavGroupDef[] = navGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => isMenuAllowedForRole(item.key as MainNavKey, user?.role))
+      items: group.items.filter((item) => isMenuAllowedForRole(item.key as MainNavKey, user?.role, customPermissionsMap))
     }))
     .filter((group) => group.items.length > 0);
 

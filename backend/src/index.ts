@@ -82,6 +82,7 @@ import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
+import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
 
 const app: any = express();
 app.use(cors());
@@ -6544,6 +6545,8 @@ app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/auth', createAuthRouter(pool));
 app.use('/api/users', createUsersRouter(pool));
+app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
+app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
 
 
 

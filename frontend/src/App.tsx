@@ -236,6 +236,7 @@ function AppContent() {
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<MainNavKey>('Kalender');
+  const [customPermissionsMap, setCustomPermissionsMap] = useState<Record<string, string[]> | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem('oak_sidebar_collapsed') === 'true';
@@ -256,15 +257,31 @@ function AppContent() {
     });
   };
 
-  // Guard active menu automatically based on user role permissions
-  useEffect(() => {
-    if (user && !isMenuAllowedForRole(selectedMenu, user.role)) {
-      setSelectedMenu(getDefaultMenuForRole(user.role));
+  const fetchRolePermissions = useCallback(async (propId: number) => {
+    try {
+      const res = await fetch(`/api/settings/role-permissions?property_id=${propId}`);
+      const json = await res.json();
+      if (res.ok && json.data && Array.isArray(json.data.roles)) {
+        const pMap: Record<string, string[]> = {};
+        for (const r of json.data.roles) {
+          pMap[r.role] = r.permissions || [];
+        }
+        setCustomPermissionsMap(pMap);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch dynamic role permissions matrix:', e);
     }
-  }, [user, selectedMenu]);
+  }, []);
+
+  // Guard active menu automatically based on user role and dynamic permissions matrix
+  useEffect(() => {
+    if (user && !isMenuAllowedForRole(selectedMenu, user.role, customPermissionsMap)) {
+      setSelectedMenu(getDefaultMenuForRole(user.role, customPermissionsMap));
+    }
+  }, [user, selectedMenu, customPermissionsMap]);
 
   const handleSelectMenu = (menu: MainNavKey) => {
-    if (user && !isMenuAllowedForRole(menu, user.role)) {
+    if (user && !isMenuAllowedForRole(menu, user.role, customPermissionsMap)) {
       return;
     }
     setSelectedMenu(menu);
@@ -301,6 +318,12 @@ function AppContent() {
       isMounted = false;
     };
   }, [propertyId, properties]);
+
+  useEffect(() => {
+    if (propertyId) {
+      void fetchRolePermissions(propertyId);
+    }
+  }, [propertyId, fetchRolePermissions]);
 
   const activeBranding = useMemo(() => {
     if (!propertyId) return undefined;
@@ -3264,6 +3287,7 @@ function AppContent() {
           activeProperty={properties.find((p: any) => p.id === propertyId) || null}
           propertyBranding={activeBranding}
           featureFlags={propertyFeatures}
+          customPermissionsMap={customPermissionsMap}
         />
 
         <main className="hotel-main">
@@ -4011,6 +4035,7 @@ function AppContent() {
           <HrdWorkspace
             propertyId={propertyId}
             propertyName={properties.find((p: any) => p.id === propertyId)?.name}
+            onPermissionsUpdated={(newMap) => setCustomPermissionsMap(newMap)}
           />
         )}
 
@@ -4071,6 +4096,7 @@ function AppContent() {
             initialCategory={initialSettingsCategory}
             onSelectProperty={(id) => setPropertyId(id)}
             onRefreshProperties={fetchProperties}
+            onPermissionsUpdated={(newMap) => setCustomPermissionsMap(newMap)}
           />
         )}
         </main>

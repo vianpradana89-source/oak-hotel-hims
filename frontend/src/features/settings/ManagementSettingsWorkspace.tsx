@@ -6,6 +6,7 @@ import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
+import { RolePermissionsMatrixTab } from './RolePermissionsMatrixTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 
 export type SettingsCategoryKey =
@@ -47,6 +48,7 @@ export interface ManagementSettingsWorkspaceProps {
   apiBaseUrl?: string;
   onSelectProperty?: (propertyId: number) => void;
   onRefreshProperties?: () => void;
+  onPermissionsUpdated?: (newMatrixMap: Record<string, string[]>) => void;
 }
 
 export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspaceProps> = ({
@@ -59,7 +61,8 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   initialCategory = 'housekeeping',
   apiBaseUrl = '/api',
   onSelectProperty,
-  onRefreshProperties
+  onRefreshProperties,
+  onPermissionsUpdated
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -327,10 +330,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     {
       key: 'users_permissions',
       label: 'Pengguna & Hak Akses',
-      description: 'Role-based access control (RBAC), user audit log, dan izin modul.',
-      status: 'CONFIGURED',
-      badgeLabel: 'Terkonfigurasi',
-      isImplemented: false,
+      description: 'Role-based access control (RBAC), matriks perizinan role, dan user audit log.',
+      status: 'ACTIVE',
+      badgeLabel: 'Aktif',
+      isImplemented: true,
       icon: ({ className }) => (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -753,8 +756,16 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
           )}
 
+          {/* Active Category: Users & Role Permissions Matrix */}
+          {activeCategory === 'users_permissions' && (
+            <RolePermissionsMatrixTab
+              propertyId={propertyId}
+              onPermissionsUpdated={onPermissionsUpdated}
+            />
+          )}
+
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'users_permissions'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

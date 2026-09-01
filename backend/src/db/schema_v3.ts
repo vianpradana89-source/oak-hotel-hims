@@ -3123,6 +3123,67 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ROLE PERMISSIONS: Dynamic Role Permissions Matrix
+    const rolePermMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'role_permissions_matrix_v1'"
+    );
+    if ((rolePermMarker.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS role_permissions (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          role_name VARCHAR(100) NOT NULL,
+          permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          updated_by VARCHAR(150),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_role_permissions_prop_role UNIQUE (property_id, role_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_role_permissions_prop ON role_permissions (property_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('role_permissions_matrix_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+
+      const sopRoleDefaults: Record<string, string[]> = {
+        'Super Admin': [
+          'Kalender', 'Transaksi', 'Pelanggan', 'Housekeeping', 'HRD', 'POS',
+          'Master Kamar', 'Master Produk', 'Laporan', 'Employee Mobile', 'Pengaturan'
+        ],
+        'General Manager': [
+          'Kalender', 'Transaksi', 'Pelanggan', 'Housekeeping', 'HRD', 'POS',
+          'Master Kamar', 'Master Produk', 'Laporan', 'Employee Mobile', 'Pengaturan'
+        ],
+        'Front Office': [
+          'Kalender', 'Transaksi', 'Pelanggan', 'POS', 'Employee Mobile'
+        ],
+        'Housekeeping': [
+          'Housekeeping', 'Employee Mobile'
+        ],
+        'Accounting': [
+          'Transaksi', 'Laporan'
+        ],
+        'POS / Resto': [
+          'POS', 'Master Produk'
+        ],
+        'Crew': [
+          'Employee Mobile'
+        ]
+      };
+
+      const props = await auditMigrationClient.query('SELECT id FROM properties');
+      for (const p of props.rows) {
+        for (const [rName, perms] of Object.entries(sopRoleDefaults)) {
+          await auditMigrationClient.query(`
+            INSERT INTO role_permissions (property_id, role_name, permissions, updated_by)
+            VALUES ($1, $2, $3, 'SYSTEM_INIT')
+            ON CONFLICT (property_id, role_name) DO NOTHING
+          `, [p.id, rName, JSON.stringify(perms)]);
+        }
+      }
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});
