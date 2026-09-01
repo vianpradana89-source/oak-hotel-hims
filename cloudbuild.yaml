@@ -1,54 +1,45 @@
-﻿steps:
-  # 1. Build Docker image with short SHA and latest tags
+steps:
+  # 1. Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-image'
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
+      - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
+      - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:latest'
       - '-f'
       - 'Dockerfile'
       - '.'
 
-  # 2. Push commit-tagged image
+  # 2. Push image versi commit
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-commit-image'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
+      - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
 
-  # 3. Push latest-tagged image
+  # 3. Push image latest
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-latest-image'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
+      - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:latest'
 
-  # 4. Deploy automatically to Google Cloud Run (us-central1)
+  # 4. Deploy image ke Cloud Run staging
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
     entrypoint: 'gcloud'
     args:
       - 'run'
       - 'deploy'
-      - '$_SERVICE_NAME'
-      - '--image=gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
-      - '--region=$_REGION'
+      - 'oak-hims-staging'
+      - '--image=asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
+      - '--region=asia-southeast2'
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--port=8080'
-      - '--set-env-vars=NODE_ENV=production'
-
-images:
-  - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:latest'
-
-substitutions:
-  _SERVICE_NAME: 'oak-hims-staging1'
-  _REGION: 'us-central1'
-  _IMAGE_NAME: 'oak-hims-staging1'
+      - '--update-env-vars=NODE_ENV=production'
 
 options:
   logging: CLOUD_LOGGING_ONLY
