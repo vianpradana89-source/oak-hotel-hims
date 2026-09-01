@@ -4,6 +4,7 @@ import { EditReservationModal } from './EditReservationModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
+import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 
 interface Props {
   reservation: any;
@@ -51,6 +52,27 @@ export default function ReservationDetailDrawer({
   const [isEditingPhone, setIsEditingPhone] = useState<boolean>(false);
   const [phoneDraft, setPhoneDraft] = useState<string>('');
   const [savingPhone, setSavingPhone] = useState<boolean>(false);
+  const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
+  const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
+
+  // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
+  const currentRes = detailData || reservation;
+  const { blobUrl: ktpBlobUrl, loading: ktpLoading, error: ktpError } = useSecureDocumentBlob(currentRes?.ktp_path, isKtpPreviewOpen);
+  const { blobUrl: paymentEvidenceBlobUrl, loading: paymentEvidenceLoading, error: paymentEvidenceError } = useSecureDocumentBlob(currentRes?.bukti_bayar_path, isPaymentEvidencePreviewOpen);
+
+  // Keyboard Escape listener for document preview modals
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isKtpPreviewOpen) setIsKtpPreviewOpen(false);
+        if (isPaymentEvidencePreviewOpen) setIsPaymentEvidencePreviewOpen(false);
+      }
+    };
+    if (isKtpPreviewOpen || isPaymentEvidencePreviewOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }
+  }, [isKtpPreviewOpen, isPaymentEvidencePreviewOpen]);
 
   // Strict property resolution: active property context OR canonical reservation.property_id
   const activePropId: number | null = (propertyId ?? detailData?.property_id ?? reservation?.property_id)
@@ -714,14 +736,13 @@ export default function ReservationDetailDrawer({
                   </div>
                   <div className="flex items-center gap-2">
                     {data.ktp_path && (
-                      <a
-                        href={data.ktp_path.startsWith('http') ? data.ktp_path : `http://localhost:5000${data.ktp_path}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200"
+                      <button
+                        type="button"
+                        onClick={() => setIsKtpPreviewOpen(true)}
+                        className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
                       >
                         Lihat KTP
-                      </a>
+                      </button>
                     )}
                     {!isCancelled && !isCheckedOut && (
                       <button
@@ -986,14 +1007,13 @@ export default function ReservationDetailDrawer({
             {data.bukti_bayar_path && (
               <div className="pt-2 border-t border-stone-100 flex items-center justify-between text-xs">
                 <span className="text-stone-500 font-medium">Bukti Pembayaran Utama:</span>
-                <a
-                  href={data.bukti_bayar_path.startsWith('http') ? data.bukti_bayar_path : `http://localhost:5000${data.bukti_bayar_path}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200"
+                <button
+                  type="button"
+                  onClick={() => setIsPaymentEvidencePreviewOpen(true)}
+                  className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
                 >
                   Buka Bukti Bayar
-                </a>
+                </button>
               </div>
             )}
           </div>
@@ -1285,6 +1305,145 @@ export default function ReservationDetailDrawer({
               onRefresh();
             }}
           />
+        )}
+
+        {/* KTP Document Preview Modal */}
+        {isKtpPreviewOpen && data.ktp_path && (
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
+            onClick={() => setIsKtpPreviewOpen(false)}
+          >
+            <div
+              className="bg-stone-900 border border-stone-700 rounded-2xl max-w-2xl w-full p-4 space-y-3 shadow-2xl overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-stone-100">
+                    Foto Identitas (KTP) — {data.guest_name || 'Tamu'}
+                  </span>
+                  {data.identity_number && (
+                    <span className="text-[11px] font-mono bg-stone-800 text-emerald-400 px-2 py-0.5 rounded border border-stone-700">
+                      NIK: {data.identity_number}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {ktpBlobUrl && (
+                    <button
+                      type="button"
+                      onClick={() => window.open(ktpBlobUrl, '_blank')}
+                      className="px-2.5 py-1 bg-stone-800 hover:bg-stone-700 text-stone-200 text-xs font-semibold rounded-lg border border-stone-600 transition-colors cursor-pointer"
+                    >
+                      Buka di Tab Baru ↗
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setIsKtpPreviewOpen(false)}
+                    className="text-stone-400 hover:text-white p-1 rounded-lg text-lg leading-none cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center bg-stone-950/60 rounded-xl p-2 min-h-[300px] max-h-[70vh] overflow-auto">
+                {ktpLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2">
+                    <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    <span>Mengunduh dokumen aman...</span>
+                  </div>
+                ) : ktpError ? (
+                  <div className="text-center p-8 text-rose-400 text-xs space-y-1">
+                    <div className="text-2xl">⚠️</div>
+                    <p className="font-bold">{ktpError}</p>
+                    <p className="text-stone-500 text-[11px]">Pastikan Anda memiliki izin akses ke dokumen properti ini.</p>
+                  </div>
+                ) : ktpBlobUrl ? (
+                  data.ktp_path.toLowerCase().endsWith('.pdf') ? (
+                    <iframe
+                      src={ktpBlobUrl}
+                      title="Dokumen KTP"
+                      className="w-full h-[60vh] rounded-lg border-0"
+                    />
+                  ) : (
+                    <img
+                      src={ktpBlobUrl}
+                      alt={`KTP ${data.guest_name || ''}`}
+                      className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
+                    />
+                  )
+                ) : null}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bukti Bayar Preview Modal */}
+        {isPaymentEvidencePreviewOpen && data.bukti_bayar_path && (
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
+            onClick={() => setIsPaymentEvidencePreviewOpen(false)}
+          >
+            <div
+              className="bg-stone-900 border border-stone-700 rounded-2xl max-w-2xl w-full p-4 space-y-3 shadow-2xl overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+                <span className="text-sm font-bold text-stone-100">
+                  Bukti Pembayaran — {data.guest_name || 'Tamu'}
+                </span>
+                <div className="flex items-center gap-2">
+                  {paymentEvidenceBlobUrl && (
+                    <button
+                      type="button"
+                      onClick={() => window.open(paymentEvidenceBlobUrl, '_blank')}
+                      className="px-2.5 py-1 bg-stone-800 hover:bg-stone-700 text-stone-200 text-xs font-semibold rounded-lg border border-stone-600 transition-colors cursor-pointer"
+                    >
+                      Buka di Tab Baru ↗
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setIsPaymentEvidencePreviewOpen(false)}
+                    className="text-stone-400 hover:text-white p-1 rounded-lg text-lg leading-none cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center bg-stone-950/60 rounded-xl p-2 min-h-[300px] max-h-[70vh] overflow-auto">
+                {paymentEvidenceLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2">
+                    <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    <span>Mengunduh bukti pembayaran...</span>
+                  </div>
+                ) : paymentEvidenceError ? (
+                  <div className="text-center p-8 text-rose-400 text-xs space-y-1">
+                    <div className="text-2xl">⚠️</div>
+                    <p className="font-bold">{paymentEvidenceError}</p>
+                    <p className="text-stone-500 text-[11px]">Pastikan file bukti pembayaran masih tersedia.</p>
+                  </div>
+                ) : paymentEvidenceBlobUrl ? (
+                  data.bukti_bayar_path.toLowerCase().endsWith('.pdf') ? (
+                    <iframe
+                      src={paymentEvidenceBlobUrl}
+                      title="Bukti Pembayaran"
+                      className="w-full h-[60vh] rounded-lg border-0"
+                    />
+                  ) : (
+                    <img
+                      src={paymentEvidenceBlobUrl}
+                      alt="Bukti Pembayaran"
+                      className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
+                    />
+                  )
+                ) : null}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

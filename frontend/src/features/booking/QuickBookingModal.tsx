@@ -222,14 +222,37 @@ export default function QuickBookingModal({
 
   const [roomsList, setRoomsList] = useState<RoomDraft[]>([createInitialRoomDraft(0, initialRoomId)]);
 
+  // Track previous channelType to detect user-initiated channel transitions
+  const prevChannelTypeRef = useRef<'WALKIN' | 'OTA'>(channelType);
+
   // Auto-synchronize OTA manual override mode on roomsList when switching channels or OTA platform
   useEffect(() => {
-    if (channelType === 'OTA') {
+    const prevChannel = prevChannelTypeRef.current;
+    if (prevChannel !== channelType) {
+      prevChannelTypeRef.current = channelType;
+      if (channelType === 'OTA') {
+        const otaReason = selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking';
+        setRoomsList(prev => prev.map(r => ({
+          ...r,
+          isManualOverride: true,
+          ratePlanId: null,
+          manualOverridePrice: 0,
+          manualOverrideReason: otaReason
+        })));
+      } else {
+        setRoomsList(prev => prev.map(r => ({
+          ...r,
+          isManualOverride: false,
+          manualOverridePrice: 0,
+          manualOverrideReason: '',
+          ratePlanId: null
+        })));
+      }
+    } else if (channelType === 'OTA') {
       const otaReason = selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking';
       setRoomsList(prev => prev.map(r => ({
         ...r,
-        isManualOverride: true,
-        manualOverrideReason: r.manualOverrideReason && !r.manualOverrideReason.startsWith('OTA') ? r.manualOverrideReason : otaReason
+        manualOverrideReason: otaReason
       })));
     }
   }, [channelType, selectedOtaSourceName]);
@@ -423,7 +446,7 @@ export default function QuickBookingModal({
             quoteLoading: false,
             roomNightlyRate: total,
             manualOverridePrice: curr.isManualOverride
-              ? (curr.manualOverridePrice > 0 ? curr.manualOverridePrice : total)
+              ? curr.manualOverridePrice
               : total
           };
           return copy;
@@ -461,8 +484,12 @@ export default function QuickBookingModal({
           nightsCount = 1;
         }
       }
-      const baseRate = draft.isManualOverride ? draft.manualOverridePrice : draft.roomNightlyRate;
-      const roomCharge = baseRate;
+      // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount
+      const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(1, nightsCount);
+      const roomCharge = draft.isManualOverride
+        ? Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights)
+        : Math.max(0, Number(draft.roomNightlyRate) || 0);
+
       const stayChargesTotal = draft.stayCharges.reduce((acc, curr) => acc + curr.amount, 0);
       
       let discountAmount = 0;
@@ -483,6 +510,7 @@ export default function QuickBookingModal({
         roomNumber: matchedRoom?.room_number || matchedRoom?.name || 'Belum dipilih',
         roomTypeName: matchedType?.name || 'Tipe Kamar',
         nights: nightsCount,
+        nightlyRate: draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge),
         roomCharge,
         stayChargesTotal,
         discountAmount,
@@ -826,14 +854,19 @@ export default function QuickBookingModal({
       issues.push('Dokumen identitas (KTP) wajib dilampirkan atau diisi NIK');
     }
 
-    // Rate Plan Gate
-    if (getFieldMode('rate_plan') === 'REQUIRED' && roomsList.some(r => !r.ratePlanId)) {
+    // Rate Plan Gate (only for non-OTA channels)
+    if (channelType !== 'OTA' && getFieldMode('rate_plan') === 'REQUIRED' && roomsList.some(r => !r.ratePlanId)) {
       issues.push('Rate plan wajib dipilih untuk setiap kamar');
     }
 
     // OTA Source Gate
-    if (channelType === 'OTA' && !selectedOtaSourceId) {
-      issues.push('Pilih salah satu platform OTA');
+    if (channelType === 'OTA') {
+      if (!selectedOtaSourceId) {
+        issues.push('Pilih salah satu platform OTA');
+      }
+      if (!referral.trim()) {
+        issues.push('Nomor booking / kode voucher OTA wajib diisi');
+      }
     }
 
     // Payment Proof Gate
@@ -857,8 +890,8 @@ export default function QuickBookingModal({
         issues.push(label + ': Tanggal check-out harus setelah check-in');
       }
       if (channelType === 'OTA') {
-        if (!r.manualOverridePrice || r.manualOverridePrice <= 0) {
-          issues.push(label + ': Tarif kamar OTA wajib diisi secara manual dengan nominal lebih dari 0');
+        if (!r.manualOverridePrice || Number(r.manualOverridePrice) <= 0) {
+          issues.push(label + ': Tarif kamar OTA per malam wajib diisi dengan nominal lebih dari 0');
         }
       } else {
         if (r.isManualOverride && !r.manualOverrideReason.trim()) {
@@ -885,6 +918,7 @@ export default function QuickBookingModal({
     identityNumber,
     channelType,
     selectedOtaSourceId,
+    referral,
     amountPaid,
     buktiBayarFile,
     buktiBayarPath,
@@ -992,13 +1026,15 @@ export default function QuickBookingModal({
             stay_type: r.stayType,
             start_at: r.stayType === 'DAY_USE' ? (r.checkIn + 'T' + r.dayUseStartTime + ':00') : undefined,
             end_at: r.stayType === 'DAY_USE' ? (r.checkIn + 'T' + r.dayUseStartTime + ':00') : undefined,
-            rate_plan_id: r.ratePlanId || undefined,
+            rate_plan_id: channelType === 'OTA' ? undefined : (r.ratePlanId ? Number(r.ratePlanId) : undefined),
             subtotal_amount: calc.roomCharge,
             tax_amount: 0,
             service_amount: 0,
             total_price: calc.netSubtotal,
-            is_manual_override: r.isManualOverride,
-            manual_override_reason: r.isManualOverride ? (r.manualOverrideReason || (channelType === 'OTA' ? (selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking') : undefined)) : undefined,
+            is_manual_override: channelType === 'OTA' ? true : Boolean(r.isManualOverride),
+            manual_override_reason: channelType === 'OTA'
+              ? (r.manualOverrideReason || (selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking'))
+              : (r.isManualOverride ? r.manualOverrideReason : undefined),
             discount_amount: calc.discountAmount,
             discount_type: r.discountType,
             discount_value: r.discountValue,
@@ -1664,18 +1700,29 @@ export default function QuickBookingModal({
                                 Tarif Kamar OTA per Malam (Rp) <span className="text-rose-500">*</span>
                               </label>
                               <input
-                                type="number"
-                                min="0"
-                                step="1000"
-                                placeholder="Contoh: 350000"
-                                value={roomDraft.manualOverridePrice || ''}
-                                onChange={e => handleUpdateRoom(roomIdx, {
-                                  isManualOverride: true,
-                                  manualOverridePrice: Number(e.target.value),
-                                  manualOverrideReason: selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking'
-                                })}
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="Contoh: 350.000"
+                                value={roomDraft.manualOverridePrice > 0 ? roomDraft.manualOverridePrice.toLocaleString('id-ID') : ''}
+                                onChange={e => {
+                                  const rawVal = e.target.value;
+                                  const numVal = rawVal === '' ? 0 : Math.max(0, parseInt(rawVal.replace(/\D/g, ''), 10) || 0);
+                                  handleUpdateRoom(roomIdx, {
+                                    isManualOverride: true,
+                                    manualOverridePrice: numVal,
+                                    manualOverrideReason: selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking'
+                                  });
+                                }}
                                 className="w-full text-xs px-3 py-2 bg-white border border-amber-300 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 rounded-lg font-mono font-bold text-stone-900"
                               />
+                              {roomDraft.manualOverridePrice > 0 && (
+                                <p className="text-[11px] text-amber-800 mt-1 font-medium">
+                                  Tarif per malam: <strong>Rp {roomDraft.manualOverridePrice.toLocaleString('id-ID')}</strong>
+                                  {roomCalculations[roomIdx]?.nights > 1 && (
+                                    <span> • Total {roomCalculations[roomIdx].nights} malam: <strong>Rp {roomCalculations[roomIdx].roomCharge.toLocaleString('id-ID')}</strong></span>
+                                  )}
+                                </p>
+                              )}
                             </div>
                           </div>
                         ) : (

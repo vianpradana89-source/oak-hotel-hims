@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { Guest, VipStatus } from './guestTypes';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
+import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 
 interface GuestEditModalProps {
   isOpen: boolean;
@@ -49,6 +50,8 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
   const [scanToast, setScanToast] = useState<string | null>(null);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
+
+  const { blobUrl: ktpBlobUrl, loading: ktpLoading, error: ktpError } = useSecureDocumentBlob(guest?.identity_path, isKtpPreviewOpen);
 
   const handleIdentityConfirmed = (data: ExtractedIdentityData | any) => {
     if (!data) return;
@@ -688,18 +691,19 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <a
-                  href={guest.identity_path}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-2.5 py-1 text-stone-300 hover:text-white hover:bg-stone-800 rounded text-xs flex items-center gap-1.5 font-sans border border-stone-700 transition-colors"
-                  title="Buka di tab baru"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                  <span>Buka Tab Baru</span>
-                </a>
+                {ktpBlobUrl && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(ktpBlobUrl, '_blank')}
+                    className="px-2.5 py-1 text-stone-300 hover:text-white hover:bg-stone-800 rounded text-xs flex items-center gap-1.5 font-sans border border-stone-700 transition-colors cursor-pointer"
+                    title="Buka di tab baru"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                    <span>Buka Tab Baru</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setIsKtpPreviewOpen(false)}
@@ -715,22 +719,24 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
 
             {/* Image Preview Body */}
             <div className="p-4 bg-stone-950 flex flex-col items-center justify-center min-h-[280px] max-h-[68vh] overflow-auto">
-              <img
-                src={guest.identity_path}
-                alt={`KTP ${guest.full_name}`}
-                className="max-h-[60vh] max-w-full object-contain rounded-lg shadow-xl border border-stone-800 bg-stone-900"
-                onError={(e) => {
-                  const target = e.currentTarget;
-                  target.style.display = 'none';
-                  const parent = target.parentElement;
-                  if (parent && !parent.querySelector('.ktp-img-err')) {
-                    const errBox = document.createElement('div');
-                    errBox.className = 'ktp-img-err text-center p-8 text-stone-400 text-xs';
-                    errBox.innerHTML = '<div class="text-2xl mb-2">⚠️</div><p class="font-bold text-rose-400 mb-1">File Foto KTP Tidak Dapat Dimuat</p><p class="text-stone-500 text-[11px]">File mungkin telah dipindahkan atau tautan dokumen tidak lagi valid.</p>';
-                    parent.appendChild(errBox);
-                  }
-                }}
-              />
+              {ktpLoading ? (
+                <div className="flex flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2">
+                  <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                  <span>Mengunduh dokumen aman...</span>
+                </div>
+              ) : ktpError ? (
+                <div className="text-center p-8 text-rose-400 text-xs space-y-1">
+                  <div className="text-2xl">⚠️</div>
+                  <p className="font-bold">{ktpError}</p>
+                  <p className="text-stone-500 text-[11px]">Pastikan Anda memiliki izin akses ke dokumen properti ini.</p>
+                </div>
+              ) : ktpBlobUrl ? (
+                <img
+                  src={ktpBlobUrl}
+                  alt={`KTP ${guest.full_name}`}
+                  className="max-h-[60vh] max-w-full object-contain rounded-lg shadow-xl border border-stone-800 bg-stone-900"
+                />
+              ) : null}
             </div>
 
             {/* Footer */}

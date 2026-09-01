@@ -7,6 +7,8 @@ import {
   extractIdentityFromDocument,
   confirmVerifiedIdentity
 } from './identityExtractionService';
+import { verifyToken, type AuthUserPayload } from '../auth/authService';
+import { normalizeRoleName } from '../auth/authMiddleware';
 
 export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): Router {
   const router = Router();
@@ -218,16 +220,93 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
   });
 
   // GET /api/identity/document/:filename (Protected Document Serving)
-  router.get('/document/:filename', (req: Request, res: Response) => {
+  router.get('/document/:filename', async (req: Request, res: Response) => {
     const filename = req.params.filename;
-    // Prevent directory traversal
+    // 1. Prevent directory traversal and validate filename format
     if (!filename || /[^a-zA-Z0-9_\-\.]/.test(filename) || filename.includes('..')) {
       return res.status(400).json({ success: false, error: 'INVALID_FILENAME', message: 'Nama file tidak valid' });
     }
 
+    // 2. Authentication: Strictly require Authorization header (No JWT in query params)
+    const authHeader = req.headers.authorization;
+    let token: string | null = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    }
+
+    if (!token) {
+      return res.status(401).json({
+        status: 'ERROR',
+        code: 'UNAUTHORIZED',
+        message: 'Akses ditolak. Silakan login terlebih dahulu untuk mengakses dokumen identitas.'
+      });
+    }
+
+    let user: AuthUserPayload;
+    try {
+      user = verifyToken(token);
+    } catch {
+      return res.status(401).json({
+        status: 'ERROR',
+        code: 'INVALID_TOKEN',
+        message: 'Sesi login telah kedaluwarsa atau token tidak valid. Silakan login kembali.'
+      });
+    }
+
+    // 3. Fail-Closed Document Ownership & Property Isolation
+    const userRole = normalizeRoleName(user.role);
+    const isSuperAdmin = userRole === 'Super Admin' || userRole === 'SUPER_ADMIN';
+
+    let docPropId: number | null = null;
+    try {
+      const docRes = await pool.query(
+        `SELECT property_id FROM (
+           SELECT r.property_id FROM reservations r WHERE r.ktp_path LIKE '%' || $1
+           UNION
+           SELECT g.property_id FROM guests g WHERE g.identity_path LIKE '%' || $1
+         ) doc_props LIMIT 1`,
+        [filename]
+      );
+
+      if (docRes.rows.length === 0) {
+        return res.status(404).json({
+          status: 'ERROR',
+          code: 'DOCUMENT_NOT_FOUND',
+          message: 'Dokumen tidak terdaftar atau tidak ditemukan pada sistem.'
+        });
+      }
+
+      docPropId = docRes.rows[0].property_id ? Number(docRes.rows[0].property_id) : null;
+    } catch (err: any) {
+      console.error('[IdentityRouter] Document property isolation query error:', err.message);
+      return res.status(500).json({
+        status: 'ERROR',
+        code: 'INTERNAL_ERROR',
+        message: 'Gagal memverifikasi kepemilikan dokumen.'
+      });
+    }
+
+    // Enforce property isolation: Only Super Admin may cross properties; GM, FO, and staff are strictly property-scoped
+    if (!isSuperAdmin) {
+      if (!user.property_id || !docPropId || Number(user.property_id) !== docPropId) {
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'FORBIDDEN',
+          message: 'Akses ditolak. Anda tidak memiliki izin untuk melihat dokumen dari properti lain.'
+        });
+      }
+    }
+
+    // 4. File existence and stream response
     const targetPath = path.resolve(privateStorageDir, filename);
-    if (!fs.existsSync(targetPath)) {
-      return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Dokumen tidak ditemukan' });
+    let resolvedFilePath = targetPath;
+    if (!fs.existsSync(resolvedFilePath)) {
+      const fallbackPath = path.resolve(uploadDir, filename);
+      if (fs.existsSync(fallbackPath)) {
+        resolvedFilePath = fallbackPath;
+      } else {
+        return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'File dokumen fisik tidak ditemukan' });
+      }
     }
 
     const ext = path.extname(filename).toLowerCase();
@@ -235,13 +314,16 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       '.jpg': 'image/jpeg',
       '.jpeg': 'image/jpeg',
       '.png': 'image/png',
+      '.webp': 'image/webp',
       '.pdf': 'application/pdf'
     };
 
     const contentType = mimeTypes[ext] || 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    fs.createReadStream(targetPath).pipe(res);
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    fs.createReadStream(resolvedFilePath).pipe(res);
   });
 
   return router;
