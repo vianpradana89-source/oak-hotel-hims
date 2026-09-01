@@ -3,6 +3,8 @@ import type { MainNavKey, NavGroupDef, ShellPropertyItem } from './shellTypes';
 import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
 import { OakLogo } from '../../design-system/OakLogo';
 import { Tooltip } from '../../design-system/Tooltip';
+import { useAuth } from '../auth/AuthContext';
+import { isMenuAllowedForRole } from '../auth/permissions';
 
 export interface AppSidebarProps {
   selectedMenu: MainNavKey;
@@ -27,6 +29,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   propertyBranding,
   featureFlags,
 }) => {
+  const { user } = useAuth();
   const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
 
   // OAK HIMS Grouped Navigation
@@ -163,6 +166,13 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
     },
   ];
 
+  const filteredGroups: NavGroupDef[] = navGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => isMenuAllowedForRole(item.key as MainNavKey, user?.role))
+    }))
+    .filter((group) => group.items.length > 0);
+
   const renderNavContent = (isDrawer = false) => (
     <div className="flex flex-col h-full select-none">
       {/* Brand Header */}
@@ -194,7 +204,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
 
       {/* Navigation Links */}
       <div className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
-        {navGroups.map((group) => (
+        {filteredGroups.map((group) => (
           <div key={group.title} className="space-y-1">
             {(!isCollapsed || isDrawer) && (
               <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { AVAILABLE_ROLE_OPTIONS } from '../auth/permissions';
 
 interface HrEmployee {
   id: number;
@@ -24,7 +25,7 @@ interface HrdWorkspaceProps {
 
 export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, propertyName }) => {
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
-  const [availableRoles, setAvailableRoles] = useState<{ role: string; category: string; description: string }[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<{ role: string; category: string; description: string }[]>(AVAILABLE_ROLE_OPTIONS);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -115,7 +116,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
   const handleOpenEdit = (emp: HrEmployee) => {
     setErrorMessage('');
-    const displayName = emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`.trim();
+    const displayName = emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || emp.username || '';
     setFormPayload({
       name: displayName,
       username: emp.username || '',

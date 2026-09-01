@@ -1,4 +1,4 @@
-﻿import bcrypt from 'bcryptjs';
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import type { Pool, PoolClient } from 'pg';
 
@@ -94,13 +94,8 @@ export async function loginUser(
 }
 
 export async function seedSuperAdmin(pool: Pool): Promise<void> {
-  const email = 'info@oaklawang.com';
-  const username = 'admin';
-  const defaultPassword = 'OakHotel2026!';
-  const fullName = 'Super Admin OAK';
-
   try {
-    // Ensure roles exist
+    // 1. Ensure all standard roles exist
     await pool.query(`
       INSERT INTO roles (id, name, description)
       VALUES 
@@ -108,28 +103,109 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
         (2, 'Front Office', 'Manages check-in, check-out, and reservations'),
         (3, 'Accounting', 'Manages finance, ledger, and reconciliation'),
         (4, 'Housekeeping', 'Manages room cleaning and turnover'),
-        (5, 'General Manager', 'Management and operations oversight')
-      ON CONFLICT (id) DO NOTHING;
+        (5, 'General Manager', 'Management and operations oversight'),
+        (6, 'POS / Resto', 'Manages POS and restaurant inventory')
+      ON CONFLICT (id) DO UPDATE SET 
+        name = EXCLUDED.name,
+        description = EXCLUDED.description;
     `);
 
-    // Check if Super Admin user already exists
-    const existing = await pool.query(
-      `SELECT id, password_hash FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1`,
-      [email, username]
-    );
+    // 2. Define standard accounts to seed / upsert
+    const seedAccounts = [
+      {
+        email: 'info@oaklawang.com',
+        username: 'vian',
+        full_name: 'Vian Pradana',
+        role_id: 1,
+        role_name: 'Super Admin',
+        department: 'Management',
+        password: 'OakLawang2026!'
+      },
+      {
+        email: 'fo@oaklawang.com',
+        username: 'fo_staff',
+        full_name: 'Front Desk Staff',
+        role_id: 2,
+        role_name: 'Front Office',
+        department: 'Front Office',
+        password: 'FrontOffice2026!'
+      },
+      {
+        email: 'hk@oaklawang.com',
+        username: 'hk_staff',
+        full_name: 'Housekeeping Staff',
+        role_id: 4,
+        role_name: 'Housekeeping',
+        department: 'Housekeeping',
+        password: 'Housekeeping2026!'
+      }
+    ];
 
-    if (existing.rows.length === 0) {
-      const passwordHash = await hashPassword(defaultPassword);
-      await pool.query(
-        `INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-         VALUES (1, 1, $1, $2, $3, $4, TRUE, NOW(), NOW())`,
-        [username, email, passwordHash, fullName]
-      );
-      console.log(`[AUTH SEED] Super Admin user seeded successfully: ${email} (Password: ${defaultPassword})`);
-    } else {
-      console.log(`[AUTH SEED] Super Admin user already present in database.`);
+    for (const acc of seedAccounts) {
+      try {
+        const passwordHash = await hashPassword(acc.password);
+        
+        // Upsert into users (by email or username)
+        const existingUser = await pool.query(
+          `SELECT id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1`,
+          [acc.email, acc.username]
+        );
+
+        let userId: number;
+        if (existingUser.rows.length === 0) {
+          const ins = await pool.query(
+            `INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+             VALUES (1, $1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+             RETURNING id`,
+            [acc.role_id, acc.username, acc.email, passwordHash, acc.full_name]
+          );
+          userId = Number(ins.rows[0].id);
+          console.log(`[AUTH SEED] User created: ${acc.email} / ${acc.username} (Role: ${acc.role_name})`);
+        } else {
+          userId = Number(existingUser.rows[0].id);
+          await pool.query(
+            `UPDATE users 
+             SET role_id = $1, username = $2, password_hash = $3, full_name = $4, is_active = TRUE, updated_at = NOW()
+             WHERE id = $5`,
+            [acc.role_id, acc.username, passwordHash, acc.full_name, userId]
+          );
+          console.log(`[AUTH SEED] User updated: ${acc.email} / ${acc.username} (Role: ${acc.role_name})`);
+        }
+
+        // Sync into hr_employees
+        const existingEmp = await pool.query(
+          `SELECT id, employee_code FROM hr_employees WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1`,
+          [acc.email, acc.username]
+        );
+
+        if (existingEmp.rows.length === 0) {
+          let empCode = `EMP-U${String(userId).padStart(3, '0')}`;
+          const codeCheck = await pool.query('SELECT id FROM hr_employees WHERE employee_code = $1', [empCode]);
+          if (codeCheck.rows.length > 0) {
+            empCode = `EMP-U${userId}-${Date.now().toString().slice(-4)}`;
+          }
+
+          await pool.query(
+            `INSERT INTO hr_employees (
+               property_id, employee_code, full_name, position, department,
+               hire_date, monthly_salary, status, role, username, email, is_active, created_at, updated_at
+             )
+             VALUES (1, $1, $2, $3, $4, CURRENT_DATE, 0, 'ACTIVE', $3, $5, $6, TRUE, NOW(), NOW())`,
+            [empCode, acc.full_name, acc.role_name, acc.department, acc.username, acc.email]
+          );
+        } else {
+          await pool.query(
+            `UPDATE hr_employees
+             SET full_name = $1, position = $2, department = $3, role = $2, username = $4, is_active = TRUE, updated_at = NOW()
+             WHERE id = $5`,
+            [acc.full_name, acc.role_name, acc.department, acc.username, existingEmp.rows[0].id]
+          );
+        }
+      } catch (userErr: any) {
+        console.warn(`[AUTH SEED] Failed to seed user ${acc.email}:`, userErr.message);
+      }
     }
   } catch (err: any) {
-    console.warn(`[AUTH SEED] Note on seeding users:`, err.message);
+    console.warn(`[AUTH SEED] Note on seeding users & roles:`, err.message);
   }
 }

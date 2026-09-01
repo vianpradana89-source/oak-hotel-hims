@@ -1,4 +1,4 @@
-﻿import { Router, type Request, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
 import { hashPassword } from '../auth/authService';
 import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
@@ -62,6 +62,7 @@ export function createUsersRouter(pool: Pool): Router {
         username,
         password,
         full_name,
+        name,
         role,
         role_id,
         department,
@@ -73,7 +74,7 @@ export function createUsersRouter(pool: Pool): Router {
       const propId = Number(property_id || req.user?.property_id || 1);
       const cleanEmail = (email || '').trim().toLowerCase();
       const cleanUsername = (username || cleanEmail.split('@')[0] || '').trim().toLowerCase();
-      const cleanFullName = (full_name || '').trim();
+      const cleanFullName = (full_name || name || '').trim();
       const initialPassword = password || 'OakHotel2026!';
 
       if (!cleanEmail || !cleanFullName) {
@@ -121,26 +122,52 @@ export function createUsersRouter(pool: Pool): Router {
       const createdUser = userRes.rows[0];
 
       // Sync into hr_employees table for unified staff directory
-      const empCode = `EMP-${String(createdUser.id).padStart(3, '0')}`;
-      await client.query(
-        `INSERT INTO hr_employees (
-           property_id, employee_code, full_name, position, department,
-           hire_date, monthly_salary, status, role, username, email, phone, is_active, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, 0, 'ACTIVE', $6, $7, $8, $9, TRUE, NOW(), NOW())
-         ON CONFLICT DO NOTHING`,
-        [
-          propId,
-          empCode,
-          cleanFullName,
-          position || targetRoleName,
-          department || (targetRoleName === 'Housekeeping' ? 'Housekeeping' : 'Front Office'),
-          targetRoleName,
-          cleanUsername,
-          cleanEmail,
-          phone || null
-        ]
+      const existingEmp = await client.query(
+        `SELECT id FROM hr_employees WHERE LOWER(email) = $1 OR LOWER(username) = $2 LIMIT 1`,
+        [cleanEmail, cleanUsername]
       );
+
+      if (existingEmp.rows.length === 0) {
+        let empCode = `EMP-U${String(createdUser.id).padStart(3, '0')}`;
+        const codeCheck = await client.query('SELECT id FROM hr_employees WHERE employee_code = $1', [empCode]);
+        if (codeCheck.rows.length > 0) {
+          empCode = `EMP-U${createdUser.id}-${Date.now().toString().slice(-4)}`;
+        }
+
+        await client.query(
+          `INSERT INTO hr_employees (
+             property_id, employee_code, full_name, position, department,
+             hire_date, monthly_salary, status, role, username, email, phone, is_active, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, 0, 'ACTIVE', $6, $7, $8, $9, TRUE, NOW(), NOW())`,
+          [
+            propId,
+            empCode,
+            cleanFullName,
+            position || targetRoleName,
+            department || (targetRoleName === 'Housekeeping' ? 'Housekeeping' : 'Front Office'),
+            targetRoleName,
+            cleanUsername,
+            cleanEmail,
+            phone || null
+          ]
+        );
+      } else {
+        await client.query(
+          `UPDATE hr_employees
+           SET full_name = $1, position = $2, department = $3, role = $4, username = $5, phone = $6, is_active = TRUE, updated_at = NOW()
+           WHERE id = $7`,
+          [
+            cleanFullName,
+            position || targetRoleName,
+            department || (targetRoleName === 'Housekeeping' ? 'Housekeeping' : 'Front Office'),
+            targetRoleName,
+            cleanUsername,
+            phone || null,
+            existingEmp.rows[0].id
+          ]
+        );
+      }
 
       // Audit Log
       await client.query(
@@ -189,7 +216,8 @@ export function createUsersRouter(pool: Pool): Router {
     try {
       await client.query('BEGIN');
       const userId = Number(req.params.id);
-      const { full_name, role, role_id, email, phone, position, department } = req.body;
+      const { full_name, name, role, role_id, email, phone, position, department } = req.body;
+      const cleanFullName = full_name || name || undefined;
 
       let targetRoleId = role_id ? Number(role_id) : undefined;
       let targetRoleName = role;
@@ -210,7 +238,7 @@ export function createUsersRouter(pool: Pool): Router {
              updated_at = NOW()
          WHERE id = $4
          RETURNING id, username, email, full_name, role_id, is_active`,
-        [full_name, email ? email.trim().toLowerCase() : null, targetRoleId, userId]
+        [cleanFullName, email ? email.trim().toLowerCase() : null, targetRoleId, userId]
       );
 
       if (updateRes.rows.length === 0) {

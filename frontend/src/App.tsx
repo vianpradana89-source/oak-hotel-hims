@@ -52,6 +52,7 @@ import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProtectedRoute } from './features/auth/ProtectedRoute';
+import { isMenuAllowedForRole, getDefaultMenuForRole } from './features/auth/permissions';
 import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
@@ -253,6 +254,20 @@ function AppContent() {
       } catch {}
       return next;
     });
+  };
+
+  // Guard active menu automatically based on user role permissions
+  useEffect(() => {
+    if (user && !isMenuAllowedForRole(selectedMenu, user.role)) {
+      setSelectedMenu(getDefaultMenuForRole(user.role));
+    }
+  }, [user, selectedMenu]);
+
+  const handleSelectMenu = (menu: MainNavKey) => {
+    if (user && !isMenuAllowedForRole(menu, user.role)) {
+      return;
+    }
+    setSelectedMenu(menu);
   };
 
   const handleSelectProperty = (val: number) => {
@@ -3222,26 +3237,26 @@ function AppContent() {
         }}
         isSidebarCollapsed={isSidebarCollapsed}
         currentUser={{
-          name: user?.full_name || 'Super Admin OAK',
-          email: user?.email || 'info@oaklawang.com',
-          role: user?.role || 'Super Admin',
-          avatarInitials: (user?.full_name || 'SA')
+          name: user?.full_name || user?.username || 'Pengguna OAK',
+          email: user?.email || '—',
+          role: user?.role || 'Staff',
+          avatarInitials: (user?.full_name || user?.username || 'OP')
             .split(' ')
             .filter(Boolean)
             .map((w: string) => w[0])
             .join('')
             .toUpperCase()
-            .slice(0, 2) || 'SA',
+            .slice(0, 2) || 'OP',
         }}
         onLogout={logout}
-        onOpenPos={() => setSelectedMenu('POS')}
+        onOpenPos={() => handleSelectMenu('POS')}
         propertyBranding={activeBranding}
       />
 
       <div className="hotel-layout">
         <AppSidebar
           selectedMenu={selectedMenu}
-          onSelectMenu={(menu) => setSelectedMenu(menu)}
+          onSelectMenu={handleSelectMenu}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={handleToggleSidebarCollapse}
           isMobileOpen={isMobileSidebarOpen}
@@ -3367,7 +3382,7 @@ function AppContent() {
                       <div className="pt-1 text-center">
                         <button
                           type="button"
-                          onClick={() => setSelectedMenu('Housekeeping')}
+                          onClick={() => handleSelectMenu('Housekeeping')}
                           className="text-xs font-semibold text-[#1b4332] hover:underline cursor-pointer"
                         >
                           Lihat Semua ({checkoutInspections.length} pemeriksaan) &rarr;
@@ -3967,7 +3982,7 @@ function AppContent() {
             propertyId={propertyId}
             onNavigateToSettings={(section) => {
               if (section) setInitialSettingsCategory(section as SettingsCategoryKey);
-              setSelectedMenu('Pengaturan');
+              handleSelectMenu('Pengaturan');
             }}
             featureFlags={propertyFeatures}
           />
