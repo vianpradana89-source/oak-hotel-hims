@@ -8,6 +8,16 @@ import IdentityExtractionModal, { type ExtractedIdentityData } from './IdentityE
 import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
 
+/**
+ * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
+ * It creates new reservations by submitting a complete payload to POST /api/bookings.
+ * 
+ * IMPORTANT ARCHITECTURAL INVARIANT:
+ * - Existing reservations are NEVER edited via this modal; existing reservations use EditReservationModal
+ *   or ReservationDetailDrawer.
+ * - Every time QuickBookingModal opens/closes, its entire transient guest, identity, and payment state
+ *   is unconditionally reset via resetQuickBookingState() to prevent cross-guest state leakage.
+ */
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -265,13 +275,48 @@ export default function QuickBookingModal({
     }
   }, [isOpen, propertyId]);
 
-  // Reset or initialize on open
+  // Complete state reset function for fresh booking session
+  const resetQuickBookingState = useCallback(() => {
+    setChannelType('WALKIN');
+    setWalkinSubSource('DIRECT');
+    setSelectedOtaSourceId(null);
+    setIsOtaModalOpen(false);
+    setReferral('');
+    setSameAsBooker(true);
+    setBookerName('');
+    setBookerPhone('');
+    setGuestName('');
+    setGuestPhone('');
+    setGuestSegment('Walk-in');
+    setSelectedCrmGuest(null);
+    setDuplicateCandidates([]);
+    setShowDuplicateModal(false);
+    setDuplicateBypassed(false);
+    setIsIdentityModalOpen(false);
+    setKtpPath(null);
+    setIdentityNumber('');
+    setHasValidIdentity(false);
+    setIdentityFileName(null);
+    setExtractedKtpData(null);
+    setPaymentMethod('CASH');
+    setAmountPaid(0);
+    setBuktiBayarFile(null);
+    setBuktiBayarPath(null);
+    setSpecialRequests('');
+    setSubmitting(false);
+    setErrorMsg(null);
+    setChargeWarningMap({});
+  }, []);
+
+  // Reset entirely on open/close for fresh new booking session
   useEffect(() => {
     if (isOpen) {
+      resetQuickBookingState();
       setRoomsList([createNewRoomDraft(0, initialRoomId)]);
-      setErrorMsg(null);
+    } else {
+      resetQuickBookingState();
     }
-  }, [isOpen, initialRoomId, createNewRoomDraft]);
+  }, [isOpen, initialRoomId, createNewRoomDraft, resetQuickBookingState]);
 
   // Multi-room management actions
   const handleAddRoom = () => {

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 export interface ExtractedIdentityData {
   full_name: string;
@@ -97,6 +97,8 @@ export default function IdentityExtractionModal({
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+  previewUrlRef.current = previewUrl;
 
   // Stop camera stream helper
   const stopCamera = () => {
@@ -106,6 +108,49 @@ export default function IdentityExtractionModal({
     }
     setIsCameraActive(false);
   };
+
+  const resetModalState = useCallback(() => {
+    stopCamera();
+    if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(previewUrlRef.current);
+      } catch {}
+    }
+    setFile(null);
+    setPreviewUrl(null);
+    setExtracting(false);
+    setSaving(false);
+    setExtractedData(null);
+    setScanSuccessBanner(null);
+    setDuplicateCandidate(null);
+    setNameMismatch(null);
+    setInfoBanner(null);
+    setErrorMsg(null);
+    setFormName('');
+    setFormNik('');
+    setFormBirthPlace('');
+    setFormBirthDate('');
+    setFormGender('');
+    setFormAddress('');
+    setFormRtRw('');
+    setFormKelurahan('');
+    setFormKecamatan('');
+    setFormAgama('');
+    setFormStatus('');
+    setFormPekerjaan('');
+    setFormCitizenship('');
+    setFormValidUntil('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (cameraInputRef.current) cameraInputRef.current.value = '';
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      resetModalState();
+    } else {
+      resetModalState();
+    }
+  }, [isOpen, resetModalState]);
 
   const startCamera = async (mode: 'environment' | 'user' = facingMode) => {
     try {
@@ -330,8 +375,8 @@ export default function IdentityExtractionModal({
     processFileExtraction(file);
   };
 
-  const handleApplyToForm = () => {
-    const finalData: ExtractedIdentityData = {
+  const getFinalData = (): ExtractedIdentityData => {
+    return {
       full_name: formName.trim().toUpperCase() || extractedData?.full_name || '',
       identity_number: formNik.trim() || extractedData?.identity_number || '',
       birth_place: formBirthPlace.trim() || extractedData?.birth_place || undefined,
@@ -350,24 +395,19 @@ export default function IdentityExtractionModal({
       recognized_fields_count: extractedData?.recognized_fields_count,
       total_fields_count: 13,
       provider: extractedData?.provider || 'GOOGLE_VISION',
-      file_path: extractedData?.file_path || ''
+      file_path: extractedData?.file_path || '',
+      raw_lines: extractedData?.raw_lines || []
     };
-
-    if (onScanSuccess) {
-      onScanSuccess(finalData);
-    }
-    if (onIdentityConfirmed) {
-      onIdentityConfirmed(finalData);
-    }
-    onClose();
   };
 
   const handleConfirm = async () => {
-    if (!formNik.trim()) {
+    const finalData = getFinalData();
+
+    if (!finalData.identity_number) {
       setErrorMsg('Nomor NIK / Identitas wajib diisi.');
       return;
     }
-    if (!formName.trim()) {
+    if (!finalData.full_name) {
       setErrorMsg('Nama lengkap KTP wajib diisi.');
       return;
     }
@@ -375,28 +415,6 @@ export default function IdentityExtractionModal({
     try {
       setSaving(true);
       setErrorMsg(null);
-
-      const finalData: ExtractedIdentityData = {
-        full_name: formName.trim().toUpperCase(),
-        identity_number: formNik.trim(),
-        birth_place: formBirthPlace.trim() || undefined,
-        birth_date: formBirthDate.trim() || undefined,
-        gender: formGender || undefined,
-        address: formAddress.trim() || undefined,
-        rt_rw: formRtRw.trim() || undefined,
-        village_kelurahan: formKelurahan.trim() || undefined,
-        district_kecamatan: formKecamatan.trim() || undefined,
-        religion: formAgama.trim() || undefined,
-        marital_status: formStatus.trim() || undefined,
-        occupation: formPekerjaan.trim() || undefined,
-        citizenship: formCitizenship.trim() || undefined,
-        valid_until: formValidUntil.trim() || undefined,
-        confidence: extractedData?.confidence || 1.0,
-        recognized_fields_count: extractedData?.recognized_fields_count,
-        total_fields_count: 13,
-        provider: extractedData?.provider || 'GOOGLE_VISION',
-        file_path: extractedData?.file_path || ''
-      };
 
       // Persist directly to canonical CRM guests table
       const confirmPayload = {
@@ -436,6 +454,7 @@ export default function IdentityExtractionModal({
 
       const savedGuest = resJson.data || null;
 
+      // Apply reviewed OCR data to guest form via callbacks
       if (onScanSuccess) {
         onScanSuccess(finalData);
       }
@@ -1011,39 +1030,26 @@ export default function IdentityExtractionModal({
             Batal
           </button>
           {extractedData && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleApplyToForm}
-                className="px-4 py-2 text-xs font-semibold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded-xl transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
-                title="Terapkan data KTP ini langsung ke input formulir tamu"
-              >
-                <svg className="w-4 h-4 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                </svg>
-                <span>Terapkan ke Form</span>
-              </button>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={handleConfirm}
-                className="px-5 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
-              >
-                {saving ? (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Menyimpan ke CRM...</span>
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    <span>Konfirmasi & Simpan</span>
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={handleConfirm}
+              className="px-5 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              {saving ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Menyimpan ke CRM...</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span>Konfirmasi & Simpan</span>
+                </>
+              )}
+            </button>
           )}
         </div>
       </div>

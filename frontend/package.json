@@ -14,6 +14,7 @@
     "test:payment-correction": "node test/payment_correction_helpers_test.ts",
     "test:payment-evidence": "node test/payment_evidence_helpers_test.ts",
     "test:design-system": "node test/design_system_and_shell_test.ts",
+    "test:quick-booking-ocr-isolation": "node test/quick_booking_ocr_state_isolation_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
