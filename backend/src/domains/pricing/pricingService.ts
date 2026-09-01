@@ -1,5 +1,9 @@
+import crypto from 'crypto';
 import type { Pool, PoolClient } from 'pg';
 import type {
+  BulkRateOverrideDto,
+  BulkRateOverridePreviewItem,
+  BulkRateOverridePreviewResult,
   CreateMealPlanDto,
   CreateRateOverrideDto,
   CreateRatePlanDto,
@@ -1081,6 +1085,71 @@ export async function deleteRatePlan(
 // RATE CALENDAR & OVERRIDES
 // ============================================================================
 
+// ============================================================================
+// RATE CALENDAR & OVERRIDES (PHASE 1 IMMUTABLE ENGINE)
+// ============================================================================
+
+export function computeRateCalendarFingerprint(state: {
+  property_id: number;
+  rate_plan_ids: number[];
+  start_date: string;
+  end_date: string;
+  days_of_week: number[] | null;
+  proposed_rate: number;
+  active_overrides: Array<{
+    id: number;
+    rate_plan_id: number;
+    start_date: string | Date;
+    end_date: string | Date;
+    days_of_week: number[] | null;
+    override_rate: number;
+    updated_at: string | Date;
+    is_active: boolean;
+    is_archived: boolean;
+  }>;
+}): string {
+  const sortedPlanIds = [...state.rate_plan_ids].map(Number).sort((a, b) => a - b);
+  const sortedDow = state.days_of_week && state.days_of_week.length > 0
+    ? [...state.days_of_week].map(Number).sort((a, b) => a - b)
+    : null;
+
+  const sortedOverrides = [...state.active_overrides]
+    .sort((a, b) => Number(a.id) - Number(b.id))
+    .map((o) => {
+      const sDate = typeof o.start_date === 'string' ? o.start_date.slice(0, 10) : toHotelDateString(new Date(o.start_date));
+      const eDate = typeof o.end_date === 'string' ? o.end_date.slice(0, 10) : toHotelDateString(new Date(o.end_date));
+      const uAt = typeof o.updated_at === 'string' ? new Date(o.updated_at).toISOString() : o.updated_at.toISOString();
+      const dows = o.days_of_week && o.days_of_week.length > 0
+        ? [...o.days_of_week].map(Number).sort((a, b) => a - b)
+        : null;
+
+      return {
+        id: Number(o.id),
+        rate_plan_id: Number(o.rate_plan_id),
+        start_date: sDate,
+        end_date: eDate,
+        days_of_week: dows,
+        override_rate: Math.round(Number(o.override_rate)),
+        updated_at: uAt,
+        is_active: Boolean(o.is_active),
+        is_archived: Boolean(o.is_archived)
+      };
+    });
+
+  const canonicalObj = {
+    property_id: Number(state.property_id),
+    rate_plan_ids: sortedPlanIds,
+    start_date: state.start_date.slice(0, 10),
+    end_date: state.end_date.slice(0, 10),
+    days_of_week: sortedDow,
+    proposed_rate: Math.round(Number(state.proposed_rate)),
+    active_overrides: sortedOverrides
+  };
+
+  const serialized = JSON.stringify(canonicalObj);
+  return `sha256:${crypto.createHash('sha256').update(serialized).digest('hex')}`;
+}
+
 export async function listRateOverrides(
   client: PoolClient | Pool,
   propertyId: number,
@@ -1111,8 +1180,8 @@ export async function listRateOverrides(
     property_id: Number(r.property_id),
     rate_plan_id: Number(r.rate_plan_id),
     override_rate: Number(r.override_rate),
-    start_date: typeof r.start_date === 'string' ? r.start_date : toHotelDateString(r.start_date),
-    end_date: typeof r.end_date === 'string' ? r.end_date : toHotelDateString(r.end_date)
+    start_date: typeof r.start_date === 'string' ? r.start_date.slice(0, 10) : toHotelDateString(r.start_date),
+    end_date: typeof r.end_date === 'string' ? r.end_date.slice(0, 10) : toHotelDateString(r.end_date)
   }));
 }
 
@@ -1160,126 +1229,644 @@ export async function getRateCalendarMatrix(
   return { rate_plan: ratePlan, days };
 }
 
-export async function upsertRateOverride(
+/**
+ * Immutable override application:
+ * Soft-archives collided overrides, inserts non-overlapping slices as new rows,
+ * and inserts the new override row.
+ */
+export async function applyRateOverrideImmutable(
   client: PoolClient | Pool,
-  propertyId: number,
-  ratePlanId: number,
-  dto: CreateRateOverrideDto,
-  actor?: string
+  params: {
+    property_id: number;
+    rate_plan_id: number;
+    start_date: string;
+    end_date: string;
+    override_rate: number;
+    days_of_week?: number[] | null;
+    reason?: string | null;
+    actor?: string;
+  }
 ): Promise<RateOverride> {
-  const ratePlan = await getRatePlanById(client, propertyId, ratePlanId);
-  if (!ratePlan) throw new Error(`Rate Plan with ID ${ratePlanId} not found.`);
+  const { property_id, rate_plan_id, start_date, end_date, override_rate, reason, actor } = params;
+  const targetDow = params.days_of_week && params.days_of_week.length > 0 ? params.days_of_week : null;
 
-  if (dto.start_date >= dto.end_date) {
-    throw new Error('Start date must be strictly before end date.');
-  }
+  const allDows = [1, 2, 3, 4, 5, 6, 7];
+  const targetDowSet = targetDow || allDows;
 
-  const overrideRate = Math.round(Number(dto.override_rate));
-  if (isNaN(overrideRate) || overrideRate < 0) {
-    throw new Error('Harga Override harus berupa bilangan bulat positif.');
-  }
+  // Query overlapping active overrides for this plan
+  const existingRes = await client.query(
+    `SELECT * FROM rate_overrides 
+     WHERE property_id = $1 
+       AND rate_plan_id = $2 
+       AND is_active = TRUE 
+       AND is_archived = FALSE 
+       AND end_date > $3 
+       AND start_date < $4 
+     ORDER BY id ASC`,
+    [property_id, rate_plan_id, start_date, end_date]
+  );
 
-  // Collision detection with active overrides
-  const existing = await listRateOverrides(client, propertyId, ratePlanId, dto.start_date, dto.end_date);
-  const activeCollisions = existing.filter((e) => {
-    if (!e.is_active || e.is_archived) return false;
-    // Check day of week overlap
-    if (!dto.days_of_week || dto.days_of_week.length === 0 || !e.days_of_week || e.days_of_week.length === 0) {
-      return true;
+  for (const existing of existingRes.rows) {
+    const existingDow = existing.days_of_week && existing.days_of_week.length > 0 ? existing.days_of_week : allDows;
+    const overlapDow = targetDowSet.filter((d: number) => existingDow.includes(d));
+
+    if (overlapDow.length === 0) {
+      // Disjoint DOWs: no collision, coexist peacefully
+      continue;
     }
-    return dto.days_of_week.some((d) => e.days_of_week!.includes(d));
-  });
 
-  if (activeCollisions.length > 0) {
-    if (!dto.replace_existing) {
-      throw new Error(
-        `Terdapat override aktif yang bertabrakan pada rentang ${activeCollisions[0].start_date} s/d ${activeCollisions[0].end_date}. Gunakan opsi replace untuk mengganti.`
-      );
-    }
-    // Replace: soft archive collided overrides
-    for (const col of activeCollisions) {
+    const existingStart = typeof existing.start_date === 'string' ? existing.start_date.slice(0, 10) : toHotelDateString(existing.start_date);
+    const existingEnd = typeof existing.end_date === 'string' ? existing.end_date.slice(0, 10) : toHotelDateString(existing.end_date);
+
+    // 1. Soft-archive original historical row
+    await client.query(
+      `UPDATE rate_overrides 
+       SET is_archived = TRUE, is_active = FALSE, updated_by = $1, updated_at = NOW() 
+       WHERE id = $2`,
+      [actor || 'SYSTEM', existing.id]
+    );
+
+    // 2. Preserve remaining non-colliding days across the FULL existing interval
+    const remainingDow = existingDow.filter((d: number) => !targetDowSet.includes(d));
+    if (remainingDow.length > 0) {
       await client.query(
-        'UPDATE rate_overrides SET is_archived = TRUE, is_active = FALSE, updated_by = $1, updated_at = NOW() WHERE id = $2',
-        [actor || 'SYSTEM', col.id]
+        `INSERT INTO rate_overrides (
+          property_id, rate_plan_id, start_date, end_date, override_rate,
+          days_of_week, reason, is_active, is_archived, created_by, updated_by
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, TRUE, FALSE, $8, $8
+        )`,
+        [
+          property_id,
+          rate_plan_id,
+          existingStart,
+          existingEnd,
+          existing.override_rate,
+          remainingDow.sort((a: number, b: number) => a - b),
+          existing.reason ? `[DOW Split #${existing.id}] ${existing.reason}` : `[DOW Split #${existing.id}]`,
+          actor || 'SYSTEM'
+        ]
+      );
+    }
+
+    // 3. Preserve left date slice if existing starts before requested start
+    if (existingStart < start_date) {
+      const leftEnd = existingEnd < start_date ? existingEnd : start_date;
+      const sliceDow = existing.days_of_week ? overlapDow : null;
+      await client.query(
+        `INSERT INTO rate_overrides (
+          property_id, rate_plan_id, start_date, end_date, override_rate,
+          days_of_week, reason, is_active, is_archived, created_by, updated_by
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, TRUE, FALSE, $8, $8
+        )`,
+        [
+          property_id,
+          rate_plan_id,
+          existingStart,
+          leftEnd,
+          existing.override_rate,
+          sliceDow,
+          existing.reason ? `[Slice #${existing.id}] ${existing.reason}` : `[Slice #${existing.id}]`,
+          actor || 'SYSTEM'
+        ]
+      );
+    }
+
+    // 4. Preserve right date slice if existing ends after requested end
+    if (existingEnd > end_date) {
+      const rightStart = existingStart > end_date ? existingStart : end_date;
+      const sliceDow = existing.days_of_week ? overlapDow : null;
+      await client.query(
+        `INSERT INTO rate_overrides (
+          property_id, rate_plan_id, start_date, end_date, override_rate,
+          days_of_week, reason, is_active, is_archived, created_by, updated_by
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, TRUE, FALSE, $8, $8
+        )`,
+        [
+          property_id,
+          rate_plan_id,
+          rightStart,
+          existingEnd,
+          existing.override_rate,
+          sliceDow,
+          existing.reason ? `[Slice #${existing.id}] ${existing.reason}` : `[Slice #${existing.id}]`,
+          actor || 'SYSTEM'
+        ]
       );
     }
   }
 
-  const res = await client.query(
+  // 5. Insert new requested override
+  const insertRes = await client.query(
     `INSERT INTO rate_overrides (
       property_id, rate_plan_id, start_date, end_date, override_rate,
       days_of_week, reason, is_active, is_archived, created_by, updated_by
     ) VALUES (
       $1, $2, $3, $4, $5,
-      $6, $7, true, false, $8, $8
+      $6, $7, TRUE, FALSE, $8, $8
     ) RETURNING *`,
     [
-      propertyId,
-      ratePlanId,
-      dto.start_date,
-      dto.end_date,
-      overrideRate,
-      dto.days_of_week || null,
-      dto.reason?.trim() || null,
+      property_id,
+      rate_plan_id,
+      start_date,
+      end_date,
+      override_rate,
+      targetDow,
+      reason?.trim() || null,
       actor || 'SYSTEM'
     ]
   );
 
-  const row = res.rows[0];
-  await logAudit(client, {
-    property_id: propertyId,
-    action: 'RATE_OVERRIDE_CREATED',
-    entity_type: 'rate_overrides',
-    entity_id: row.id,
-    after: row,
-    actor
-  });
-
+  const row = insertRes.rows[0];
   return {
     ...row,
     id: Number(row.id),
     property_id: Number(row.property_id),
     rate_plan_id: Number(row.rate_plan_id),
     override_rate: Number(row.override_rate),
-    start_date: typeof row.start_date === 'string' ? row.start_date : toHotelDateString(row.start_date),
-    end_date: typeof row.end_date === 'string' ? row.end_date : toHotelDateString(row.end_date)
+    start_date: typeof row.start_date === 'string' ? row.start_date.slice(0, 10) : toHotelDateString(row.start_date),
+    end_date: typeof row.end_date === 'string' ? row.end_date.slice(0, 10) : toHotelDateString(row.end_date)
   };
 }
 
-export async function deleteRateOverride(
+/**
+ * Preview bulk rate overrides (Zero writes, property isolated, deterministic fingerprint).
+ */
+export async function previewBulkRateOverrides(
   client: PoolClient | Pool,
   propertyId: number,
-  overrideId: number,
-  actor?: string
-): Promise<{ success: boolean; message: string }> {
-  const res = await client.query(
-    'SELECT * FROM rate_overrides WHERE id = $1 AND property_id = $2',
-    [overrideId, propertyId]
-  );
-  if (res.rows.length === 0) throw new Error(`Rate override with ID ${overrideId} not found.`);
+  dto: BulkRateOverrideDto
+): Promise<BulkRateOverridePreviewResult> {
+  if (!dto.rate_plan_ids || dto.rate_plan_ids.length === 0) {
+    throw new Error('Setidaknya satu Rate Plan harus dipilih.');
+  }
 
-  const current = res.rows[0];
-  await client.query(
-    'UPDATE rate_overrides SET is_archived = TRUE, is_active = FALSE, updated_by = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3',
-    [actor || 'SYSTEM', overrideId, propertyId]
+  if (dto.start_date >= dto.end_date) {
+    throw new Error('Tanggal mulai menginap harus sebelum tanggal selesai.');
+  }
+
+  const proposedRate = Math.round(Number(dto.override_rate));
+  if (isNaN(proposedRate) || proposedRate <= 0) {
+    throw new Error('Harga Override harus berupa bilangan bulat positif.');
+  }
+
+  // 1. Validate property ownership for all requested rate plans
+  const plansRes = await client.query(
+    `SELECT rp.id, rp.property_id, rp.room_type_id, rp.code, rp.name, rp.base_rate,
+            rt.name as room_type_name, rt.code as room_type_code
+     FROM rate_plans rp
+     JOIN room_types rt ON rp.room_type_id = rt.id
+     WHERE rp.id = ANY($1::bigint[]) AND rp.property_id = $2 AND rp.is_archived = FALSE`,
+    [dto.rate_plan_ids, propertyId]
   );
 
-  await logAudit(client, {
+  if (plansRes.rows.length !== dto.rate_plan_ids.length) {
+    throw new Error('Satu atau lebih Rate Plan tidak valid atau bukan milik properti ini.');
+  }
+
+  const plansMap = new Map<number, any>();
+  for (const p of plansRes.rows) {
+    plansMap.set(Number(p.id), {
+      ...p,
+      id: Number(p.id),
+      base_rate: Number(p.base_rate),
+      room_type_id: Number(p.room_type_id)
+    });
+  }
+
+  // 2. Query all active overrides in window (ZERO WRITES)
+  const overridesRes = await client.query(
+    `SELECT * FROM rate_overrides
+     WHERE property_id = $1
+       AND rate_plan_id = ANY($2::bigint[])
+       AND is_active = TRUE
+       AND is_archived = FALSE
+       AND end_date > $3
+       AND start_date < $4
+     ORDER BY id ASC`,
+    [propertyId, dto.rate_plan_ids, dto.start_date, dto.end_date]
+  );
+
+  const activeOverrides = overridesRes.rows.map((r) => ({
+    ...r,
+    id: Number(r.id),
+    rate_plan_id: Number(r.rate_plan_id),
+    override_rate: Number(r.override_rate),
+    start_date: typeof r.start_date === 'string' ? r.start_date.slice(0, 10) : toHotelDateString(r.start_date),
+    end_date: typeof r.end_date === 'string' ? r.end_date.slice(0, 10) : toHotelDateString(r.end_date)
+  }));
+
+  // 3. Generate deterministic preview fingerprint
+  const previewToken = computeRateCalendarFingerprint({
     property_id: propertyId,
-    action: 'RATE_OVERRIDE_REMOVED',
-    entity_type: 'rate_overrides',
-    entity_id: overrideId,
-    before: current,
-    after: { is_archived: true, is_active: false },
-    actor
+    rate_plan_ids: dto.rate_plan_ids,
+    start_date: dto.start_date,
+    end_date: dto.end_date,
+    days_of_week: dto.days_of_week || null,
+    proposed_rate: proposedRate,
+    active_overrides: activeOverrides
   });
 
-  return { success: true, message: 'Rate override berhasil direset ke harga dasar.' };
+  // 4. Build per-date breakdown
+  const stayDates = getStayDatesArray(dto.start_date, dto.end_date);
+  const targetDow = dto.days_of_week && dto.days_of_week.length > 0 ? dto.days_of_week : null;
+
+  const breakdown: BulkRateOverridePreviewItem[] = [];
+  let affectedDatesCount = 0;
+  let replacementsCount = 0;
+
+  for (const rawPlanId of dto.rate_plan_ids) {
+    const planId = Number(rawPlanId);
+    const plan = plansMap.get(planId);
+    if (!plan) continue;
+
+    const planOverrides = activeOverrides.filter((o) => Number(o.rate_plan_id) === planId);
+
+    for (const stayDate of stayDates) {
+      const dow = getIsoDayOfWeek(stayDate);
+      const dayName = getIndonesianDayName(dow);
+
+      // Check DOW filter
+      if (targetDow && !targetDow.includes(dow)) {
+        continue;
+      }
+
+      // Find active override for this stay date
+      const matching = planOverrides.find((o) => {
+        if (stayDate < o.start_date || stayDate >= o.end_date) return false;
+        if (o.days_of_week && o.days_of_week.length > 0 && !o.days_of_week.includes(dow)) return false;
+        return true;
+      });
+
+      const currentEffectiveRate = matching ? matching.override_rate : plan.base_rate;
+      let status: 'NEW' | 'REPLACE' | 'UNCHANGED' | 'CONFLICT' = 'NEW';
+
+      if (matching) {
+        if (matching.override_rate === proposedRate) {
+          status = 'UNCHANGED';
+        } else {
+          status = 'REPLACE';
+          replacementsCount++;
+          affectedDatesCount++;
+        }
+      } else {
+        if (plan.base_rate === proposedRate) {
+          status = 'UNCHANGED';
+        } else {
+          status = 'NEW';
+          affectedDatesCount++;
+        }
+      }
+
+      breakdown.push({
+        stay_date: stayDate,
+        day_of_week: dow,
+        day_name: dayName,
+        room_type_id: plan.room_type_id,
+        room_type_name: plan.room_type_name,
+        rate_plan_id: plan.id,
+        rate_plan_name: plan.name,
+        rate_plan_code: plan.code,
+        base_rate: plan.base_rate,
+        current_effective_rate: currentEffectiveRate,
+        proposed_rate: proposedRate,
+        existing_override_id: matching ? matching.id : null,
+        status,
+        reason: dto.reason?.trim() || null
+      });
+    }
+  }
+
+  return {
+    property_id: propertyId,
+    affected_dates_count: affectedDatesCount,
+    replacements_count: replacementsCount,
+    preview_token: previewToken,
+    breakdown
+  };
 }
 
-// ============================================================================
-// AUTHORITATIVE PRICING QUOTE SERVICE
-// ============================================================================
+/**
+ * Transaction-scoped PostgreSQL advisory lock for Rate Calendar mutations.
+ * Locks (property_id, rate_plan_id) in deterministic sorted rate_plan_id order.
+ * Automatically released at COMMIT or ROLLBACK. Fail-closed.
+ */
+export async function acquireRateCalendarTransactionLocks(
+  client: PoolClient | Pool,
+  propertyId: number,
+  ratePlanIds: number[]
+): Promise<void> {
+  const sortedPlanIds = Array.from(new Set(ratePlanIds.map((id) => Number(id)))).sort((a, b) => a - b);
+  for (const planId of sortedPlanIds) {
+    if (!Number.isFinite(planId) || planId <= 0) {
+      throw { statusCode: 400, code: 'VALIDATION_ERROR', message: `Invalid rate_plan_id ${planId} for locking` };
+    }
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext('oak_rate_calendar_' || $1 || '_' || $2))`,
+      [propertyId, planId]
+    );
+  }
+}
+
+/**
+ * Apply bulk rate overrides atomically with concurrency verification.
+ */
+export async function applyBulkRateOverrides(
+  pool: Pool,
+  propertyId: number,
+  dto: BulkRateOverrideDto,
+  actor?: string
+): Promise<{ success: boolean; message: string; preview_token: string }> {
+  if (!dto.rate_plan_ids || dto.rate_plan_ids.length === 0) {
+    throw new Error('Setidaknya satu Rate Plan harus dipilih.');
+  }
+
+  if (dto.start_date >= dto.end_date) {
+    throw new Error('Tanggal mulai menginap harus sebelum tanggal selesai.');
+  }
+
+  const proposedRate = Math.round(Number(dto.override_rate));
+  if (isNaN(proposedRate) || proposedRate <= 0) {
+    throw new Error('Harga Override harus berupa bilangan bulat positif.');
+  }
+
+  if (!dto.preview_token) {
+    throw new Error('preview_token wajib disertakan untuk menerapkan perubahan kalender tarif.');
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Property Isolation & Plan validation
+    const plansRes = await client.query(
+      `SELECT id FROM rate_plans 
+       WHERE id = ANY($1::bigint[]) AND property_id = $2 AND is_archived = FALSE`,
+      [dto.rate_plan_ids, propertyId]
+    );
+
+    if (plansRes.rows.length !== dto.rate_plan_ids.length) {
+      throw new Error('Satu atau lebih Rate Plan tidak valid atau bukan milik properti ini.');
+    }
+
+    // 2. Transaction-Scoped Advisory Locks (sorted rate_plan_ids)
+    await acquireRateCalendarTransactionLocks(client, propertyId, dto.rate_plan_ids);
+
+    // 3. Lock active overrides in window (FOR UPDATE)
+    const lockedRes = await client.query(
+      `SELECT id, rate_plan_id, start_date, end_date, days_of_week, override_rate, updated_at, is_active, is_archived
+       FROM rate_overrides
+       WHERE property_id = $1
+         AND rate_plan_id = ANY($2::bigint[])
+         AND is_active = TRUE
+         AND is_archived = FALSE
+         AND end_date > $3
+         AND start_date < $4
+       ORDER BY id ASC
+       FOR UPDATE`,
+      [propertyId, dto.rate_plan_ids, dto.start_date, dto.end_date]
+    );
+
+    // 4. Reconstruct canonical fingerprint from live locked rows
+    const currentToken = computeRateCalendarFingerprint({
+      property_id: propertyId,
+      rate_plan_ids: dto.rate_plan_ids,
+      start_date: dto.start_date,
+      end_date: dto.end_date,
+      days_of_week: dto.days_of_week || null,
+      proposed_rate: proposedRate,
+      active_overrides: lockedRes.rows
+    });
+
+    // 5. Compare with provided preview_token
+    if (currentToken !== dto.preview_token) {
+      const err: any = new Error(
+        'Rate Calendar berubah sejak pratinjau dibuat. Silakan perbarui pratinjau sebelum menerapkan perubahan.'
+      );
+      err.code = 'RATE_CALENDAR_CHANGED';
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // 6. Apply immutable override for each selected plan
+    for (const planId of dto.rate_plan_ids) {
+      await applyRateOverrideImmutable(client, {
+        property_id: propertyId,
+        rate_plan_id: planId,
+        start_date: dto.start_date,
+        end_date: dto.end_date,
+        override_rate: proposedRate,
+        days_of_week: dto.days_of_week,
+        reason: dto.reason,
+        actor
+      });
+    }
+
+    // 7. Write Audit Log
+    await logAudit(client, {
+      property_id: propertyId,
+      action: 'RATE_OVERRIDE_BULK_APPLIED',
+      entity_type: 'rate_overrides',
+      entity_id: 'BULK',
+      after: {
+        rate_plan_ids: dto.rate_plan_ids,
+        start_date: dto.start_date,
+        end_date: dto.end_date,
+        override_rate: proposedRate,
+        days_of_week: dto.days_of_week,
+        reason: dto.reason
+      },
+      actor
+    });
+
+    await client.query('COMMIT');
+
+    return {
+      success: true,
+      message: 'Perubahan tarif kalender berhasil diterapkan secara aman.',
+      preview_token: currentToken
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function upsertRateOverride(
+  poolOrClient: PoolClient | Pool,
+  propertyId: number,
+  ratePlanId: number,
+  dto: CreateRateOverrideDto,
+  actor?: string
+): Promise<RateOverride> {
+  const isPool = typeof (poolOrClient as any).connect === 'function';
+  const client = isPool ? await (poolOrClient as Pool).connect() : (poolOrClient as PoolClient);
+
+  try {
+    if (isPool) await client.query('BEGIN');
+
+    const ratePlan = await getRatePlanById(client, propertyId, ratePlanId);
+    if (!ratePlan) throw new Error(`Rate Plan with ID ${ratePlanId} not found.`);
+
+    if (dto.start_date >= dto.end_date) {
+      throw new Error('Tanggal mulai harus sebelum tanggal selesai.');
+    }
+
+    const overrideRate = Math.round(Number(dto.override_rate));
+    if (isNaN(overrideRate) || overrideRate <= 0) {
+      throw new Error('Harga Override harus berupa bilangan bulat positif.');
+    }
+
+    // Acquire transaction advisory lock
+    await acquireRateCalendarTransactionLocks(client, propertyId, [ratePlanId]);
+
+    // Use the canonical immutable override engine
+    const override = await applyRateOverrideImmutable(client, {
+      property_id: propertyId,
+      rate_plan_id: ratePlanId,
+      start_date: dto.start_date,
+      end_date: dto.end_date,
+      override_rate: overrideRate,
+      days_of_week: dto.days_of_week,
+      reason: dto.reason,
+      actor
+    });
+
+    await logAudit(client, {
+      property_id: propertyId,
+      action: 'RATE_OVERRIDE_CREATED',
+      entity_type: 'rate_overrides',
+      entity_id: override.id,
+      after: override,
+      actor
+    });
+
+    if (isPool) await client.query('COMMIT');
+    return override;
+  } catch (err) {
+    if (isPool) await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    if (isPool) (client as PoolClient).release();
+  }
+}
+
+export async function deleteRateOverride(
+  poolOrClient: PoolClient | Pool,
+  propertyId: number,
+  overrideId: number,
+  actor?: string,
+  targetDate?: string
+): Promise<{ success: boolean; message: string }> {
+  const isPool = typeof (poolOrClient as any).connect === 'function';
+  const client = isPool ? await (poolOrClient as Pool).connect() : (poolOrClient as PoolClient);
+
+  try {
+    if (isPool) await client.query('BEGIN');
+
+    const res = await client.query(
+      'SELECT * FROM rate_overrides WHERE id = $1 AND property_id = $2',
+      [overrideId, propertyId]
+    );
+    if (res.rows.length === 0) throw new Error(`Rate override with ID ${overrideId} not found.`);
+
+    const current = res.rows[0];
+    const currentStart = typeof current.start_date === 'string' ? current.start_date.slice(0, 10) : toHotelDateString(current.start_date);
+    const currentEnd = typeof current.end_date === 'string' ? current.end_date.slice(0, 10) : toHotelDateString(current.end_date);
+
+    // Acquire transaction advisory lock
+    await acquireRateCalendarTransactionLocks(client, propertyId, [Number(current.rate_plan_id)]);
+
+    // Soft archive the original override
+    await client.query(
+      'UPDATE rate_overrides SET is_archived = TRUE, is_active = FALSE, updated_by = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3',
+      [actor || 'SYSTEM', overrideId, propertyId]
+    );
+
+    // If a specific targetDate was requested to be reset and the override spans multiple days, preserve the slices
+    if (targetDate && targetDate >= currentStart && targetDate < currentEnd) {
+      const nextDate = addDays(targetDate, 1);
+      
+      // Left slice
+      if (currentStart < targetDate) {
+        await client.query(
+          `INSERT INTO rate_overrides (
+            property_id, rate_plan_id, start_date, end_date, override_rate,
+            days_of_week, reason, is_active, is_archived, created_by, updated_by
+          ) VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, TRUE, FALSE, $8, $8
+          )`,
+          [
+            propertyId,
+            current.rate_plan_id,
+            currentStart,
+            targetDate,
+            current.override_rate,
+            current.days_of_week,
+            current.reason ? `[Slice #${current.id}] ${current.reason}` : `[Slice #${current.id}]`,
+            actor || 'SYSTEM'
+          ]
+        );
+      }
+
+      // Right slice
+      if (currentEnd > nextDate) {
+        await client.query(
+          `INSERT INTO rate_overrides (
+            property_id, rate_plan_id, start_date, end_date, override_rate,
+            days_of_week, reason, is_active, is_archived, created_by, updated_by
+          ) VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, TRUE, FALSE, $8, $8
+          )`,
+          [
+            propertyId,
+            current.rate_plan_id,
+            nextDate,
+            currentEnd,
+            current.override_rate,
+            current.days_of_week,
+            current.reason ? `[Slice #${current.id}] ${current.reason}` : `[Slice #${current.id}]`,
+            actor || 'SYSTEM'
+          ]
+        );
+      }
+    }
+
+    await logAudit(client, {
+      property_id: propertyId,
+      action: 'RATE_OVERRIDE_DELETED',
+      entity_type: 'rate_overrides',
+      entity_id: overrideId,
+      before: current,
+      after: { is_archived: true, is_active: false, reset_date: targetDate || null },
+      actor
+    });
+
+    if (isPool) await client.query('COMMIT');
+
+    return {
+      success: true,
+      message: targetDate
+        ? `Tarif override untuk ${targetDate} berhasil direset ke tarif standar.`
+        : 'Override tarif berhasil dihapus.'
+    };
+  } catch (err) {
+    if (isPool) await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    if (isPool) (client as PoolClient).release();
+  }
+}
 
 export async function calculatePriceQuote(
   client: PoolClient | Pool,

@@ -173,6 +173,41 @@ export interface CreateRateOverrideDto {
   replace_existing?: boolean;
 }
 
+export interface BulkRateOverrideDto {
+  rate_plan_ids: number[];
+  start_date: string;
+  end_date: string;
+  override_rate: number;
+  days_of_week?: number[] | null;
+  reason?: string | null;
+  preview_token?: string;
+}
+
+export interface BulkRateOverridePreviewItem {
+  stay_date: string;
+  day_of_week: number;
+  day_name: string;
+  room_type_id: number;
+  room_type_name: string;
+  rate_plan_id: number;
+  rate_plan_name: string;
+  rate_plan_code: string;
+  base_rate: number;
+  current_effective_rate: number;
+  proposed_rate: number;
+  existing_override_id: number | null;
+  status: 'NEW' | 'REPLACE' | 'UNCHANGED' | 'CONFLICT';
+  reason: string | null;
+}
+
+export interface BulkRateOverridePreviewResult {
+  property_id: number;
+  affected_dates_count: number;
+  replacements_count: number;
+  preview_token: string;
+  breakdown: BulkRateOverridePreviewItem[];
+}
+
 export interface RateCalendarDay {
   date: string;
   day_of_week: number;
@@ -271,9 +306,10 @@ async function handleResponse<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const message = data.error || data.message || `Request failed with status ${res.status}`;
-    const err = new Error(message) as Error & { collision?: boolean; status?: number };
+    const err = new Error(message) as Error & { collision?: boolean; status?: number; code?: string };
     err.status = res.status;
     if (data.collision) err.collision = true;
+    if (data.code) err.code = data.code;
     throw err;
   }
   return data as T;
@@ -426,11 +462,34 @@ export const pricingApi = {
     return handleResponse<RateOverride>(res);
   },
 
-  async deleteRateOverride(propertyId: number, overrideId: number): Promise<{ success: boolean; message: string }> {
-    const res = await fetch(`${API_BASE}/rate-overrides/${overrideId}?property_id=${propertyId}`, {
+  async deleteRateOverride(propertyId: number, overrideId: number, targetDate?: string): Promise<{ success: boolean; message: string }> {
+    const params = new URLSearchParams({ property_id: String(propertyId) });
+    if (targetDate) params.set('target_date', targetDate);
+    const res = await fetch(`${API_BASE}/rate-overrides/${overrideId}?${params.toString()}`, {
       method: 'DELETE'
     });
     return handleResponse<{ success: boolean; message: string }>(res);
+  },
+
+  async previewBulkRateOverrides(propertyId: number, data: BulkRateOverrideDto): Promise<BulkRateOverridePreviewResult> {
+    const res = await fetch(`${API_BASE}/bulk-overrides/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-property-id': String(propertyId) },
+      body: JSON.stringify({ ...data, property_id: propertyId })
+    });
+    return handleResponse<BulkRateOverridePreviewResult>(res);
+  },
+
+  async applyBulkRateOverrides(
+    propertyId: number,
+    data: BulkRateOverrideDto
+  ): Promise<{ success: boolean; message: string; preview_token: string }> {
+    const res = await fetch(`${API_BASE}/bulk-overrides/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-property-id': String(propertyId) },
+      body: JSON.stringify({ ...data, property_id: propertyId })
+    });
+    return handleResponse<{ success: boolean; message: string; preview_token: string }>(res);
   },
 
   async calculateQuote(payload: {

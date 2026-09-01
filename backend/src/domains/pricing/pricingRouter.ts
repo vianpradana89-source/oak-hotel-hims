@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import type { Pool } from 'pg';
 import {
+  applyBulkRateOverrides,
   calculatePriceQuote,
   createMealPlan,
   createRatePlan,
@@ -15,6 +16,7 @@ import {
   getReservationRateSnapshots,
   listMealPlans,
   listRatePlans,
+  previewBulkRateOverrides,
   setMealPlanActive,
   setRatePlanActive,
   updateMealPlan,
@@ -246,6 +248,33 @@ export function createPricingRouter(pool: Pool): Router {
   // RATE CALENDAR & OVERRIDES
   // ==========================================================================
 
+  router.post('/bulk-overrides/preview', async (req: Request, res: Response) => {
+    try {
+      const propertyId = getPropertyId(req);
+      const preview = await previewBulkRateOverrides(pool, propertyId, req.body);
+      res.json(preview);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Failed to preview bulk rate overrides' });
+    }
+  });
+
+  router.post('/bulk-overrides/apply', async (req: Request, res: Response) => {
+    try {
+      const propertyId = getPropertyId(req);
+      const actor = (req as any).user?.username || req.body.actor || 'USER';
+      const result = await applyBulkRateOverrides(pool, propertyId, req.body, actor);
+      res.json(result);
+    } catch (err: any) {
+      if (err.code === 'RATE_CALENDAR_CHANGED' || err.statusCode === 409) {
+        return res.status(409).json({
+          error: err.message,
+          code: 'RATE_CALENDAR_CHANGED'
+        });
+      }
+      res.status(400).json({ error: err.message || 'Failed to apply bulk rate overrides' });
+    }
+  });
+
   router.get('/rate-plans/:id/calendar', async (req: Request, res: Response) => {
     try {
       const propertyId = getPropertyId(req);
@@ -284,7 +313,8 @@ export function createPricingRouter(pool: Pool): Router {
       const propertyId = getPropertyId(req);
       const id = Number(req.params.id);
       const actor = (req as any).user?.username || req.body.actor || 'USER';
-      const result = await deleteRateOverride(pool, propertyId, id, actor);
+      const targetDate = (req.query.target_date || req.body.target_date) as string | undefined;
+      const result = await deleteRateOverride(pool, propertyId, id, actor, targetDate);
       res.json(result);
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Failed to delete rate override' });

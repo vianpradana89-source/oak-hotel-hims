@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { pricingApi } from './pricingApi';
 import type {
   RatePlan,
   RateCalendarMatrix,
   RateCalendarDay,
-  CreateRateOverrideDto
+  BulkRateOverridePreviewResult
 } from './pricingApi';
 import type { RoomType } from './roomMasterTypes';
 
@@ -31,70 +31,121 @@ function toLocalDateString(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-const DAY_NAMES = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
+const MONTH_NAMES = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+];
 
-export default function RateCalendarView({ propertyId, initialRatePlanId, onChanged, onOpenRatePlans }: Props) {
+const DOW_LABELS = [
+  { dow: 1, name: 'Senin', short: 'Sen' },
+  { dow: 2, name: 'Selasa', short: 'Sel' },
+  { dow: 3, name: 'Rabu', short: 'Rab' },
+  { dow: 4, name: 'Kamis', short: 'Kam' },
+  { dow: 5, name: 'Jumat', short: 'Jum' },
+  { dow: 6, name: 'Sabtu', short: 'Sab' },
+  { dow: 7, name: 'Minggu', short: 'Min' }
+];
+
+export default function RateCalendarView({
+  propertyId,
+  roomTypes = [],
+  initialRatePlanId,
+  onChanged,
+  onOpenRatePlans
+}: Props) {
   const [ratePlans, setRatePlans] = useState<RatePlan[]>([]);
+  const [selectedRoomTypeId, setSelectedRoomTypeId] = useState<number | 'ALL'>('ALL');
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(initialRatePlanId || null);
   const [loadingPlans, setLoadingPlans] = useState(true);
 
-  // Date Range (default 14 days from today)
-  const [startDate, setStartDate] = useState<string>(() => toLocalDateString(new Date()));
-  const [daysCount, setDaysCount] = useState<14 | 30>(14);
+  // Month navigation (Defaults to current month)
+  const today = useMemo(() => new Date(), []);
+  const [currentYear, setCurrentYear] = useState<number>(() => today.getFullYear());
+  const [currentMonth, setCurrentMonth] = useState<number>(() => today.getMonth()); // 0-indexed
 
   // Matrix State
   const [matrix, setMatrix] = useState<RateCalendarMatrix | null>(null);
   const [loadingMatrix, setLoadingMatrix] = useState(false);
   const [matrixError, setMatrixError] = useState<string | null>(null);
 
-  // Override Modal
-  const [showOverrideModal, setShowOverrideModal] = useState(false);
-  const [overrideForm, setOverrideForm] = useState<CreateRateOverrideDto & { specificDays: number[] }>({
-    start_date: toLocalDateString(new Date()),
-    end_date: toLocalDateString(new Date(Date.now() + 86400000)),
-    override_rate: 600000,
-    reason: '',
-    replace_existing: false,
-    specificDays: [0, 1, 2, 3, 4, 5, 6]
-  });
-  const [submittingOverride, setSubmittingOverride] = useState(false);
-  const [overrideModalError, setOverrideModalError] = useState<string | null>(null);
-  const [collisionWarning, setCollisionWarning] = useState<boolean>(false);
+  // Single Date Override Modal
+  const [selectedDay, setSelectedDay] = useState<RateCalendarDay | null>(null);
+  const [singleRateInput, setSingleRateInput] = useState<number>(0);
+  const [singleReasonInput, setSingleReasonInput] = useState<string>('');
+  const [submittingSingle, setSubmittingSingle] = useState(false);
+  const [singleError, setSingleError] = useState<string | null>(null);
 
-  // Load Rate Plans for property
-  useEffect(() => {
+  // Bulk Update Modal State (Step 1 = Form, Step 2 = Preview)
+  const [showBulkModal, setShowBulkModal] = useState(false);
+  const [bulkStep, setBulkStep] = useState<1 | 2>(1);
+  const [bulkStartDate, setBulkStartDate] = useState<string>(() => toLocalDateString(new Date()));
+  const [bulkEndDate, setBulkEndDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return toLocalDateString(d);
+  });
+  const [bulkSelectedDows, setBulkSelectedDows] = useState<number[]>([1, 2, 3, 4, 5, 6, 7]);
+  const [bulkSelectedPlanIds, setBulkSelectedPlanIds] = useState<number[]>([]);
+  const [bulkOverrideRate, setBulkOverrideRate] = useState<number>(0);
+  const [bulkReason, setBulkReason] = useState<string>('');
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewResult, setPreviewResult] = useState<BulkRateOverridePreviewResult | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [applyingBulk, setApplyingBulk] = useState(false);
+
+  // Load Rate Plans
+  const loadRatePlans = useCallback(async () => {
     if (!propertyId) return;
     setLoadingPlans(true);
-    pricingApi
-      .listRatePlans(propertyId, { is_active: true })
-      .then((plans) => {
-        setRatePlans(plans);
-        if (!selectedPlanId && plans.length > 0) {
-          setSelectedPlanId(plans[0].id);
-        } else if (initialRatePlanId && plans.some((p) => p.id === initialRatePlanId)) {
-          setSelectedPlanId(initialRatePlanId);
+    try {
+      const data = await pricingApi.listRatePlans(propertyId);
+      const activeOnly = data.filter((p) => p.is_active);
+      setRatePlans(activeOnly);
+
+      if (activeOnly.length > 0) {
+        if (!selectedPlanId || !activeOnly.some((p) => p.id === selectedPlanId)) {
+          setSelectedPlanId(activeOnly[0].id);
         }
-      })
-      .catch((err) => {
-        console.error('Failed to load rate plans:', err);
-      })
-      .finally(() => {
-        setLoadingPlans(false);
-      });
-  }, [propertyId, initialRatePlanId]);
+      } else {
+        setSelectedPlanId(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to load rate plans:', err);
+    } finally {
+      setLoadingPlans(false);
+    }
+  }, [propertyId, selectedPlanId]);
 
-  // Compute calculated end date for matrix
-  const computeEndDate = useCallback(
-    (start: string, count: number) => {
-      const parts = start.split('-').map(Number);
-      const d = new Date(parts[0], parts[1] - 1, parts[2]);
-      d.setDate(d.getDate() + count);
-      return toLocalDateString(d);
-    },
-    []
-  );
+  useEffect(() => {
+    void loadRatePlans();
+  }, [loadRatePlans]);
 
-  // Load Matrix
+  // Filtered Rate Plans by selectedRoomTypeId
+  const filteredRatePlans = useMemo(() => {
+    if (selectedRoomTypeId === 'ALL') return ratePlans;
+    return ratePlans.filter((p) => p.room_type_id === selectedRoomTypeId);
+  }, [ratePlans, selectedRoomTypeId]);
+
+  // Keep selectedPlanId valid when room type changes
+  useEffect(() => {
+    if (filteredRatePlans.length > 0) {
+      if (!selectedPlanId || !filteredRatePlans.some((p) => p.id === selectedPlanId)) {
+        setSelectedPlanId(filteredRatePlans[0].id);
+      }
+    }
+  }, [filteredRatePlans, selectedPlanId]);
+
+  // Calculate start_date and end_date for the entire current month
+  const monthDateRange = useMemo(() => {
+    const start = new Date(currentYear, currentMonth, 1);
+    const end = new Date(currentYear, currentMonth + 1, 1); // 1st of next month
+    return {
+      startDate: toLocalDateString(start),
+      endDate: toLocalDateString(end)
+    };
+  }, [currentYear, currentMonth]);
+
+  // Load Rate Calendar Matrix for current month
   const loadMatrix = useCallback(async () => {
     if (!propertyId || !selectedPlanId) {
       setMatrix(null);
@@ -102,532 +153,975 @@ export default function RateCalendarView({ propertyId, initialRatePlanId, onChan
     }
     setLoadingMatrix(true);
     setMatrixError(null);
-    const end = computeEndDate(startDate, daysCount);
     try {
-      const data = await pricingApi.getRateCalendar(propertyId, selectedPlanId, startDate, end);
+      const data = await pricingApi.getRateCalendar(
+        propertyId,
+        selectedPlanId,
+        monthDateRange.startDate,
+        monthDateRange.endDate
+      );
       setMatrix(data);
     } catch (err: any) {
       console.error('Failed to load rate calendar matrix:', err);
-      setMatrixError('Data Rate Calendar belum dapat dimuat. Coba muat ulang.');
+      setMatrixError(err.message || 'Gagal memuat kalender tarif.');
     } finally {
       setLoadingMatrix(false);
     }
-  }, [propertyId, selectedPlanId, startDate, daysCount, computeEndDate]);
+  }, [propertyId, selectedPlanId, monthDateRange.startDate, monthDateRange.endDate]);
 
   useEffect(() => {
     void loadMatrix();
   }, [loadMatrix]);
 
-  // Date Navigation
-  function handleShiftDays(delta: number) {
-    const parts = startDate.split('-').map(Number);
-    const d = new Date(parts[0], parts[1] - 1, parts[2]);
-    d.setDate(d.getDate() + delta);
-    setStartDate(toLocalDateString(d));
-  }
-
-  function handleResetToday() {
-    setStartDate(toLocalDateString(new Date()));
-  }
-
-  // Open Override Modal
-  function handleOpenOverride(targetDay?: RateCalendarDay) {
-    const start = targetDay ? targetDay.date : startDate;
-    const parts = start.split('-').map(Number);
-    const nextD = new Date(parts[0], parts[1] - 1, parts[2]);
-    nextD.setDate(nextD.getDate() + 1);
-    const end = toLocalDateString(nextD);
-
-    const baseRate = matrix?.rate_plan.base_rate || 500000;
-    setOverrideForm({
-      start_date: start,
-      end_date: end,
-      override_rate: targetDay?.effective_rate || baseRate,
-      reason: targetDay?.reason || '',
-      replace_existing: false,
-      specificDays: [0, 1, 2, 3, 4, 5, 6]
-    });
-    setCollisionWarning(false);
-    setOverrideModalError(null);
-    setShowOverrideModal(true);
-  }
-
-  // Toggle Day of Week in Override Form
-  function handleToggleDay(dayIndex: number) {
-    const current = [...overrideForm.specificDays];
-    const idx = current.indexOf(dayIndex);
-    if (idx >= 0) {
-      if (current.length === 1) return; // Keep at least one day
-      current.splice(idx, 1);
+  // Navigation handlers
+  function handlePrevMonth() {
+    if (currentMonth === 0) {
+      setCurrentMonth(11);
+      setCurrentYear((y) => y - 1);
     } else {
-      current.push(dayIndex);
-    }
-    setOverrideForm({ ...overrideForm, specificDays: current.sort() });
-  }
-
-  // Submit Override
-  async function handleSubmitOverride(e: React.FormEvent) {
-    e.preventDefault();
-    if (!propertyId || !selectedPlanId) return;
-    setSubmittingOverride(true);
-    setOverrideModalError(null);
-
-    const isAllDays = overrideForm.specificDays.length === 7;
-    const dto: CreateRateOverrideDto = {
-      start_date: overrideForm.start_date,
-      end_date: overrideForm.end_date,
-      override_rate: Number(overrideForm.override_rate),
-      days_of_week: isAllDays ? null : overrideForm.specificDays,
-      reason: overrideForm.reason?.trim() || null,
-      replace_existing: overrideForm.replace_existing
-    };
-
-    try {
-      await pricingApi.upsertRateOverride(propertyId, selectedPlanId, dto);
-      onChanged(`Tarif override sebesar ${formatIDR(dto.override_rate)} berhasil disimpan.`);
-      setShowOverrideModal(false);
-      void loadMatrix();
-    } catch (err: any) {
-      if (err.collision || err.message?.includes('collision') || err.message?.includes('tabrakan')) {
-        setCollisionWarning(true);
-        setOverrideModalError('Terdapat override lain pada tanggal tersebut. Centang pilihan di bawah untuk mengganti override lama.');
-      } else {
-        setOverrideModalError(err.message || 'Gagal menyimpan override.');
-      }
-    } finally {
-      setSubmittingOverride(false);
+      setCurrentMonth((m) => m - 1);
     }
   }
 
-  // Reset Day to Base Rate
-  async function handleResetDay(day: RateCalendarDay) {
-    if (!propertyId || !day.override_id) return;
-    if (!confirm(`Kembalikan tarif tanggal ${day.date} ke harga dasar (${formatIDR(day.base_rate)})?`)) {
+  function handleNextMonth() {
+    if (currentMonth === 11) {
+      setCurrentMonth(0);
+      setCurrentYear((y) => y + 1);
+    } else {
+      setCurrentMonth((m) => m + 1);
+    }
+  }
+
+  function handleToday() {
+    const now = new Date();
+    setCurrentYear(now.getFullYear());
+    setCurrentMonth(now.getMonth());
+  }
+
+  // Single Date Override Modal Handlers
+  function handleCellClick(day: RateCalendarDay) {
+    setSelectedDay(day);
+    setSingleRateInput(day.effective_rate);
+    setSingleReasonInput(day.reason || '');
+    setSingleError(null);
+  }
+
+  async function handleSaveSingleOverride() {
+    if (!propertyId || !selectedPlanId || !selectedDay) return;
+    if (singleRateInput <= 0) {
+      setSingleError('Harga override harus lebih besar dari 0.');
       return;
     }
 
+    setSubmittingSingle(true);
+    setSingleError(null);
     try {
-      await pricingApi.deleteRateOverride(propertyId, day.override_id);
-      onChanged(`Tarif tanggal ${day.date} berhasil dikembalikan ke harga dasar.`);
+      // End date is day + 1 day
+      const start = new Date(selectedDay.date);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      await pricingApi.upsertRateOverride(propertyId, selectedPlanId, {
+        start_date: selectedDay.date,
+        end_date: toLocalDateString(end),
+        override_rate: singleRateInput,
+        days_of_week: null,
+        reason: singleReasonInput.trim() || undefined,
+        replace_existing: true
+      });
+
+      onChanged(`Tarif override untuk ${selectedDay.date} berhasil disimpan.`);
+      setSelectedDay(null);
       void loadMatrix();
     } catch (err: any) {
-      alert(`Gagal mereset tarif: ${err.message}`);
+      setSingleError(err.message || 'Gagal menyimpan override tarif.');
+    } finally {
+      setSubmittingSingle(false);
     }
   }
 
-  const selectedPlan = ratePlans.find((p) => p.id === selectedPlanId);
+  async function handleResetSingleOverride() {
+    if (!propertyId || !selectedDay || !selectedDay.override_id) return;
+    setSubmittingSingle(true);
+    setSingleError(null);
+    try {
+      await pricingApi.deleteRateOverride(propertyId, selectedDay.override_id, selectedDay.date);
+      onChanged(`Tarif untuk tanggal ${selectedDay.date} telah dikembalikan ke tarif dasar.`);
+      setSelectedDay(null);
+      void loadMatrix();
+    } catch (err: any) {
+      setSingleError(err.message || 'Gagal mereset override.');
+    } finally {
+      setSubmittingSingle(false);
+    }
+  }
+
+  // Bulk Modal Actions
+  function handleOpenBulkModal() {
+    setShowBulkModal(true);
+    setBulkStep(1);
+    setPreviewResult(null);
+    setPreviewError(null);
+    setBulkStartDate(toLocalDateString(new Date()));
+    const end = new Date();
+    end.setDate(end.getDate() + 7);
+    setBulkEndDate(toLocalDateString(end));
+    setBulkSelectedDows([1, 2, 3, 4, 5, 6, 7]);
+    setBulkSelectedPlanIds(selectedPlanId ? [selectedPlanId] : ratePlans.slice(0, 1).map((p) => p.id));
+    setBulkOverrideRate(matrix?.rate_plan.base_rate || 500000);
+    setBulkReason('');
+  }
+
+  function handleToggleDow(dow: number) {
+    if (bulkSelectedDows.includes(dow)) {
+      if (bulkSelectedDows.length === 1) return; // Must keep at least 1
+      setBulkSelectedDows(bulkSelectedDows.filter((d) => d !== dow));
+    } else {
+      setBulkSelectedDows([...bulkSelectedDows, dow].sort((a, b) => a - b));
+    }
+  }
+
+  function handleTogglePlan(planId: number) {
+    if (bulkSelectedPlanIds.includes(planId)) {
+      if (bulkSelectedPlanIds.length === 1) return;
+      setBulkSelectedPlanIds(bulkSelectedPlanIds.filter((id) => id !== planId));
+    } else {
+      setBulkSelectedPlanIds([...bulkSelectedPlanIds, planId]);
+    }
+  }
+
+  async function handleFetchPreview() {
+    if (!propertyId) return;
+    if (bulkSelectedPlanIds.length === 0) {
+      setPreviewError('Pilih setidaknya satu Paket Tarif.');
+      return;
+    }
+    if (bulkStartDate >= bulkEndDate) {
+      setPreviewError('Tanggal mulai harus sebelum tanggal selesai.');
+      return;
+    }
+    if (bulkOverrideRate <= 0) {
+      setPreviewError('Harga override harus lebih besar dari 0.');
+      return;
+    }
+
+    setLoadingPreview(true);
+    setPreviewError(null);
+    try {
+      const res = await pricingApi.previewBulkRateOverrides(propertyId, {
+        rate_plan_ids: bulkSelectedPlanIds,
+        start_date: bulkStartDate,
+        end_date: bulkEndDate,
+        days_of_week: bulkSelectedDows.length === 7 ? null : bulkSelectedDows,
+        override_rate: bulkOverrideRate,
+        reason: bulkReason.trim() || undefined
+      });
+      setPreviewResult(res);
+      setBulkStep(2);
+    } catch (err: any) {
+      setPreviewError(err.message || 'Gagal memuat pratinjau bulk update.');
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  async function handleApplyBulk() {
+    if (!propertyId || !previewResult) return;
+
+    setApplyingBulk(true);
+    setPreviewError(null);
+    try {
+      await pricingApi.applyBulkRateOverrides(propertyId, {
+        rate_plan_ids: bulkSelectedPlanIds,
+        start_date: bulkStartDate,
+        end_date: bulkEndDate,
+        days_of_week: bulkSelectedDows.length === 7 ? null : bulkSelectedDows,
+        override_rate: bulkOverrideRate,
+        reason: bulkReason.trim() || undefined,
+        preview_token: previewResult.preview_token
+      });
+
+      onChanged('Perubahan kalender tarif berhasil diterapkan secara massal.');
+      setShowBulkModal(false);
+      void loadMatrix();
+    } catch (err: any) {
+      if (err.code === 'RATE_CALENDAR_CHANGED' || err.status === 409) {
+        setPreviewError(
+          'Rate Calendar berubah sejak pratinjau dibuat. Silakan perbarui pratinjau sebelum menerapkan perubahan.'
+        );
+      } else {
+        setPreviewError(err.message || 'Gagal menerapkan perubahan kalender tarif.');
+      }
+    } finally {
+      setApplyingBulk(false);
+    }
+  }
+
+  // Monthly Calendar Grid Helper
+  const calendarGrid = useMemo(() => {
+    if (!matrix || !matrix.days) return [];
+
+    // First day of current month
+    const firstOfMonth = new Date(currentYear, currentMonth, 1);
+    // getDay(): 0=Sun, 1=Mon, ..., 6=Sat
+    // Convert to ISO dow (1=Mon, ..., 7=Sun)
+    let firstDowIso = firstOfMonth.getDay();
+    if (firstDowIso === 0) firstDowIso = 7;
+
+    // Leading padding cells
+    const paddingCells: Array<{ isPadding: true; key: string }> = [];
+    for (let i = 1; i < firstDowIso; i++) {
+      paddingCells.push({ isPadding: true, key: `pad-lead-${i}` });
+    }
+
+    // Days map
+    const dayCells = matrix.days.map((day) => ({
+      isPadding: false,
+      key: day.date,
+      data: day
+    }));
+
+    // Trailing padding cells (7 modulo)
+    const totalCells = paddingCells.length + dayCells.length;
+    const trailingPadding = (7 - (totalCells % 7)) % 7;
+    const trailingCells: Array<{ isPadding: true; key: string }> = [];
+    for (let i = 0; i < trailingPadding; i++) {
+      trailingCells.push({ isPadding: true, key: `pad-trail-${i}` });
+    }
+
+    return [...paddingCells, ...dayCells, ...trailingCells];
+  }, [matrix, currentYear, currentMonth]);
+
+  const activePlan = useMemo(() => {
+    return ratePlans.find((p) => p.id === selectedPlanId);
+  }, [ratePlans, selectedPlanId]);
 
   return (
-    <div className="space-y-4">
-      {/* Top Filter & Navigation Bar */}
-      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Rate Plan Selector */}
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Rate Plan:</label>
-            {loadingPlans ? (
-              <span className="text-xs text-gray-400">Memuat rate plan...</span>
-            ) : ratePlans.length === 0 ? (
-              <span className="text-xs text-amber-600 font-medium">Belum ada Rate Plan aktif</span>
-            ) : (
+    <div className="space-y-6">
+      {/* HEADER CONTROLS */}
+      <div className="bg-white rounded-xl shadow-sm border border-stone-200 p-5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          {/* Filters: Room Type & Rate Plan */}
+          <div className="flex flex-wrap items-center gap-3">
+            {roomTypes.length > 0 && (
+              <div>
+                <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1">
+                  Tipe Kamar
+                </label>
+                <select
+                  value={selectedRoomTypeId}
+                  onChange={(e) => {
+                    const val = e.target.value === 'ALL' ? 'ALL' : Number(e.target.value);
+                    setSelectedRoomTypeId(val);
+                    if (val !== 'ALL') {
+                      const matchPlans = ratePlans.filter((p) => p.room_type_id === val);
+                      if (matchPlans.length > 0 && (!selectedPlanId || !matchPlans.some((p) => p.id === selectedPlanId))) {
+                        setSelectedPlanId(matchPlans[0].id);
+                      }
+                    }
+                  }}
+                  className="px-3 py-2 text-sm bg-stone-50 border border-stone-300 rounded-lg text-stone-800 font-medium focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                >
+                  <option value="ALL">Semua Tipe Kamar</option>
+                  {roomTypes.map((rt) => (
+                    <option key={rt.id} value={rt.id}>
+                      {rt.name} ({rt.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-500 uppercase tracking-wider mb-1">
+                Paket Tarif / Rate Plan
+              </label>
               <select
                 value={selectedPlanId || ''}
                 onChange={(e) => setSelectedPlanId(Number(e.target.value))}
-                className="text-sm font-semibold bg-gray-50 border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-emerald-950"
+                disabled={loadingPlans || filteredRatePlans.length === 0}
+                className="px-3 py-2 text-sm bg-stone-50 border border-stone-300 rounded-lg text-stone-800 font-medium focus:ring-2 focus:ring-emerald-600 focus:outline-none min-w-[220px]"
               >
-                {ratePlans.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    [{p.code}] {p.name} ({p.room_type_name || `Tipe ${p.room_type_id}`})
+                {filteredRatePlans.map((plan) => (
+                  <option key={plan.id} value={plan.id}>
+                    {plan.name} ({formatIDR(plan.base_rate)})
                   </option>
                 ))}
               </select>
-            )}
+            </div>
           </div>
 
-          {/* Days Count Selector */}
-          <div className="flex items-center bg-gray-100 p-0.5 rounded-lg border border-gray-300 text-xs font-semibold">
-            <button
-              type="button"
-              onClick={() => setDaysCount(14)}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                daysCount === 14 ? 'bg-white shadow-xs text-emerald-800' : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              14 Hari
-            </button>
-            <button
-              type="button"
-              onClick={() => setDaysCount(30)}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                daysCount === 30 ? 'bg-white shadow-xs text-emerald-800' : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              30 Hari
-            </button>
-          </div>
-        </div>
+          {/* Month / Year Navigator & Bulk Update CTA */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center bg-stone-100 rounded-lg p-1 border border-stone-200">
+              <button
+                type="button"
+                onClick={handlePrevMonth}
+                title="Bulan Sebelumnya"
+                className="p-1.5 text-stone-600 hover:text-stone-900 hover:bg-white rounded transition"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <div className="px-3 py-1 text-sm font-bold text-stone-800 min-w-[140px] text-center">
+                {MONTH_NAMES[currentMonth]} {currentYear}
+              </div>
+              <button
+                type="button"
+                onClick={handleNextMonth}
+                title="Bulan Berikutnya"
+                className="p-1.5 text-stone-600 hover:text-stone-900 hover:bg-white rounded transition"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
 
-        {/* Date Navigation & Actions */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center bg-gray-100 rounded-lg border border-gray-300 overflow-hidden">
             <button
               type="button"
-              onClick={() => handleShiftDays(-7)}
-              title="Mundur 7 hari"
-              className="px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-200 transition-colors"
-            >
-              &larr; 7 Hari
-            </button>
-            <button
-              type="button"
-              onClick={handleResetToday}
-              className="px-3 py-1.5 text-xs font-bold text-gray-800 hover:bg-gray-200 border-x border-gray-300 transition-colors"
+              onClick={handleToday}
+              className="px-3 py-2 text-sm font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-lg border border-stone-300 transition"
             >
               Hari Ini
             </button>
+
             <button
               type="button"
-              onClick={() => handleShiftDays(7)}
-              title="Maju 7 hari"
-              className="px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-200 transition-colors"
+              onClick={handleOpenBulkModal}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg shadow-sm transition"
             >
-              7 Hari &rarr;
+              <svg className="w-4 h-4 text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+              </svg>
+              Bulk Update Tarif
             </button>
           </div>
-
-          <button
-            type="button"
-            onClick={() => handleOpenOverride()}
-            disabled={!selectedPlanId}
-            className="px-4 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-            </svg>
-            Set Override Tarif / Promo
-          </button>
         </div>
-      </div>
 
-      {/* Plan Info Strip */}
-      {selectedPlan && (
-        <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl px-4 py-3 text-xs text-emerald-950 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-3">
-            <span className="font-mono font-bold bg-emerald-700 text-white px-2 py-0.5 rounded">
-              {selectedPlan.code}
-            </span>
-            <span className="font-semibold text-sm">{selectedPlan.name}</span>
-            <span className="text-emerald-700">| Tipe Kamar: <strong>{selectedPlan.room_type_name}</strong></span>
-          </div>
-          <div className="flex items-center gap-4 text-xs font-medium">
-            <span>Harga Dasar: <strong>{formatIDR(selectedPlan.base_rate)}</strong> / malam</span>
-            <span>Meal Plan: <strong>{selectedPlan.meal_plan}</strong></span>
-            <span>{selectedPlan.refundable ? 'Refundable' : 'Non-Refundable'}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Calendar Matrix Grid */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-xs p-4">
-        {loadingMatrix ? (
-          <div className="p-12 text-center text-gray-500 text-sm">Memuat Rate Calendar harian...</div>
-        ) : matrixError ? (
-          <div className="p-8 text-center space-y-3">
-            <div className="text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-4 max-w-md mx-auto">
-              <p className="font-semibold text-sm">Data Rate Calendar belum dapat dimuat.</p>
-              <p className="text-xs text-amber-700 mt-1">Silakan periksa koneksi atau coba muat ulang data.</p>
-              <button
-                type="button"
-                onClick={() => void loadMatrix()}
-                className="mt-3 px-4 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors cursor-pointer"
-              >
-                Coba Muat Ulang
-              </button>
+        {/* Plan Info Subheader */}
+        {activePlan && (
+          <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-600">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-stone-800">{activePlan.name}</span>
+              <span className="text-stone-400">•</span>
+              <span>Tarif Rutin Dasar (BAR): <strong className="text-stone-900">{formatIDR(activePlan.base_rate)}</strong></span>
             </div>
-          </div>
-        ) : ratePlans.length === 0 ? (
-          <div className="p-12 text-center space-y-3">
-            <svg className="w-12 h-12 text-gray-300 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            <div className="text-sm font-semibold text-gray-700">Belum ada Rate Plan aktif.</div>
-            <div className="text-xs text-gray-500">Tambahkan Rate Plan terlebih dahulu untuk mulai mengatur harga kalender harian.</div>
-            {onOpenRatePlans && (
-              <button
-                type="button"
-                onClick={onOpenRatePlans}
-                className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                Buat Rate Plan
-              </button>
-            )}
-          </div>
-        ) : !matrix || matrix.days.length === 0 ? (
-          <div className="p-12 text-center text-gray-500 text-sm">Pilih Rate Plan untuk menampilkan matriks tarif kalender.</div>
-        ) : (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2.5">
-              {matrix.days.map((day) => {
-                const isWeekend = day.day_of_week === 5 || day.day_of_week === 6; // Friday / Saturday nights
-                const isSunday = day.day_of_week === 0;
-                return (
-                  <div
-                    key={day.date}
-                    className={`rounded-xl border p-3 flex flex-col justify-between transition-all relative ${
-                      day.is_overridden
-                        ? 'bg-amber-50/80 border-amber-300 ring-1 ring-amber-400/50 shadow-xs'
-                        : isWeekend || isSunday
-                        ? 'bg-emerald-50/40 border-emerald-200'
-                        : 'bg-gray-50/60 border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    {/* Day Header */}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1">
-                        <span
-                          className={`text-xs font-bold uppercase ${
-                            isWeekend || isSunday ? 'text-emerald-800' : 'text-gray-600'
-                          }`}
-                        >
-                          {day.day_name}
-                        </span>
-                        <span className="text-xs text-gray-500 font-mono">
-                          {day.date.substring(5)}
-                        </span>
-                      </div>
-                      {day.is_overridden && (
-                        <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
-                          OVERRIDE
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Price Display */}
-                    <div className="my-3">
-                      <div className="text-base font-extrabold text-gray-900 tracking-tight">
-                        {formatIDR(day.effective_rate)}
-                      </div>
-                      {day.is_overridden && (
-                        <div className="text-[11px] text-gray-400 line-through">
-                          {formatIDR(day.base_rate)}
-                        </div>
-                      )}
-                      {day.reason && (
-                        <div className="text-[11px] text-amber-800 font-medium truncate mt-0.5" title={day.reason}>
-                          {day.reason}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Card Actions */}
-                    <div className="pt-2 border-t border-gray-200/70 flex items-center justify-between text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenOverride(day)}
-                        className="text-emerald-700 hover:text-emerald-900 font-semibold hover:underline"
-                      >
-                        {day.is_overridden ? 'Ubah' : 'Override'}
-                      </button>
-
-                      {day.is_overridden && (
-                        <button
-                          type="button"
-                          onClick={() => handleResetDay(day)}
-                          className="text-gray-500 hover:text-red-600 font-medium hover:underline"
-                          title="Kembalikan ke harga dasar"
-                        >
-                          Reset
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Legend */}
-            <div className="pt-3 border-t border-gray-100 flex flex-wrap items-center gap-5 text-xs text-gray-600">
+            <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded bg-gray-50 border border-gray-300" />
-                <span>Harga Dasar Reguler</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-600"></span>
+                <span>Tarif Standar</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded bg-emerald-50 border border-emerald-300" />
-                <span>Akhir Pekan (Jumat / Sabtu / Minggu)</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+                <span>Override / Pengecualian</span>
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded bg-amber-100 border border-amber-400" />
-                <span>Tarif Override Khusus (Promo / Musim Padat)</span>
-              </div>
+              {onOpenRatePlans && (
+                <button
+                  type="button"
+                  onClick={onOpenRatePlans}
+                  className="text-emerald-800 hover:text-emerald-900 font-semibold underline"
+                >
+                  Kelola Paket Tarif
+                </button>
+              )}
             </div>
           </div>
         )}
       </div>
 
-      {/* ==================================================================== */}
-      {/* MODAL: SET RATE OVERRIDE */}
-      {/* ==================================================================== */}
-      {showOverrideModal && selectedPlan && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="bg-emerald-900 text-white px-6 py-4 flex items-center justify-between">
+      {/* MONTHLY CALENDAR GRID */}
+      <div className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
+        {/* Day of Week Headers (Mon - Sun) */}
+        <div className="grid grid-cols-7 bg-stone-50 border-b border-stone-200 text-center text-xs font-bold text-stone-600 uppercase py-3">
+          {DOW_LABELS.map((d) => (
+            <div key={d.dow} className={d.dow >= 6 ? 'text-amber-800' : ''}>
+              <span className="hidden sm:inline">{d.name}</span>
+              <span className="sm:hidden">{d.short}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Calendar Body */}
+        {loadingMatrix ? (
+          <div className="py-24 text-center text-stone-400">
+            <svg className="w-8 h-8 animate-spin mx-auto mb-2 text-emerald-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <p className="text-sm font-medium">Memuat data kalender tarif...</p>
+          </div>
+        ) : matrixError ? (
+          <div className="p-8 text-center text-rose-600">
+            <svg className="w-8 h-8 mx-auto mb-2 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <p className="text-sm font-medium">{matrixError}</p>
+            <button
+              type="button"
+              onClick={() => void loadMatrix()}
+              className="mt-3 px-4 py-1.5 text-xs font-semibold bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg"
+            >
+              Coba Lagi
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-7 divide-x divide-y divide-stone-100 min-h-[480px]">
+            {calendarGrid.map((cell) => {
+              if (cell.isPadding || !cell.data) {
+                return (
+                  <div
+                    key={cell.key}
+                    className="bg-stone-50/50 min-h-[90px] sm:min-h-[110px] p-2 select-none"
+                  />
+                );
+              }
+
+              const day = cell.data;
+              const dateObj = new Date(day.date);
+              const dayNumber = dateObj.getDate();
+              const isWeekend = day.day_of_week >= 6;
+              const isTodayDate = day.date === toLocalDateString(new Date());
+
+              return (
+                <div
+                  key={cell.key}
+                  onClick={() => handleCellClick(day)}
+                  className={`min-h-[90px] sm:min-h-[110px] p-2.5 transition cursor-pointer group relative flex flex-col justify-between ${
+                    isWeekend ? 'bg-amber-50/20' : 'bg-white'
+                  } hover:bg-emerald-50/60`}
+                >
+                  {/* Top Bar: Date Number & Badge */}
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={`text-xs sm:text-sm font-bold w-6 h-6 flex items-center justify-center rounded-full ${
+                        isTodayDate
+                          ? 'bg-emerald-800 text-white font-black'
+                          : isWeekend
+                          ? 'text-amber-800'
+                          : 'text-stone-700'
+                      }`}
+                    >
+                      {dayNumber}
+                    </span>
+
+                    {day.is_overridden && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300">
+                        Override
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Price Info */}
+                  <div className="mt-2 text-right">
+                    {day.is_overridden ? (
+                      <div>
+                        <div className="text-[11px] text-stone-400 line-through">
+                          {formatIDR(day.base_rate)}
+                        </div>
+                        <div className="text-xs sm:text-sm font-black text-amber-700">
+                          {formatIDR(day.effective_rate)}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs sm:text-sm font-bold text-stone-800 group-hover:text-emerald-800">
+                        {formatIDR(day.effective_rate)}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Reason tooltip / snippet */}
+                  {day.reason && (
+                    <div
+                      className="text-[10px] text-stone-500 truncate mt-1 bg-stone-100 px-1 py-0.5 rounded"
+                      title={day.reason}
+                    >
+                      {day.reason}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* MODAL: SINGLE DATE OVERRIDE */}
+      {selectedDay && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-6 py-4 bg-stone-50 border-b border-stone-200 flex items-center justify-between">
               <div>
-                <h3 className="font-bold text-base">Set Override Tarif Kalender</h3>
-                <p className="text-xs text-emerald-200 mt-0.5">
-                  Rate Plan: <strong>{selectedPlan.code}</strong> (Harga Dasar: {formatIDR(selectedPlan.base_rate)})
+                <h3 className="text-base font-bold text-stone-900">Edit Tarif Harian</h3>
+                <p className="text-xs text-stone-500">
+                  {selectedDay.day_name}, {selectedDay.date}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setShowOverrideModal(false)}
-                className="text-white/80 hover:text-white text-xl leading-none"
+                onClick={() => setSelectedDay(null)}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-lg"
               >
-                &times;
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
             </div>
 
-            <form onSubmit={handleSubmitOverride} className="p-6 space-y-4">
-              {overrideModalError && (
-                <div className="bg-red-50 border border-red-200 text-red-700 text-xs p-3 rounded-lg">
-                  {overrideModalError}
+            {/* Content */}
+            <div className="p-6 space-y-4">
+              {singleError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg flex items-start gap-2">
+                  <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span>{singleError}</span>
                 </div>
               )}
 
-              {/* Date Range [start_date, end_date) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    Tanggal Mulai Menginap <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={overrideForm.start_date}
-                    onChange={(e) => setOverrideForm({ ...overrideForm, start_date: e.target.value })}
-                    className="w-full text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden font-medium"
-                  />
+              <div className="bg-stone-50 rounded-xl p-3 border border-stone-200 space-y-1.5 text-xs text-stone-600">
+                <div className="flex justify-between">
+                  <span>Paket Tarif:</span>
+                  <strong className="text-stone-900">{matrix?.rate_plan.name}</strong>
                 </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    Tanggal Selesai (Checkout) <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    min={overrideForm.start_date}
-                    value={overrideForm.end_date}
-                    onChange={(e) => setOverrideForm({ ...overrideForm, end_date: e.target.value })}
-                    className="w-full text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden font-medium"
-                  />
+                <div className="flex justify-between">
+                  <span>Tarif Rutin Dasar (BAR):</span>
+                  <strong className="text-stone-900">{formatIDR(selectedDay.base_rate)}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span>Tarif Berlaku Saat Ini:</span>
+                  <strong className={selectedDay.is_overridden ? 'text-amber-700 font-bold' : 'text-emerald-800 font-bold'}>
+                    {formatIDR(selectedDay.effective_rate)}
+                  </strong>
                 </div>
               </div>
 
-              {/* Override Price */}
               <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Tarif Override (IDR / Malam) <span className="text-red-500">*</span>
+                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1.5">
+                  Tarif Baru (Rp)
                 </label>
                 <input
                   type="number"
                   min="0"
-                  step="1000"
-                  required
-                  value={overrideForm.override_rate}
-                  onChange={(e) => setOverrideForm({ ...overrideForm, override_rate: Number(e.target.value) })}
-                  className="w-full text-base font-bold bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden text-gray-900"
+                  step="10000"
+                  value={singleRateInput || ''}
+                  onChange={(e) => setSingleRateInput(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  placeholder="Contoh: 650000"
+                  className="w-full px-3 py-2 text-base font-bold text-stone-900 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
                 />
-                <span className="text-xs text-gray-500 mt-1 block">{formatIDR(overrideForm.override_rate)} / malam</span>
               </div>
 
-              {/* Days of week selector */}
               <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-                  Berlaku Pada Hari (Opsional)
-                </label>
-                <div className="grid grid-cols-7 gap-1">
-                  {DAY_NAMES.map((dayLabel, dIdx) => {
-                    const isSelected = overrideForm.specificDays.includes(dIdx);
-                    return (
-                      <button
-                        key={dIdx}
-                        type="button"
-                        onClick={() => handleToggleDay(dIdx)}
-                        className={`py-1.5 text-xs font-bold rounded-lg border transition-colors ${
-                          isSelected
-                            ? 'bg-emerald-700 text-white border-emerald-700'
-                            : 'bg-gray-100 text-gray-600 border-gray-300 hover:bg-gray-200'
-                        }`}
-                      >
-                        {dayLabel}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-gray-500 mt-1">
-                  <span>Klik hari untuk mengaktifkan / menonaktifkan hari tertentu</span>
-                  <button
-                    type="button"
-                    onClick={() => setOverrideForm({ ...overrideForm, specificDays: [0, 1, 2, 3, 4, 5, 6] })}
-                    className="text-emerald-700 font-semibold hover:underline"
-                  >
-                    Pilih Semua Hari
-                  </button>
-                </div>
-              </div>
-
-              {/* Reason / Notes */}
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Keterangan / Alasan Override
+                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1.5">
+                  Alasan / Catatan Override
                 </label>
                 <input
                   type="text"
-                  placeholder="Contoh: Weekend Surcharge, Libur Idul Fitri, Flash Sale"
-                  value={overrideForm.reason || ''}
-                  onChange={(e) => setOverrideForm({ ...overrideForm, reason: e.target.value })}
-                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                  value={singleReasonInput}
+                  onChange={(e) => setSingleReasonInput(e.target.value)}
+                  placeholder="Contoh: High Season, Libur Nasional"
+                  className="w-full px-3 py-2 text-sm text-stone-800 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
                 />
               </div>
+            </div>
 
-              {/* Collision Replace Checkbox */}
-              {collisionWarning && (
-                <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 text-xs text-amber-900">
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={overrideForm.replace_existing}
-                      onChange={(e) => setOverrideForm({ ...overrideForm, replace_existing: e.target.checked })}
-                      className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 mt-0.5"
-                    />
-                    <span>
-                      <strong>Ganti jadwal override yang bertabrakan:</strong> Timpa override lama yang tumpang tindih dengan periode ini.
-                    </span>
-                  </label>
-                </div>
-              )}
-
-              {/* Modal Actions */}
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-200">
+            {/* Actions */}
+            <div className="px-6 py-4 bg-stone-50 border-t border-stone-200 flex items-center justify-between gap-3">
+              {selectedDay.is_overridden ? (
                 <button
                   type="button"
-                  onClick={() => setShowOverrideModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  onClick={() => void handleResetSingleOverride()}
+                  disabled={submittingSingle}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-rose-700 hover:text-rose-800 hover:bg-rose-50 border border-rose-300 rounded-lg transition"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Reset ke Tarif Dasar
+                </button>
+              ) : (
+                <div></div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDay(null)}
+                  className="px-3 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-200 rounded-lg transition"
                 >
                   Batal
                 </button>
                 <button
-                  type="submit"
-                  disabled={submittingOverride}
-                  className="px-5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors disabled:opacity-50"
+                  type="button"
+                  onClick={() => void handleSaveSingleOverride()}
+                  disabled={submittingSingle}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg shadow-sm transition"
                 >
-                  {submittingOverride ? 'Menyimpan...' : 'Simpan Override'}
+                  {submittingSingle ? 'Menyimpan...' : 'Simpan Override'}
                 </button>
               </div>
-            </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: BULK UPDATE (2 STEPS: INPUT -> PREVIEW -> APPLY) */}
+      {showBulkModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-stone-50 border-b border-stone-200 flex items-center justify-between flex-shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                  Bulk Update Tarif Kalender
+                </h3>
+                <p className="text-xs text-stone-500">
+                  {bulkStep === 1
+                    ? 'Langkah 1 dari 2: Tentukan rentang tanggal, hari, dan tarif baru'
+                    : 'Langkah 2 dari 2: Pratinjau dampak perubahan sebelum diterapkan'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBulkModal(false)}
+                className="p-1.5 text-stone-400 hover:text-stone-700 rounded-lg"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Scrollable Body */}
+            <div className="p-6 overflow-y-auto space-y-5 flex-1">
+              {previewError && (
+                <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-start gap-2.5">
+                  <svg className="w-4 h-4 flex-shrink-0 mt-0.5 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span className="leading-relaxed">{previewError}</span>
+                </div>
+              )}
+
+              {bulkStep === 1 ? (
+                /* STEP 1: FORM INPUTS */
+                <div className="space-y-4">
+                  {/* Date Range */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Tanggal Mulai Menginap
+                      </label>
+                      <input
+                        type="date"
+                        value={bulkStartDate}
+                        onChange={(e) => setBulkStartDate(e.target.value)}
+                        className="w-full px-3 py-2 text-sm bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Tanggal Selesai (Checkout)
+                      </label>
+                      <input
+                        type="date"
+                        value={bulkEndDate}
+                        onChange={(e) => setBulkEndDate(e.target.value)}
+                        className="w-full px-3 py-2 text-sm bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Day of Week Selector */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
+                        Hari Berlaku
+                      </label>
+                      <div className="flex gap-2 text-[11px] font-semibold text-emerald-800">
+                        <button
+                          type="button"
+                          onClick={() => setBulkSelectedDows([1, 2, 3, 4, 5, 6, 7])}
+                          className="hover:underline"
+                        >
+                          Semua Hari
+                        </button>
+                        <span>•</span>
+                        <button
+                          type="button"
+                          onClick={() => setBulkSelectedDows([1, 2, 3, 4, 5])}
+                          className="hover:underline"
+                        >
+                          Hari Kerja
+                        </button>
+                        <span>•</span>
+                        <button
+                          type="button"
+                          onClick={() => setBulkSelectedDows([6, 7])}
+                          className="hover:underline"
+                        >
+                          Akhir Pekan
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-7 gap-1.5">
+                      {DOW_LABELS.map((d) => {
+                        const isSelected = bulkSelectedDows.includes(d.dow);
+                        return (
+                          <button
+                            key={d.dow}
+                            type="button"
+                            onClick={() => handleToggleDow(d.dow)}
+                            className={`py-2 text-xs font-bold rounded-lg border transition text-center ${
+                              isSelected
+                                ? 'bg-emerald-800 text-white border-emerald-900 shadow-sm'
+                                : 'bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100'
+                            }`}
+                          >
+                            {d.short}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Rate Plans Multi-Selection */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
+                        Pilih Paket Tarif
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (bulkSelectedPlanIds.length === ratePlans.length) {
+                            setBulkSelectedPlanIds(ratePlans.slice(0, 1).map((p) => p.id));
+                          } else {
+                            setBulkSelectedPlanIds(ratePlans.map((p) => p.id));
+                          }
+                        }}
+                        className="text-[11px] font-semibold text-emerald-800 hover:underline"
+                      >
+                        {bulkSelectedPlanIds.length === ratePlans.length ? 'Pilih Satu' : 'Pilih Semua Paket'}
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto p-1 bg-stone-50 rounded-xl border border-stone-200">
+                      {ratePlans.map((plan) => {
+                        const isSelected = bulkSelectedPlanIds.includes(plan.id);
+                        return (
+                          <div
+                            key={plan.id}
+                            onClick={() => handleTogglePlan(plan.id)}
+                            className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer transition select-none ${
+                              isSelected
+                                ? 'bg-emerald-50/80 border-emerald-300 text-stone-900 font-semibold'
+                                : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-100'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {}}
+                              className="rounded text-emerald-800 focus:ring-emerald-600 w-4 h-4"
+                            />
+                            <div className="truncate flex-1">
+                              <div>{plan.name}</div>
+                              <div className="text-[10px] text-stone-400">{formatIDR(plan.base_rate)}</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Override Rate & Reason */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Tarif Baru (Rp)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="10000"
+                        value={bulkOverrideRate || ''}
+                        onChange={(e) => setBulkOverrideRate(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        placeholder="Contoh: 650000"
+                        className="w-full px-3 py-2 text-base font-black text-stone-900 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Alasan / Catatan Override
+                      </label>
+                      <input
+                        type="text"
+                        value={bulkReason}
+                        onChange={(e) => setBulkReason(e.target.value)}
+                        placeholder="Contoh: Lebaran Peak Period"
+                        className="w-full px-3 py-2 text-sm text-stone-800 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* STEP 2: PREVIEW TABLE & SUMMARY */
+                <div className="space-y-4">
+                  {previewResult && (
+                    <>
+                      {/* Summary Cards */}
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-center">
+                          <div className="text-xl font-black text-stone-900">
+                            {previewResult.affected_dates_count}
+                          </div>
+                          <div className="text-[11px] font-semibold text-stone-500 uppercase tracking-wider">
+                            Total Perubahan
+                          </div>
+                        </div>
+                        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-center">
+                          <div className="text-xl font-black text-amber-800">
+                            {previewResult.replacements_count}
+                          </div>
+                          <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wider">
+                            Ganti Override Lama
+                          </div>
+                        </div>
+                        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-center">
+                          <div className="text-xl font-black text-emerald-800">
+                            {previewResult.affected_dates_count - previewResult.replacements_count}
+                          </div>
+                          <div className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wider">
+                            Override Baru
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Detailed Preview Table */}
+                      <div className="border border-stone-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead className="bg-stone-100 text-stone-700 font-bold sticky top-0 border-b border-stone-200">
+                            <tr>
+                              <th className="p-2.5">Tanggal</th>
+                              <th className="p-2.5">Paket Tarif</th>
+                              <th className="p-2.5 text-right">Tarif Saat Ini</th>
+                              <th className="p-2.5 text-right">Tarif Baru</th>
+                              <th className="p-2.5 text-center">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-stone-100">
+                            {previewResult.breakdown.map((item, idx) => (
+                              <tr
+                                key={idx}
+                                className={
+                                  item.status === 'REPLACE'
+                                    ? 'bg-amber-50/40'
+                                    : item.status === 'NEW'
+                                    ? 'bg-emerald-50/30'
+                                    : 'bg-white'
+                                }
+                              >
+                                <td className="p-2.5 whitespace-nowrap font-medium text-stone-800">
+                                  {item.stay_date} <span className="text-stone-400">({item.day_name})</span>
+                                </td>
+                                <td className="p-2.5 font-medium text-stone-700 truncate max-w-[140px]">
+                                  {item.rate_plan_name}
+                                </td>
+                                <td className="p-2.5 text-right text-stone-500 line-through">
+                                  {formatIDR(item.current_effective_rate)}
+                                </td>
+                                <td className="p-2.5 text-right font-bold text-stone-900">
+                                  {formatIDR(item.proposed_rate)}
+                                </td>
+                                <td className="p-2.5 text-center">
+                                  {item.status === 'REPLACE' ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
+                                      GANTI
+                                    </span>
+                                  ) : item.status === 'NEW' ? (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                      BARU
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-stone-100 text-stone-500">
+                                      TIDAK BERUBAH
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="px-6 py-4 bg-stone-50 border-t border-stone-200 flex items-center justify-between flex-shrink-0">
+              {bulkStep === 2 ? (
+                <button
+                  type="button"
+                  onClick={() => setBulkStep(1)}
+                  disabled={applyingBulk}
+                  className="px-4 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-200 rounded-lg transition"
+                >
+                  Kembali ke Formulir
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowBulkModal(false)}
+                  className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-200 rounded-lg transition"
+                >
+                  Batal
+                </button>
+              )}
+
+              {bulkStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleFetchPreview()}
+                  disabled={loadingPreview}
+                  className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg shadow-sm transition"
+                >
+                  {loadingPreview ? (
+                    'Memuat Pratinjau...'
+                  ) : (
+                    <>
+                      Pratinjau Perubahan
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void handleApplyBulk()}
+                  disabled={applyingBulk}
+                  className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg shadow-sm transition"
+                >
+                  {applyingBulk ? (
+                    'Menerapkan Perubahan...'
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                      </svg>
+                      Terapkan Perubahan Massal
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

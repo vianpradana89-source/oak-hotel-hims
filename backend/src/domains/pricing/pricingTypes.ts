@@ -178,6 +178,41 @@ export interface CreateRateOverrideDto {
   replace_existing?: boolean;
 }
 
+export interface BulkRateOverrideDto {
+  rate_plan_ids: number[];
+  start_date: string;
+  end_date: string;
+  override_rate: number;
+  days_of_week?: number[] | null;
+  reason?: string | null;
+  preview_token?: string;
+}
+
+export interface BulkRateOverridePreviewItem {
+  stay_date: string;
+  day_of_week: number;
+  day_name: string;
+  room_type_id: number;
+  room_type_name: string;
+  rate_plan_id: number;
+  rate_plan_name: string;
+  rate_plan_code: string;
+  base_rate: number;
+  current_effective_rate: number;
+  proposed_rate: number;
+  existing_override_id: number | null;
+  status: 'NEW' | 'REPLACE' | 'UNCHANGED' | 'CONFLICT';
+  reason: string | null;
+}
+
+export interface BulkRateOverridePreviewResult {
+  property_id: number;
+  affected_dates_count: number;
+  replacements_count: number;
+  preview_token: string;
+  breakdown: BulkRateOverridePreviewItem[];
+}
+
 export interface RateCalendarDay {
   date: string;
   day_of_week: number; // 1 = Mon, 7 = Sun
