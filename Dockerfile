@@ -1,66 +1,71 @@
-﻿# ==========================================
+# ==========================================
 # Stage 1: Build Frontend
 # ==========================================
 FROM node:20-slim AS frontend-builder
+
 WORKDIR /app
 
-# Copy package manifests
-COPY package.json package-lock.json ./
-COPY frontend/package.json ./frontend/
+# Copy frontend package manifests
+COPY frontend/package.json frontend/package-lock.json ./frontend/
 
-# Install dependencies with platform-specific optional binaries for Linux
-RUN npm --prefix frontend install --include=optional
+# Install exact frontend dependencies,
+# including Linux-specific optional binaries
+RUN npm --prefix frontend ci --include=optional
 
-# Copy frontend source code
+# Copy frontend source
 COPY frontend/ ./frontend/
 
-# Build React / Vite SPA (outputs to /app/frontend/dist)
+# Build React / Vite frontend
 RUN npm --prefix frontend run build
+
 
 # ==========================================
 # Stage 2: Build Backend
 # ==========================================
 FROM node:20-slim AS backend-builder
+
 WORKDIR /app
 
-# Copy package manifests
-COPY package.json package-lock.json ./
-COPY backend/package.json ./backend/
+# Copy backend package manifests
+COPY backend/package.json backend/package-lock.json ./backend/
 
-# Install dependencies for backend
-RUN npm --prefix backend install --include=optional
+# Install exact backend dependencies
+RUN npm --prefix backend ci --include=optional
 
-# Copy backend source code
+# Copy backend source
 COPY backend/ ./backend/
 
-# Build TypeScript backend (outputs to /app/backend/dist)
+# Build TypeScript backend
 RUN npm --prefix backend run build
+
 
 # ==========================================
 # Stage 3: Production Runner
 # ==========================================
 FROM node:20-slim AS runner
+
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=8080
 
-# Install production dependencies only
-COPY package.json package-lock.json ./
-COPY backend/package.json ./backend/
-RUN npm --prefix backend install --omit=dev && npm cache clean --force
+# Copy backend package manifests
+COPY backend/package.json backend/package-lock.json ./backend/
 
-# Copy compiled backend output
+# Install only production backend dependencies
+RUN npm --prefix backend ci --omit=dev --include=optional \
+    && npm cache clean --force
+
+# Copy compiled backend
 COPY --from=backend-builder /app/backend/dist ./backend/dist
 
-# Copy compiled frontend static assets
+# Copy compiled frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create uploads directory for runtime evidence/receipt storage
+# Runtime folders
 RUN mkdir -p /app/backend/uploads /app/backend/storage
 
-# Expose default Cloud Run port
 EXPOSE 8080
 
-# Start production server
+# Start backend server
 CMD ["node", "backend/dist/index.js"]
