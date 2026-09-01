@@ -456,3 +456,40 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
 
   return result;
 }
+
+export interface FormattedKtpData extends IdentityCandidateData {
+  nik: string | null;
+  nama: string | null;
+  tempat_lahir: string | null;
+  tanggal_lahir: string | null;
+  jenis_kelamin: 'LAKI-LAKI' | 'PEREMPUAN' | null;
+  alamat: string | null;
+  kelurahan: string | null;
+  kecamatan: string | null;
+  agama: string | null;
+  status_perkawinan: string | null;
+  pekerjaan: string | null;
+  kewarganegaraan: string | null;
+  berlaku_hingga: string | null;
+}
+
+export function formatParsedKtpData(candidate: IdentityCandidateData): FormattedKtpData {
+  const jkIndo = candidate.gender === 'MALE' ? 'LAKI-LAKI' : (candidate.gender === 'FEMALE' ? 'PEREMPUAN' : null);
+  return {
+    ...candidate,
+    nik: candidate.identity_number,
+    nama: candidate.full_name,
+    tempat_lahir: candidate.birth_place,
+    tanggal_lahir: candidate.birth_date,
+    jenis_kelamin: jkIndo,
+    alamat: candidate.address,
+    kelurahan: candidate.village_kelurahan,
+    kecamatan: candidate.district_kecamatan,
+    agama: candidate.religion,
+    status_perkawinan: candidate.marital_status,
+    pekerjaan: candidate.occupation,
+    kewarganegaraan: candidate.citizenship,
+    berlaku_hingga: candidate.valid_until
+  };
+}
+

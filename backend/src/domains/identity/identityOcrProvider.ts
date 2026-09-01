@@ -259,6 +259,168 @@ Output only the raw text lines, without any commentary, markdown asterisks or co
 }
 
 /**
+ * Google Cloud Vision API Provider
+ * Uses @google-cloud/vision for enterprise DOCUMENT_TEXT_DETECTION and TEXT_DETECTION.
+ */
+export class GoogleVisionOcrProvider implements IdentityOcrProvider {
+  readonly providerName: IdentityOcrProviderType = 'GOOGLE_VISION';
+  private visionClient: any = null;
+
+  private getVisionClient(): any {
+    if (!this.visionClient) {
+      try {
+        const vision = require('@google-cloud/vision');
+        const options: any = {};
+
+        // 1. Check explicit Google Service Account key file path
+        if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+          options.keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+        } else if (process.env.GCP_SERVICE_ACCOUNT_KEY) {
+          // 2. Check inline JSON or file path
+          try {
+            options.credentials = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+          } catch {
+            if (fs.existsSync(process.env.GCP_SERVICE_ACCOUNT_KEY)) {
+              options.keyFilename = process.env.GCP_SERVICE_ACCOUNT_KEY;
+            }
+          }
+        } else if (process.env.GOOGLE_VISION_API_KEY || process.env.GOOGLE_API_KEY) {
+          // 3. API Key support
+          options.apiKey = process.env.GOOGLE_VISION_API_KEY || process.env.GOOGLE_API_KEY;
+        }
+
+        this.visionClient = new vision.ImageAnnotatorClient(options);
+      } catch (err: any) {
+        console.warn('[GoogleVisionOcrProvider] Failed to initialize ImageAnnotatorClient:', err.message);
+      }
+    }
+    return this.visionClient;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return Boolean(
+      process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+      process.env.GCP_SERVICE_ACCOUNT_KEY ||
+      process.env.GOOGLE_VISION_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.NODE_ENV === 'production'
+    );
+  }
+
+  async extractRawLines(imagePath: string, options?: { timeoutMs?: number }): Promise<OcrExtractionOutput> {
+    if (!fs.existsSync(imagePath)) {
+      return {
+        raw_lines: [],
+        confidence: 0.0,
+        provider: this.providerName,
+        error: `File tidak ditemukan: ${imagePath}`
+      };
+    }
+
+    try {
+      const client = this.getVisionClient();
+      if (!client) {
+        throw new Error('Google Cloud Vision client tidak dapat diinisialisasi');
+      }
+
+      // Execute documentTextDetection (preferred for dense ID cards like KTP)
+      let fullText = '';
+      try {
+        const [result] = await client.documentTextDetection(imagePath);
+        if (result?.fullTextAnnotation?.text) {
+          fullText = result.fullTextAnnotation.text;
+        } else if (result?.textAnnotations && result.textAnnotations.length > 0) {
+          fullText = result.textAnnotations[0].description || '';
+        }
+      } catch (docErr: any) {
+        // Fallback to textDetection
+        console.warn('[GoogleVisionOcrProvider] documentTextDetection fallback to textDetection:', docErr.message);
+        try {
+          const [simpleResult] = await client.textDetection(imagePath);
+          if (simpleResult?.textAnnotations && simpleResult.textAnnotations.length > 0) {
+            fullText = simpleResult.textAnnotations[0].description || '';
+          }
+        } catch (simpleErr: any) {
+          console.warn('[GoogleVisionOcrProvider] textDetection fallback also failed:', simpleErr.message);
+        }
+      }
+
+      const lines = fullText
+        .split(/\r?\n/)
+        .map((l: string) => l.trim())
+        .filter((l: string) => l.length > 0);
+
+      if (lines.length > 0) {
+        return {
+          raw_lines: lines,
+          confidence: 0.99,
+          provider: this.providerName,
+          error: null
+        };
+      }
+
+      // If Vision returned empty, try fallback to Gemini or Local PaddleOCR
+      if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
+        try {
+          const geminiProvider = new GeminiOcrProvider();
+          const geminiResult = await geminiProvider.extractRawLines(imagePath, options);
+          if (geminiResult.raw_lines.length > 0) {
+            return geminiResult;
+          }
+        } catch {}
+      }
+
+      try {
+        const paddleProvider = new LocalPaddleOcrProvider();
+        if (await paddleProvider.isAvailable()) {
+          const paddleRes = await paddleProvider.extractRawLines(imagePath, options);
+          if (paddleRes.raw_lines.length > 0) {
+            return paddleRes;
+          }
+        }
+      } catch {}
+
+      return {
+        raw_lines: [],
+        confidence: 0.0,
+        provider: this.providerName,
+        error: 'Google Cloud Vision tidak mendeteksi teks dalam gambar'
+      };
+    } catch (err: any) {
+      console.warn('[GoogleVisionOcrProvider] Extraction error:', err.message);
+
+      // Attempt fallback to Gemini or local provider
+      if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
+        try {
+          const geminiProvider = new GeminiOcrProvider();
+          const fallbackRes = await geminiProvider.extractRawLines(imagePath, options);
+          if (fallbackRes.raw_lines.length > 0) {
+            return fallbackRes;
+          }
+        } catch {}
+      }
+
+      try {
+        const paddleProvider = new LocalPaddleOcrProvider();
+        if (await paddleProvider.isAvailable()) {
+          const fallbackRes = await paddleProvider.extractRawLines(imagePath, options);
+          if (fallbackRes.raw_lines.length > 0) {
+            return fallbackRes;
+          }
+        }
+      } catch {}
+
+      return {
+        raw_lines: [],
+        confidence: 0.0,
+        provider: this.providerName,
+        error: `Google Vision API error: ${err.message}`
+      };
+    }
+  }
+}
+
+/**
  * Manual Fallback Provider
  */
 export class ManualOcrProvider implements IdentityOcrProvider {
@@ -283,13 +445,17 @@ export class ManualOcrProvider implements IdentityOcrProvider {
  */
 export function getOcrProvider(): IdentityOcrProvider {
   const isEnabled = process.env.IDENTITY_OCR_ENABLED !== 'false';
-  const providerType = (process.env.IDENTITY_OCR_PROVIDER || 'LOCAL_PADDLE_OCR').toUpperCase();
+  const providerType = (process.env.IDENTITY_OCR_PROVIDER || 'GOOGLE_VISION').toUpperCase();
 
   if (!isEnabled) {
     return new ManualOcrProvider();
   }
 
   switch (providerType) {
+    case 'GOOGLE_VISION':
+    case 'VISION':
+    case 'GCP_VISION':
+      return new GoogleVisionOcrProvider();
     case 'GEMINI':
       return new GeminiOcrProvider();
     case 'LOCAL_PADDLE_OCR':
@@ -297,7 +463,7 @@ export function getOcrProvider(): IdentityOcrProvider {
     case 'MANUAL':
       return new ManualOcrProvider();
     default:
-      console.warn(`[IdentityOCR] Unknown provider "${providerType}", falling back to LOCAL_PADDLE_OCR`);
-      return new LocalPaddleOcrProvider();
+      // Default to Google Cloud Vision Provider
+      return new GoogleVisionOcrProvider();
   }
 }

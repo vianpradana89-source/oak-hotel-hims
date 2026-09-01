@@ -17,52 +17,72 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
     fs.mkdirSync(privateStorageDir, { recursive: true });
   }
 
-  const maxFileMb = Number(process.env.IDENTITY_OCR_MAX_FILE_MB) || 10;
+  const maxFileMb = 15;
+
+  // Multer instance supporting any image field
   const upload = multer({
     storage: multer.diskStorage({
       destination: (_req: any, _file: any, cb: (error: Error | null, destination: string) => void) => {
         cb(null, privateStorageDir);
       },
       filename: (_req: any, file: any, cb: (error: Error | null, filename: string) => void) => {
-        const ext = path.extname(file.originalname || '.jpg');
+        const ext = path.extname(file.originalname || '.jpg') || '.jpg';
         const safeName = `ktp-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
         cb(null, safeName);
       }
     }),
     limits: { fileSize: maxFileMb * 1024 * 1024 },
     fileFilter: (_req: any, file: any, cb: any) => {
-      const allowed = ['image/jpeg', 'image/png', 'application/pdf'];
-      if (allowed.includes(file.mimetype)) return cb(null, true);
-      cb(new Error('Format file tidak didukung. Harap unggah file JPG, PNG, atau PDF.'));
+      const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+      if (allowed.includes(file.mimetype) || file.mimetype.startsWith('image/')) return cb(null, true);
+      cb(new Error('Format file tidak didukung. Harap unggah file JPG, PNG, atau WebP.'));
     }
   });
 
-  // POST /api/identity/extract and /api/identity/extract-ktp
+  // Handler for /scan-id, /scan, /extract, /extract-ktp
   const handleExtract = (req: Request, res: Response) => {
-    upload.single('ktp')(req as any, res as any, async (err: any) => {
+    upload.any()(req as any, res as any, async (err: any) => {
       if (err) {
         return res.status(400).json({
           success: false,
           status: 'FAILED',
           error: 'UPLOAD_ERROR',
-          message: err.message || 'Gagal mengunggah file KTP',
+          message: err.message || 'Gagal mengunggah file gambar identitas',
           warnings: ['UPLOAD_ERROR']
         });
       }
 
       try {
-        if (!req.file) {
+        let localFilePath: string | null = null;
+        let storedRelativePath: string | null = null;
+
+        const files = (req as any).files as Express.Multer.File[];
+        if (files && files.length > 0) {
+          const mainFile = files[0];
+          localFilePath = mainFile.path;
+          storedRelativePath = `/api/identity/document/${mainFile.filename}`;
+        } else if (req.body.image_base64 || req.body.base64_image || req.body.image) {
+          // Handle base64 payload
+          const rawBase64 = String(req.body.image_base64 || req.body.base64_image || req.body.image);
+          const matches = rawBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          const base64Data = matches ? matches[2] : rawBase64;
+          const ext = matches && matches[1].includes('png') ? '.png' : '.jpg';
+          const filename = `ktp-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+          localFilePath = path.resolve(privateStorageDir, filename);
+          fs.writeFileSync(localFilePath, Buffer.from(base64Data, 'base64'));
+          storedRelativePath = `/api/identity/document/${filename}`;
+        }
+
+        if (!localFilePath || !fs.existsSync(localFilePath)) {
           return res.status(400).json({
             success: false,
             status: 'FAILED',
             error: 'FILE_REQUIRED',
-            message: 'File KTP wajib diunggah',
+            message: 'File atau gambar identitas KTP/Paspor wajib diunggah',
             warnings: ['FILE_REQUIRED']
           });
         }
 
-        const storedRelativePath = `/api/identity/document/${req.file.filename}`;
-        const localFilePath = req.file.path;
         const guestName = req.body.guest_name ? String(req.body.guest_name) : null;
         const guestId = req.body.guest_id ? Number(req.body.guest_id) : null;
         const propertyId = req.body.property_id ? Number(req.body.property_id) : 1;
@@ -70,7 +90,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         const result = await extractIdentityFromDocument(
           pool,
           localFilePath,
-          storedRelativePath,
+          storedRelativePath || localFilePath,
           {
             property_id: propertyId,
             guest_name: guestName,
@@ -78,20 +98,46 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
           }
         );
 
-        return res.json(result);
+        // Enrich response with standard Indonesian aliases for seamless frontend consumption
+        const c = result.data;
+        const enrichedData = {
+          ...c,
+          nik: c.identity_number,
+          nama: c.full_name,
+          tempat_lahir: c.birth_place,
+          tanggal_lahir: c.birth_date,
+          jenis_kelamin: c.gender === 'MALE' ? 'LAKI-LAKI' : (c.gender === 'FEMALE' ? 'PEREMPUAN' : null),
+          alamat: c.address,
+          rt_rw: c.rt_rw,
+          kelurahan: c.village_kelurahan,
+          kecamatan: c.district_kecamatan,
+          agama: c.religion,
+          status_perkawinan: c.marital_status,
+          pekerjaan: c.occupation,
+          kewarganegaraan: c.citizenship,
+          berlaku_hingga: c.valid_until
+        };
+
+        return res.json({
+          ...result,
+          data: enrichedData,
+          candidate: enrichedData
+        });
       } catch (err: any) {
         console.error('[IdentityExtractionRouter] Extraction error:', err.message);
         return res.status(500).json({
           success: false,
           status: 'FAILED',
           error: 'EXTRACTION_ERROR',
-          message: 'Gagal memproses ekstraksi identitas',
+          message: 'Gagal memproses ekstraksi identitas: ' + (err.message || 'Unknown error'),
           warnings: ['SERVER_ERROR']
         });
       }
     });
   };
 
+  router.post('/scan-id', handleExtract);
+  router.post('/scan', handleExtract);
   router.post('/extract', handleExtract);
   router.post('/extract-ktp', handleExtract);
 

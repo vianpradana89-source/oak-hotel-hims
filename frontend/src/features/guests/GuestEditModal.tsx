@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { Guest, VipStatus } from './guestTypes';
+import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 
 interface GuestEditModalProps {
   isOpen: boolean;
@@ -46,6 +47,25 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
+  const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
+
+  const handleIdentityConfirmed = (data: ExtractedIdentityData) => {
+    if (data.full_name) setFullName(data.full_name);
+    if (data.identity_number) setIdentityNumber(data.identity_number);
+    if (data.birth_place) setBirthPlace(data.birth_place);
+    if (data.birth_date) setBirthDate(data.birth_date.slice(0, 10));
+    if (data.gender) setGender(data.gender);
+    if (data.address) setAddress(data.address);
+    if (data.rt_rw) setRtRw(data.rt_rw);
+    if (data.village_kelurahan) setVillageKelurahan(data.village_kelurahan);
+    if (data.district_kecamatan) setDistrictKecamatan(data.district_kecamatan);
+    if (data.religion) setReligion(data.religion);
+    if (data.marital_status) setMaritalStatus(data.marital_status);
+    if (data.occupation) setOccupation(data.occupation);
+    if (data.citizenship) setCitizenship(data.citizenship);
+    if (data.valid_until) setValidUntil(data.valid_until);
+    setIsOcrModalOpen(false);
+  };
 
   useEffect(() => {
     setIsKtpPreviewOpen(false);
@@ -212,9 +232,23 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
 
           {/* Section: Identitas Utama */}
           <div className="space-y-3">
-            <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
-              Identitas Tamu
-            </h4>
+            <div className="flex items-center justify-between">
+              <h4 className="font-bold text-stone-400 uppercase tracking-wider text-[11px]">
+                Identitas Tamu
+              </h4>
+              <button
+                type="button"
+                onClick={() => setIsOcrModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-semibold shadow-2xs transition-all hover:scale-[1.02] cursor-pointer"
+                title="Pindai foto KTP / Paspor menggunakan OCR & Kamera"
+              >
+                <svg className="w-4 h-4 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                <span>Scan KTP / Paspor</span>
+              </button>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block font-semibold text-stone-700 mb-1">
@@ -657,6 +691,17 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
           </div>
         </div>
       )}
+
+      {/* OCR KTP / Paspor Extraction Modal */}
+      <IdentityExtractionModal
+        isOpen={isOcrModalOpen}
+        onClose={() => setIsOcrModalOpen(false)}
+        guestName={fullName}
+        guestPhone={phone}
+        guestId={guest?.id}
+        propertyId={propertyId}
+        onIdentityConfirmed={handleIdentityConfirmed}
+      />
     </div>
   );
 };

@@ -6543,6 +6543,7 @@ app.use('/api/transactions', createTransactionsRouter(pool));
 app.use('/api/suppliers', createSuppliersRouter(pool));
 app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
+app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/auth', createAuthRouter(pool));
 app.use('/api/users', createUsersRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
