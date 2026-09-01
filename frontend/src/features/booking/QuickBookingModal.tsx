@@ -222,8 +222,13 @@ export default function QuickBookingModal({
       if (!ratePlans || ratePlans.length === 0) {
         const res = await fetch('/api/rate-plans?property_id=' + propertyId);
         const json = await res.json();
-        if (res.ok && Array.isArray(json.data)) {
-          setInternalRatePlans(json.data);
+
+        if (res.ok) {
+          const plans = Array.isArray(json)
+            ? json
+            : (Array.isArray(json.data) ? json.data : []);
+
+          setInternalRatePlans(plans);
         }
       } else {
         setInternalRatePlans(ratePlans);
