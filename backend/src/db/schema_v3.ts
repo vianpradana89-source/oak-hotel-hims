@@ -3075,6 +3075,20 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // Migration: transaction_reversal_index_v1
+    const txRevIdxCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'transaction_reversal_index_v1'"
+    );
+    if ((txRevIdxCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE INDEX IF NOT EXISTS idx_transactions_reversal ON transactions (property_id, reversal_of_transaction_id) WHERE reversal_of_transaction_id IS NOT NULL;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('transaction_reversal_index_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     // FOLIO PROPERTY ID BACKFILL & NOT NULL NORMALIZATION
     const folioPropCheck = await auditMigrationClient.query(
       "SELECT 1 FROM schema_migrations WHERE version = 'folio_entries_property_id_backfill_and_not_null_v1'"

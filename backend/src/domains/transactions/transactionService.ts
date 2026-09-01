@@ -2053,7 +2053,9 @@ export async function getTransactions(
         (t.transaction_type = 'PURCHASE' AND t.receiving_status IN ('DITERIMA', 'DITERIMA_LENGKAP'))
         OR (t.transaction_type != 'PURCHASE' AND t.transaction_status = 'POSTED')
       ) THEN 1 END) AS count_selesai,
-      COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED') THEN 1 END) AS count_batal,
+      COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED') AND NOT EXISTS (
+        SELECT 1 FROM transactions rev WHERE rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED' AND rev.deleted_at IS NULL
+      ) THEN 1 END) AS count_batal,
       COUNT(CASE WHEN t.deleted_at IS NOT NULL THEN 1 END) AS count_hapus
     FROM transactions t
     LEFT JOIN suppliers s ON s.id = t.supplier_id
@@ -2098,6 +2100,9 @@ export async function getTransactions(
       )`);
     } else if (targetSheet === 'BATAL') {
       conditions.push(`t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED')`);
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM transactions rev WHERE rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED' AND rev.deleted_at IS NULL
+      )`);
     } else if (params.transaction_status) {
       conditions.push(`t.transaction_status = $${valIdx++}`);
       values.push(params.transaction_status);

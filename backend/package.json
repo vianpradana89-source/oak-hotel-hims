@@ -53,6 +53,7 @@
     "test:transaction-2c": "node test/transaction_2c_penjualan_regression_test.js",
     "test:property-safety": "node test/property_master_creation_safety_test.js",
     "test:role-permissions": "node test/role_permissions_matrix_test.js",
+    "test:batal-dedup": "npm run build && node test/batal_cancellation_group_dedup_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],
