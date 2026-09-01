@@ -1,5 +1,5 @@
 ﻿steps:
-  # 1. Build production multi-stage container image
+  # 1. Build Docker image with short SHA and latest tags
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-image'
     args:
@@ -39,6 +39,7 @@
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--port=8080'
+      - '--set-env-vars=NODE_ENV=production'
 
 images:
   - 'gcr.io/$PROJECT_ID/$_IMAGE_NAME:$COMMIT_SHA'
