@@ -74,14 +74,14 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
         <div className="hidden sm:flex items-center gap-2.5 min-w-0 border-l border-slate-700/60 pl-3">
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" title="Sistem Aktif" />
-            <span className="text-xs font-bold text-slate-100 tracking-tight truncate max-w-[140px] md:max-w-[200px]">
+            <span className="text-sm font-bold text-slate-100 tracking-tight truncate max-w-[140px] md:max-w-[200px]">
               {displayPropertyName}
             </span>
           </div>
 
           <span className="text-slate-600">·</span>
 
-          <span className="text-[11px] font-medium text-slate-300 tracking-wide truncate">
+          <span className="text-xs font-medium text-slate-300 tracking-wide truncate">
             {currentDateTime}
           </span>
         </div>
@@ -188,7 +188,7 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
             onClick={() => setShowUserMenu(!showUserMenu)}
             className="flex items-center gap-2 p-1 pl-1.5 text-xs text-slate-200 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
-            <div className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center justify-center font-bold text-[10px]">
+            <div className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center justify-center font-bold text-xs">
               {currentUser.avatarInitials || 'VP'}
             </div>
             <span className="hidden md:inline-block font-medium truncate max-w-[100px]">
@@ -204,8 +204,8 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
             <div className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-2 text-slate-800 z-50 animate-in fade-in-0 duration-150">
               <div className="px-3 py-2 border-b border-slate-100">
                 <p className="text-xs font-bold text-slate-900">{currentUser.name}</p>
-                <p className="text-[11px] text-slate-500 truncate">{currentUser.email}</p>
-                <span className="inline-block mt-1 text-[10px] font-semibold px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded">
+                <p className="text-xs text-slate-500 truncate">{currentUser.email}</p>
+                <span className="inline-block mt-1 text-xs font-semibold px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded">
                   {currentUser.role}
                 </span>
               </div>

@@ -36,7 +36,7 @@ export const SearchInput = React.forwardRef<HTMLInputElement, SearchInputProps>(
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className={`w-full h-9 text-xs pl-9 pr-14 rounded-lg border border-slate-300 bg-white text-slate-800 placeholder:text-slate-400 transition-colors duration-150 focus:outline-none focus:border-[#1b4332] focus:ring-2 focus:ring-[#1b4332]/20 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${className}`}
+        className={`w-full h-10 text-oak-input pl-9 pr-14 rounded-lg border border-slate-300 bg-white text-slate-800 placeholder:text-slate-400 transition-colors duration-150 focus:outline-none focus:border-[#1b4332] focus:ring-2 focus:ring-[#1b4332]/20 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${className}`}
         {...props}
       />
       <div className="absolute right-2.5 flex items-center gap-1.5">

@@ -209,7 +209,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
         {filteredGroups.map((group) => (
           <div key={group.title} className="space-y-1">
             {(!isCollapsed || isDrawer) && (
-              <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              <div className="px-3 py-1 text-xs font-bold uppercase tracking-wider text-slate-400">
                 {group.title}
               </div>
             )}
@@ -227,7 +227,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
                       if (isDrawer) onCloseMobile();
                     }
                   }}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-colors duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-left relative ${
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-left relative ${
                     isCollapsed && !isDrawer ? 'justify-center' : ''
                   } ${
                     isActive
@@ -244,7 +244,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
                     <span className="truncate flex-1">{item.label}</span>
                   )}
                   {(!isCollapsed || isDrawer) && item.badge && (
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-semibold">
+                    <span className="text-xs px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-semibold">
                       {item.badge}
                     </span>
                   )}

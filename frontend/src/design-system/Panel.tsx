@@ -25,10 +25,10 @@ export const Panel: React.FC<PanelProps> = ({
         <div className="px-4 py-3 bg-[#fcfbf9] border-b border-slate-200/80 flex items-center justify-between gap-3">
           <div>
             {title && (
-              <h3 className="text-sm font-bold text-slate-800 tracking-tight">{title}</h3>
+              <h3 className="text-base font-bold text-slate-800 tracking-tight">{title}</h3>
             )}
             {subtitle && (
-              <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
+              <p className="text-sm text-slate-500 mt-0.5">{subtitle}</p>
             )}
           </div>
           {actions && <div className="flex items-center gap-2">{actions}</div>}

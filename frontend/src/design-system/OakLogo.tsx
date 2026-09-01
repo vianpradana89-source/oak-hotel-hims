@@ -103,12 +103,12 @@ export const OakLogo: React.FC<OakLogoProps> = ({
           <span className="font-bold tracking-wider text-sm text-slate-100 uppercase truncate">
             {brandTitle}
           </span>
-          <span className="text-[10px] font-semibold px-1.5 py-0.2 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded shrink-0">
+          <span className="text-xs font-semibold px-1.5 py-0.2 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded shrink-0">
             HIMS
           </span>
         </div>
         {subtitle && (
-          <span className="text-[11px] text-slate-400 truncate tracking-wide">
+          <span className="text-xs text-slate-400 truncate tracking-wide">
             {subtitle}
           </span>
         )}

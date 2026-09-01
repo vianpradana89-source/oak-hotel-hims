@@ -22,7 +22,7 @@ export const SectionHeader: React.FC<SectionHeaderProps> = ({
           <h2 className="text-lg font-bold text-slate-900 tracking-tight truncate">{title}</h2>
           {badge}
         </div>
-        {subtitle && <p className="text-xs text-slate-500 mt-0.5 truncate">{subtitle}</p>}
+        {subtitle && <p className="text-sm text-slate-500 mt-0.5 truncate">{subtitle}</p>}
       </div>
       {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
     </div>

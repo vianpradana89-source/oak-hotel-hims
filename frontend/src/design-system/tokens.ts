@@ -9,6 +9,9 @@
  * - Muted Gold: OAK brand / Premium accent
  * - Slate / Gray: Secondary text & neutral borders
  * - Emerald / Amber / Rose / Blue: Semantic operational statuses
+ *
+ * Typography scale defined in tailwind.config.js (canonical source).
+ * These TypeScript tokens are reference metadata for type-safe consumers.
  */
 
 export const OAK_COLORS = {
@@ -207,3 +210,30 @@ export function getStatusStyle(status: string | null | undefined): SemanticStatu
     }
   );
 }
+
+/**
+ * OAK Typography Scale
+ *
+ * Canonical Tailwind classes: text-oak-page, text-oak-section, etc.
+ * These metadata objects document the scale for TypeScript consumers.
+ * The authoritative source is tailwind.config.js fontSize extensions.
+ */
+export const OAK_FONTS = {
+  sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
+  mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
+  serif: ['ui-serif', 'Georgia', 'Cambria', 'Times New Roman', 'Times', 'serif'],
+} as const;
+
+export const OAK_FONT_SIZES = {
+  page:   { size: '1.5rem',   px: 24, lineHeight: '1.3',  fontWeight: 700, tailwind: 'text-oak-page' },
+  section: { size: '1.125rem', px: 18, lineHeight: '1.35', fontWeight: 600, tailwind: 'text-oak-section' },
+  card:   { size: '1rem',     px: 16, lineHeight: '1.4',  fontWeight: 600, tailwind: 'text-oak-card' },
+  body:   { size: '0.875rem', px: 14, lineHeight: '1.5',  fontWeight: 400, tailwind: 'text-oak-body' },
+  label:  { size: '0.8125rem', px: 13, lineHeight: '1.4', fontWeight: 500, tailwind: 'text-oak-label' },
+  input:  { size: '0.875rem', px: 14, lineHeight: '1.4',  fontWeight: 400, tailwind: 'text-oak-input' },
+  button: { size: '0.875rem', px: 14, lineHeight: '1',    fontWeight: 600, tailwind: 'text-oak-button' },
+  th:     { size: '0.8125rem', px: 13, lineHeight: '1',   fontWeight: 600, tailwind: 'text-oak-th' },
+  td:     { size: '0.875rem', px: 14, lineHeight: '1.5',  fontWeight: 400, tailwind: 'text-oak-td' },
+  caption: { size: '0.75rem',  px: 12, lineHeight: '1.4', fontWeight: 400, tailwind: 'text-oak-caption' },
+  badge:  { size: '0.75rem',  px: 12, lineHeight: '1',   fontWeight: 600, tailwind: 'text-oak-badge' },
+} as const;

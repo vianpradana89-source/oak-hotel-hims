@@ -54,7 +54,7 @@ export const Drawer: React.FC<DrawerProps> = ({
       >
         {title && (
           <div className="px-4 py-3.5 border-b border-slate-700/60 flex items-center justify-between shrink-0">
-            <div className="text-sm font-bold text-slate-100">{title}</div>
+            <div className="text-base font-bold text-slate-100">{title}</div>
             <button
               type="button"
               onClick={onClose}

@@ -17,7 +17,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
   ...props
 }) => {
   const style = getStatusStyle(status);
-  const sizeClasses = size === 'sm' ? 'text-[10px] px-1.5 py-0.5 gap-1 font-medium' : 'text-xs px-2 py-0.5 gap-1.5 font-semibold';
+  const sizeClasses = size === 'sm' ? 'text-oak-badge px-1.5 py-0.5 gap-1' : 'text-oak-badge px-2 py-0.5 gap-1.5';
 
   return (
     <span

@@ -30,9 +30,9 @@ export const Button: React.FC<ButtonProps> = ({
   ...props
 }) => {
   const sizeClasses: Record<ButtonSize, string> = {
-    sm: 'h-7 px-2.5 text-xs gap-1.5 rounded-md font-medium',
-    md: 'h-9 px-3.5 text-xs gap-2 rounded-md font-medium',
-    lg: 'h-10 px-4 text-sm gap-2.5 rounded-lg font-semibold',
+    sm: 'h-8 px-3 text-oak-button gap-1.5 rounded-md',
+    md: 'h-10 px-4 text-oak-button gap-2 rounded-md',
+    lg: 'h-11 px-5 text-oak-button gap-2.5 rounded-lg',
   };
 
   const variantClasses: Record<ButtonVariant, string> = {

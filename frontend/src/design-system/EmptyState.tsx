@@ -26,8 +26,8 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           </svg>
         </div>
       )}
-      <h4 className="text-sm font-bold text-slate-800">{title}</h4>
-      {description && <p className="text-xs text-slate-500 mt-1 max-w-sm">{description}</p>}
+      <h4 className="text-base font-bold text-slate-800">{title}</h4>
+      {description && <p className="text-sm text-slate-500 mt-1 max-w-sm">{description}</p>}
       {action && <div className="mt-4">{action}</div>}
     </div>
   );

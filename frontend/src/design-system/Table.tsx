@@ -6,7 +6,7 @@ export const Table: React.FC<React.TableHTMLAttributes<HTMLTableElement>> = ({
   ...props
 }) => (
   <div className="w-full overflow-x-auto rounded-lg border border-slate-200/90 bg-white">
-    <table className={`w-full text-left text-xs border-collapse ${className}`} {...props}>
+    <table className={`w-full text-left text-oak-td border-collapse ${className}`} {...props}>
       {children}
     </table>
   </div>
@@ -17,7 +17,7 @@ export const TableHeader: React.FC<React.HTMLAttributes<HTMLTableSectionElement>
   className = '',
   ...props
 }) => (
-  <thead className={`bg-[#f8f7f4] text-slate-600 border-b border-slate-200 uppercase font-semibold text-[11px] tracking-wider select-none ${className}`} {...props}>
+  <thead className={`bg-[#f8f7f4] text-slate-600 border-b border-slate-200 uppercase text-oak-th tracking-wider select-none ${className}`} {...props}>
     {children}
   </thead>
 );

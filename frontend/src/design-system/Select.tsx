@@ -29,7 +29,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(({
   return (
     <div className="w-full flex flex-col gap-1">
       {label && (
-        <label htmlFor={selectId} className="text-xs font-semibold text-slate-700 flex items-center gap-1">
+        <label htmlFor={selectId} className="text-oak-label text-slate-700 flex items-center gap-1">
           {label}
           {props.required && <span className="text-rose-500">*</span>}
         </label>
@@ -39,7 +39,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(({
           ref={ref}
           id={selectId}
           disabled={disabled}
-          className={`w-full h-9 text-xs rounded-lg border bg-white px-3 pr-8 transition-colors duration-150 appearance-none focus:outline-none focus:ring-2 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${
+          className={`w-full h-10 text-oak-input rounded-lg border bg-white px-3 pr-8 transition-colors duration-150 appearance-none focus:outline-none focus:ring-2 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${
             error
               ? 'border-rose-300 text-rose-900 focus:border-rose-500 focus:ring-rose-200'
               : 'border-slate-300 text-slate-800 focus:border-[#1b4332] focus:ring-[#1b4332]/20'
@@ -61,9 +61,9 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(({
         </div>
       </div>
       {error ? (
-        <span className="text-[11px] text-rose-600 font-medium">{error}</span>
+        <span className="text-xs text-rose-600 font-medium">{error}</span>
       ) : helperText ? (
-        <span className="text-[11px] text-slate-500">{helperText}</span>
+        <span className="text-xs text-slate-500">{helperText}</span>
       ) : null}
     </div>
   );

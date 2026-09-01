@@ -24,7 +24,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(({
   return (
     <div className="w-full flex flex-col gap-1">
       {label && (
-        <label htmlFor={inputId} className="text-xs font-semibold text-slate-700 flex items-center gap-1">
+        <label htmlFor={inputId} className="text-oak-label text-slate-700 flex items-center gap-1">
           {label}
           {props.required && <span className="text-rose-500">*</span>}
         </label>
@@ -39,7 +39,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(({
           ref={ref}
           id={inputId}
           disabled={disabled}
-          className={`w-full h-9 text-xs rounded-lg border bg-white px-3 transition-colors duration-150 focus:outline-none focus:ring-2 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${
+          className={`w-full h-10 text-oak-input rounded-lg border bg-white px-3 transition-colors duration-150 focus:outline-none focus:ring-2 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${
             leftIcon ? 'pl-9' : ''
           } ${rightIcon ? 'pr-9' : ''} ${
             error
@@ -55,9 +55,9 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(({
         )}
       </div>
       {error ? (
-        <span className="text-[11px] text-rose-600 font-medium">{error}</span>
+        <span className="text-xs text-rose-600 font-medium">{error}</span>
       ) : helperText ? (
-        <span className="text-[11px] text-slate-500">{helperText}</span>
+        <span className="text-xs text-slate-500">{helperText}</span>
       ) : null}
     </div>
   );

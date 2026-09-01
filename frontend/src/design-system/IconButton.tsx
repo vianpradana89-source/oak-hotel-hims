@@ -20,9 +20,9 @@ export const IconButton: React.FC<IconButtonProps> = ({
   ...props
 }) => {
   const sizeClasses: Record<ButtonSize, string> = {
-    sm: 'w-7 h-7 text-xs rounded-md',
-    md: 'w-9 h-9 text-xs rounded-md',
-    lg: 'w-10 h-10 text-sm rounded-lg',
+    sm: 'w-8 h-8 text-oak-button rounded-md',
+    md: 'w-10 h-10 text-oak-button rounded-md',
+    lg: 'w-11 h-11 text-oak-button rounded-lg',
   };
 
   const variantClasses: Record<ButtonVariant, string> = {
