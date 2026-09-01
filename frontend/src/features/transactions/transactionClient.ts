@@ -91,30 +91,53 @@ export async function fetchCategoriesApi(propertyId: number = 1): Promise<{
 }
 
 // Supplier Domain APIs
+// Supplier Domain APIs
 export async function fetchSuppliersApi(params: {
   property_id: number;
   search?: string;
+  entity_type?: string;
+  category?: string;
+  status?: string;
   is_active?: boolean;
+  include_deleted?: boolean;
 }): Promise<Supplier[]> {
   const query = new URLSearchParams();
   query.set('property_id', String(params.property_id));
   if (params.search) query.set('search', params.search);
+  if (params.entity_type) query.set('entity_type', params.entity_type);
+  if (params.category) query.set('category', params.category);
+  if (params.status) query.set('status', params.status);
   if (params.is_active !== undefined) query.set('is_active', String(params.is_active));
+  if (params.include_deleted) query.set('include_deleted', 'true');
 
   return await fetchJson<Supplier[]>(`${SUPPLIERS_BASE}?${query.toString()}`);
 }
 
 export async function createSupplierApi(data: {
   property_id: number;
+  code?: string | null;
   name: string;
+  legal_name?: string | null;
+  entity_type?: string;
+  category?: string | null;
+  contact_person?: string | null;
   phone?: string | null;
+  whatsapp?: string | null;
   email?: string | null;
   bank_name?: string | null;
   bank_account?: string | null;
   bank_holder?: string | null;
   address?: string | null;
+  city?: string | null;
+  province?: string | null;
   tax_id?: string | null;
+  payment_terms_days?: number | null;
+  default_department_code?: string | null;
+  status?: string;
+  notes?: string | null;
+  is_active?: boolean;
   actor_name?: string | null;
+  created_by?: string | null;
 }): Promise<Supplier> {
   return await fetchJson<Supplier>(SUPPLIERS_BASE, {
     method: 'POST',
@@ -127,16 +150,29 @@ export async function updateSupplierApi(
   id: string | number,
   data: {
     property_id: number;
+    code?: string | null;
     name?: string;
+    legal_name?: string | null;
+    entity_type?: string;
+    category?: string | null;
+    contact_person?: string | null;
     phone?: string | null;
+    whatsapp?: string | null;
     email?: string | null;
     bank_name?: string | null;
     bank_account?: string | null;
     bank_holder?: string | null;
     address?: string | null;
+    city?: string | null;
+    province?: string | null;
     tax_id?: string | null;
+    payment_terms_days?: number | null;
+    default_department_code?: string | null;
+    status?: string;
+    notes?: string | null;
     is_active?: boolean;
     actor_name?: string | null;
+    updated_by?: string | null;
   }
 ): Promise<Supplier> {
   return await fetchJson<Supplier>(`${SUPPLIERS_BASE}/${id}`, {
@@ -157,6 +193,19 @@ export async function toggleSupplierApi(
     body: JSON.stringify({ property_id: propertyId, actor_name: actorName })
   });
 }
+
+export async function deleteSupplierApi(
+  id: string | number,
+  propertyId: number,
+  actorName?: string
+): Promise<{ success: boolean; message: string }> {
+  return await fetchJson<{ success: boolean; message: string }>(`${SUPPLIERS_BASE}/${id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ property_id: propertyId, actor_name: actorName })
+  });
+}
+
 
 // Custom Categories APIs
 export async function fetchCustomCategoriesApi(

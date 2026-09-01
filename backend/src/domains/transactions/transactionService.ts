@@ -28,6 +28,7 @@ import {
   TransactionSummary
 } from './transactionTypes';
 import { generateTransactionNumber, getHotelDateToday } from './transactionNumberService';
+import { generateSupplierCode } from '../suppliers/supplierService';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -944,19 +945,21 @@ export async function createPurchaseTransaction(
     if (!supplierId && supplierName) {
       // Check duplicate supplier
       const dupSupplier = await client.query(
-        `SELECT id, name FROM suppliers WHERE property_id = $1 AND LOWER(TRIM(name)) = LOWER($2)`,
+        `SELECT id, name FROM suppliers WHERE property_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2)) AND deleted_at IS NULL`,
         [propertyId, supplierName]
       );
       if ((dupSupplier.rowCount ?? 0) > 0) {
         supplierId = Number(dupSupplier.rows[0].id);
       } else {
+        const supCode = await generateSupplierCode(client, propertyId, 'SUPPLIER');
         const newSup = await client.query(
           `INSERT INTO suppliers (
-            property_id, name, phone, bank_name, bank_account, address, is_active, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), NOW())
+            property_id, code, name, entity_type, status, phone, bank_name, bank_account, address, is_active, created_at, updated_at
+          ) VALUES ($1, $2, $3, 'SUPPLIER', 'ACTIVE', $4, $5, $6, $7, TRUE, NOW(), NOW())
           RETURNING id`,
           [
             propertyId,
+            supCode,
             supplierName,
             dto.supplier_phone?.trim() || null,
             dto.supplier_bank_name?.trim() || null,
@@ -968,7 +971,7 @@ export async function createPurchaseTransaction(
       }
     } else if (supplierId) {
       const supCheck = await client.query(
-        `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2`,
+        `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL`,
         [supplierId, propertyId]
       );
       if ((supCheck.rowCount ?? 0) > 0) {
@@ -1191,7 +1194,7 @@ export async function createExpenseTransaction(
 
     if (supplierId && !partyName) {
       const supRes = await client.query(
-        `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2`,
+        `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL`,
         [supplierId, propertyId]
       );
       if ((supRes.rowCount ?? 0) > 0) {

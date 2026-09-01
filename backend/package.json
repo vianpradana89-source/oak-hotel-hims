@@ -54,6 +54,7 @@
     "test:property-safety": "node test/property_master_creation_safety_test.js",
     "test:role-permissions": "node test/role_permissions_matrix_test.js",
     "test:batal-dedup": "npm run build && node test/batal_cancellation_group_dedup_test.js",
+    "test:vendor-supplier": "npm run build && node test/vendor_supplier_canonical_master_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

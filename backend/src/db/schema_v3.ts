@@ -3198,6 +3198,109 @@ export async function initializeDatabase(pool: Pool) {
       }
     }
 
+    // 26. VENDOR & SUPPLIER CANONICAL MASTER FOUNDATION (Phase 1)
+    const vendorMasterMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'vendor_supplier_canonical_master_v1'"
+    );
+    if ((vendorMasterMarker.rowCount ?? 0) === 0) {
+      // 1. Additive column extensions on suppliers table
+      await auditMigrationClient.query(`
+        ALTER TABLE suppliers
+          ADD COLUMN IF NOT EXISTS code VARCHAR(50) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS legal_name VARCHAR(255) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS entity_type VARCHAR(20) NOT NULL DEFAULT 'SUPPLIER',
+          ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS contact_person VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS whatsapp VARCHAR(50) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS email VARCHAR(150) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS city VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS province VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS tax_id VARCHAR(50) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS bank_holder VARCHAR(150) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS payment_terms_days INTEGER DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS default_department_code VARCHAR(50) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+          ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS created_by VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ DEFAULT NULL;
+
+        -- 2. Constraints for entity_type and status
+        ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS chk_suppliers_entity_type;
+        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_entity_type 
+          CHECK (entity_type IN ('SUPPLIER', 'VENDOR', 'BOTH'));
+
+        ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS chk_suppliers_status;
+        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_status 
+          CHECK (status IN ('ACTIVE', 'INACTIVE', 'BLACKLISTED'));
+
+        -- 3. Synchronize status & is_active for existing legacy rows
+        UPDATE suppliers
+        SET status = CASE WHEN is_active = FALSE THEN 'INACTIVE' ELSE 'ACTIVE' END;
+
+        UPDATE suppliers
+        SET is_active = (status = 'ACTIVE');
+
+        UPDATE suppliers
+        SET code = 'SUP-' || LPAD(id::text, 4, '0')
+        WHERE code IS NULL;
+      `);
+
+      // 4. Preflight Guard: Check for duplicate normalized names before creating unique index
+      const normNameDuplicates = await auditMigrationClient.query(`
+        SELECT property_id, LOWER(TRIM(name)) AS norm_name, COUNT(*) AS dup_count, ARRAY_AGG(id) AS supplier_ids
+        FROM suppliers
+        WHERE deleted_at IS NULL
+        GROUP BY property_id, LOWER(TRIM(name))
+        HAVING COUNT(*) > 1
+      `);
+      if ((normNameDuplicates.rowCount ?? 0) > 0) {
+        const conflictDetails = normNameDuplicates.rows
+          .map((r: any) => `Property ${r.property_id}: "${r.norm_name}" (${r.dup_count} data, IDs: [${(r.supplier_ids || []).join(', ')}])`)
+          .join('; ');
+        throw new Error(
+          `[MIGRATION HALTED - VENDOR/SUPPLIER CANONICAL MASTER] Ditemukan duplikasi nama supplier sebelum pembuatan unique index uq_suppliers_property_norm_name: ${conflictDetails}. Silakan tinjau dan rapikan data duplikat secara manual tanpa menghapus riwayat audit.`
+        );
+      }
+
+      // 5. Preflight Guard: Check for duplicate codes before creating unique index
+      const codeDuplicates = await auditMigrationClient.query(`
+        SELECT property_id, UPPER(TRIM(code)) AS norm_code, COUNT(*) AS dup_count, ARRAY_AGG(id) AS supplier_ids
+        FROM suppliers
+        WHERE code IS NOT NULL AND deleted_at IS NULL
+        GROUP BY property_id, UPPER(TRIM(code))
+        HAVING COUNT(*) > 1
+      `);
+      if ((codeDuplicates.rowCount ?? 0) > 0) {
+        const conflictDetails = codeDuplicates.rows
+          .map((r: any) => `Property ${r.property_id}: "${r.norm_code}" (${r.dup_count} data, IDs: [${(r.supplier_ids || []).join(', ')}])`)
+          .join('; ');
+        throw new Error(
+          `[MIGRATION HALTED - VENDOR/SUPPLIER CANONICAL MASTER] Ditemukan duplikasi kode supplier sebelum pembuatan unique index uq_suppliers_property_code: ${conflictDetails}. Silakan perbaiki kode duplikat sebelum melanjutkan migration.`
+        );
+      }
+
+      // 6. Indexes & Unique constraints
+      await auditMigrationClient.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_property_norm_name 
+          ON suppliers(property_id, LOWER(TRIM(name))) 
+          WHERE deleted_at IS NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_property_code
+          ON suppliers(property_id, UPPER(TRIM(code)))
+          WHERE code IS NOT NULL AND deleted_at IS NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_suppliers_prop_entity ON suppliers(property_id, entity_type);
+        CREATE INDEX IF NOT EXISTS idx_suppliers_prop_status ON suppliers(property_id, status);
+        CREATE INDEX IF NOT EXISTS idx_suppliers_prop_code ON suppliers(property_id, code);
+        CREATE INDEX IF NOT EXISTS idx_suppliers_prop_deleted ON suppliers(property_id, deleted_at);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('vendor_supplier_canonical_master_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

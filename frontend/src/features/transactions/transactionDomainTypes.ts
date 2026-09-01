@@ -5,21 +5,38 @@ export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 export type DepartmentCode = 'FRONT_OFFICE' | 'HOUSEKEEPING' | 'FNB' | 'MAINTENANCE' | 'ADMIN' | 'HRD' | 'GENERAL';
 
+export type SupplierEntityType = 'SUPPLIER' | 'VENDOR' | 'BOTH';
+export type SupplierStatus = 'ACTIVE' | 'INACTIVE' | 'BLACKLISTED';
+
 export interface Supplier {
   id: string | number;
   property_id: number;
+  code?: string | null;
   name: string;
+  legal_name?: string | null;
+  entity_type?: SupplierEntityType;
+  category?: string | null;
+  contact_person?: string | null;
   phone?: string | null;
+  whatsapp?: string | null;
   email?: string | null;
   bank_name?: string | null;
   bank_account?: string | null;
   bank_holder?: string | null;
   address?: string | null;
+  city?: string | null;
+  province?: string | null;
   tax_id?: string | null;
+  payment_terms_days?: number | null;
+  default_department_code?: string | null;
+  status?: SupplierStatus;
+  notes?: string | null;
   is_active: boolean;
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
+  deleted_at?: string | null;
 }
+
 
 export interface TransactionLine {
   id: string;
