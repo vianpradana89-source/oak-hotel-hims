@@ -2193,6 +2193,7 @@ export default function QuickBookingModal({
         guestPhone={guestPhone}
         guestId={selectedCrmGuest?.id}
         propertyId={propertyId}
+        onScanSuccess={handleIdentityConfirmed}
         onIdentityConfirmed={handleIdentityConfirmed}
       />
 

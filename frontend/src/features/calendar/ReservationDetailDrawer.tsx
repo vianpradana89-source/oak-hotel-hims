@@ -1237,6 +1237,7 @@ export default function ReservationDetailDrawer({
             guestName={data.guest_name || data.booker_name || ''}
             guestPhone={data.guest_phone || data.booker_phone || ''}
             propertyId={activePropId}
+            onScanSuccess={handleIdentityConfirmed}
             onIdentityConfirmed={handleIdentityConfirmed}
           />
         )}

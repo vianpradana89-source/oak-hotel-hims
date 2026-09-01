@@ -120,7 +120,9 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
 
         return res.json({
           ...result,
+          success: true,
           data: enrichedData,
+          ktpData: enrichedData,
           candidate: enrichedData
         });
       } catch (err: any) {

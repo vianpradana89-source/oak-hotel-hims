@@ -46,25 +46,62 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
 
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanToast, setScanToast] = useState<string | null>(null);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
 
-  const handleIdentityConfirmed = (data: ExtractedIdentityData) => {
-    if (data.full_name) setFullName(data.full_name);
-    if (data.identity_number) setIdentityNumber(data.identity_number);
-    if (data.birth_place) setBirthPlace(data.birth_place);
-    if (data.birth_date) setBirthDate(data.birth_date.slice(0, 10));
-    if (data.gender) setGender(data.gender);
-    if (data.address) setAddress(data.address);
-    if (data.rt_rw) setRtRw(data.rt_rw);
-    if (data.village_kelurahan) setVillageKelurahan(data.village_kelurahan);
-    if (data.district_kecamatan) setDistrictKecamatan(data.district_kecamatan);
-    if (data.religion) setReligion(data.religion);
-    if (data.marital_status) setMaritalStatus(data.marital_status);
-    if (data.occupation) setOccupation(data.occupation);
-    if (data.citizenship) setCitizenship(data.citizenship);
-    if (data.valid_until) setValidUntil(data.valid_until);
+  const handleIdentityConfirmed = (data: ExtractedIdentityData | any) => {
+    if (!data) return;
+
+    const fn = data.full_name || data.nama || '';
+    const nik = data.identity_number || data.nik || '';
+    const bp = data.birth_place || data.tempat_lahir || '';
+    const bd = data.birth_date || data.tanggal_lahir || '';
+    const rawGender = data.gender || data.jenis_kelamin || '';
+    const addr = data.address || data.alamat || '';
+    const rtrw = data.rt_rw || '';
+    const kel = data.village_kelurahan || data.kelurahan || '';
+    const kec = data.district_kecamatan || data.kecamatan || '';
+    const rel = data.religion || data.agama || '';
+    const stat = data.marital_status || data.status_perkawinan || '';
+    const occ = data.occupation || data.pekerjaan || '';
+    const cit = data.citizenship || data.kewarganegaraan || 'WNI';
+    const vu = data.valid_until || data.berlaku_hingga || 'SEUMUR HIDUP';
+
+    if (fn) setFullName(fn);
+    if (nik) setIdentityNumber(nik);
+    if (bp) setBirthPlace(bp);
+    if (bd) {
+      // Normalize to YYYY-MM-DD
+      const cleanBd = String(bd).split('T')[0].trim();
+      setBirthDate(cleanBd.slice(0, 10));
+    }
+    if (rawGender) {
+      const gUpper = String(rawGender).toUpperCase();
+      if (gUpper === 'MALE' || gUpper === 'LAKI-LAKI' || gUpper === 'L') {
+        setGender('MALE');
+      } else if (gUpper === 'FEMALE' || gUpper === 'PEREMPUAN' || gUpper === 'P') {
+        setGender('FEMALE');
+      } else {
+        setGender(rawGender);
+      }
+    }
+    if (addr) setAddress(addr);
+    if (rtrw) setRtRw(rtrw);
+    if (kel) setVillageKelurahan(kel);
+    if (kec) setDistrictKecamatan(kec);
+    if (rel) setReligion(rel);
+    if (stat) setMaritalStatus(stat);
+    if (occ) setOccupation(occ);
+    if (cit) setCitizenship(cit);
+    if (vu) setValidUntil(vu);
+    setIdentityType('KTP');
+
     setIsOcrModalOpen(false);
+    setScanToast('Data KTP berhasil dipindai! NIK, Nama Lengkap, Tanggal Lahir, Jenis Kelamin, dan Alamat telah diisi otomatis.');
+    setTimeout(() => {
+      setScanToast(null);
+    }, 5000);
   };
 
   useEffect(() => {
@@ -227,6 +264,24 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
           {error && (
             <div className="p-3 bg-red-50 border border-red-200 rounded text-red-700">
               {error}
+            </div>
+          )}
+
+          {scanToast && (
+            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-lg text-emerald-900 flex items-center justify-between shadow-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-emerald-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="font-semibold text-xs">{scanToast}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScanToast(null)}
+                className="text-emerald-700 hover:text-emerald-900 p-1 text-xs cursor-pointer font-bold"
+              >
+                ✕
+              </button>
             </div>
           )}
 
@@ -700,6 +755,7 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
         guestPhone={phone}
         guestId={guest?.id}
         propertyId={propertyId}
+        onScanSuccess={handleIdentityConfirmed}
         onIdentityConfirmed={handleIdentityConfirmed}
       />
     </div>
