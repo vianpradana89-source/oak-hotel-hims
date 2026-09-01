@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { Supplier } from './transactionDomainTypes';
+import type { Supplier, SupplierEntityType } from './transactionDomainTypes';
 import { fetchSuppliersApi, createSupplierApi } from './transactionClient';
 
 interface SupplierSelectorModalProps {
@@ -25,7 +25,9 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
   const [showCreateForm, setShowCreateForm] = useState(false);
 
   // Form State for new supplier
+  const [newEntityType, setNewEntityType] = useState<SupplierEntityType>('SUPPLIER');
   const [newName, setNewName] = useState('');
+  const [newContactPerson, setNewContactPerson] = useState('');
   const [newPhone, setNewPhone] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [newAddress, setNewAddress] = useState('');
@@ -51,7 +53,11 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
         property_id: propertyId,
         is_active: true
       });
-      setSuppliers(data);
+      // Explicitly guard: Exclude BLACKLISTED and INACTIVE suppliers from transaction selector
+      const activeOnly = data.filter(
+        (s) => s.status !== 'BLACKLISTED' && s.is_active !== false
+      );
+      setSuppliers(activeOnly);
     } catch (err: any) {
       setError(err.message || 'Gagal memuat daftar rekanan supplier');
     } finally {
@@ -66,7 +72,11 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
     const q = search.toLowerCase();
     return (
       s.name.toLowerCase().includes(q) ||
+      (s.code && s.code.toLowerCase().includes(q)) ||
+      (s.legal_name && s.legal_name.toLowerCase().includes(q)) ||
+      (s.contact_person && s.contact_person.toLowerCase().includes(q)) ||
       (s.phone && s.phone.toLowerCase().includes(q)) ||
+      (s.whatsapp && s.whatsapp.toLowerCase().includes(q)) ||
       (s.bank_account && s.bank_account.toLowerCase().includes(q))
     );
   });
@@ -89,15 +99,21 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
     try {
       const created = await createSupplierApi({
         property_id: propertyId,
+        entity_type: newEntityType,
         name: newName.trim(),
+        contact_person: newContactPerson.trim() || undefined,
         phone: newPhone.trim() || undefined,
+        whatsapp: newPhone.trim() || undefined,
         email: newEmail.trim() || undefined,
         address: newAddress.trim() || undefined,
         bank_name: newBankName.trim() || undefined,
         bank_account: newBankAccount.trim() || undefined,
         bank_holder: newBankHolder.trim() || undefined,
         tax_id: newTaxId.trim() || undefined,
-        actor_name: actorName
+        status: 'ACTIVE',
+        is_active: true,
+        actor_name: actorName,
+        created_by: actorName
       });
 
       onSelect(created);
@@ -107,6 +123,13 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
     } finally {
       setCreating(false);
     }
+  };
+
+  const getEntityBadge = (type?: SupplierEntityType | string | null) => {
+    const t = String(type || 'SUPPLIER').toUpperCase();
+    if (t === 'VENDOR') return <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.2 rounded font-medium">Vendor</span>;
+    if (t === 'BOTH') return <span className="text-[10px] bg-purple-50 text-purple-700 border border-purple-200 px-1.5 py-0.2 rounded font-medium">Barang & Jasa</span>;
+    return <span className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded font-medium">Supplier</span>;
   };
 
   return (
@@ -121,13 +144,14 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
               </svg>
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-800">Pilih Supplier / Vendor</h3>
-              <p className="text-[11px] text-slate-500">Cari vendor terdaftar atau tambahkan baru</p>
+              <h3 className="text-sm font-bold text-slate-800">Pilih Rekanan (Supplier / Vendor)</h3>
+              <p className="text-[11px] text-slate-500">Cari vendor aktif atau tambahkan rekanan baru</p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-200/60 transition-colors"
+            className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-200/60 transition-colors cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -156,10 +180,10 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                   </svg>
                   <input
                     type="text"
-                    placeholder="Cari nama supplier, telepon, rekening..."
+                    placeholder="Cari kode, nama supplier, PIC, telepon, rekening..."
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                   />
                 </div>
                 <button
@@ -168,7 +192,7 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                     setShowCreateForm(true);
                     setNewName(search);
                   }}
-                  className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-colors shrink-0"
+                  className="px-3.5 py-2 bg-[#1b4332] hover:bg-[#143427] text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-colors shrink-0 cursor-pointer"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -192,7 +216,7 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                         setShowCreateForm(true);
                         setNewName(search);
                       }}
-                      className="text-xs text-emerald-700 font-bold hover:underline inline-flex items-center gap-1"
+                      className="text-xs text-emerald-700 font-bold hover:underline inline-flex items-center gap-1 cursor-pointer"
                     >
                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -216,20 +240,33 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                             : 'bg-white border-slate-200 hover:border-emerald-300 hover:bg-slate-50'
                         }`}
                       >
-                        <div className="space-y-0.5">
-                          <div className="font-bold text-slate-800 text-xs flex items-center gap-2">
-                            <span>{sup.name}</span>
-                            {sup.phone && (
-                              <span className="font-normal text-slate-400 text-[11px]">• {sup.phone}</span>
+                        <div className="space-y-0.5 min-w-0 pr-2">
+                          <div className="font-bold text-slate-800 text-xs flex items-center gap-2 flex-wrap">
+                            {sup.code && (
+                              <span className="font-mono text-[11px] bg-stone-100 text-stone-700 px-1.5 py-0.2 rounded border border-stone-200">
+                                {sup.code}
+                              </span>
+                            )}
+                            <span className="truncate">{sup.name}</span>
+                            {getEntityBadge(sup.entity_type)}
+                          </div>
+
+                          <div className="flex items-center gap-2 text-[11px] text-slate-500 flex-wrap">
+                            {sup.contact_person && (
+                              <span>PIC: {sup.contact_person}</span>
+                            )}
+                            {(sup.whatsapp || sup.phone) && (
+                              <span>• {sup.whatsapp || sup.phone}</span>
+                            )}
+                            {sup.city && (
+                              <span>• {sup.city}</span>
                             )}
                           </div>
+
                           {(sup.bank_name || sup.bank_account) && (
-                            <div className="text-[11px] text-slate-500">
-                              Rekening: {sup.bank_name} {sup.bank_account} {sup.bank_holder ? `(a/n ${sup.bank_holder})` : ''}
+                            <div className="text-[10px] text-slate-400">
+                              Rek: {sup.bank_name} {sup.bank_account} {sup.bank_holder ? `(a/n ${sup.bank_holder})` : ''}
                             </div>
-                          )}
-                          {sup.address && (
-                            <div className="text-[10px] text-slate-400 truncate max-w-sm">{sup.address}</div>
                           )}
                         </div>
 
@@ -244,16 +281,40 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
             </>
           ) : (
             /* Create Form */
-            <form onSubmit={handleCreateSupplier} className="space-y-3">
+            <form onSubmit={handleCreateSupplier} className="space-y-3 text-xs">
               <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                <span className="text-xs font-bold text-slate-700">Daftarkan Supplier Baru</span>
+                <span className="text-xs font-bold text-slate-700">Daftarkan Rekanan Baru</span>
                 <button
                   type="button"
                   onClick={() => setShowCreateForm(false)}
-                  className="text-xs text-slate-500 hover:text-slate-800 font-semibold"
+                  className="text-xs text-slate-500 hover:text-slate-800 font-semibold cursor-pointer"
                 >
                   Kembali ke Daftar
                 </button>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Tipe Rekanan</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { value: 'SUPPLIER', label: 'Supplier (Barang)' },
+                    { value: 'VENDOR', label: 'Vendor (Jasa)' },
+                    { value: 'BOTH', label: 'Keduanya' }
+                  ].map((t) => (
+                    <button
+                      key={t.value}
+                      type="button"
+                      onClick={() => setNewEntityType(t.value as SupplierEntityType)}
+                      className={`py-1.5 px-2 rounded-lg border text-center text-[11px] transition-all cursor-pointer ${
+                        newEntityType === t.value
+                          ? 'border-[#1b4332] bg-[#1b4332]/5 text-[#1b4332] font-bold'
+                          : 'border-slate-200 text-slate-600 bg-slate-50'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div>
@@ -266,11 +327,21 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                   placeholder="Contoh: CV Berkah Pangan Mandiri"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Nama PIC / Kontak</label>
+                  <input
+                    type="text"
+                    placeholder="Budi Santoso"
+                    value={newContactPerson}
+                    onChange={(e) => setNewContactPerson(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
+                  />
+                </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-1">No. WhatsApp / Telepon</label>
                   <input
@@ -278,22 +349,12 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                     placeholder="081234567890"
                     value={newPhone}
                     onChange={(e) => setNewPhone(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Email (Opsional)</label>
-                  <input
-                    type="email"
-                    placeholder="vendor@mail.com"
-                    value={newEmail}
-                    onChange={(e) => setNewEmail(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-1">Nama Bank</label>
                   <input
@@ -301,7 +362,7 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                     placeholder="BCA / Mandiri / BRI"
                     value={newBankName}
                     onChange={(e) => setNewBankName(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                   />
                 </div>
                 <div>
@@ -311,55 +372,69 @@ export const SupplierSelectorModal: React.FC<SupplierSelectorModalProps> = ({
                     placeholder="1234567890"
                     value={newBankAccount}
                     onChange={(e) => setNewBankAccount(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Atas Nama</label>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Atas Nama Rekening</label>
                   <input
                     type="text"
                     placeholder="a/n Pemilik"
                     value={newBankHolder}
                     onChange={(e) => setNewBankHolder(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
+                  />
+                </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Email Tagihan (Opsional)</label>
+                  <input
+                    type="email"
+                    placeholder="tagihan@vendor.com"
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">NPWP / Tax ID (Opsional)</label>
+                  <input
+                    type="text"
+                    placeholder="01.234.567.8-123.000"
+                    value={newTaxId}
+                    onChange={(e) => setNewTaxId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Alamat / Lokasi Vendor</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Alamat Singkat</label>
                 <input
                   type="text"
-                  placeholder="Jl. Raya No. 123, Kota"
+                  placeholder="Kota / Jalan"
                   value={newAddress}
                   onChange={(e) => setNewAddress(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-[#1b4332] outline-none"
                 />
               </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">NPWP / NIK (Opsional)</label>
-                <input
-                  type="text"
-                  placeholder="Nomor Pokok Wajib Pajak"
-                  value={newTaxId}
-                  onChange={(e) => setNewTaxId(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
-                />
               </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setShowCreateForm(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
                   disabled={creating}
-                  className="px-5 py-2 bg-emerald-800 hover:bg-emerald-900 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                  className="px-5 py-2 bg-[#1b4332] hover:bg-[#143427] disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
