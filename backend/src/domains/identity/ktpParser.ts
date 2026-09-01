@@ -167,7 +167,7 @@ function cleanValue(raw: string | null | undefined): string | null {
 /**
  * Parses raw OCR lines into structured candidate data
  */
-export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): IdentityCandidateData {
+function legacyParseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): IdentityCandidateData {
   const result: IdentityCandidateData = {
     full_name: null,
     identity_number: null,
@@ -550,3 +550,299 @@ export function formatParsedKtpData(candidate: IdentityCandidateData): Formatted
   };
 }
 
+
+
+const PURE_LABEL_PATTERN = /^(?:NIK|N1K|NlK|NO\.?\s*KTP|Nama(?:\s*Lengkap)?|Narna|Name|Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tempat|Tpt|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir|Jenis\s*Kelamin|Sex|Gender|Alamat|Ala\s*mat|Address|RT[\s\/\.\-]*RW|RT|RW|RTAW|RTRW|Kel(?:urahan)?[\s\/\.\-]*Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa|Kellbesa|Kecamatan|Kecaniatan|Kecarnatan|Kec\.|Kec|Agama|Religion|Status(?:\s*Perkawin[a-z]*n)?|Perkawinan|Pekerjaan|Pekerlaan|Pekeriaan|Occupation|Kewarganegaraan|Citizenship|Berlaku(?:\s*Hingga|\s*s\/?d)?|Masa\s*Berlaku|Gol(?:ongan)?\.?\s*Darah)[:;=\-\s]*$/i;
+
+export function isPureLabel(line: string): boolean {
+  if (!line) return false;
+  const s = line.trim();
+  if (s.length === 0) return false;
+  return PURE_LABEL_PATTERN.test(s);
+}
+
+export function isHeaderOrNoise(raw: string | null | undefined): boolean {
+  if (!raw) return true;
+  const s = raw.trim().toUpperCase();
+  if (s.length <= 1) return true;
+  if (/^(?:PROVINSI|KABUPATEN|KOTA|KARTU\s*TANDA\s*PENDUDUK|REPUBLIK\s*INDONESIA|PEMERINTAH|FORMULIR|NIK)\b/i.test(s)) {
+    return true;
+  }
+  return false;
+}
+
+export function isLikelyPersonName(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  if (s.length < 2) return false;
+  if (isPureLabel(s) || isHeaderOrNoise(s)) return false;
+  if (normalizeDate(s) !== null) return false;
+  if (normalizeGender(s) !== null) return false;
+  if (normalizeReligion(s) !== null) return false;
+  if (normalizeMaritalStatus(s) !== null) return false;
+  if (normalizeCitizenship(s) !== null) return false;
+  if (normalizeRtRw(s) !== null && s.includes('/')) return false;
+  if (normalizeNik(s) !== null && s.replace(/\D/g, '').length === 16) return false;
+  const letters = s.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 2) return false;
+  return true;
+}
+
+export function isLikelyAddress(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  if (s.length < 2) return false;
+  if (isPureLabel(s) || isHeaderOrNoise(s)) return false;
+  if (normalizeDate(s) !== null) return false;
+  if (normalizeGender(s) !== null) return false;
+  if (normalizeReligion(s) !== null) return false;
+  if (normalizeMaritalStatus(s) !== null) return false;
+  if (normalizeCitizenship(s) !== null) return false;
+  if (normalizeNik(s) !== null && s.replace(/\D/g, '').length === 16) return false;
+  return true;
+}
+
+export function isLikelyAdministrativeName(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  if (s.length < 2) return false;
+  if (isPureLabel(s) || isHeaderOrNoise(s)) return false;
+  if (normalizeDate(s) !== null) return false;
+  if (normalizeGender(s) !== null) return false;
+  if (normalizeReligion(s) !== null) return false;
+  if (normalizeMaritalStatus(s) !== null) return false;
+  if (normalizeCitizenship(s) !== null) return false;
+  if (normalizeRtRw(s) !== null && s.includes('/')) return false;
+  if (normalizeNik(s) !== null && s.replace(/\D/g, '').length === 16) return false;
+  const letters = s.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 2) return false;
+  return true;
+}
+
+export function isLikelyOccupation(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  if (s.length < 2) return false;
+  if (isPureLabel(s) || isHeaderOrNoise(s)) return false;
+  if (normalizeDate(s) !== null) return false;
+  if (normalizeGender(s) !== null) return false;
+  if (normalizeReligion(s) !== null) return false;
+  if (normalizeMaritalStatus(s) !== null) return false;
+  if (normalizeCitizenship(s) !== null) return false;
+  if (normalizeRtRw(s) !== null && s.includes('/')) return false;
+  if (normalizeNik(s) !== null && s.replace(/\D/g, '').length === 16) return false;
+  const letters = s.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 2) return false;
+  return true;
+}
+
+const LEADING_LABEL_REGEX = /^(?:NIK|N1K|NlK|NO\.?\s*KTP|Nama(?:\s*Lengkap)?|Narna|Name|Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tempat|Tpt|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir|Jenis\s*Kelamin|Sex|Gender|Alamat|Ala\s*mat|Address|RT[\s\/\.\-]*RW|RT|RW|RTAW|RTRW|Kel(?:urahan)?[\s\/\.\-]*Desa|Kel(?:urahan)?(?!\s*Kelamin)|Desa|Kellbesa|Kecamatan|Kecaniatan|Kecarnatan|Kec\.|Kec|Agama|Religion|Status(?:\s*Perkawin[a-z]*n)?|Perkawinan|Pekerjaan|Pekerlaan|Pekeriaan|Occupation|Kewarganegaraan|Citizenship|Berlaku(?:\s*Hingga|\s*s\/?d)?|Masa\s*Berlaku|Gol(?:ongan)?\.?\s*Darah)\s*[:;=\-\s]+/i;
+
+export function stripLeadingLabel(line: string): string {
+  if (!line) return '';
+  let s = line.trim();
+  s = s.replace(LEADING_LABEL_REGEX, '');
+  return s.replace(/^[:;=\-\s]+/, '').trim();
+}
+
+export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): IdentityCandidateData {
+  const result: IdentityCandidateData = {
+    full_name: null,
+    identity_number: null,
+    birth_place: null,
+    birth_date: null,
+    gender: null,
+    address: null,
+    rt_rw: null,
+    village_kelurahan: null,
+    district_kecamatan: null,
+    religion: null,
+    marital_status: null,
+    occupation: null,
+    citizenship: null,
+    valid_until: null,
+    confidence: 0.0,
+    recognized_fields_count: 0,
+    total_fields_count: 13
+  };
+
+  if (!lines || lines.length === 0) return result;
+
+  const cleanLines = lines.map(l => l ? l.trim() : '').filter(l => l.length > 0);
+
+  // PASS 1 & 2: Anchor Sequence Block Parsing
+  const valueCandidates: string[] = [];
+  for (const l of cleanLines) {
+    if (isPureLabel(l)) {
+      continue;
+    }
+    const val = stripLeadingLabel(l);
+    if (val.length > 0) {
+      valueCandidates.push(val);
+    }
+  }
+
+  let nikIdx = -1;
+  for (let i = 0; i < valueCandidates.length; i++) {
+    const digits = valueCandidates[i].replace(/[^0-9]/g, '');
+    if (digits.length === 16) {
+      const parsed = normalizeNik(digits);
+      if (parsed) {
+        result.identity_number = parsed;
+        nikIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (nikIdx !== -1) {
+    let curr = nikIdx + 1;
+    const peek = () => curr < valueCandidates.length ? valueCandidates[curr] : null;
+    const consume = () => { const v = peek(); curr++; return v; };
+    const skipNoise = () => {
+      while (curr < valueCandidates.length && isHeaderOrNoise(valueCandidates[curr])) {
+        curr++;
+      }
+    };
+
+    // 1. Nama
+    skipNoise();
+    if (peek() && isLikelyPersonName(peek())) {
+      result.full_name = consume()!.toUpperCase();
+    }
+
+    // 2. Tempat/Tgl Lahir
+    skipNoise();
+    if (peek()) {
+      let val = peek()!;
+      const dateMatch = val.match(/(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})/) || val.match(/(\d{2})(\d{2})[\s\-\/\.]+(\d{4})/);
+      if (dateMatch) {
+        result.birth_date = normalizeDate(dateMatch[0]);
+        const placeMatch = val.match(/^([A-Za-z\s]+?)(?:[,\.\:\-]|\d{1,2})/);
+        if (placeMatch && placeMatch[1]) {
+          let p = placeMatch[1].replace(/^(?:TEMPAT|TGL|LAHIR|LAHI|LAHIL|TPT|\:|\-)+/i, '').trim().toUpperCase();
+          if (p.length >= 2 && !isHeaderOrNoise(p)) result.birth_place = p;
+        }
+        consume();
+      }
+    }
+
+    // 3. Jenis Kelamin
+    skipNoise();
+    if (peek()) {
+      const g = normalizeGender(peek());
+      if (g) {
+        result.gender = g;
+        consume();
+      }
+    }
+
+    // 4. Alamat
+    skipNoise();
+    if (peek() && isLikelyAddress(peek())) {
+      result.address = consume()!.toUpperCase();
+    }
+
+    // 5. RT/RW
+    skipNoise();
+    if (peek()) {
+      let val = peek()!;
+      if (val.includes('/')) {
+        const r = normalizeRtRw(val);
+        if (r) {
+          result.rt_rw = r;
+          consume();
+        }
+      }
+    }
+
+    // 6. Kelurahan
+    skipNoise();
+    if (peek() && isLikelyAdministrativeName(peek())) {
+      result.village_kelurahan = consume()!.toUpperCase();
+    }
+
+    // 7. Kecamatan
+    skipNoise();
+    if (peek() && isLikelyAdministrativeName(peek())) {
+      result.district_kecamatan = consume()!.toUpperCase();
+    }
+
+    // 8. Agama
+    skipNoise();
+    if (peek()) {
+      const r = normalizeReligion(peek());
+      if (r) {
+        result.religion = r;
+        consume();
+      }
+    }
+
+    // 9. Status Perkawinan
+    skipNoise();
+    if (peek()) {
+      const s = normalizeMaritalStatus(peek());
+      if (s) {
+        result.marital_status = s;
+        consume();
+      }
+    }
+
+    // 10. Pekerjaan
+    skipNoise();
+    if (peek() && isLikelyOccupation(peek())) {
+      result.occupation = consume()!.toUpperCase();
+    }
+
+    // 11. Kewarganegaraan
+    skipNoise();
+    if (peek()) {
+      const c = normalizeCitizenship(peek());
+      if (c) {
+        result.citizenship = c;
+        consume();
+      }
+    }
+    
+    // 12. Berlaku Hingga
+    skipNoise();
+    if (peek()) {
+      const v = normalizeValidUntil(peek());
+      if (v) {
+        result.valid_until = v;
+        consume();
+      }
+    }
+  }
+
+  // PASS 3: Legacy Fallback
+  const legacyResult = legacyParseKtpRawLines(lines, ocrConfidence);
+  
+  for (const key of Object.keys(result) as Array<keyof IdentityCandidateData>) {
+    if (key === 'confidence' || key === 'recognized_fields_count' || key === 'total_fields_count') continue;
+    if (result[key] === null || result[key] === undefined || result[key] === '') {
+      if (legacyResult[key] !== null && legacyResult[key] !== undefined && legacyResult[key] !== '') {
+        (result as any)[key] = legacyResult[key];
+      }
+    }
+  }
+
+  // Recalculate confidence
+  const fieldsToCheck = [
+    result.full_name, result.identity_number, result.birth_place, result.birth_date,
+    result.gender, result.address, result.rt_rw, result.village_kelurahan,
+    result.district_kecamatan, result.religion, result.marital_status, result.occupation, result.citizenship
+  ];
+  const recognizedCount = fieldsToCheck.filter((f) => f !== null && f !== undefined && f !== '').length;
+  result.recognized_fields_count = recognizedCount;
+  result.total_fields_count = 13;
+
+  if (recognizedCount === 0) result.confidence = 0.0;
+  else {
+    const completeness = recognizedCount / 13;
+    const combined = ocrConfidence * 0.4 + completeness * 0.6;
+    result.confidence = Math.round(combined * 100) / 100;
+  }
+
+  return result;
+}

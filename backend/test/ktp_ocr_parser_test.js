@@ -40,7 +40,7 @@ async function runTests() {
   }
 
   // Load built TypeScript modules from dist
-  const { parseKtpRawLines, normalizeNik, normalizeDate, normalizeGender } = require('../dist/domains/identity/ktpParser');
+  const { parseKtpRawLines, normalizeNik, normalizeDate, normalizeGender, isPureLabel } = require('../dist/domains/identity/ktpParser');
   const { extractIdentityFromDocument, confirmVerifiedIdentity } = require('../dist/domains/identity/identityExtractionService');
   const { LocalPaddleOcrProvider, ManualOcrProvider, getOcrProvider } = require('../dist/domains/identity/identityOcrProvider');
 
@@ -200,6 +200,145 @@ async function runTests() {
     assert.strictEqual(result.valid_until, 'SEUMUR HIDUP');
     assert.strictEqual(result.recognized_fields_count, 13);
     assert.ok(result.confidence > 0.85);
+  });
+
+  test('parseKtpRawLines handles label block output correctly (Issue CRM-1A regression)', () => {
+    const lines = [
+      'NIK',
+      'Nama',
+      'Tempat/Tgl Lahir',
+      'Jenis kelamin',
+      'Alamat',
+      'RT/RW',
+      'Kel/Desa',
+      'Kecamatan',
+      'Agama',
+      'PROVINSI JAWA TIMUR',
+      'KABUPATEN LUMAJANG',
+      ': 3508016702910001',
+      'EKA FEBRIANTI WULANDARI',
+      'LUMAJANG, 27-02-1991',
+      ': PEREMPUAN',
+      'KARANG MENJANGAN',
+      '012/005',
+      'BULUREJO',
+      'TEMPURSARI',
+      'ISLAM',
+      'Status Perkawinan: KAWIN',
+      'Pekerjaan',
+      ': KARYAWAN SWASTA',
+      'Kewarganegaraan: WNI',
+      'Berlaku Hingga : SEUMUR HIDUP'
+    ];
+
+    const result = parseKtpRawLines(lines, 0.95);
+    assert.strictEqual(result.identity_number, '3508016702910001');
+    assert.strictEqual(result.full_name, 'EKA FEBRIANTI WULANDARI');
+    assert.strictEqual(result.birth_place, 'LUMAJANG');
+    assert.strictEqual(result.birth_date, '1991-02-27');
+    assert.strictEqual(result.gender, 'FEMALE');
+    assert.strictEqual(result.address, 'KARANG MENJANGAN');
+    assert.strictEqual(result.rt_rw, '012/005');
+    assert.strictEqual(result.village_kelurahan, 'BULUREJO');
+    assert.strictEqual(result.district_kecamatan, 'TEMPURSARI');
+    assert.strictEqual(result.religion, 'ISLAM');
+    assert.strictEqual(result.marital_status, 'KAWIN');
+    assert.strictEqual(result.occupation, 'KARYAWAN SWASTA');
+    assert.strictEqual(result.citizenship, 'WNI');
+    assert.strictEqual(result.valid_until, 'SEUMUR HIDUP');
+  });
+
+  
+  test('parseKtpRawLines correctly falls back to legacy inline parser for noisy labels (Case C)', () => {
+    const lines = ['ING Nama : BUDI SANTOSO'];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.full_name, 'BUDI SANTOSO');
+  });
+
+  test('parseKtpRawLines correctly parses complete inline with generic text without shifting (Case B)', () => {
+    const lines = ['Nama : BUDI SANTOSO', 'Alamat : JL MERDEKA', 'RT/RW : 001/002', 'Kel/Desa : SUKAMAJU', 'Kecamatan : LOWOKWARU'];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.full_name, 'BUDI SANTOSO');
+    assert.strictEqual(result.address, 'JL MERDEKA');
+    assert.strictEqual(result.rt_rw, '001/002');
+    assert.strictEqual(result.village_kelurahan, 'SUKAMAJU');
+    assert.strictEqual(result.district_kecamatan, 'LOWOKWARU');
+  });
+
+  test('parseKtpRawLines supports valid_until block layouts (Case D)', () => {
+    const lines = ['Berlaku Hingga', 'SEUMUR HIDUP'];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.valid_until, 'SEUMUR HIDUP');
+  });
+
+  test('parseKtpRawLines does not blindly shift values if validators fail (Case E)', () => {
+    const lines = ['NIK', 'Nama', 'Alamat', 'Kel/Desa', 'Kecamatan', ': 1234567890123456', 'BUDI', 'JL PUSAT', 'SUKAMAJU', 'LOWOKWARU'];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.identity_number, '1234567890123456');
+    assert.strictEqual(result.full_name, 'BUDI');
+    assert.strictEqual(result.address, 'JL PUSAT');
+    assert.strictEqual(result.rt_rw, null); // Shouldn't shift SUKAMAJU here
+    assert.strictEqual(result.village_kelurahan, 'SUKAMAJU');
+  });
+
+  test('parseKtpRawLines supports standalone legacy occupation (Case F)', () => {
+    const lines = ['Pekerjaan', 'KARYAWAN SWASTA'];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.occupation, 'KARYAWAN SWASTA');
+  });
+
+  test('parseKtpRawLines filters header noise after NIK and correctly extracts name and fields (Requirement 5)', () => {
+    const lines = [
+      'NIK',
+      'Nama',
+      'Tempat/Tgl Lahir',
+      'Jenis Kelamin',
+      'Alamat',
+      'RT/RW',
+      'Kel/Desa',
+      'Kecamatan',
+      ': 3508016702910001',
+      'KABUPATEN LUMAJANG',
+      'BUDI SANTOSO',
+      'LUMAJANG, 01-01-1990',
+      'LAKI-LAKI',
+      'JL MERDEKA',
+      '001/002',
+      'SUKAMAJU',
+      'LOWOKWARU'
+    ];
+    const result = parseKtpRawLines(lines);
+    assert.strictEqual(result.identity_number, '3508016702910001');
+    assert.strictEqual(result.full_name, 'BUDI SANTOSO');
+    assert.strictEqual(result.birth_place, 'LUMAJANG');
+    assert.strictEqual(result.birth_date, '1990-01-01');
+    assert.strictEqual(result.gender, 'MALE');
+    assert.strictEqual(result.address, 'JL MERDEKA');
+    assert.strictEqual(result.rt_rw, '001/002');
+    assert.strictEqual(result.village_kelurahan, 'SUKAMAJU');
+    assert.strictEqual(result.district_kecamatan, 'LOWOKWARU');
+  });
+
+  test('isPureLabel correctly distinguishes pure labels from inline values (Requirement 6)', () => {
+    // Pure labels
+    assert.strictEqual(isPureLabel('Nama'), true);
+    assert.strictEqual(isPureLabel('NIK'), true);
+    assert.strictEqual(isPureLabel('Alamat'), true);
+    assert.strictEqual(isPureLabel('RT/RW'), true);
+    assert.strictEqual(isPureLabel('Kel/Desa'), true);
+    assert.strictEqual(isPureLabel('Kecamatan'), true);
+    assert.strictEqual(isPureLabel('Agama'), true);
+    assert.strictEqual(isPureLabel('Pekerjaan'), true);
+    assert.strictEqual(isPureLabel('Berlaku Hingga'), true);
+    assert.strictEqual(isPureLabel('Berlaku Hingga :'), true);
+
+    // Inline values (MUST be false)
+    assert.strictEqual(isPureLabel('Nama : BUDI SANTOSO'), false);
+    assert.strictEqual(isPureLabel('Alamat : JL MERDEKA'), false);
+    assert.strictEqual(isPureLabel('Desa Sukamaju'), false);
+    assert.strictEqual(isPureLabel('Kecamatan LOWOKWARU'), false);
+    assert.strictEqual(isPureLabel('Status Perkawinan: KAWIN'), false);
+    assert.strictEqual(isPureLabel('Berlaku Hingga : SEUMUR HIDUP'), false);
   });
 
   // --- PART 2: OCR PROVIDER ADAPTERS ---
