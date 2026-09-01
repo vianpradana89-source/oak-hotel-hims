@@ -87,7 +87,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // LEVEL 1 — TRANSACTION TYPE (Default: SALE)
   const [activeTab, setActiveTab] = useState<'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL'>('SALE');
-  const [purchaseSubTab, setPurchaseSubTab] = useState<'TRANSACTIONS' | 'VENDORS'>('TRANSACTIONS');
+  const [showVendorSupplierMaster, setShowVendorSupplierMaster] = useState<boolean>(false);
 
   // LEVEL 2 — DATE PERIOD
   const [datePreset, setDatePreset] = useState<'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time' | 'custom'>('today');
@@ -265,7 +265,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const handleTabChange = (tab: 'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL') => {
     setActiveTab(tab);
-    setPurchaseSubTab('TRANSACTIONS');
+    setShowVendorSupplierMaster(false);
     setCategoryCode('');
     setReceivingFilter('');
     setVerificationFilter('');
@@ -467,7 +467,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2">
-            {activeTab === 'PURCHASE' && purchaseSubTab === 'TRANSACTIONS' && (
+            {/* Global Vendor/Supplier Master Shortcut */}
+            <button
+              onClick={() => setShowVendorSupplierMaster(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-xs cursor-pointer"
+              title="Buka direktori master vendor & supplier"
+            >
+              <span>🏢 Vendor & Supplier</span>
+            </button>
+
+            {activeTab === 'PURCHASE' && (
               <button
                 onClick={() => setActiveEditor('PURCHASE')}
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-xs cursor-pointer"
@@ -480,27 +489,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             )}
 
             {activeTab === 'EXPENSE' && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    setActiveTab('PURCHASE');
-                    setPurchaseSubTab('VENDORS');
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-xl transition-all shadow-xs cursor-pointer"
-                  title="Buka direktori master vendor & supplier"
-                >
-                  <span>🏢 Kelola Vendor & Supplier</span>
-                </button>
-                <button
-                  onClick={() => setActiveEditor('EXPENSE')}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-xs cursor-pointer"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                  </svg>
-                  <span>+ Catat Pengeluaran</span>
-                </button>
-              </div>
+              <button
+                onClick={() => setActiveEditor('EXPENSE')}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-xs cursor-pointer"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>+ Catat Pengeluaran</span>
+              </button>
             )}
 
             {activeTab === 'INCOME' && (
@@ -653,36 +650,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* LEVEL 1.5 — PURCHASE SUB-TABS */}
-      {activeTab === 'PURCHASE' && (
-        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs p-2 flex items-center gap-2">
-          <button
-            onClick={() => setPurchaseSubTab('TRANSACTIONS')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-              purchaseSubTab === 'TRANSACTIONS'
-                ? 'bg-blue-700 text-white shadow-xs'
-                : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <span>📋 Transaksi Pembelian</span>
-          </button>
-          <button
-            onClick={() => setPurchaseSubTab('VENDORS')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-              purchaseSubTab === 'VENDORS'
-                ? 'bg-[#1b4332] text-white shadow-xs'
-                : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <span>🏢 Vendor & Supplier</span>
-          </button>
-        </div>
-      )}
-
-      {activeTab === 'PURCHASE' && purchaseSubTab === 'VENDORS' ? (
+      {showVendorSupplierMaster ? (
         <VendorSupplierMasterPage
           propertyId={propertyId}
           currentStaffName={currentStaffName}
+          onBack={() => setShowVendorSupplierMaster(false)}
         />
       ) : (
         /* Main Table Workspace */

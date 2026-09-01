@@ -27,11 +27,13 @@ import { useAuth } from '../auth/AuthContext';
 interface VendorSupplierMasterPageProps {
   propertyId: number;
   currentStaffName?: string;
+  onBack?: () => void;
 }
 
 export const VendorSupplierMasterPage: React.FC<VendorSupplierMasterPageProps> = ({
   propertyId,
-  currentStaffName = 'Staff'
+  currentStaffName = 'Staff',
+  onBack
 }) => {
   const { user } = useAuth();
   const actorName = user?.full_name || user?.username || currentStaffName;
@@ -342,16 +344,32 @@ export const VendorSupplierMasterPage: React.FC<VendorSupplierMasterPageProps> =
 
   if (!capabilities.canView) {
     return (
-      <div className="bg-white rounded-2xl border border-stone-200/80 p-8 text-center shadow-xs">
-        <div className="w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mx-auto mb-3 text-stone-400">
+      <div className="bg-white rounded-2xl border border-stone-200/80 p-8 text-center shadow-xs space-y-4">
+        <div className="w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mx-auto text-stone-400">
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
         </div>
-        <h3 className="text-sm font-semibold text-stone-800">Akses Terbatas</h3>
-        <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-          Anda tidak memiliki izin untuk melihat Master Vendor & Supplier.
-        </p>
+        <div>
+          <h3 className="text-sm font-semibold text-stone-800">Akses Terbatas</h3>
+          <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
+            Anda tidak memiliki izin untuk melihat Master Vendor & Supplier.
+          </p>
+        </div>
+        {onBack && (
+          <div>
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-xl transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-stone-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              <span>Kembali ke Pusat Transaksi</span>
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -393,13 +411,28 @@ export const VendorSupplierMasterPage: React.FC<VendorSupplierMasterPageProps> =
 
       {/* Header & Primary Action */}
       <div className="bg-white p-5 rounded-2xl border border-stone-200/80 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
-            <span>🏢</span> Master Rekanan (Vendor & Supplier)
-          </h2>
-          <p className="text-xs text-stone-500 mt-0.5">
-            Kelola direktori rekanan pengadaan barang (Supplier) dan penyedia jasa (Vendor) properti OAK HIMS.
-          </p>
+        <div className="flex items-center gap-3">
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded-xl transition-colors cursor-pointer shrink-0"
+              title="Kembali ke Pusat Transaksi"
+            >
+              <svg className="w-4 h-4 text-stone-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              <span>Kembali</span>
+            </button>
+          )}
+          <div>
+            <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+              <span>🏢</span> Master Rekanan (Vendor & Supplier)
+            </h2>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Kelola direktori rekanan pengadaan barang (Supplier) dan penyedia jasa (Vendor) properti OAK HIMS.
+            </p>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
