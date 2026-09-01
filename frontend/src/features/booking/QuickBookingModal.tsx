@@ -220,7 +220,7 @@ export default function QuickBookingModal({
 
     try {
       if (!ratePlans || ratePlans.length === 0) {
-        const res = await fetch('/api/rate-plans?property_id=' + propertyId);
+        const res = await fetch('/api/pricing/rate-plans?property_id=' + propertyId);
         const json = await res.json();
 
         if (res.ok) {
