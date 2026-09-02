@@ -3,6 +3,7 @@ import { normalizeHotelDate } from './calendarDates';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
 import { useAuth } from '../auth/AuthContext';
+import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 
 export interface QuickReservationDetailProps {
   reservation: any;
@@ -470,6 +471,18 @@ export default function QuickReservationDetail({
               </div>
             </div>
           </div>
+
+          {/* Deposit & Jaminan Section */}
+          {data?.id && activePropId && (
+            <DepositGuaranteeSection
+              reservationId={data.id}
+              propertyId={activePropId}
+              reservationStatus={data.status}
+              remainingBalance={remainingBalance}
+              compact
+              onRefresh={() => { onRefresh?.(); }}
+            />
+          )}
 
           {/* Inspection feedback message if any */}
           {inspectionFeedback && (

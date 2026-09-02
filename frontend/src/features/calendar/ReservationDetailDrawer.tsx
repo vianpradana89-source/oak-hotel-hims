@@ -6,6 +6,7 @@ import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { useAuth } from '../auth/AuthContext';
+import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 
 interface Props {
   reservation: any;
@@ -1103,6 +1104,17 @@ export default function ReservationDetailDrawer({
                 {paymentSubmitting ? 'Menyimpan...' : 'Catat Pembayaran'}
               </button>
             </form>
+          )}
+
+          {/* Section: Deposit & Jaminan */}
+          {data.id && activePropId && (
+            <DepositGuaranteeSection
+              reservationId={data.id}
+              propertyId={activePropId}
+              reservationStatus={data.status}
+              remainingBalance={remainingBalance}
+              onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
+            />
           )}
 
           {/* Section 8: Catatan / Special Requests */}
