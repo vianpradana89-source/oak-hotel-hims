@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { safeFetchJson } from './calendarApi';
+import { useAuth } from '../auth/AuthContext';
 import type { RoomOperationalBlock } from './calendarTypes';
 
 interface Props {
@@ -13,6 +14,7 @@ interface Props {
 export default function OperationalBlockDetailModal({ block, roomNumber, roomTypeName, onClose, onRefresh }: Props) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { authFetch } = useAuth();
 
   if (!block) return null;
 
@@ -33,7 +35,8 @@ export default function OperationalBlockDetailModal({ block, roomNumber, roomTyp
             released_by: 'Front Office'
           })
         },
-        'Gagal menyelesaikan blok operasional'
+        'Gagal menyelesaikan blok operasional',
+        authFetch
       );
       if (result.ok && result.data?.status === 'OK') {
         onRefresh?.();
@@ -66,7 +69,8 @@ export default function OperationalBlockDetailModal({ block, roomNumber, roomTyp
             reason: 'Dibatalkan dari Kalender'
           })
         },
-        'Gagal membatalkan blok operasional'
+        'Gagal membatalkan blok operasional',
+        authFetch
       );
       if (result.ok && result.data?.status === 'OK') {
         onRefresh?.();

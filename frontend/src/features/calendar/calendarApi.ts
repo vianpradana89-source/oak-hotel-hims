@@ -17,15 +17,18 @@ export interface SafeFetchResult<T = any> {
   errorMessage?: string;
 }
 
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
 export async function safeFetchJson<T = any>(
   url: string,
   options?: SafeFetchOptions,
-  defaultErrorMessage = 'Data operasional belum dapat dimuat. Coba lagi.'
+  defaultErrorMessage = 'Data operasional belum dapat dimuat. Coba lagi.',
+  fetchImpl: FetchLike = fetch
 ): Promise<SafeFetchResult<T>> {
   const expectJson = options?.expectJson ?? true;
 
   try {
-    const res = await fetch(url, options);
+    const res = await fetchImpl(url, options);
     const contentType = res.headers.get('content-type') || '';
     const isJson = contentType.toLowerCase().includes('application/json');
 
@@ -128,11 +131,11 @@ export async function safeFetchJson<T = any>(
   }
 }
 
-export async function fetchTapechart(request: TapechartRequest): Promise<TapechartResponse> {
+export async function fetchTapechart(request: TapechartRequest, fetchImpl: FetchLike = fetch): Promise<TapechartResponse> {
   const params = new URLSearchParams({ start: request.start, end: request.end, property_id: String(request.propertyId) });
   if (request.includeInactive) params.set('include_inactive', '1');
 
-  const result = await safeFetchJson<TapechartResponse>(`/api/tapechart?${params.toString()}`);
+  const result = await safeFetchJson<TapechartResponse>(`/api/tapechart?${params.toString()}`, undefined, undefined, fetchImpl);
   if (!result.ok || !result.data) {
     throw new Error(result.errorMessage || `Tape Chart request failed (${result.status})`);
   }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { safeFetchJson } from './calendarApi';
+import { useAuth } from '../auth/AuthContext';
 import { StayChargePickerCombobox } from '../stayCharges/StayChargePickerCombobox';
 import { fetchStayChargeRules } from '../stayCharges/stayChargesApi';
 import type { StayChargeRule } from '../stayCharges/stayChargesTypes';
@@ -37,6 +38,7 @@ export const AddStayChargeModal: React.FC<AddStayChargeModalProps> = ({
   const [notes, setNotes] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const { authFetch } = useAuth();
 
   const loadRules = useCallback(async () => {
     if (!propertyId) return;
@@ -152,7 +154,8 @@ export const AddStayChargeModal: React.FC<AddStayChargeModalProps> = ({
             actor_role: 'STAFF'
           })
         },
-        'Gagal menambahkan biaya stay charge'
+        'Gagal menambahkan biaya stay charge',
+        authFetch
       );
 
       if (!result.ok) {

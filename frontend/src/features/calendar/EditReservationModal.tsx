@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { safeFetchJson } from './calendarApi';
+import { useAuth } from '../auth/AuthContext';
 
 interface EditReservationModalProps {
   isOpen: boolean;
@@ -19,6 +20,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const { authFetch } = useAuth();
 
   // Form Fields
   const [guestName, setGuestName] = useState<string>('');
@@ -81,9 +83,9 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     const loadMasters = async () => {
       try {
         const [rtRes, rRes, rpRes] = await Promise.all([
-          safeFetchJson<{ data?: any[] }>(`/api/room-types?property_id=${propertyId}`),
-          safeFetchJson<{ data?: any[] }>(`/api/rooms?property_id=${propertyId}`),
-          safeFetchJson<{ data?: any[] }>(`/api/pricing/rate-plans?property_id=${propertyId}`)
+          safeFetchJson<{ data?: any[] }>(`/api/room-types?property_id=${propertyId}`, undefined, undefined, authFetch),
+          safeFetchJson<{ data?: any[] }>(`/api/rooms?property_id=${propertyId}`, undefined, undefined, authFetch),
+          safeFetchJson<{ data?: any[] }>(`/api/pricing/rate-plans?property_id=${propertyId}`, undefined, undefined, authFetch)
         ]);
         if (rtRes.ok && rtRes.data?.data) {
           setRoomTypes(rtRes.data.data);
@@ -99,7 +101,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       }
     };
     loadMasters();
-  }, [isOpen, propertyId]);
+  }, [isOpen, propertyId, authFetch]);
 
   // Fetch Pricing Preview
   const fetchPreview = useCallback(async () => {
@@ -125,7 +127,8 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
             children
           })
         },
-        'Gagal menghitung pratinjau harga'
+        'Gagal menghitung pratinjau harga',
+        authFetch
       );
       if (result.ok && result.data?.data) {
         setPreviewData(result.data.data);
@@ -137,7 +140,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     } finally {
       setPreviewLoading(false);
     }
-  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, guestName, guestPhone]);
+  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, guestName, guestPhone, authFetch]);
 
   useEffect(() => {
     if (isOpen && checkIn && roomTypeId) {
@@ -181,7 +184,8 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         },
-        'Gagal menyimpan perubahan reservasi'
+        undefined,
+        authFetch
       );
 
       if (!result.ok) {

@@ -2,6 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import { normalizeHotelDate } from './calendarDates';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
+import { useAuth } from '../auth/AuthContext';
 
 export interface QuickReservationDetailProps {
   reservation: any;
@@ -37,6 +38,7 @@ export default function QuickReservationDetail({
   const [bidCopied, setBidCopied] = useState<boolean>(false);
   const [requestingInspection, setRequestingInspection] = useState<boolean>(false);
   const [inspectionFeedback, setInspectionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const { authFetch } = useAuth();
 
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number }>({ top: 100, left: 100 });
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -63,7 +65,8 @@ export default function QuickReservationDetail({
         const result = await safeFetchJson<{ data?: any }>(
           `/api/reservations/${reservation.id}?property_id=${activePropId}`,
           undefined,
-          'Data operasional reservasi belum dapat dimuat.'
+          'Data operasional reservasi belum dapat dimuat.',
+          authFetch
         );
         if (result.ok && result.data?.data && isMounted) {
           setFullData(result.data.data);
@@ -81,7 +84,7 @@ export default function QuickReservationDetail({
     return () => {
       isMounted = false;
     };
-  }, [reservation.id, activePropId]);
+  }, [reservation.id, activePropId, authFetch]);
 
   // Viewport-aware positioning & flip calculation
   const updatePosition = useCallback(() => {
@@ -266,13 +269,14 @@ export default function QuickReservationDetail({
             requested_by_role: 'Receptionist'
           })
         },
-        'Status pemeriksaan belum dapat dimuat. Coba lagi.'
+        'Status pemeriksaan belum dapat dimuat. Coba lagi.',
+        authFetch
       );
 
       if (result.ok && (result.data?.status === 'OK' || result.data?.success)) {
         setInspectionFeedback({ type: 'success', text: 'Permintaan pemeriksaan kamar berhasil dikirim ke Housekeeping.' });
         onRefresh?.();
-        const fresh = await safeFetchJson<{ data?: any }>(`/api/reservations/${data.id}?property_id=${activePropId}`);
+        const fresh = await safeFetchJson<{ data?: any }>(`/api/reservations/${data.id}?property_id=${activePropId}`, undefined, undefined, authFetch);
         if (fresh.ok && fresh.data?.data) {
           setFullData(fresh.data.data);
         }

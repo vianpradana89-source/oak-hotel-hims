@@ -5,6 +5,7 @@ import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { useAuth } from '../auth/AuthContext';
 
 interface Props {
   reservation: any;
@@ -54,6 +55,7 @@ export default function ReservationDetailDrawer({
   const [savingPhone, setSavingPhone] = useState<boolean>(false);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
+  const { authFetch } = useAuth();
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
@@ -89,7 +91,10 @@ export default function ReservationDetailDrawer({
     }
     try {
       const result = await safeFetchJson<{ data?: any[] }>(
-        `/api/housekeeping/findings?property_id=${effectivePropId}&room_id=${targetRoomId}`
+        `/api/housekeeping/findings?property_id=${effectivePropId}&room_id=${targetRoomId}`,
+        undefined,
+        undefined,
+        authFetch
       );
       if (result.ok && result.data?.data) {
         setActiveRoomFindings(result.data.data);
@@ -97,7 +102,7 @@ export default function ReservationDetailDrawer({
     } catch (err) {
       console.warn('Failed to load room findings', err);
     }
-  }, [detailData?.room_id, activePropId, reservation?.room_id]);
+  }, [detailData?.room_id, activePropId, reservation?.room_id, authFetch]);
 
   // Load complete reservation details
   const loadFullReservation = async (customId?: number) => {
@@ -106,7 +111,10 @@ export default function ReservationDetailDrawer({
     try {
       setLoading(true);
       const result = await safeFetchJson<{ data?: any }>(
-        `/api/reservations/${targetId}?property_id=${activePropId}`
+        `/api/reservations/${targetId}?property_id=${activePropId}`,
+        undefined,
+        undefined,
+        authFetch
       );
       if (result.ok && result.data?.data) {
         setDetailData(result.data.data);
@@ -127,7 +135,10 @@ export default function ReservationDetailDrawer({
     if (!targetId || !activePropId) return;
     try {
       const result = await safeFetchJson<{ data?: any }>(
-        `/api/reservations/${targetId}/folio?property_id=${activePropId}`
+        `/api/reservations/${targetId}/folio?property_id=${activePropId}`,
+        undefined,
+        undefined,
+        authFetch
       );
       if (result.ok && result.data?.data) {
         setFolioData(result.data.data);
@@ -160,7 +171,8 @@ export default function ReservationDetailDrawer({
             requested_by_role: 'Receptionist'
           })
         },
-        'Gagal meminta pemeriksaan kamar. Coba lagi.'
+        'Gagal meminta pemeriksaan kamar. Coba lagi.',
+        authFetch
       );
       if (!result.ok) {
         throw new Error(result.errorMessage || 'Gagal meminta pemeriksaan kamar');
@@ -193,7 +205,8 @@ export default function ReservationDetailDrawer({
             guest_phone: phoneDraft.trim()
           })
         },
-        'Gagal memperbarui nomor telepon'
+        'Gagal memperbarui nomor telepon',
+        authFetch
       );
       if (result.ok) {
         setIsEditingPhone(false);
@@ -225,7 +238,8 @@ export default function ReservationDetailDrawer({
             guest_name: extracted.full_name || undefined
           })
         },
-        'Gagal menyimpan data KTP ke reservasi'
+        'Gagal menyimpan data KTP ke reservasi',
+        authFetch
       );
       if (result.ok) {
         setIsIdentityModalOpen(false);
@@ -318,7 +332,7 @@ export default function ReservationDetailDrawer({
         formData.append('evidence', paymentEvidenceFile);
       }
 
-      const res = await fetch(`/api/reservations/${data.id}/payments`, {
+      const res = await authFetch(`/api/reservations/${data.id}/payments`, {
         method: 'POST',
         body: formData
       });

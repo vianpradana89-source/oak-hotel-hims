@@ -121,7 +121,7 @@ function localDateISO(value: Date | string | undefined) {
 }
 
 function AppContent() {
-  const { user, logout } = useAuth();
+  const { user, logout, authFetch } = useAuth();
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
@@ -1064,7 +1064,7 @@ function AppContent() {
 
     const requestVersion = ++tapechartRequestVersionRef.current;
     try {
-      const data = await fetchTapechart({ start, end, propertyId, includeInactive: calendarIncludeInactive });
+      const data = await fetchTapechart({ start, end, propertyId, includeInactive: calendarIncludeInactive }, authFetch);
         if (requestVersion !== tapechartRequestVersionRef.current) return;
         if (data && data.rooms) {
           setRooms(data.rooms || []);
@@ -2346,7 +2346,8 @@ function AppContent() {
     const fetchAvailabilityRows = async (key: string, roomTypeId: number | null, roomTypeName: string, checkIn: string, checkOut: string, version: number) => {
       console.log('AVAIL_FETCH_START', { key, roomTypeId, roomTypeName, checkIn, checkOut, version });
       try {
-        const response = await fetch(buildAvailabilityRequest(roomTypeId, roomTypeName, checkIn, checkOut, propertyId!));
+        const availUrl = buildAvailabilityRequest(roomTypeId, roomTypeName, checkIn, checkOut, propertyId!);
+        const response = await authFetch(availUrl);
         if (!response.ok) {
           throw new Error(`availability request failed for ${key}`);
         }
