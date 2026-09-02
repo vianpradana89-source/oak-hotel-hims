@@ -101,18 +101,25 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     const loadMasters = async () => {
       try {
         const [rtRes, rRes, rpRes] = await Promise.all([
-          safeFetchJson<{ data?: any[] }>(`/api/room-types?property_id=${propertyId}`, undefined, undefined, authFetch),
-          safeFetchJson<{ data?: any[] }>(`/api/rooms?property_id=${propertyId}`, undefined, undefined, authFetch),
-          safeFetchJson<{ data?: any[] }>(`/api/pricing/rate-plans?property_id=${propertyId}`, undefined, undefined, authFetch)
+          safeFetchJson<{ data?: any[] }>(`/api/room-types?property_id=${propertyId}&active=true`, undefined, undefined, authFetch),
+          safeFetchJson<{ data?: any[] }>(`/api/rooms?property_id=${propertyId}&is_active=true`, undefined, undefined, authFetch),
+          safeFetchJson<{ data?: any[] }>(`/api/pricing/rate-plans?property_id=${propertyId}&is_active=true`, undefined, undefined, authFetch)
         ]);
         if (rtRes.ok && rtRes.data?.data) {
-          setRoomTypes(rtRes.data.data);
+          setRoomTypes(rtRes.data.data.filter((rt: any) => rt.is_active !== false));
         }
         if (rRes.ok && rRes.data?.data) {
-          setRooms(rRes.data.data);
+          setRooms(rRes.data.data.filter((room: any) =>
+            room.is_active !== false
+            && !room.operational_block_type
+            && !['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(String(room.status || '').toUpperCase())
+          ));
         }
-        if (rpRes.ok && rpRes.data?.data) {
-          setRatePlans(rpRes.data.data);
+        if (rpRes.ok) {
+          const plans = Array.isArray(rpRes.data)
+            ? rpRes.data
+            : (Array.isArray((rpRes.data as any)?.data) ? (rpRes.data as any).data : []);
+          setRatePlans(plans.filter((rp: any) => rp.is_active !== false && rp.is_archived !== true));
         }
       } catch (err) {
         console.warn('Failed to load master data for edit modal', err);
@@ -323,8 +330,18 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
 
   if (!isOpen) return null;
 
-  const filteredRooms = rooms.filter((r) => !roomTypeId || r.room_type_id === roomTypeId);
-  const filteredRatePlans = ratePlans.filter((rp) => !roomTypeId || !rp.room_type_id || rp.room_type_id === roomTypeId);
+  const filteredRooms = rooms.filter((r) =>
+    roomTypeId
+    && Number(r.room_type_id) === Number(roomTypeId)
+    && r.is_active !== false
+    && !r.operational_block_type
+    && !['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(String(r.status || '').toUpperCase())
+  );
+  const filteredRatePlans = ratePlans.filter((rp) => {
+    if (!roomTypeId || Number(rp.room_type_id) !== Number(roomTypeId)) return false;
+    if (rp.is_active === false || rp.is_archived === true) return false;
+    return stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE';
+  });
 
   return ReactDOM.createPortal(
     <div data-portal-overlay="reservation-edit" className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
@@ -544,7 +561,12 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                     setRoomTypeId(newTypeId);
                     setRoomId(null);
                     // Clear incompatible rate plan and auto-select first compatible
-                    const compatible = ratePlans.filter((rp) => newTypeId && Number(rp.room_type_id) === newTypeId);
+                    const compatible = ratePlans.filter((rp) =>
+                      newTypeId
+                      && Number(rp.room_type_id) === newTypeId
+                      && rp.is_active !== false
+                      && rp.is_archived !== true
+                    );
                     const preferred = compatible.find((rp) => stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE');
                     setRatePlanId(preferred?.id || compatible[0]?.id || null);
                   }}
@@ -586,10 +608,16 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   onChange={(e) => setRatePlanId(Number(e.target.value) || null)}
                   className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg"
                 >
-                  <option value="">Standard Rate</option>
+                  {filteredRatePlans.length === 0 && (
+                    <option value="">
+                      {stayType === 'DAY_USE'
+                        ? 'Tidak ada Paket Day Use untuk Tipe Kamar ini'
+                        : 'Tidak ada Paket Tarif aktif untuk Tipe Kamar ini'}
+                    </option>
+                  )}
                   {filteredRatePlans.map((rp) => (
                     <option key={rp.id} value={rp.id}>
-                      {rp.name} ({rp.meal_plan_name || rp.meal_plan || 'RO'})
+                      {rp.name} ({rp.code}) {rp.meal_plan_name ? `• ${rp.meal_plan_name}` : ''}
                     </option>
                   ))}
                 </select>
