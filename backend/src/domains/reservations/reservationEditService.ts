@@ -761,7 +761,12 @@ export async function previewReservationEdit(
   const newTotalPrice = isOta
     ? currentTotalPrice
     : Math.max(0, Number(quote.grand_total || 0) - Number(current.discount_amount || 0));
-  const priceDifference = newTotalPrice - currentTotalPrice;
+  const settlement = calculateEditSettlement(
+    currentTotalPrice,
+    newTotalPrice,
+    Number(current.amount_paid || 0),
+    Number(current.applied_deposit || 0)
+  );
 
   return {
     reservation_id: reservationId,
@@ -796,7 +801,14 @@ export async function previewReservationEdit(
       grand_total: newTotalPrice,
       nightly_breakdown: quote.nightly_breakdown
     },
-    price_difference: priceDifference,
+    old_total: currentTotalPrice,
+    new_total: newTotalPrice,
+    price_difference: settlement.priceDifference,
+    amount_paid: Number(current.amount_paid || 0),
+    applied_deposit: Number(current.applied_deposit || 0),
+    effective_settlement: settlement.effectiveSettlement,
+    new_remaining_before_payment: settlement.newRemainingBeforePayment,
+    payment_required: settlement.paymentRequired,
     room_overlap_conflict: roomOverlapConflict,
     overlap_message: overlapMessage
   };
@@ -841,6 +853,8 @@ export async function executeReservationEdit(
 
 export interface EditWithPaymentPayload extends ReservationEditPayload {
   payment_method?: string;
+  payment_amount?: number;
+  amount_tendered?: number;
   evidence_note?: string | null;
   evidence_type?: string;
   keep_current_price?: boolean;
@@ -862,6 +876,22 @@ export interface EditWithPaymentResult {
   price_difference: number;
   old_total_price: number;
   new_total_price: number;
+  effective_settlement: number;
+  new_remaining_before_payment: number;
+  payment_required: number;
+}
+
+function calculateEditSettlement(
+  oldTotal: number,
+  newTotal: number,
+  amountPaid: number,
+  appliedDeposit: number
+) {
+  const priceDifference = Math.round(newTotal - oldTotal);
+  const effectiveSettlement = Math.max(0, Math.round(amountPaid) + Math.round(appliedDeposit));
+  const newRemainingBeforePayment = Math.max(0, Math.round(newTotal) - effectiveSettlement);
+  const paymentRequired = Math.min(Math.max(0, priceDifference), newRemainingBeforePayment);
+  return { priceDifference, effectiveSettlement, newRemainingBeforePayment, paymentRequired };
 }
 
 /**
@@ -936,13 +966,18 @@ export async function executeReservationEditWithPayment(
       await client.query('COMMIT');
       const paymentAmount = Number(existingPayment.rows[0].amount || 0);
       const currentTotal = Number(existingReservation.rows[0].total_price || 0);
+      const currentAmountPaid = Number(existingReservation.rows[0].amount_paid || 0);
+      const currentAppliedDeposit = Number(existingReservation.rows[0].applied_deposit || 0);
       return {
         reservation: existingReservation.rows[0],
         payment: existingPayment.rows[0],
         evidence: existingEvidence.rows[0] || null,
         price_difference: paymentAmount,
         old_total_price: currentTotal - paymentAmount,
-        new_total_price: currentTotal
+        new_total_price: currentTotal,
+        effective_settlement: currentAmountPaid + currentAppliedDeposit,
+        new_remaining_before_payment: Math.max(0, currentTotal - currentAmountPaid - currentAppliedDeposit),
+        payment_required: paymentAmount
       };
     }
 
@@ -968,13 +1003,22 @@ export async function executeReservationEditWithPayment(
       throw err;
     }
 
-    // Payment orchestration (only when keepCurrentPrice is false AND positive difference)
+    const settlement = calculateEditSettlement(
+      old_total_price,
+      new_total_price,
+      Number(editResult.current_row.amount_paid || 0),
+      Number(editResult.current_row.applied_deposit || 0)
+    );
+
+    // Payment orchestration uses the server-derived required amount. A price
+    // increase can be smaller than an existing outstanding balance, or fully
+    // covered by prior settlement, so it must not post raw price_difference.
     let paymentRow: any = null;
     let evidenceRow: any = null;
     let savedEvidence: { storageKey: string; absolutePath: string; fileSizeBytes: number } | null = null;
 
-    if (!payload.keep_current_price && price_difference > 0) {
-      const paymentAmount = price_difference;
+    if (!payload.keep_current_price && settlement.paymentRequired > 0) {
+      const paymentAmount = settlement.paymentRequired;
       const paymentMethod = String(payload.payment_method || '').trim();
 
       if (!paymentMethod) {
@@ -982,6 +1026,27 @@ export async function executeReservationEditWithPayment(
         err.statusCode = 400;
         err.code = 'PAYMENT_METHOD_REQUIRED';
         throw err;
+      }
+
+      if (paymentMethod === 'CASH') {
+        const tendered = Number(payload.amount_tendered);
+        if (!Number.isInteger(tendered) || tendered < paymentAmount) {
+          const shortage = Number.isFinite(tendered) ? Math.max(0, paymentAmount - tendered) : paymentAmount;
+          const err: any = new Error(`Uang diterima kurang Rp${shortage.toLocaleString('id-ID')}.`);
+          err.statusCode = 400;
+          err.code = 'INSUFFICIENT_CASH_TENDER';
+          err.details = { payment_required: paymentAmount, amount_tendered: Number.isFinite(tendered) ? tendered : null, shortage };
+          throw err;
+        }
+      } else {
+        const submittedAmount = Number(payload.payment_amount);
+        if (!Number.isInteger(submittedAmount) || submittedAmount !== paymentAmount) {
+          const err: any = new Error('Nominal pembayaran harus sama dengan jumlah yang wajib dibayar sekarang.');
+          err.statusCode = 400;
+          err.code = 'PAYMENT_AMOUNT_MISMATCH';
+          err.details = { payment_required: paymentAmount, submitted_amount: Number.isFinite(submittedAmount) ? submittedAmount : null };
+          throw err;
+        }
       }
 
       // Backend evidence requirement
@@ -1032,7 +1097,10 @@ export async function executeReservationEditWithPayment(
       evidence: evidenceRow,
       price_difference,
       old_total_price,
-      new_total_price
+      new_total_price,
+      effective_settlement: settlement.effectiveSettlement,
+      new_remaining_before_payment: settlement.newRemainingBeforePayment,
+      payment_required: settlement.paymentRequired
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

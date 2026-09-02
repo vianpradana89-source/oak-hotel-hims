@@ -100,9 +100,13 @@ async function run() {
   let targetRoomId4;
   let targetRoomId5;
   let targetRoomId6;
+  let targetRoomId7;
+  let targetRoomId8;
+  let targetRoomId9;
   let staleRatePlanId;
   let targetRatePlanId;
   let alternateTargetRatePlanId;
+  let settlementRatePlanId;
   let otaSourceId;
   try {
     await client.query('BEGIN');
@@ -159,7 +163,10 @@ async function run() {
          ($1, $2, 'ERP-NEW-3', 'New Room 3', 'Ready', TRUE),
          ($1, $2, 'ERP-NEW-4', 'New Room 4', 'Ready', TRUE),
          ($1, $2, 'ERP-NEW-5', 'New Room 5', 'Ready', TRUE),
-         ($1, $2, 'ERP-NEW-6', 'New Room 6', 'Ready', TRUE)
+         ($1, $2, 'ERP-NEW-6', 'New Room 6', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-7', 'New Room 7', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-8', 'New Room 8', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-9', 'New Room 9', 'Ready', TRUE)
        RETURNING id`,
       [tracked.propertyId, targetTypeId]
     );
@@ -168,6 +175,9 @@ async function run() {
     targetRoomId4 = extraTargetRooms.rows[2].id;
     targetRoomId5 = extraTargetRooms.rows[3].id;
     targetRoomId6 = extraTargetRooms.rows[4].id;
+    targetRoomId7 = extraTargetRooms.rows[5].id;
+    targetRoomId8 = extraTargetRooms.rows[6].id;
+    targetRoomId9 = extraTargetRooms.rows[7].id;
     const stalePlan = await client.query(
       `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate)
        VALUES ($1, $2, 'ERP-STALE', 'Stale Old Plan', 550000) RETURNING id`,
@@ -186,6 +196,12 @@ async function run() {
       [tracked.propertyId, targetTypeId]
     );
     alternateTargetRatePlanId = alternateTargetPlan.rows[0].id;
+    const settlementPlan = await client.query(
+      `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate)
+       VALUES ($1, $2, 'ERP-SETTLEMENT', 'Settlement Plan', 610000) RETURNING id`,
+      [tracked.propertyId, targetTypeId]
+    );
+    settlementRatePlanId = settlementPlan.rows[0].id;
     const ota = await client.query(
       `INSERT INTO ota_sources (property_id, code, name)
        VALUES ($1, 'ERP-OTA', 'Edit Reprice OTA') RETURNING id`,
@@ -232,6 +248,96 @@ async function run() {
       Number(selectedTargetPlanPreview.quote.grand_total),
       'different Rate Plan IDs cannot reuse the prior quote total'
     );
+
+    const financialAId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 435000, 'FIN-A');
+    await pool.query(
+      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, status)
+       VALUES ($1, 'PAYMENT', 385000, 'TRANSFER', 'SUCCESS')`,
+      [financialAId]
+    );
+    await pool.query(
+      `UPDATE reservations SET amount_paid = 385000, remaining_balance = 50000, payment_status = 'PARTIAL' WHERE id = $1`,
+      [financialAId]
+    );
+    const financialAPreview = await previewReservationEdit(pool, financialAId, {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId7,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
+    });
+    assert.strictEqual(Number(financialAPreview.old_total), 435000, 'A old_total is canonical reservation total');
+    assert.strictEqual(Number(financialAPreview.new_total), 610000, 'A new_total is canonical selected plan quote');
+    assert.strictEqual(Number(financialAPreview.price_difference), 175000, 'A price difference is correct');
+    assert.strictEqual(Number(financialAPreview.effective_settlement), 385000, 'A effective settlement is correct');
+    assert.strictEqual(Number(financialAPreview.new_remaining_before_payment), 225000, 'A remaining before payment is correct');
+    assert.strictEqual(Number(financialAPreview.payment_required), 175000, 'A payment required is capped at price difference');
+    const paymentEvidence = { buffer: Buffer.from([137, 80, 78, 71]), mimetype: 'image/png', originalname: 'difference.png', size: 4 };
+    const financialAResult = await executeReservationEditWithPayment(pool, financialAId, {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId7,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
+      expected_new_total: 610000, payment_method: 'TRANSFER', payment_amount: 175000,
+      idempotency_key: `${runId}-FIN-A`
+    }, paymentEvidence, 'TEST');
+    assert.strictEqual(Number(financialAResult.payment.amount), 175000, 'A posts only payment_required');
+    assert.strictEqual(Number(financialAResult.reservation.remaining_balance), 50000, 'A preserves prior outstanding balance');
+
+    const financialBId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 534000, 'FIN-B');
+    await pool.query(
+      `INSERT INTO payment_transactions (reservation_id, transaction_type, amount, payment_method, status)
+       VALUES ($1, 'PAYMENT', 560000, 'TRANSFER', 'SUCCESS')`,
+      [financialBId]
+    );
+    await pool.query(
+      `UPDATE reservations SET amount_paid = 560000, remaining_balance = 0, payment_status = 'PAID' WHERE id = $1`,
+      [financialBId]
+    );
+    const financialBPreview = await previewReservationEdit(pool, financialBId, {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId8,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
+    });
+    assert.strictEqual(Number(financialBPreview.price_difference), 76000, 'B price difference is correct');
+    assert.strictEqual(Number(financialBPreview.new_remaining_before_payment), 50000, 'B remaining before payment is correct');
+    assert.strictEqual(Number(financialBPreview.payment_required), 50000, 'B payment required is capped by new remaining');
+    const financialBPayload = {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId8,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
+      expected_new_total: 610000, payment_method: 'CASH', idempotency_key: `${runId}-FIN-B`
+    };
+    await assert.rejects(
+      executeReservationEditWithPayment(pool, financialBId, { ...financialBPayload, amount_tendered: 40000 }, paymentEvidence, 'TEST'),
+      (error) => error.code === 'INSUFFICIENT_CASH_TENDER'
+    );
+    const financialBResult = await executeReservationEditWithPayment(pool, financialBId, { ...financialBPayload, amount_tendered: 100000 }, paymentEvidence, 'TEST');
+    assert.strictEqual(Number(financialBResult.payment.amount), 50000, 'B cash tender posts required amount, not tendered amount');
+    assert.strictEqual(Number(financialBResult.reservation.remaining_balance), 0, 'B remaining balance is zero after capped payment');
+    assert.strictEqual(String(financialBResult.reservation.payment_status), 'PAID', 'B payment status is PAID');
+
+    const nonCashMismatchId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 534000, 'NONCASH-MISMATCH');
+    const nonCashMismatchPreview = await previewReservationEdit(pool, nonCashMismatchId, {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId9,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
+    });
+    await assert.rejects(
+      executeReservationEditWithPayment(pool, nonCashMismatchId, {
+        property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId9,
+        rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
+        expected_new_total: Number(nonCashMismatchPreview.new_total), payment_method: 'TRANSFER', payment_amount: 100000,
+        idempotency_key: `${runId}-NONCASH-MISMATCH`
+      }, paymentEvidence, 'TEST'),
+      (error) => error.code === 'PAYMENT_AMOUNT_MISMATCH'
+    );
+
+    const depositPreviewId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 534000, 'DEPOSIT-PREVIEW');
+    await pool.query(
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction, status, is_voided)
+       VALUES ($1, $2, 'DEPOSIT_APPLY', 'Applied deposit', 560000, 'CREDIT', 'POSTED', FALSE)`,
+      [depositPreviewId, tracked.propertyId]
+    );
+    await pool.query('UPDATE reservations SET applied_deposit = 560000, remaining_balance = 0, payment_status = $2 WHERE id = $1', [depositPreviewId, 'PAID']);
+    const depositPreview = await previewReservationEdit(pool, depositPreviewId, {
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId9,
+      rate_plan_id: settlementRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
+    });
+    assert.strictEqual(Number(depositPreview.effective_settlement), 560000, 'applied deposit participates in effective settlement');
+    assert.strictEqual(Number(depositPreview.payment_required), 50000, 'applied deposit reduces payment_required');
 
     const quoteSeedId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 1, 'QUOTE');
     const targetPreview = await previewReservationEdit(pool, quoteSeedId, {
@@ -326,7 +432,7 @@ async function run() {
       property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId5,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
       keep_current_price: false, expected_new_total: increasePreview.quote.grand_total,
-      payment_method: 'QRIS', idempotency_key: `${runId}-INCREASE`
+      payment_method: 'QRIS', payment_amount: Number(increasePreview.payment_required), idempotency_key: `${runId}-INCREASE`
     };
     await assert.rejects(
       executeReservationEditWithPayment(pool, increaseId, increasePayload, null, 'TEST'),

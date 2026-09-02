@@ -3223,6 +3223,8 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, requireRole(['F
       rate_plan_id: nullableId(body.rate_plan_id),
       adults: body.adults === undefined ? undefined : Number(body.adults),
       children: body.children === undefined ? undefined : Number(body.children),
+      payment_amount: body.payment_amount === undefined || String(body.payment_amount).trim() === '' ? undefined : Number(body.payment_amount),
+      amount_tendered: body.amount_tendered === undefined || String(body.amount_tendered).trim() === '' ? undefined : Number(body.amount_tendered),
       keep_current_price: body.keep_current_price === true || body.keep_current_price === 'true',
       expected_new_total: body.expected_new_total === undefined ? undefined : Number(body.expected_new_total),
       idempotency_key: idempotencyKey
@@ -3252,7 +3254,10 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, requireRole(['F
         evidence: result.evidence,
         price_difference: result.price_difference,
         old_total_price: result.old_total_price,
-        new_total_price: result.new_total_price
+        new_total_price: result.new_total_price,
+        effective_settlement: result.effective_settlement,
+        new_remaining_before_payment: result.new_remaining_before_payment,
+        payment_required: result.payment_required
       }
     });
   } catch (err: any) {

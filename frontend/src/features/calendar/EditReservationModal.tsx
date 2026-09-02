@@ -55,6 +55,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   // Difference Payment Modal State
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
   const [paymentMethod, setPaymentMethod] = useState<string>('CASH');
+  const [cashTenderedInput, setCashTenderedInput] = useState<string>('');
   const [paymentFile, setPaymentFile] = useState<File | null>(null);
   const [paymentNote, setPaymentNote] = useState<string>('');
   const [paymentSubmitting, setPaymentSubmitting] = useState<boolean>(false);
@@ -76,6 +77,11 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     && selectedRatePlan.is_archived !== true
     && (stayType === 'DAY_USE' ? selectedRatePlan.rate_type === 'DAY_USE' : selectedRatePlan.rate_type !== 'DAY_USE')
   );
+  const paymentRequired = Math.max(0, Number(previewData?.payment_required || 0));
+  const cashTendered = Number(cashTenderedInput || 0);
+  const cashShortage = paymentMethod === 'CASH' ? Math.max(0, paymentRequired - cashTendered) : 0;
+  const changeAmount = paymentMethod === 'CASH' ? Math.max(0, cashTendered - paymentRequired) : 0;
+  const formatRupiah = (amount: number) => `Rp${Math.max(0, Math.round(amount || 0)).toLocaleString('id-ID')}`;
 
   // Initialize form
   useEffect(() => {
@@ -105,6 +111,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     setShowDecreaseModal(false);
     setPaymentFile(null);
     setPaymentNote('');
+    setCashTenderedInput('');
     setPaymentError(null);
     saveRequestKeyRef.current = null;
   }, [reservation, isOpen]);
@@ -310,8 +317,9 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       return;
     }
 
-    if (previewData && previewData.price_difference > 0) {
+    if (previewData && paymentRequired > 0) {
       getSaveRequestKey();
+      setCashTenderedInput(paymentMethod === 'CASH' ? String(paymentRequired) : '');
       setShowPaymentModal(true);
       return;
     }
@@ -363,6 +371,10 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       setPaymentError('Bukti pembayaran selisih wajib dilampirkan.');
       return;
     }
+    if (paymentMethod === 'CASH' && cashShortage > 0) {
+      setPaymentError(`Uang diterima kurang ${formatRupiah(cashShortage)}.`);
+      return;
+    }
     try {
       setPaymentSubmitting(true);
       setPaymentError(null);
@@ -372,6 +384,11 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       const payload = buildEditPayload();
       formData.append('property_id', String(payload.property_id));
       formData.append('payment_method', paymentMethod);
+      if (paymentMethod === 'CASH') {
+        formData.append('amount_tendered', String(cashTendered));
+      } else {
+        formData.append('payment_amount', String(paymentRequired));
+      }
       formData.append('evidence_note', paymentNote.trim());
       formData.append('guest_name', payload.guest_name);
       formData.append('guest_phone', payload.guest_phone);
@@ -819,12 +836,12 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
               type="submit"
               disabled={loading || previewLoading || !previewData || (previewData && previewData.room_overlap_conflict)}
               className={`px-5 py-2 font-bold rounded-xl shadow-xs transition-colors cursor-pointer ${
-                previewData && previewData.price_difference > 0
+                paymentRequired > 0
                   ? 'bg-amber-600 hover:bg-amber-500 text-white'
                   : 'bg-emerald-800 hover:bg-emerald-700 text-white'
               } disabled:opacity-50`}
             >
-              {loading ? 'Menyimpan...' : previewData && previewData.price_difference > 0 ? 'Bayar Selisih & Simpan' : 'Simpan Perubahan'}
+              {loading ? 'Menyimpan...' : paymentRequired > 0 ? 'Bayar Selisih & Simpan' : 'Simpan Perubahan'}
             </button>
           </div>
         </form>
@@ -911,7 +928,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
         <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between pb-3 border-b border-stone-200">
-              <h3 className="text-base font-bold text-stone-900">Konfirmasi Pembayaran Selisih</h3>
+              <h3 className="text-base font-bold text-stone-900">Konfirmasi Pembayaran Perubahan</h3>
               <button
                 type="button"
                 onClick={() => { setShowPaymentModal(false); setPaymentError(null); }}
@@ -945,10 +962,36 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   Rp {Number(previewData.quote?.grand_total || 0).toLocaleString('id-ID')}
                 </span>
               </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-stone-600">Selisih Perubahan Harga</span>
+                <span className="font-mono font-semibold text-stone-800">
+                  {formatRupiah(Number(previewData.price_difference || 0))}
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-stone-600">Sudah Dibayar</span>
+                <span className="font-mono font-semibold text-stone-800">
+                  {formatRupiah(Number(previewData.amount_paid || 0))}
+                </span>
+              </div>
+              {Number(previewData.applied_deposit || 0) > 0 && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-stone-600">Deposit Terpakai</span>
+                  <span className="font-mono font-semibold text-stone-800">
+                    {formatRupiah(Number(previewData.applied_deposit || 0))}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between text-xs">
+                <span className="text-stone-600">Sisa Tagihan Setelah Perubahan</span>
+                <span className="font-mono font-semibold text-stone-800">
+                  {formatRupiah(Number(previewData.new_remaining_before_payment || 0))}
+                </span>
+              </div>
               <div className="border-t border-stone-200 pt-2 flex justify-between text-sm">
-                <span className="font-bold text-stone-800">Wajib Dibayar</span>
+                <span className="font-bold text-stone-800">Wajib Dibayar Sekarang</span>
                 <span className="font-mono font-bold text-rose-700">
-                  Rp {Number(previewData.price_difference || 0).toLocaleString('id-ID')}
+                  {formatRupiah(paymentRequired)}
                 </span>
               </div>
             </div>
@@ -961,7 +1004,12 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 </label>
                 <select
                   value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  onChange={(e) => {
+                    const nextMethod = e.target.value;
+                    setPaymentMethod(nextMethod);
+                    setCashTenderedInput(nextMethod === 'CASH' ? String(paymentRequired) : '');
+                    setPaymentError(null);
+                  }}
                   className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs"
                 >
                   <option value="CASH">CASH</option>
@@ -971,6 +1019,41 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   <option value="CREDIT_CARD">CREDIT CARD</option>
                 </select>
               </div>
+
+              {paymentMethod === 'CASH' ? (
+                <div className="space-y-2">
+                  <div>
+                    <label className="block font-semibold text-stone-700 mb-1 text-xs">
+                      Uang Diterima <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      inputMode="numeric"
+                      value={cashTenderedInput ? formatRupiah(cashTendered) : ''}
+                      onChange={(e) => {
+                        setCashTenderedInput(e.target.value.replace(/\D/g, ''));
+                        setPaymentError(null);
+                      }}
+                      placeholder="Rp0"
+                      className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs font-mono"
+                    />
+                  </div>
+                  {cashShortage > 0 ? (
+                    <p className="text-xs font-semibold text-rose-700">Uang diterima kurang {formatRupiah(cashShortage)}.</p>
+                  ) : (
+                    <div className="flex justify-between rounded-lg bg-emerald-50 px-3 py-2 text-xs">
+                      <span className="font-semibold text-emerald-900">Kembalian</span>
+                      <span className="font-mono font-bold text-emerald-900">{formatRupiah(changeAmount)}</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <label className="block font-semibold text-stone-700 mb-1 text-xs">Nominal Pembayaran</label>
+                  <div className="w-full px-3 py-2 bg-stone-100 border border-stone-200 rounded-lg text-xs font-mono font-bold text-stone-800">
+                    {formatRupiah(paymentRequired)}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-stone-700 mb-1 text-xs">
@@ -1008,7 +1091,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
               <button
                 type="button"
                 onClick={handleSubmitWithPayment}
-                disabled={paymentSubmitting || !paymentFile}
+                disabled={paymentSubmitting || !paymentFile || (paymentMethod === 'CASH' && cashShortage > 0)}
                 className="px-5 py-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
               >
                 {paymentSubmitting ? 'Menyimpan...' : 'Konfirmasi Pembayaran & Simpan'}
