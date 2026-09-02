@@ -257,6 +257,61 @@ export default function QuickBookingModal({
     }
   }, [channelType, selectedOtaSourceName]);
 
+  const isDayUseAllowed = getFieldMode('day_use') !== 'HIDDEN';
+
+  // If Day Use is not allowed for the active channel, ensure any DAY_USE drafts revert to OVERNIGHT
+  useEffect(() => {
+    if (!isDayUseAllowed) {
+      setRoomsList(prev => {
+        let changed = false;
+        const updated = prev.map(draft => {
+          if (draft.stayType === 'DAY_USE') {
+            changed = true;
+            let newCheckOut = draft.checkOut;
+            if (!newCheckOut || newCheckOut <= draft.checkIn) {
+              const d = new Date(draft.checkIn || todayStr);
+              d.setDate(d.getDate() + 1);
+              newCheckOut = d.toISOString().slice(0, 10);
+            }
+            return {
+              ...draft,
+              stayType: 'OVERNIGHT' as const,
+              checkOut: newCheckOut,
+              ratePlanId: null
+            };
+          }
+          return draft;
+        });
+        return changed ? updated : prev;
+      });
+    }
+  }, [isDayUseAllowed, todayStr]);
+
+  // Auto-fill default rate plan if ratePlanId is missing and channel is not OTA
+  useEffect(() => {
+    const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
+    if (allPlans.length === 0 || channelType === 'OTA') return;
+
+    setRoomsList(prev => {
+      let changed = false;
+      const updated = prev.map(draft => {
+        if (!draft.ratePlanId && draft.roomTypeId) {
+          const isDayUse = draft.stayType === 'DAY_USE';
+          const matchPlan = allPlans.find((rp: any) =>
+            (!rp.room_type_id || Number(rp.room_type_id) === Number(draft.roomTypeId)) &&
+            (isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
+          );
+          if (matchPlan) {
+            changed = true;
+            return { ...draft, ratePlanId: Number(matchPlan.id) };
+          }
+        }
+        return draft;
+      });
+      return changed ? updated : prev;
+    });
+  }, [internalRatePlans, ratePlans, channelType]);
+
   // --- UI & Submission State ---
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -478,14 +533,14 @@ export default function QuickBookingModal({
         try {
           const d1 = new Date(draft.checkIn);
           const d2 = new Date(draft.checkOut);
-          const diff = Math.ceil((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
-          nightsCount = diff > 0 ? diff : 1;
+          const diff = Math.round((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
+          nightsCount = diff > 0 ? diff : 0;
         } catch {
-          nightsCount = 1;
+          nightsCount = 0;
         }
       }
       // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount
-      const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(1, nightsCount);
+      const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(0, nightsCount);
       const roomCharge = draft.isManualOverride
         ? Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights)
         : Math.max(0, Number(draft.roomNightlyRate) || 0);
@@ -1442,8 +1497,13 @@ export default function QuickBookingModal({
                     netSubtotal: 0
                   };
 
+                  const isDayUse = roomDraft.stayType === 'DAY_USE';
                   const availableRPlans = (internalRatePlans.length > 0 ? internalRatePlans : ratePlans).filter(
-                    (rp: any) => !rp.room_type_id || rp.room_type_id === roomDraft.roomTypeId
+                    (rp: any) => {
+                      const matchesType = !rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId);
+                      if (!matchesType) return false;
+                      return isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE';
+                    }
                   );
 
                   return (
@@ -1481,26 +1541,54 @@ export default function QuickBookingModal({
                           <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500">
                             Waktu & Durasi Menginap
                           </span>
-                          <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg text-xs font-semibold">
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateRoom(roomIdx, { stayType: 'OVERNIGHT' })}
-                              className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
-                                roomDraft.stayType === 'OVERNIGHT' ? 'bg-white text-emerald-950 shadow-xs font-bold' : 'text-stone-600'
-                              )}
-                            >
-                              Menginap
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateRoom(roomIdx, { stayType: 'DAY_USE' })}
-                              className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
-                                roomDraft.stayType === 'DAY_USE' ? 'bg-white text-emerald-950 shadow-xs font-bold' : 'text-stone-600'
-                              )}
-                            >
-                              Day Use
-                            </button>
-                          </div>
+                          {isDayUseAllowed && (
+                            <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg text-xs font-semibold">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  let newCheckOut = roomDraft.checkOut;
+                                  if (!newCheckOut || newCheckOut <= roomDraft.checkIn) {
+                                    const d = new Date(roomDraft.checkIn || todayStr);
+                                    d.setDate(d.getDate() + 1);
+                                    newCheckOut = d.toISOString().slice(0, 10);
+                                  }
+                                  const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
+                                  const matchingPlan = allPlans.find(
+                                    (rp: any) => (!rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId)) && rp.rate_type !== 'DAY_USE'
+                                  );
+                                  handleUpdateRoom(roomIdx, {
+                                    stayType: 'OVERNIGHT',
+                                    checkOut: newCheckOut,
+                                    ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
+                                  });
+                                }}
+                                className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
+                                  roomDraft.stayType === 'OVERNIGHT' ? 'bg-white text-emerald-950 shadow-xs font-bold' : 'text-stone-600'
+                                )}
+                              >
+                                Menginap
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
+                                  const matchingDayPlan = allPlans.find(
+                                    (rp: any) => (!rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId)) && rp.rate_type === 'DAY_USE'
+                                  );
+                                  handleUpdateRoom(roomIdx, {
+                                    stayType: 'DAY_USE',
+                                    checkOut: roomDraft.checkIn,
+                                    ratePlanId: matchingDayPlan ? Number(matchingDayPlan.id) : null
+                                  });
+                                }}
+                                className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
+                                  roomDraft.stayType === 'DAY_USE' ? 'bg-white text-emerald-950 shadow-xs font-bold' : 'text-stone-600'
+                                )}
+                              >
+                                Day Use
+                              </button>
+                            </div>
+                          )}
                         </div>
 
                         {roomDraft.stayType === 'OVERNIGHT' ? (
@@ -1513,7 +1601,16 @@ export default function QuickBookingModal({
                                 type="date"
                                 required
                                 value={roomDraft.checkIn}
-                                onChange={e => handleUpdateRoom(roomIdx, { checkIn: e.target.value })}
+                                onChange={e => {
+                                  const newCheckIn = e.target.value;
+                                  let newCheckOut = roomDraft.checkOut;
+                                  if (newCheckOut && newCheckOut <= newCheckIn) {
+                                    const d = new Date(newCheckIn);
+                                    d.setDate(d.getDate() + 1);
+                                    newCheckOut = d.toISOString().slice(0, 10);
+                                  }
+                                  handleUpdateRoom(roomIdx, { checkIn: newCheckIn, checkOut: newCheckOut });
+                                }}
                                 className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
                               />
                             </div>
@@ -1618,10 +1715,16 @@ export default function QuickBookingModal({
                             onChange={e => {
                               const newTypeId = Number(e.target.value);
                               const matchingRooms = rooms.filter(rm => (rm.room_type_id || rm.canonical_room_type_id) === newTypeId);
+                              const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
+                              const matchingPlan = allPlans.find(
+                                (rp: any) =>
+                                  (!rp.room_type_id || Number(rp.room_type_id) === newTypeId) &&
+                                  (roomDraft.stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
+                              );
                               handleUpdateRoom(roomIdx, {
                                 roomTypeId: newTypeId,
                                 roomId: matchingRooms.length > 0 ? matchingRooms[0].id : null,
-                                ratePlanId: null
+                                ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
                               });
                             }}
                             className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
@@ -1659,14 +1762,18 @@ export default function QuickBookingModal({
                         {channelType !== 'OTA' && (
                           <div className="sm:col-span-2">
                             <label className="block text-xs font-semibold text-stone-700 mb-1">
-                              Rate Plan / Paket Harga
+                              Rate Plan / Paket Harga {isDayUse ? '(Khusus Day Use)' : ''}
                             </label>
                             <select
                               value={roomDraft.ratePlanId || ''}
                               onChange={e => handleUpdateRoom(roomIdx, { ratePlanId: e.target.value ? Number(e.target.value) : null })}
                               className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                             >
-                              <option value="">Tarif Standar / Reguler</option>
+                              <option value="">
+                                {isDayUse
+                                  ? (availableRPlans.length === 0 ? 'Tidak ada Paket Day Use untuk Tipe Kamar ini' : '-- Pilih Paket Day Use --')
+                                  : 'Tarif Standar / Reguler'}
+                              </option>
                               {availableRPlans.map((rp: any) => (
                                 <option key={rp.id} value={rp.id}>
                                   {rp.name} ({rp.code}) {rp.meal_plan_name ? ('• ' + rp.meal_plan_name) : ''}

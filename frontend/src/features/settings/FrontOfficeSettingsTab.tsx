@@ -29,6 +29,7 @@ const FIELD_DEFINITIONS: { key: string; label: string; desc: string }[] = [
   { key: 'payment_amount', label: 'Nominal Pembayaran', desc: 'Jumlah uang muka / pelunasan saat pemesanan' },
   { key: 'payment_evidence', label: 'Bukti Pembayaran', desc: 'Unggah bukti transfer/struk EDC non-tunai' },
   { key: 'rate_plan', label: 'Rate Plan / Paket Tarif', desc: 'Pilihan paket tarif kamar (Standard, Breakfast, Promo)' },
+  { key: 'day_use', label: 'Layanan Day Use / Transit', desc: 'Izin dan ketersediaan opsi sewa kamar per jam / Day Use pada form reservasi' },
 ];
 
 interface FrontOfficeSettingsTabProps {

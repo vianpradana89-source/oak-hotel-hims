@@ -39,7 +39,8 @@ export const DEFAULT_BOOKING_FIELDS = [
   'payment_method',
   'payment_amount',
   'payment_evidence',
-  'rate_plan'
+  'rate_plan',
+  'day_use'
 ];
 
 export const DEFAULT_WALK_IN_RULES: Record<string, FieldMode> = {
@@ -53,7 +54,8 @@ export const DEFAULT_WALK_IN_RULES: Record<string, FieldMode> = {
   payment_method: 'OPTIONAL',
   payment_amount: 'OPTIONAL',
   payment_evidence: 'OPTIONAL',
-  rate_plan: 'OPTIONAL'
+  rate_plan: 'OPTIONAL',
+  day_use: 'OPTIONAL'
 };
 
 export const DEFAULT_OTA_RULES: Record<string, FieldMode> = {
@@ -67,7 +69,8 @@ export const DEFAULT_OTA_RULES: Record<string, FieldMode> = {
   payment_method: 'OPTIONAL',
   payment_amount: 'OPTIONAL',
   payment_evidence: 'OPTIONAL',
-  rate_plan: 'OPTIONAL'
+  rate_plan: 'OPTIONAL',
+  day_use: 'HIDDEN'
 };
 
 export const DEFAULT_DAY_USE_PRESETS = [
