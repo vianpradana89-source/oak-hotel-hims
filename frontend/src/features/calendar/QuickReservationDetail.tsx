@@ -161,10 +161,12 @@ export default function QuickReservationDetail({
     };
 
     const handlePointerDown = (e: MouseEvent | TouchEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (popoverRef.current && !popoverRef.current.contains(target)) {
+        if ((target as Element).closest?.('[data-portal-overlay]')) return;
         onClose();
       }
-      if (moreActionsRef.current && !moreActionsRef.current.contains(e.target as Node)) {
+      if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
         setIsMoreActionsOpen(false);
       }
     };

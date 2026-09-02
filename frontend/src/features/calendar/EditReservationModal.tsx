@@ -208,7 +208,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   const filteredRatePlans = ratePlans.filter((rp) => !roomTypeId || !rp.room_type_id || rp.room_type_id === roomTypeId);
 
   return ReactDOM.createPortal(
-    <div className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
+    <div data-portal-overlay="reservation-edit" className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
       <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 my-8 max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-stone-200">
