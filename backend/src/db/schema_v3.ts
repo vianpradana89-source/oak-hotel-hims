@@ -3301,6 +3301,126 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // 27. FRONT OFFICE DEPOSIT + PHYSICAL IDENTITY CUSTODY FOUNDATION
+    const depositFoundationMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'front_office_deposit_identity_custody_v1'"
+    );
+    if ((depositFoundationMarker.rowCount ?? 0) === 0) {
+      const legacyDepositPayments = await auditMigrationClient.query(`
+        SELECT id, property_id, reservation_id, transaction_type, amount, reference_code, status
+        FROM payment_transactions
+        WHERE UPPER(TRIM(transaction_type)) IN ('DEPOSIT', 'DEPOSIT_REFUND')
+        ORDER BY id
+      `);
+      if ((legacyDepositPayments.rowCount ?? 0) > 0) {
+        const details = legacyDepositPayments.rows
+          .map((row: any) => `payment=${row.id}, property=${row.property_id ?? 'NULL'}, reservation=${row.reservation_id ?? 'NULL'}, type=${row.transaction_type}, amount=${row.amount}, status=${row.status}`)
+          .join('; ');
+        throw new Error(
+          `[MIGRATION HALTED - CANONICAL DEPOSIT FOUNDATION] Existing DEPOSIT/DEPOSIT_REFUND payment transactions require explicit classification before migration: ${details}`
+        );
+      }
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS deposits (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          deposit_number VARCHAR(40) NOT NULL,
+          original_amount BIGINT NOT NULL CHECK (original_amount > 0),
+          payment_method VARCHAR(30) NOT NULL,
+          status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED'
+            CHECK (status IN ('RECEIVED', 'PARTIALLY_USED', 'CLOSED', 'CANCELLED')),
+          received_by VARCHAR(100) NOT NULL,
+          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          notes TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_deposits_property_number UNIQUE (property_id, deposit_number),
+          CONSTRAINT uq_deposits_event_identity UNIQUE (id, property_id, reservation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS deposit_events (
+          id BIGSERIAL PRIMARY KEY,
+          deposit_id BIGINT NOT NULL,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          event_type VARCHAR(30) NOT NULL
+            CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL')),
+          amount BIGINT NOT NULL CHECK (amount > 0),
+          payment_transaction_id INTEGER REFERENCES payment_transactions(id) ON DELETE RESTRICT,
+          folio_entry_id INTEGER REFERENCES folio_entries(id) ON DELETE RESTRICT,
+          reversal_of_event_id BIGINT REFERENCES deposit_events(id) ON DELETE RESTRICT,
+          idempotency_key VARCHAR(150) NOT NULL,
+          performed_by VARCHAR(100) NOT NULL,
+          performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          notes TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT fk_deposit_events_deposit_ownership
+            FOREIGN KEY (deposit_id, property_id, reservation_id)
+            REFERENCES deposits(id, property_id, reservation_id) ON DELETE RESTRICT,
+          CONSTRAINT uq_deposit_events_property_idempotency UNIQUE (property_id, idempotency_key),
+          CONSTRAINT chk_deposit_event_projection CHECK (
+            (event_type = 'RECEIVED' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+            OR (event_type = 'APPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NULL)
+            OR (event_type = 'REFUND' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+            OR (event_type = 'REVERSAL' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NOT NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deposits_property_reservation
+          ON deposits(property_id, reservation_id);
+        CREATE INDEX IF NOT EXISTS idx_deposits_property_status
+          ON deposits(property_id, status);
+        CREATE INDEX IF NOT EXISTS idx_deposit_events_deposit
+          ON deposit_events(deposit_id, id);
+        CREATE INDEX IF NOT EXISTS idx_deposit_events_reservation
+          ON deposit_events(property_id, reservation_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_events_payment_projection
+          ON deposit_events(payment_transaction_id)
+          WHERE payment_transaction_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_events_folio_projection
+          ON deposit_events(folio_entry_id)
+          WHERE folio_entry_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_events_single_reversal
+          ON deposit_events(reversal_of_event_id)
+          WHERE event_type = 'REVERSAL';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_refund_reference
+          ON payment_transactions(property_id, reference_code)
+          WHERE transaction_type = 'DEPOSIT_REFUND' AND reference_code IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS identity_custody (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          document_type VARCHAR(30) NOT NULL
+            CHECK (document_type IN ('KTP', 'SIM', 'PASSPORT', 'OTHER')),
+          document_holder_name VARCHAR(255) NOT NULL,
+          document_number_masked VARCHAR(50),
+          status VARCHAR(20) NOT NULL DEFAULT 'HELD'
+            CHECK (status IN ('HELD', 'RETURNED')),
+          received_by VARCHAR(100) NOT NULL,
+          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          returned_by VARCHAR(100),
+          returned_at TIMESTAMPTZ,
+          storage_location VARCHAR(255),
+          notes TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_identity_custody_return CHECK (
+            (status = 'HELD' AND returned_by IS NULL AND returned_at IS NULL)
+            OR (status = 'RETURNED' AND returned_by IS NOT NULL AND returned_at IS NOT NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_custody_reservation
+          ON identity_custody(property_id, reservation_id, status);
+
+        INSERT INTO schema_migrations(version)
+        VALUES ('front_office_deposit_identity_custody_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

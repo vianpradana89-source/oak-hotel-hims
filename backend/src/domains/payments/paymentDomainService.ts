@@ -74,6 +74,13 @@ export async function createPaymentCore(
   if (!Number.isInteger(paymentAmount)) {
     throw { statusCode: 400, code: 'VALIDATION_ERROR', message: 'amount must be an integer (IDR currency does not support decimal amounts)' };
   }
+  if (['DEPOSIT', 'DEPOSIT_REFUND'].includes(String(transactionType).toUpperCase())) {
+    throw {
+      statusCode: 400,
+      code: 'DEPOSIT_ENDPOINT_REQUIRED',
+      message: 'Deposit cash movements must use the canonical deposit service'
+    };
+  }
 
   // 2. Evidence validation
   if (requireEvidence && !file) {

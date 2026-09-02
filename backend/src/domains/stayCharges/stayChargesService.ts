@@ -330,7 +330,8 @@ export async function deleteStayChargeRule(
 export async function recalculateReservationFinancials(
   client: PoolClient | Pool,
   reservationId: number,
-  propertyId: number
+  propertyId: number,
+  ordinaryFallbackOverride?: number
 ): Promise<{
   total_price: number;
   amount_paid: number;
@@ -343,7 +344,8 @@ export async function recalculateReservationFinancials(
     `SELECT r.*, b.property_id AS booking_property_id
      FROM reservations r
      LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1`,
+     WHERE r.id = $1
+     FOR UPDATE OF r`,
     [reservationId]
   );
   if ((resCheck.rowCount ?? 0) === 0) {
@@ -408,12 +410,30 @@ export async function recalculateReservationFinancials(
      WHERE reservation_id = $1`,
     [reservationId]
   );
-  let netAmountPaid = Math.round(Number(pmtRes.rows[0]?.net_paid || 0));
-  if (netAmountPaid < 0) netAmountPaid = 0;
+  let ordinaryAmountPaid = Math.round(Number(pmtRes.rows[0]?.net_paid || 0));
+  if (ordinaryAmountPaid < 0) ordinaryAmountPaid = 0;
 
-  // If no payment_transactions rows exist, fallback to reservation.amount_paid or folio payment credits
+  const depositApplyRes = await client.query(
+    `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
+     FROM folio_entries
+     WHERE reservation_id = $1
+       AND property_id = $2
+       AND entry_type = 'DEPOSIT_APPLY'
+       AND direction = 'CREDIT'
+       AND status = 'POSTED'
+       AND is_voided = FALSE
+       AND reversal_of_entry_id IS NULL`,
+    [reservationId, propertyId]
+  );
+  const appliedDeposit = Math.round(Number(depositApplyRes.rows[0]?.applied_deposit || 0));
+
+  // Deposit cash movements are liabilities, not reservation settlement. Only
+  // ordinary settlement transaction types participate in this legacy fallback.
   const hasPaymentTx = await client.query(
-    `SELECT 1 FROM payment_transactions WHERE reservation_id = $1 LIMIT 1`,
+    `SELECT 1 FROM payment_transactions
+     WHERE reservation_id = $1
+       AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+     LIMIT 1`,
     [reservationId]
   );
   if ((hasPaymentTx.rowCount ?? 0) === 0) {
@@ -426,8 +446,19 @@ export async function recalculateReservationFinancials(
       [reservationId]
     );
     const folioPaid = Math.round(Number(folioPmtRes.rows[0]?.folio_paid || 0));
-    netAmountPaid = folioPaid > 0 ? folioPaid : Math.round(Number(resRow.amount_paid || 0));
+    if (folioPaid > 0) {
+      ordinaryAmountPaid = folioPaid;
+    } else {
+      ordinaryAmountPaid = ordinaryFallbackOverride === undefined
+        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)) - appliedDeposit)
+        : Math.max(0, Math.round(ordinaryFallbackOverride));
+    }
   }
+
+  // A deposit affects reservation settlement only when explicitly applied.
+  // Do not generically sum folio credits: ordinary payments already have folio
+  // projections and would otherwise be counted twice.
+  const netAmountPaid = ordinaryAmountPaid + appliedDeposit;
 
   // 4. Calculate Remaining Balance & Payment Status
   const remainingBalance = Math.max(0, netTotalCharges - netAmountPaid);
@@ -819,6 +850,12 @@ export async function voidFolioEntry(
   }
 
   // 4. Validate entry kind (cannot void payment or reversal rows directly through this endpoint)
+  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+    const err: any = new Error('Aplikasi deposit hanya dapat dibalik melalui lifecycle deposit canonical');
+    err.statusCode = 400;
+    err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
+    throw err;
+  }
   if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {
     const err: any = new Error('Pembayaran harus dibatalkan melalui fitur pembatalan pembayaran');
     err.statusCode = 400;
@@ -971,6 +1008,12 @@ export async function correctFolioEntry(
     const err: any = new Error(`Item folio #${folioEntryId} sudah dibatalkan atau dikoreksi sebelumnya`);
     err.statusCode = 409;
     err.code = 'ALREADY_MODIFIED';
+    throw err;
+  }
+  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+    const err: any = new Error('Aplikasi deposit hanya dapat dikoreksi melalui lifecycle deposit canonical');
+    err.statusCode = 400;
+    err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
     throw err;
   }
   if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {

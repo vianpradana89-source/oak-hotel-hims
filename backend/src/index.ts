@@ -75,6 +75,9 @@ import { createTransactionsRouter } from './domains/transactions/transactionsRou
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
+import { createIdentityCustodyRouter } from './domains/identity/identityCustodyRouter';
+import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCustodyService';
+import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { previewReservationEdit, executeReservationEdit } from './domains/reservations/reservationEditService';
@@ -5343,6 +5346,19 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         }
       }
 
+      // No property guarantee policy exists yet. Fail closed only when an
+      // explicit physical custody record is still HELD; uploaded KTP/OCR data
+      // is intentionally unrelated to this gate.
+      const heldIdentity = await getHeldIdentityCustodyForCheckout(client, propertyId, reservationId);
+      if (heldIdentity.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'IDENTITY_CUSTODY_NOT_RETURNED',
+          message: 'Dokumen identitas fisik masih ditahan hotel dan harus dikembalikan sebelum checkout.'
+        });
+      }
+
       const updated = await client.query(
         `UPDATE reservations
          SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
@@ -5460,6 +5476,14 @@ app.post('/api/reservations/:id/payments', handlePaymentUpload, async (req: any,
   }
 
   const { property_id: propertyIdRaw, amount, payment_method, reference_code, transaction_type, evidence_type, evidence_note } = req.body;
+
+  if (['DEPOSIT', 'DEPOSIT_REFUND'].includes(String(transaction_type || '').toUpperCase())) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'DEPOSIT_ENDPOINT_REQUIRED',
+      message: 'Deposit cash movements must use the canonical deposit endpoints.'
+    });
+  }
 
   if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
@@ -5650,6 +5674,14 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
     }
 
     const originalPayment = paymentRes.rows[0];
+    if (['DEPOSIT', 'DEPOSIT_REFUND'].includes(String(originalPayment.transaction_type || '').toUpperCase())) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'DEPOSIT_CANONICAL_OPERATION_REQUIRED',
+        message: 'Deposit cash movements must be corrected through the canonical deposit lifecycle.'
+      });
+    }
     if (originalPayment.status === 'CORRECTED' || originalPayment.status === 'VOIDED' || originalPayment.transaction_type === 'REVERSAL') {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -5953,6 +5985,14 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
     }
 
     const originalPayment = paymentRes.rows[0];
+    if (['DEPOSIT', 'DEPOSIT_REFUND'].includes(String(originalPayment.transaction_type || '').toUpperCase())) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'DEPOSIT_CANONICAL_OPERATION_REQUIRED',
+        message: 'Deposit cash movements must be voided through the canonical deposit lifecycle.'
+      });
+    }
     if (originalPayment.status === 'CORRECTED' || originalPayment.status === 'VOIDED' || originalPayment.transaction_type === 'REVERSAL') {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -6544,6 +6584,8 @@ app.use('/api/suppliers', createSuppliersRouter(pool));
 app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
+app.use('/api', createDepositRouter(pool));
+app.use('/api', createIdentityCustodyRouter(pool));
 app.use('/api/auth', createAuthRouter(pool));
 app.use('/api/users', createUsersRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
