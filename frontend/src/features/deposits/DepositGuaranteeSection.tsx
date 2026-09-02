@@ -108,6 +108,7 @@ export default function DepositGuaranteeSection({
   const returnedCustody = custody.filter(c => c.status === 'RETURNED');
   const isClosed = ['CHECKED_OUT', 'CANCELLED'].includes(reservationStatus);
 
+  const [showChooser, setShowChooser] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showApply, setShowApply] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
@@ -218,9 +219,9 @@ export default function DepositGuaranteeSection({
       {/* Action Buttons */}
       {!isClosed && capabilities.canReceiveDeposit && (
         <div className="px-4 py-3 border-t border-stone-100 flex flex-wrap gap-2">
-          <button onClick={() => { setError(null); setShowReceive(true); }}
+          <button onClick={() => { setError(null); setShowChooser(true); }}
             className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition">
-            + Terima Deposit
+            + Tambah Jaminan
           </button>
           {capabilities.canApplyDeposit && balance.remaining > 0 && remainingBalance > 0 && (
             <button onClick={() => { setError(null); setShowApply(true); }}
@@ -270,12 +271,6 @@ export default function DepositGuaranteeSection({
         ) : (
           <div className="flex items-center justify-between">
             <span className="text-xs text-stone-400">Tidak ada identitas ditahan</span>
-            {!isClosed && capabilities.canHoldIdentity && (
-              <button onClick={() => { setError(null); setShowHoldId(true); }}
-                className="px-2.5 py-1 bg-stone-100 text-stone-700 text-xs font-semibold rounded-lg hover:bg-stone-200 border border-stone-200 transition">
-                + Terima Identitas
-              </button>
-            )}
           </div>
         )}
         {/* Identity Custody History */}
@@ -304,6 +299,36 @@ export default function DepositGuaranteeSection({
       {error && <div className="px-4 py-2 bg-red-50 border-t border-red-100 text-xs text-red-600">{error}</div>}
 
       {/* === MODALS === */}
+
+      {/* Guarantee Type Chooser */}
+      <Modal isOpen={showChooser} onClose={() => setShowChooser(false)}
+        title="Tambah Jaminan" size="sm">
+        <p className="text-xs text-stone-500 mb-3">Pilih jenis jaminan yang diterima dari tamu:</p>
+        <div className="space-y-2">
+          <button onClick={() => { setShowChooser(false); setError(null); setShowReceive(true); }}
+            className="w-full flex items-center gap-3 p-3 border border-stone-200 rounded-lg hover:bg-stone-50 hover:border-emerald-300 transition text-left group">
+            <span className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 text-lg group-hover:bg-emerald-100 transition">
+              Rp
+            </span>
+            <div>
+              <div className="text-sm font-semibold text-stone-800">Deposit Uang</div>
+              <div className="text-[11px] text-stone-400">Terima uang jaminan sebagai deposit</div>
+            </div>
+          </button>
+          {capabilities.canHoldIdentity && (
+            <button onClick={() => { setShowChooser(false); setError(null); setShowHoldId(true); }}
+              className="w-full flex items-center gap-3 p-3 border border-stone-200 rounded-lg hover:bg-stone-50 hover:border-amber-300 transition text-left group">
+              <span className="w-10 h-10 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600 text-lg group-hover:bg-amber-100 transition">
+                ID
+              </span>
+              <div>
+                <div className="text-sm font-semibold text-stone-800">Identitas Ditahan</div>
+                <div className="text-[11px] text-stone-400">Tahan kartu identitas fisik tamu</div>
+              </div>
+            </button>
+          )}
+        </div>
+      </Modal>
 
       {/* Receive Deposit Modal */}
       <ReceiveDepositModal isOpen={showReceive} onClose={() => setShowReceive(false)}
@@ -360,7 +385,7 @@ export default function DepositGuaranteeSection({
 
       {/* Hold Identity Modal */}
       <Modal isOpen={showHoldId} onClose={() => { setShowHoldId(false); setError(null); }}
-        title="Terima Identitas Fisik" size="sm">
+        title="Terima Identitas Ditahan" size="sm">
         <HoldIdentityForm propertyId={propertyId} reservationId={reservationId}
           onSuccess={() => { setShowHoldId(false); refreshAll(); }} onError={setError} />
       </Modal>
