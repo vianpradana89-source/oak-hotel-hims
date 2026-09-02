@@ -221,7 +221,8 @@ export default function QuickReservationDetail({
   // Financial status & values
   const totalPrice = Number(data.total_price || 0);
   const amountPaid = Number(data.amount_paid || 0);
-  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid)));
+  const appliedDeposit = Number(data.applied_deposit || 0);
+  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
 
   const getPaymentStatus = () => {
     const pStatus = String(data.payment_status || '').toUpperCase();

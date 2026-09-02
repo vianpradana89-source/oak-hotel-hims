@@ -2366,6 +2366,7 @@ app.get('/api/reservations', async (req, res) => {
       check_out: hotelDateKey(row.check_out),
       total_price: Number(row.total_price || 0),
       amount_paid: Number(row.amount_paid || 0),
+      applied_deposit: Number(row.applied_deposit || 0),
       remaining_balance: Number(row.remaining_balance || 0),
     }));
 
@@ -4741,10 +4742,16 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       [reservationId]
     );
     const totalPaid = Number(paymentsRes.rows[0].total_paid || 0);
-    const newRemainingBalance = Math.max(0, finalTotalPrice - totalPaid);
-    const newPaymentStatus = totalPaid >= finalTotalPrice && finalTotalPrice > 0
+    const appliedDepositRes = await client.query(
+      `SELECT COALESCE(applied_deposit, 0) AS applied_deposit FROM reservations WHERE id = $1`,
+      [reservationId]
+    );
+    const appliedDeposit = Number(appliedDepositRes.rows[0].applied_deposit || 0);
+    const effectiveSettlement = totalPaid + appliedDeposit;
+    const newRemainingBalance = Math.max(0, finalTotalPrice - effectiveSettlement);
+    const newPaymentStatus = effectiveSettlement >= finalTotalPrice && finalTotalPrice > 0
       ? 'PAID'
-      : (totalPaid > 0 ? 'PARTIAL' : 'UNPAID');
+      : (effectiveSettlement > 0 ? 'PARTIAL' : 'UNPAID');
 
     // Update reservation
     await client.query(
@@ -4753,14 +4760,16 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
            subtotal_amount = $2,
            total_price = $3,
            amount_paid = $4,
-           remaining_balance = $5,
-           payment_status = $6
-       WHERE id = $7`,
+           applied_deposit = $5,
+           remaining_balance = $6,
+           payment_status = $7
+       WHERE id = $8`,
       [
         requestedCheckOut,
         newStaySubtotal + otherCharges,
         finalTotalPrice,
         totalPaid,
+        appliedDeposit,
         newRemainingBalance,
         newPaymentStatus,
         reservationId
@@ -5005,10 +5014,16 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       [reservationId]
     );
     const totalPaid = Number(paymentsRes.rows[0].total_paid || 0);
-    const newRemainingBalance = Math.max(0, finalTotalPrice - totalPaid);
-    const newPaymentStatus = totalPaid > finalTotalPrice
+    const appliedDepositRes = await client.query(
+      `SELECT COALESCE(applied_deposit, 0) AS applied_deposit FROM reservations WHERE id = $1`,
+      [reservationId]
+    );
+    const appliedDeposit = Number(appliedDepositRes.rows[0].applied_deposit || 0);
+    const effectiveSettlement = totalPaid + appliedDeposit;
+    const newRemainingBalance = Math.max(0, finalTotalPrice - effectiveSettlement);
+    const newPaymentStatus = effectiveSettlement > finalTotalPrice
       ? 'OVERPAID'
-      : (totalPaid === finalTotalPrice && finalTotalPrice > 0 ? 'PAID' : (totalPaid > 0 ? 'PARTIAL' : 'UNPAID'));
+      : (effectiveSettlement === finalTotalPrice && finalTotalPrice > 0 ? 'PAID' : (effectiveSettlement > 0 ? 'PARTIAL' : 'UNPAID'));
 
     // Update reservation
     await client.query(
@@ -5017,14 +5032,16 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
            subtotal_amount = $2,
            total_price = $3,
            amount_paid = $4,
-           remaining_balance = $5,
-           payment_status = $6
-       WHERE id = $7`,
+           applied_deposit = $5,
+           remaining_balance = $6,
+           payment_status = $7
+       WHERE id = $8`,
       [
         requestedCheckOut,
         newStaySubtotal + otherCharges,
         finalTotalPrice,
         totalPaid,
+        appliedDeposit,
         newRemainingBalance,
         newPaymentStatus,
         reservationId
@@ -5694,9 +5711,11 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
     const oldAmount = Math.round(Number(originalPayment.amount || 0));
     const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
     const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
+    const currentAppliedDeposit = Math.round(Number(reservation.rows[0].applied_deposit || 0));
 
     const resultingPaid = (currentPaid - oldAmount) + correctedAmount;
-    if (resultingPaid > totalPrice) {
+    const resultingEffectiveSettlement = resultingPaid + currentAppliedDeposit;
+    if (resultingEffectiveSettlement > totalPrice) {
       await client.query('ROLLBACK');
       return res.status(400).json({
         status: 'ERROR',
@@ -5705,14 +5724,15 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
         details: {
           corrected_amount: correctedAmount,
           resulting_paid: resultingPaid,
+          applied_deposit: currentAppliedDeposit,
           total_price: totalPrice,
-          maximum_allowed_payment: totalPrice - (currentPaid - oldAmount)
+          maximum_allowed_payment: totalPrice - currentAppliedDeposit - (currentPaid - oldAmount)
         }
       });
     }
 
-    const resultingRemaining = Math.max(0, totalPrice - resultingPaid);
-    const resultingPaymentStatus = resultingPaid <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
+    const resultingRemaining = Math.max(0, totalPrice - resultingEffectiveSettlement);
+    const resultingPaymentStatus = resultingEffectiveSettlement <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     // 1. Mark original payment as CORRECTED
     await client.query(
@@ -5834,8 +5854,8 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
 
     // 6. Update reservation
     const updated = await client.query(
-      `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
-      [resultingPaid, resultingRemaining, resultingPaymentStatus, reservationId]
+      `UPDATE reservations SET amount_paid = $1, applied_deposit = $2, remaining_balance = $3, payment_status = $4 WHERE id = $5 RETURNING *`,
+      [resultingPaid, currentAppliedDeposit, resultingRemaining, resultingPaymentStatus, reservationId]
     );
 
     // 7. Audit log
@@ -6005,10 +6025,12 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
     const oldAmount = Math.round(Number(originalPayment.amount || 0));
     const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
     const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
+    const currentAppliedDeposit = Math.round(Number(reservation.rows[0].applied_deposit || 0));
 
     const resultingPaid = Math.max(0, currentPaid - oldAmount);
-    const resultingRemaining = totalPrice - resultingPaid;
-    const resultingPaymentStatus = resultingPaid <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
+    const resultingEffectiveSettlement = resultingPaid + currentAppliedDeposit;
+    const resultingRemaining = Math.max(0, totalPrice - resultingEffectiveSettlement);
+    const resultingPaymentStatus = resultingEffectiveSettlement <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     // 1. Mark original payment as VOIDED
     await client.query(
@@ -6047,8 +6069,8 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
 
     // 4. Update reservation
     const updated = await client.query(
-      `UPDATE reservations SET amount_paid = $1, remaining_balance = $2, payment_status = $3 WHERE id = $4 RETURNING *`,
-      [resultingPaid, resultingRemaining, resultingPaymentStatus, reservationId]
+      `UPDATE reservations SET amount_paid = $1, applied_deposit = $2, remaining_balance = $3, payment_status = $4 WHERE id = $5 RETURNING *`,
+      [resultingPaid, currentAppliedDeposit, resultingRemaining, resultingPaymentStatus, reservationId]
     );
 
     // 5. Audit log

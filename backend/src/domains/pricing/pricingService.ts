@@ -2152,7 +2152,7 @@ export async function createReservationRateSnapshots(
       tax_amount = $8,
       service_amount = $9,
       total_price = $10,
-      remaining_balance = GREATEST(0, $10 - COALESCE(amount_paid, 0)),
+      remaining_balance = GREATEST(0, $10 - COALESCE(amount_paid, 0) - COALESCE(applied_deposit, 0)),
       is_manual_override = $12,
       manual_override_reason = $13
      WHERE id = $11`,
@@ -2337,7 +2337,7 @@ export async function repriceReservationStayDates(
       service_amount = $4,
       tax_amount = $5,
       total_price = $6,
-      remaining_balance = GREATEST(0, $6 - COALESCE(amount_paid, 0))
+      remaining_balance = GREATEST(0, $6 - COALESCE(amount_paid, 0) - COALESCE(applied_deposit, 0))
      WHERE id = $7`,
     [newCheckIn, newCheckOut, totalSubtotal, totalService, totalTax, grandTotal, reservationId]
   );

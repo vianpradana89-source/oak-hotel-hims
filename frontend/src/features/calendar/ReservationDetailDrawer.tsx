@@ -7,6 +7,7 @@ import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import { PrintMenu } from '../print';
 
 interface Props {
   reservation: any;
@@ -56,6 +57,7 @@ export default function ReservationDetailDrawer({
   const [savingPhone, setSavingPhone] = useState<boolean>(false);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
+  const [isPrintMenuOpen, setIsPrintMenuOpen] = useState<boolean>(false);
   const { authFetch } = useAuth();
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
@@ -297,7 +299,8 @@ export default function ReservationDetailDrawer({
 
   const totalPrice = Number(data.total_price || 0);
   const amountPaid = Number(data.amount_paid || 0);
-  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid)));
+  const appliedDeposit = Number(data.applied_deposit || 0);
+  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
 
   const handleCopyBid = async () => {
     try {
@@ -1264,6 +1267,15 @@ export default function ReservationDetailDrawer({
               </>
             )}
 
+            {/* Print Button */}
+            <button
+              type="button"
+              onClick={() => setIsPrintMenuOpen(true)}
+              className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+            >
+              🖨️ Cetak
+            </button>
+
             {/* General Close Button */}
             <button
               type="button"
@@ -1470,6 +1482,16 @@ export default function ReservationDetailDrawer({
               </div>
             </div>
           </div>
+        )}
+
+        {/* Print Menu */}
+        {isPrintMenuOpen && activePropId && (
+          <PrintMenu
+            isOpen={isPrintMenuOpen}
+            onClose={() => setIsPrintMenuOpen(false)}
+            reservationId={data.id}
+            propertyId={activePropId}
+          />
         )}
       </div>
     </div>

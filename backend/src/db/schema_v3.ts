@@ -461,8 +461,157 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS discount_reason VARCHAR(255);
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(12,2) DEFAULT 0;
+    ALTER TABLE reservations ADD COLUMN IF NOT EXISTS applied_deposit DECIMAL(12,2) DEFAULT 0;
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
+  `);
 
+  // ==========================================================================
+  // Financial invariant backfill: applied_deposit + amount_paid correction.
+  // Wrapped in migration_marker so it runs ONCE per database, not every start.
+  // On subsequent startups, the marker prevents re-execution entirely.
+  // ==========================================================================
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version VARCHAR(100) PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  const _depMarker = await pool.query(
+    "SELECT 1 FROM schema_migrations WHERE version = 'applied_deposit_financial_correction_v1'"
+  );
+  if ((_depMarker.rowCount ?? 0) === 0) {
+    const _depClient = await pool.connect();
+    try {
+      await _depClient.query('BEGIN');
+      await _depClient.query("SELECT pg_advisory_xact_lock(hashtext('oak_hims_applied_deposit_backfill_lock'))");
+
+      const _depRecheck = await _depClient.query(
+        "SELECT 1 FROM schema_migrations WHERE version = 'applied_deposit_financial_correction_v1'"
+      );
+      if ((_depRecheck.rowCount ?? 0) === 0) {
+        // Predicate alignment note:
+        // All fallback guards below match stayChargesService.ts recalculateReservationFinancials exactly:
+        //   Payment fallback: row existence (NOT SUM) → matches runtime hasPaymentTx.rowCount === 0
+        //   Folio fallback guard: v_folio_ordinary > 0 → matches runtime folioPaid > 0
+        //   Charges fallback: row existence (NOT SUM) → matches runtime chargeCount > 0
+        await _depClient.query(`
+          DO $$
+          DECLARE
+            rec RECORD;
+            v_ordinary NUMERIC;
+            v_applied NUMERIC;
+            v_charges NUMERIC;
+            v_remain NUMERIC;
+            v_status TEXT;
+            v_folio_ordinary NUMERIC;
+            v_has_pmt_rows BOOLEAN;
+            v_has_charge_rows BOOLEAN;
+          BEGIN
+            FOR rec IN
+              WITH deposit_calc AS (
+                SELECT
+                  fe.reservation_id,
+                  COALESCE(SUM(CASE
+                    WHEN fe.direction = 'CREDIT' AND fe.entry_type = 'DEPOSIT_APPLY'
+                      AND fe.status = 'POSTED' AND fe.is_voided = FALSE
+                      AND fe.reversal_of_entry_id IS NULL
+                    THEN fe.amount ELSE 0
+                  END), 0) AS new_applied_deposit
+                FROM folio_entries fe
+                WHERE fe.entry_type = 'DEPOSIT_APPLY'
+                GROUP BY fe.reservation_id
+              )
+              SELECT DISTINCT r.id AS rid, r.total_price AS tp,
+                COALESCE(dc.new_applied_deposit, 0) AS ad
+              FROM reservations r
+              LEFT JOIN deposit_calc dc ON dc.reservation_id = r.id
+              WHERE COALESCE(dc.new_applied_deposit, 0) > 0
+            LOOP
+              -- A. Ordinary payment from payment_transactions (authoritative source)
+              SELECT COALESCE(SUM(CASE
+                WHEN pt.status = 'SUCCESS' AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+                THEN pt.amount ELSE 0
+              END), 0) INTO v_ordinary
+              FROM payment_transactions pt WHERE pt.reservation_id = rec.rid;
+
+              -- B. Payment fallback: ONLY if NO payment_transactions rows exist
+              --    (matches runtime hasPaymentTx check — row existence, NOT sum)
+              SELECT EXISTS (
+                SELECT 1 FROM payment_transactions
+                WHERE reservation_id = rec.rid
+                  AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+                LIMIT 1
+              ) INTO v_has_pmt_rows;
+
+              IF NOT v_has_pmt_rows THEN
+                SELECT COALESCE(SUM(CASE WHEN fe.direction = 'CREDIT' AND fe.entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT') AND fe.reversal_of_entry_id IS NULL THEN fe.amount ELSE 0 END), 0)
+                  - COALESCE(SUM(CASE WHEN fe.direction = 'DEBIT' AND fe.entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL') THEN fe.amount ELSE 0 END), 0)
+                INTO v_folio_ordinary
+                FROM folio_entries fe WHERE fe.reservation_id = rec.rid;
+
+                IF v_folio_ordinary > 0 THEN
+                  v_ordinary := v_folio_ordinary;
+                END IF;
+              END IF;
+
+              -- C. Effective total charges from folio
+              SELECT GREATEST(0,
+                COALESCE(SUM(CASE WHEN fe.direction = 'DEBIT' AND fe.entry_type NOT IN ('PAYMENT_VOID','PAYMENT_REVERSAL','REFUND_DEBIT') THEN fe.amount ELSE 0 END), 0)
+                - COALESCE(SUM(CASE WHEN fe.direction = 'CREDIT' AND (fe.reversal_of_entry_id IS NOT NULL OR fe.entry_type = 'REVERSAL' OR fe.entry_type LIKE '%_REVERSAL') THEN fe.amount ELSE 0 END), 0)
+              ) INTO v_charges
+              FROM folio_entries fe WHERE fe.reservation_id = rec.rid;
+
+              -- D. Charges fallback: ONLY if NO folio charge DEBIT rows exist
+              --    (matches runtime chargeCount check — row existence, NOT sum)
+              SELECT EXISTS (
+                SELECT 1 FROM folio_entries
+                WHERE reservation_id = rec.rid
+                  AND direction = 'DEBIT'
+                  AND entry_type NOT IN ('PAYMENT_VOID','PAYMENT_REVERSAL','REFUND_DEBIT')
+                LIMIT 1
+              ) INTO v_has_charge_rows;
+
+              IF NOT v_has_charge_rows THEN
+                SELECT COALESCE(SUM(total_amount), 0) INTO v_charges
+                FROM reservation_nightly_rates WHERE reservation_id = rec.rid;
+                IF v_charges = 0 THEN
+                  v_charges := rec.tp;
+                END IF;
+              END IF;
+
+              v_applied := rec.ad;
+              v_remain := GREATEST(0, v_charges - v_ordinary - v_applied);
+              IF v_ordinary + v_applied <= 0 THEN v_status := 'UNPAID';
+              ELSIF v_remain = 0 THEN v_status := 'PAID';
+              ELSE v_status := 'PARTIAL';
+              END IF;
+
+              UPDATE reservations SET
+                amount_paid = GREATEST(0, ROUND(v_ordinary)),
+                applied_deposit = GREATEST(0, ROUND(v_applied)),
+                remaining_balance = GREATEST(0, ROUND(v_remain)),
+                payment_status = v_status
+              WHERE id = rec.rid;
+            END LOOP;
+          END $$;
+        `);
+
+        await _depClient.query(
+          "INSERT INTO schema_migrations (version) VALUES ('applied_deposit_financial_correction_v1') ON CONFLICT (version) DO NOTHING"
+        );
+      }
+
+      await _depClient.query('COMMIT');
+    } catch (_depErr) {
+      await _depClient.query('ROLLBACK');
+      throw _depErr;
+    } finally {
+      _depClient.release();
+    }
+  }
+
+  await pool.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'reservations_booking_id_fkey') THEN

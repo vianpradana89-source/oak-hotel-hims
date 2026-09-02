@@ -1488,7 +1488,7 @@ function AppContent() {
       return;
     }
 
-    const currentRemaining = Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0))));
+    const currentRemaining = Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0) - Number(selectedRes.applied_deposit || 0), 0))));
     const validation = validateIdrPaymentInput(paymentDraft, currentRemaining);
     if (!validation.isValid) {
       setPaymentFeedback({ type: 'error', message: validation.error || 'Nominal pembayaran tidak valid' });
@@ -1730,7 +1730,8 @@ function AppContent() {
     const newAmount = parseIdrInput(paymentCorrectionModal.newAmountDraft);
     const totalPrice = Math.round(Number(selectedRes.total_price || 0));
     const currentPaid = Math.round(Number(selectedRes.amount_paid || 0));
-    const maxAllowedNewAmount = totalPrice - (currentPaid - originalAmount);
+    const currentAppliedDeposit = Math.round(Number(selectedRes.applied_deposit || 0));
+    const maxAllowedNewAmount = totalPrice - currentAppliedDeposit - (currentPaid - originalAmount);
 
     const validation = validateCorrectionForm({
       originalAmount,
@@ -3137,7 +3138,7 @@ function AppContent() {
       title: undefined,
       variant: 'primary',
       onClick: () => {
-        const remaining = selectedRes ? Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0), 0)))) : 0;
+        const remaining = selectedRes ? Math.max(0, Math.round(Number(selectedRes.remaining_balance ?? Math.max(Number(selectedRes.total_price || 0) - Number(selectedRes.amount_paid || 0) - Number(selectedRes.applied_deposit || 0), 0)))) : 0;
         const validation = validateIdrPaymentInput(paymentDraft, remaining);
         if (validation.isValid) {
           void handlePayment();
@@ -4784,7 +4785,8 @@ function AppContent() {
               const diff = calculateCorrectionDifference(origAmount, newAmount);
               const totalPrice = Math.round(Number(selectedRes?.total_price || 0));
               const currentPaid = Math.round(Number(selectedRes?.amount_paid || 0));
-              const maxAllowedNewAmount = totalPrice - (currentPaid - origAmount);
+              const currentAppliedDeposit = Math.round(Number(selectedRes?.applied_deposit || 0));
+              const maxAllowedNewAmount = totalPrice - currentAppliedDeposit - (currentPaid - origAmount);
               const val = validateCorrectionForm({
                 originalAmount: origAmount,
                 newAmount,

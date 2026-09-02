@@ -335,6 +335,7 @@ export async function recalculateReservationFinancials(
 ): Promise<{
   total_price: number;
   amount_paid: number;
+  applied_deposit: number;
   remaining_balance: number;
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
   reservation: any;
@@ -450,7 +451,7 @@ export async function recalculateReservationFinancials(
       ordinaryAmountPaid = folioPaid;
     } else {
       ordinaryAmountPaid = ordinaryFallbackOverride === undefined
-        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)) - appliedDeposit)
+        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)))
         : Math.max(0, Math.round(ordinaryFallbackOverride));
     }
   }
@@ -458,13 +459,13 @@ export async function recalculateReservationFinancials(
   // A deposit affects reservation settlement only when explicitly applied.
   // Do not generically sum folio credits: ordinary payments already have folio
   // projections and would otherwise be counted twice.
-  const netAmountPaid = ordinaryAmountPaid + appliedDeposit;
+  const effectiveSettlement = ordinaryAmountPaid + appliedDeposit;
 
   // 4. Calculate Remaining Balance & Payment Status
-  const remainingBalance = Math.max(0, netTotalCharges - netAmountPaid);
+  const remainingBalance = Math.max(0, netTotalCharges - effectiveSettlement);
 
   let newPaymentStatus: 'UNPAID' | 'PARTIAL' | 'PAID' = 'UNPAID';
-  if (netAmountPaid <= 0) {
+  if (effectiveSettlement <= 0) {
     newPaymentStatus = 'UNPAID';
   } else if (remainingBalance === 0) {
     newPaymentStatus = 'PAID';
@@ -473,20 +474,25 @@ export async function recalculateReservationFinancials(
   }
 
   // 5. Update reservations row atomically
+  // amount_paid = ordinary settlement payments ONLY (PAYMENT + CORRECTION_REPLACEMENT)
+  // applied_deposit = effective DEPOSIT_APPLY folio credits
+  // remaining_balance = total_price - amount_paid - applied_deposit
   const updatedRes = await client.query(
     `UPDATE reservations SET
        total_price = $1,
        amount_paid = $2,
-       remaining_balance = $3,
-       payment_status = $4
-     WHERE id = $5
+       applied_deposit = $3,
+       remaining_balance = $4,
+       payment_status = $5
+     WHERE id = $6
      RETURNING *`,
-    [netTotalCharges, netAmountPaid, remainingBalance, newPaymentStatus, reservationId]
+    [netTotalCharges, ordinaryAmountPaid, appliedDeposit, remainingBalance, newPaymentStatus, reservationId]
   );
 
   return {
     total_price: netTotalCharges,
-    amount_paid: netAmountPaid,
+    amount_paid: ordinaryAmountPaid,
+    applied_deposit: appliedDeposit,
     remaining_balance: remainingBalance,
     payment_status: newPaymentStatus,
     reservation: updatedRes.rows[0]

@@ -468,7 +468,7 @@ export async function applyDeposit(pool: Pool, input: ApplyDepositInput): Promis
     );
 
     const balance = await updateStatusProjection(client, depositId);
-    const ordinaryFallback = Math.max(0, currentFinancials.amount_paid - before.applied);
+    const ordinaryFallback = Math.max(0, currentFinancials.amount_paid);
     const financials = await recalculateReservationFinancials(client, reservationId, propertyId, ordinaryFallback);
     await logDepositAudit(client, 'DEPOSIT_APPLIED', propertyId, reservationId, {
       deposit_id: depositId,

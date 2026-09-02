@@ -118,6 +118,7 @@ export async function createPaymentCore(
         r.id,
         r.total_price,
         r.amount_paid,
+        r.applied_deposit,
         r.payment_status,
         r.booking_id,
         b.property_id AS booking_property_id
@@ -144,8 +145,9 @@ export async function createPaymentCore(
     }
 
     const currentPaid = Math.round(Number(reservationRes.rows[0].amount_paid || 0));
+    const currentAppliedDeposit = Math.round(Number(reservationRes.rows[0].applied_deposit || 0));
     const totalPrice = Math.round(Number(reservationRes.rows[0].total_price || 0));
-    const currentRemaining = Math.max(totalPrice - currentPaid, 0);
+    const currentRemaining = Math.max(totalPrice - currentPaid - currentAppliedDeposit, 0);
 
     if (paymentAmount > currentRemaining) {
       await client.query('ROLLBACK');
@@ -163,8 +165,9 @@ export async function createPaymentCore(
     }
 
     const updatedAmountPaid = currentPaid + paymentAmount;
-    const updatedRemaining = totalPrice - updatedAmountPaid;
-    const updatedPaymentStatus = updatedAmountPaid <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
+    const updatedEffectiveSettlement = updatedAmountPaid + currentAppliedDeposit;
+    const updatedRemaining = Math.max(0, totalPrice - updatedEffectiveSettlement);
+    const updatedPaymentStatus = updatedEffectiveSettlement <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     const corrId = correlationId || `corr_pmt_${reservationId}_${Date.now()}`;
 
@@ -287,11 +290,12 @@ export async function createPaymentCore(
       UPDATE reservations
       SET
         amount_paid = $1,
-        remaining_balance = $2,
-        payment_status = $3
-      WHERE id = $4
+        applied_deposit = $2,
+        remaining_balance = $3,
+        payment_status = $4
+      WHERE id = $5
       RETURNING *
-    `, [updatedAmountPaid, updatedRemaining, updatedPaymentStatus, reservationId]);
+    `, [updatedAmountPaid, currentAppliedDeposit, updatedRemaining, updatedPaymentStatus, reservationId]);
 
     // 8. Audit log for payment created
     const paymentAuditPayload = {

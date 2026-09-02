@@ -294,9 +294,11 @@ export async function executeReservationEdit(
 
     const discountAmount = Number(current.discount_amount || 0);
     const amountPaid = Number(current.amount_paid || 0);
+    const appliedDeposit = Number(current.applied_deposit || 0);
     const finalTotalAfterDiscount = Math.max(0, finalGrandTotal - discountAmount);
-    const remainingBalance = Math.max(0, finalTotalAfterDiscount - amountPaid);
-    const paymentStatus = amountPaid >= finalTotalAfterDiscount ? 'PAID' : (amountPaid > 0 ? 'PARTIAL' : 'UNPAID');
+    const effectiveSettlement = amountPaid + appliedDeposit;
+    const remainingBalance = Math.max(0, finalTotalAfterDiscount - effectiveSettlement);
+    const paymentStatus = effectiveSettlement >= finalTotalAfterDiscount ? 'PAID' : (effectiveSettlement > 0 ? 'PARTIAL' : 'UNPAID');
 
     let startAt: string | null = null;
     let endAt: string | null = null;
