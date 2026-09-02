@@ -80,10 +80,10 @@ import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCu
 import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
-import { previewReservationEdit, executeReservationEdit } from './domains/reservations/reservationEditService';
+import { previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
-import { requireAuth } from './domains/auth/authMiddleware';
+import { requireAuth, requireRole } from './domains/auth/authMiddleware';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
@@ -3162,8 +3162,93 @@ const handleReservationEdit = async (req: any, res: any) => {
   }
 };
 
-app.post('/api/reservations/:id/edit', handleReservationEdit);
-app.put('/api/reservations/:id/edit', handleReservationEdit);
+app.post('/api/reservations/:id/edit', requireAuth, requireRole(['Front Office']), handleReservationEdit);
+app.put('/api/reservations/:id/edit', requireAuth, requireRole(['Front Office']), handleReservationEdit);
+
+// POST /api/reservations/:id/edit-with-payment — atomic edit + difference payment
+app.post('/api/reservations/:id/edit-with-payment', requireAuth, requireRole(['Front Office']), handlePaymentUpload, async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
+    }
+
+    const idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        status: 'ERROR', code: 'IDEMPOTENCY_KEY_REQUIRED',
+        message: 'Idempotency-Key wajib dikirim untuk menyimpan edit reservasi.'
+      });
+    }
+
+    const nullableId = (value: unknown): number | null | undefined => {
+      if (value === undefined) return undefined;
+      if (value === null || String(value).trim() === '') return null;
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        const err: any = new Error('ID referensi tidak valid');
+        err.statusCode = 400;
+        err.code = 'VALIDATION_ERROR';
+        throw err;
+      }
+      return parsed;
+    };
+    const body = req.body || {};
+    const requestedPropertyId = Number(body.property_id);
+    if (!Number.isInteger(requestedPropertyId) || requestedPropertyId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id tidak valid' });
+    }
+    const payload = {
+      ...body,
+      property_id: requestedPropertyId,
+      room_type_id: nullableId(body.room_type_id) ?? undefined,
+      room_id: nullableId(body.room_id),
+      rate_plan_id: nullableId(body.rate_plan_id),
+      adults: body.adults === undefined ? undefined : Number(body.adults),
+      children: body.children === undefined ? undefined : Number(body.children),
+      keep_current_price: body.keep_current_price === true || body.keep_current_price === 'true',
+      expected_new_total: body.expected_new_total === undefined ? undefined : Number(body.expected_new_total),
+      idempotency_key: idempotencyKey
+    };
+    const actor = body.actor || req.user?.username || 'USER';
+    const file = req.file ? {
+      buffer: req.file.buffer,
+      mimetype: req.file.mimetype,
+      originalname: req.file.originalname,
+      size: req.file.size
+    } : null;
+
+    const result = await executeReservationEditWithPayment(pool, reservationId, payload, file, actor);
+
+    broadcastEvent('ReservationUpdated', {
+      reservation_id: reservationId,
+      room_id: result.reservation.room_id,
+      guest_name: result.reservation.guest_name,
+      timestamp: new Date().toISOString()
+    });
+
+    res.json({
+      status: 'SUCCESS',
+      data: {
+        reservation: withReservationHotelDates(result.reservation),
+        payment: result.payment,
+        evidence: result.evidence,
+        price_difference: result.price_difference,
+        old_total_price: result.old_total_price,
+        new_total_price: result.new_total_price
+      }
+    });
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      return sendRoomOverlapConflict(res);
+    }
+    const statusCode = err?.statusCode || 400;
+    const message = String(err?.message || err);
+    const resp: any = { status: 'ERROR', code: err.code, message };
+    if (err.details) resp.details = err.details;
+    res.status(statusCode).json(resp);
+  }
+});
 
 app.post('/api/reservations/:id/cancel', async (req, res) => {
   const reservationId = Number(req.params.id);
