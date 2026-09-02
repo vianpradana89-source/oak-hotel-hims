@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { calculatePriceQuote, createReservationRateSnapshots, toHotelDateString } from '../pricing/pricingService';
+import { addDays, calculatePriceQuote, createReservationRateSnapshots, toHotelDateString } from '../pricing/pricingService';
 import { validateEvidenceUpload, saveEvidenceFile, deleteEvidenceFile } from '../payments/evidenceStorageService';
 import { createPaymentInTransaction } from '../payments/paymentDomainService';
 
@@ -26,6 +26,24 @@ export interface ReservationEditPayload {
   actor?: string;
 }
 
+export interface ReservationEditAvailability {
+  property_id: number;
+  check_in: string;
+  check_out: string;
+  stay_type: 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT';
+  room_types: Array<{
+    id: number;
+    code: string;
+    name: string;
+    rooms: Array<{
+      id: number;
+      room_number: string;
+      floor: string | null;
+      name: string | null;
+    }>;
+  }>;
+}
+
 // ============================================================================
 // SHARED CANONICAL EDIT RESULT (returned by internal applyReservationEdit)
 // ============================================================================
@@ -46,6 +64,135 @@ function normalizeHotelDate(value: unknown): string {
   if (value instanceof Date) return toHotelDateString(value);
   const text = String(value || '').slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : toHotelDateString(new Date(String(value)));
+}
+
+function isValidHotelDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+/**
+ * Read-only selector projection for BOOKED reservation edits. This uses the
+ * same half-open room-overlap predicate as preview/save and excludes only the
+ * reservation currently being edited.
+ */
+export async function getReservationEditAvailability(
+  pool: Pool,
+  reservationId: number,
+  propertyId: number,
+  checkIn: string,
+  checkOut: string,
+  stayType: 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT' = 'OVERNIGHT'
+): Promise<ReservationEditAvailability> {
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    const err: any = new Error('ID reservasi tidak valid.');
+    err.statusCode = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    const err: any = new Error('property_id tidak valid.');
+    err.statusCode = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  if (!['OVERNIGHT', 'DAY_USE', 'TRANSIT'].includes(stayType) || !isValidHotelDate(checkIn) || !isValidHotelDate(checkOut)) {
+    const err: any = new Error('Tanggal atau tipe menginap tidak valid.');
+    err.statusCode = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  const effectiveCheckOut = stayType === 'DAY_USE' && checkIn === checkOut
+    ? addDays(checkIn, 1)
+    : checkOut;
+  if (!checkIn || !effectiveCheckOut || checkIn >= effectiveCheckOut) {
+    const err: any = new Error('Rentang tanggal menginap tidak valid.');
+    err.statusCode = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+
+  const reservation = await pool.query(
+    `SELECT r.id, r.status, b.property_id
+     FROM reservations r
+     JOIN bookings b ON b.id = r.booking_id
+     WHERE r.id = $1`,
+    [reservationId]
+  );
+  if (reservation.rows.length === 0) {
+    const err: any = new Error(`Reservasi #${reservationId} tidak ditemukan.`);
+    err.statusCode = 404;
+    err.code = 'RESERVATION_NOT_FOUND';
+    throw err;
+  }
+  if (Number(reservation.rows[0].property_id) !== propertyId) {
+    const err: any = new Error(`Reservasi #${reservationId} bukan milik properti #${propertyId}`);
+    err.statusCode = 403;
+    err.code = 'PROPERTY_MISMATCH';
+    throw err;
+  }
+  if (String(reservation.rows[0].status || '').toUpperCase() !== 'BOOKED') {
+    const err: any = new Error('Pemilihan kamar untuk edit hanya tersedia untuk reservasi BOOKED.');
+    err.statusCode = 409;
+    err.code = 'BOOKED_RESERVATION_REQUIRED';
+    throw err;
+  }
+
+  const result = await pool.query(
+    `SELECT rt.id AS room_type_id, rt.code AS room_type_code, rt.name AS room_type_name,
+            r.id AS room_id, r.room_number, r.floor, r.name AS room_name
+     FROM room_types rt
+     JOIN rooms r ON r.room_type_id = rt.id
+     WHERE rt.property_id = $1
+       AND rt.is_active = TRUE
+       AND COALESCE(r.is_active, TRUE) = TRUE
+       AND UPPER(COALESCE(r.status, 'READY')) NOT IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM room_operational_blocks rob
+         WHERE rob.room_id = r.id
+           AND rob.property_id = $1
+           AND rob.status = 'ACTIVE'
+           AND rob.start_date < $3::date
+           AND rob.end_date > $2::date
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM reservations conflict
+         WHERE conflict.room_id = r.id
+           AND conflict.id <> $4
+           AND conflict.status IN ('BOOKED', 'CHECKED_IN', 'GUARANTEED', 'CONFIRMED')
+           AND conflict.check_in < $3::date
+           AND conflict.check_out > $2::date
+       )
+     ORDER BY rt.display_order, rt.id, r.room_number`,
+    [propertyId, checkIn, effectiveCheckOut, reservationId]
+  );
+
+  const roomTypes = new Map<number, ReservationEditAvailability['room_types'][number]>();
+  for (const row of result.rows) {
+    const roomTypeId = Number(row.room_type_id);
+    let roomType = roomTypes.get(roomTypeId);
+    if (!roomType) {
+      roomType = { id: roomTypeId, code: row.room_type_code, name: row.room_type_name, rooms: [] };
+      roomTypes.set(roomTypeId, roomType);
+    }
+    roomType.rooms.push({
+      id: Number(row.room_id),
+      room_number: String(row.room_number),
+      floor: row.floor === null || row.floor === undefined ? null : String(row.floor),
+      name: row.room_name || null
+    });
+  }
+
+  return {
+    property_id: propertyId,
+    check_in: checkIn,
+    check_out: effectiveCheckOut,
+    stay_type: stayType,
+    room_types: [...roomTypes.values()]
+  };
 }
 
 async function refreshPreservedPriceSnapshotContext(
@@ -156,9 +303,9 @@ async function applyReservationEdit(
   client: PoolClient,
   reservationId: number,
   payload: ReservationEditPayload,
-  opts: { keepCurrentPrice?: boolean; bookedOnly?: boolean; actor?: string } = {}
+  opts: { keepCurrentPrice?: boolean; bookedOnly?: boolean; requireAssignedRoom?: boolean; actor?: string } = {}
 ): Promise<CanonicalEditResult> {
-  const { keepCurrentPrice = false, bookedOnly = false, actor = 'USER' } = opts;
+  const { keepCurrentPrice = false, bookedOnly = false, requireAssignedRoom = false, actor = 'USER' } = opts;
 
   // 1. Lock reservation row
   const rRes = await client.query(
@@ -222,6 +369,27 @@ async function applyReservationEdit(
 
   const datesChanged = targetCheckIn !== currentCheckIn || targetCheckOut !== currentCheckOut;
   const roomTypeChanged = Number(targetRoomTypeId) !== Number(current.current_room_type_id);
+  const availabilityCheckOut = targetStayType === 'DAY_USE' && targetCheckIn === targetCheckOut
+    ? addDays(targetCheckIn, 1)
+    : targetCheckOut;
+
+  if (requireAssignedRoom && !targetRoomId) {
+    const err: any = new Error('Kamar fisik yang tersedia wajib dipilih.');
+    err.statusCode = 400;
+    err.code = 'ROOM_ASSIGNMENT_REQUIRED';
+    throw err;
+  }
+
+  const roomTypeCheck = await client.query(
+    'SELECT is_active FROM room_types WHERE id = $1 AND property_id = $2',
+    [targetRoomTypeId, propertyId]
+  );
+  if (roomTypeCheck.rows.length === 0 || (requireAssignedRoom && roomTypeCheck.rows[0].is_active === false)) {
+    const err: any = new Error('Tipe kamar tidak aktif atau bukan milik properti ini.');
+    err.statusCode = 400;
+    err.code = 'ROOM_TYPE_NOT_SELLABLE';
+    throw err;
+  }
 
   // 3. OTA stale rate plan guard: if room type changed and current rate plan is incompatible, clear it
   if (targetRatePlanId && (roomTypeChanged || isOta)) {
@@ -237,7 +405,10 @@ async function applyReservationEdit(
 
   // 4. Overlap validation if physical room is assigned
   if (targetRoomId) {
-    const roomPropRes = await client.query('SELECT property_id, room_type_id FROM rooms WHERE id = $1', [targetRoomId]);
+    const roomPropRes = await client.query(
+      'SELECT property_id, room_type_id, is_active, status FROM rooms WHERE id = $1',
+      [targetRoomId]
+    );
     if (roomPropRes.rows.length === 0 || Number(roomPropRes.rows[0].property_id) !== propertyId) {
       const err: any = new Error(`Kamar #${targetRoomId} bukan milik properti #${propertyId}`);
       err.statusCode = 403;
@@ -250,6 +421,34 @@ async function applyReservationEdit(
       err.code = 'ROOM_TYPE_MISMATCH';
       throw err;
     }
+    if (requireAssignedRoom && (
+      roomPropRes.rows[0].is_active === false
+      || ['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(String(roomPropRes.rows[0].status || '').toUpperCase())
+    )) {
+      const err: any = new Error('Kamar fisik tidak aktif atau tidak dapat dijual.');
+      err.statusCode = 409;
+      err.code = 'ROOM_NOT_SELLABLE';
+      throw err;
+    }
+
+    if (requireAssignedRoom) {
+      const blockRes = await client.query(
+        `SELECT 1 FROM room_operational_blocks
+         WHERE room_id = $1
+           AND property_id = $2
+           AND status = 'ACTIVE'
+           AND start_date < $4::date
+           AND end_date > $3::date
+         LIMIT 1`,
+        [targetRoomId, propertyId, targetCheckIn, availabilityCheckOut]
+      );
+      if (blockRes.rows.length > 0) {
+        const err: any = new Error('Kamar fisik sedang diblokir untuk tanggal menginap yang dipilih.');
+        err.statusCode = 409;
+        err.code = 'ROOM_OPERATIONALLY_BLOCKED';
+        throw err;
+      }
+    }
 
     const overlapRes = await client.query(
       `SELECT r.id, r.guest_name
@@ -258,7 +457,7 @@ async function applyReservationEdit(
          AND r.id != $2
          AND r.status IN ('BOOKED', 'CHECKED_IN', 'GUARANTEED', 'CONFIRMED')
          AND r.check_in < $3 AND r.check_out > $4`,
-      [targetRoomId, reservationId, targetCheckOut, targetCheckIn]
+      [targetRoomId, reservationId, availabilityCheckOut, targetCheckIn]
     );
 
     if (overlapRes.rows.length > 0) {
@@ -620,7 +819,12 @@ export async function executeReservationEdit(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const result = await applyReservationEdit(client, reservationId, payload, { keepCurrentPrice: false, actor });
+    const result = await applyReservationEdit(client, reservationId, payload, {
+      keepCurrentPrice: false,
+      bookedOnly: true,
+      requireAssignedRoom: true,
+      actor
+    });
     await client.query('COMMIT');
     return result.reservation;
   } catch (err) {
@@ -746,6 +950,7 @@ export async function executeReservationEditWithPayment(
     const editResult = await applyReservationEdit(client, reservationId, payload, {
       keepCurrentPrice: payload.keep_current_price === true,
       bookedOnly: true,
+      requireAssignedRoom: true,
       actor
     });
 

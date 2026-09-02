@@ -9,6 +9,7 @@
     "dev": "tsc && node dist/index.js",
     "test:booking-create": "node test/booking_create_test.js",
     "test:reservation-create-compat": "node test/reservation_create_compat_test.js",
+    "test:reservation-edit-availability": "npm run build && node test/reservation_edit_availability_test.js",
     "test:booking-completion": "node test/booking_completion_test.js",
     "test:reservation-stay-dates": "node test/reservation_stay_dates_test.js",
     "test:hotel-date-contract": "node test/hotel_date_contract_test.js",

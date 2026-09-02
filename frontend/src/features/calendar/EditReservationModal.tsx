@@ -45,9 +45,9 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   const [ratePlanId, setRatePlanId] = useState<number | null>(null);
 
   // Master Data
-  const [roomTypes, setRoomTypes] = useState<any[]>([]);
-  const [rooms, setRooms] = useState<any[]>([]);
   const [ratePlans, setRatePlans] = useState<any[]>([]);
+  const [availableRoomTypes, setAvailableRoomTypes] = useState<any[] | null>(null);
+  const [availabilityLoading, setAvailabilityLoading] = useState<boolean>(false);
 
   // Preview State
   const [previewData, setPreviewData] = useState<any>(null);
@@ -61,7 +61,21 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [showDecreaseModal, setShowDecreaseModal] = useState<boolean>(false);
   const previewRequestRef = useRef(0);
+  const availabilityRequestRef = useRef(0);
   const saveRequestKeyRef = useRef<string | null>(null);
+
+  const isOta = reservation?.ota_source_id != null;
+  const selectedAvailableType = availableRoomTypes?.find((type) => Number(type.id) === Number(roomTypeId));
+  const availableRooms = selectedAvailableType?.rooms || [];
+  const hasAssignableRoom = availableRooms.some((room: any) => Number(room.id) === Number(roomId));
+  const selectedRatePlan = ratePlans.find((plan) => Number(plan.id) === Number(ratePlanId));
+  const hasCompatibleRatePlan = Boolean(
+    selectedRatePlan
+    && Number(selectedRatePlan.room_type_id) === Number(roomTypeId)
+    && selectedRatePlan.is_active !== false
+    && selectedRatePlan.is_archived !== true
+    && (stayType === 'DAY_USE' ? selectedRatePlan.rate_type === 'DAY_USE' : selectedRatePlan.rate_type !== 'DAY_USE')
+  );
 
   // Initialize form
   useEffect(() => {
@@ -95,26 +109,14 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     saveRequestKeyRef.current = null;
   }, [reservation, isOpen]);
 
-  // Load Room Types, Rooms, and Rate Plans
+  // Load canonical Rate Plans from Master Kamar.
   useEffect(() => {
     if (!isOpen) return;
     const loadMasters = async () => {
       try {
-        const [rtRes, rRes, rpRes] = await Promise.all([
-          safeFetchJson<{ data?: any[] }>(`/api/room-types?property_id=${propertyId}&active=true`, undefined, undefined, authFetch),
-          safeFetchJson<{ data?: any[] }>(`/api/rooms?property_id=${propertyId}&is_active=true`, undefined, undefined, authFetch),
+        const [rpRes] = await Promise.all([
           safeFetchJson<{ data?: any[] }>(`/api/pricing/rate-plans?property_id=${propertyId}&is_active=true`, undefined, undefined, authFetch)
         ]);
-        if (rtRes.ok && rtRes.data?.data) {
-          setRoomTypes(rtRes.data.data.filter((rt: any) => rt.is_active !== false));
-        }
-        if (rRes.ok && rRes.data?.data) {
-          setRooms(rRes.data.data.filter((room: any) =>
-            room.is_active !== false
-            && !room.operational_block_type
-            && !['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(String(room.status || '').toUpperCase())
-          ));
-        }
         if (rpRes.ok) {
           const plans = Array.isArray(rpRes.data)
             ? rpRes.data
@@ -128,9 +130,90 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     loadMasters();
   }, [isOpen, propertyId, authFetch]);
 
+  // The server owns date-aware selector availability. Sequence protection
+  // prevents slow responses from replacing a newer proposed stay interval.
+  useEffect(() => {
+    if (!isOpen || !reservation?.id || !checkIn || (!checkOut && stayType !== 'DAY_USE')) {
+      availabilityRequestRef.current += 1;
+      setAvailableRoomTypes(null);
+      setAvailabilityLoading(false);
+      return;
+    }
+    const requestId = ++availabilityRequestRef.current;
+    const controller = new AbortController();
+    const effectiveCheckOut = stayType === 'DAY_USE' ? checkIn : checkOut;
+    const params = new URLSearchParams({
+      property_id: String(propertyId),
+      check_in: checkIn,
+      check_out: effectiveCheckOut,
+      stay_type: stayType
+    });
+    const loadAvailability = async () => {
+      try {
+        setAvailabilityLoading(true);
+        setAvailableRoomTypes(null);
+        previewRequestRef.current += 1;
+        setPreviewData(null);
+        const result = await safeFetchJson<{ data?: { room_types?: any[] } }>(
+          `/api/reservations/${reservation.id}/edit-availability?${params.toString()}`,
+          { signal: controller.signal },
+          'Gagal memuat kamar yang tersedia untuk tanggal menginap.',
+          authFetch
+        );
+        if (requestId !== availabilityRequestRef.current) return;
+        if (!result.ok || !result.data?.data) {
+          setAvailableRoomTypes([]);
+          setError(result.errorMessage || 'Gagal memuat kamar yang tersedia untuk tanggal menginap.');
+          return;
+        }
+        setAvailableRoomTypes(result.data.data.room_types || []);
+      } catch (err: any) {
+        if (requestId === availabilityRequestRef.current && err?.name !== 'AbortError') {
+          setAvailableRoomTypes([]);
+          setError('Gagal memuat kamar yang tersedia untuk tanggal menginap.');
+        }
+      } finally {
+        if (requestId === availabilityRequestRef.current) setAvailabilityLoading(false);
+      }
+    };
+    loadAvailability();
+    return () => controller.abort();
+  }, [isOpen, reservation?.id, propertyId, checkIn, checkOut, stayType, authFetch]);
+
+  // Reconcile selections after the server refreshes availability. A type or
+  // room that is no longer sellable is never retained in the draft.
+  useEffect(() => {
+    if (availabilityLoading || availableRoomTypes === null) return;
+    setRoomTypeId((currentTypeId) => {
+      if (!currentTypeId) return null;
+      return availableRoomTypes.some((type) => Number(type.id) === Number(currentTypeId))
+        ? currentTypeId
+        : null;
+    });
+  }, [availableRoomTypes, availabilityLoading]);
+
+  useEffect(() => {
+    if (availabilityLoading || availableRoomTypes === null) return;
+    if (!roomTypeId) {
+      setRoomId(null);
+      return;
+    }
+    const currentType = availableRoomTypes.find((type) => Number(type.id) === Number(roomTypeId));
+    const roomsForType = currentType?.rooms || [];
+    setRoomId((currentRoomId) => {
+      if (roomsForType.some((room: any) => Number(room.id) === Number(currentRoomId))) return currentRoomId;
+      return roomsForType.length === 1 ? Number(roomsForType[0].id) : null;
+    });
+  }, [availableRoomTypes, availabilityLoading, roomTypeId]);
+
   // Fetch Pricing Preview
   const fetchPreview = useCallback(async () => {
-    if (!reservation?.id || !roomTypeId || !checkIn || (!checkOut && stayType !== 'DAY_USE')) return;
+    if (!reservation?.id || availabilityLoading || !roomTypeId || !roomId || !hasAssignableRoom || !checkIn || (!checkOut && stayType !== 'DAY_USE') || (!isOta && !hasCompatibleRatePlan)) {
+      previewRequestRef.current += 1;
+      setPreviewData(null);
+      setPreviewLoading(false);
+      return;
+    }
     const requestId = ++previewRequestRef.current;
     try {
       setPreviewLoading(true);
@@ -165,21 +248,27 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     } finally {
       if (requestId === previewRequestRef.current) setPreviewLoading(false);
     }
-  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, authFetch]);
+  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, availabilityLoading, hasAssignableRoom, isOta, hasCompatibleRatePlan, authFetch]);
 
   useEffect(() => {
-    if (isOpen && checkIn && roomTypeId) {
+    if (isOpen && checkIn && roomTypeId && roomId && hasAssignableRoom && !availabilityLoading && (isOta || hasCompatibleRatePlan)) {
       fetchPreview();
     }
-  }, [isOpen, checkIn, checkOut, stayType, roomTypeId, roomId, ratePlanId, adults, children, fetchPreview]);
+  }, [isOpen, checkIn, checkOut, stayType, roomTypeId, roomId, ratePlanId, adults, children, availabilityLoading, hasAssignableRoom, isOta, hasCompatibleRatePlan, fetchPreview]);
 
   useEffect(() => {
     saveRequestKeyRef.current = null;
   }, [roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children]);
 
   useEffect(() => {
-    if (!roomTypeId || ratePlanId || ratePlans.length === 0) return;
-    const compatible = ratePlans.filter((rp) => Number(rp.room_type_id) === roomTypeId);
+    if (!roomTypeId || ratePlans.length === 0) return;
+    const compatible = ratePlans.filter((rp) =>
+      Number(rp.room_type_id) === Number(roomTypeId)
+      && rp.is_active !== false
+      && rp.is_archived !== true
+      && (stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
+    );
+    if (compatible.some((rp) => Number(rp.id) === Number(ratePlanId))) return;
     const preferred = compatible.find((rp) => stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE');
     setRatePlanId(preferred?.id || compatible[0]?.id || null);
   }, [ratePlans, ratePlanId, roomTypeId, stayType]);
@@ -330,13 +419,6 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
 
   if (!isOpen) return null;
 
-  const filteredRooms = rooms.filter((r) =>
-    roomTypeId
-    && Number(r.room_type_id) === Number(roomTypeId)
-    && r.is_active !== false
-    && !r.operational_block_type
-    && !['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(String(r.status || '').toUpperCase())
-  );
   const filteredRatePlans = ratePlans.filter((rp) => {
     if (!roomTypeId || Number(rp.room_type_id) !== Number(roomTypeId)) return false;
     if (rp.is_active === false || rp.is_archived === true) return false;
@@ -559,7 +641,8 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   onChange={(e) => {
                     const newTypeId = Number(e.target.value) || null;
                     setRoomTypeId(newTypeId);
-                    setRoomId(null);
+                    const nextType = availableRoomTypes?.find((type) => Number(type.id) === Number(newTypeId));
+                    setRoomId(nextType?.rooms?.length === 1 ? Number(nextType.rooms[0].id) : null);
                     // Clear incompatible rate plan and auto-select first compatible
                     const compatible = ratePlans.filter((rp) =>
                       newTypeId
@@ -573,7 +656,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg"
                 >
                   <option value="">Pilih Tipe Kamar</option>
-                  {roomTypes.map((rt) => (
+                  {(availableRoomTypes || []).map((rt) => (
                     <option key={rt.id} value={rt.id}>
                       {rt.name}
                     </option>
@@ -586,14 +669,22 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   Kamar Fisik
                 </label>
                 <select
+                  required
                   value={roomId || ''}
                   onChange={(e) => setRoomId(Number(e.target.value) || null)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg"
+                  disabled={availabilityLoading || !roomTypeId || availableRooms.length === 0}
+                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg disabled:bg-stone-100"
                 >
-                  <option value="">Unassigned (Pilih Nanti)</option>
-                  {filteredRooms.map((r) => (
+                  <option value="">
+                    {availabilityLoading
+                      ? 'Memuat kamar tersedia...'
+                      : availableRooms.length === 0
+                        ? 'Tidak ada kamar tersedia'
+                        : 'Pilih Kamar Fisik'}
+                  </option>
+                  {availableRooms.map((r: any) => (
                     <option key={r.id} value={r.id}>
-                      Kamar {r.room_number} (Lt. {r.floor || 1})
+                      Kamar {r.room_number}{r.floor ? ` (Lt. ${r.floor})` : ''}
                     </option>
                   ))}
                 </select>

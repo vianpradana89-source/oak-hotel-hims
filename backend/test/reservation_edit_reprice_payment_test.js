@@ -95,6 +95,11 @@ async function run() {
   let targetTypeId;
   let oldRoomId;
   let targetRoomId;
+  let targetRoomId2;
+  let targetRoomId3;
+  let targetRoomId4;
+  let targetRoomId5;
+  let targetRoomId6;
   let staleRatePlanId;
   let targetRatePlanId;
   let otaSourceId;
@@ -135,6 +140,22 @@ async function run() {
     );
     oldRoomId = oldRoom.rows[0].id;
     targetRoomId = targetRoom.rows[0].id;
+    const extraTargetRooms = await client.query(
+      `INSERT INTO rooms (property_id, room_type_id, room_number, name, status, is_active)
+       VALUES
+         ($1, $2, 'ERP-NEW-2', 'New Room 2', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-3', 'New Room 3', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-4', 'New Room 4', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-5', 'New Room 5', 'Ready', TRUE),
+         ($1, $2, 'ERP-NEW-6', 'New Room 6', 'Ready', TRUE)
+       RETURNING id`,
+      [tracked.propertyId, targetTypeId]
+    );
+    targetRoomId2 = extraTargetRooms.rows[0].id;
+    targetRoomId3 = extraTargetRooms.rows[1].id;
+    targetRoomId4 = extraTargetRooms.rows[2].id;
+    targetRoomId5 = extraTargetRooms.rows[3].id;
+    targetRoomId6 = extraTargetRooms.rows[4].id;
     const stalePlan = await client.query(
       `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate)
        VALUES ($1, $2, 'ERP-STALE', 'Stale Old Plan', 550000) RETURNING id`,
@@ -164,7 +185,7 @@ async function run() {
   try {
     const quoteSeedId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 1, 'QUOTE');
     const targetPreview = await previewReservationEdit(pool, quoteSeedId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId2,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
     });
     const targetTotal = Number(targetPreview.quote.grand_total);
@@ -210,11 +231,11 @@ async function run() {
     );
     await pool.query('UPDATE reservations SET amount_paid = $2, remaining_balance = 0, payment_status = $3 WHERE id = $1', [lowerId, targetTotal + 90000, 'PAID']);
     const lowerPreview = await previewReservationEdit(pool, lowerId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId2,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
     });
     const lowered = await executeReservationEditWithPayment(pool, lowerId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId3,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
       keep_current_price: false, expected_new_total: lowerPreview.quote.grand_total,
       idempotency_key: `${runId}-LOWER`
@@ -232,11 +253,11 @@ async function run() {
 
     const samePriceId = await createReservation(pool, tracked.propertyId, null, targetTypeId, targetTotal, 'SAME');
     const samePreview = await previewReservationEdit(pool, samePriceId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId3,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
     });
     await executeReservationEditWithPayment(pool, samePriceId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId4,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
       keep_current_price: false, expected_new_total: samePreview.quote.grand_total,
       idempotency_key: `${runId}-SAME`
@@ -248,11 +269,11 @@ async function run() {
 
     const increaseId = await createReservation(pool, tracked.propertyId, null, oldTypeId, targetTotal - 51379, 'INCREASE');
     const increasePreview = await previewReservationEdit(pool, increaseId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId4,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
     });
     const increasePayload = {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId5,
       rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
       keep_current_price: false, expected_new_total: increasePreview.quote.grand_total,
       payment_method: 'QRIS', idempotency_key: `${runId}-INCREASE`
@@ -278,11 +299,11 @@ async function run() {
     const otaId = await createReservation(pool, tracked.propertyId, oldRoomId, oldTypeId, 777777, 'OTA', otaSourceId);
     await pool.query('UPDATE reservations SET rate_plan_id = $2 WHERE id = $1', [otaId, staleRatePlanId]);
     const otaPreview = await previewReservationEdit(pool, otaId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId6,
       rate_plan_id: staleRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT'
     });
     const otaEdited = await executeReservationEditWithPayment(pool, otaId, {
-      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+      property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId6,
       rate_plan_id: staleRatePlanId, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
       keep_current_price: false, expected_new_total: otaPreview.quote.grand_total,
       idempotency_key: `${runId}-OTA`
@@ -294,7 +315,7 @@ async function run() {
     await pool.query("UPDATE reservations SET status = 'CHECKED_IN' WHERE id = $1", [checkedInId]);
     await assert.rejects(
       executeReservationEditWithPayment(pool, checkedInId, {
-        property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: null,
+        property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId6,
         rate_plan_id: null, check_in: '2035-01-01', check_out: '2035-01-02', stay_type: 'OVERNIGHT',
         keep_current_price: false, expected_new_total: targetTotal,
         idempotency_key: `${runId}-CHECKED-IN`

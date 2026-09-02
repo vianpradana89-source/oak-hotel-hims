@@ -80,7 +80,7 @@ import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCu
 import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
-import { previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
+import { getReservationEditAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { requireAuth, requireRole } from './domains/auth/authMiddleware';
@@ -3114,6 +3114,23 @@ app.patch('/api/reservations/:id', async (req, res) => {
     res.status(500).json({ status: 'ERROR', message });
   } finally {
     client.release();
+  }
+});
+
+// GET /api/reservations/:id/edit-availability - server-authoritative selector projection
+app.get('/api/reservations/:id/edit-availability', requireAuth, requireRole(['Front Office']), async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    const propertyId = Number(req.query.property_id);
+    const checkIn = String(req.query.check_in || '');
+    const checkOut = String(req.query.check_out || '');
+    const stayType = String(req.query.stay_type || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT';
+    const availability = await getReservationEditAvailability(pool, reservationId, propertyId, checkIn, checkOut, stayType);
+    return res.json({ status: 'OK', data: availability });
+  } catch (err: any) {
+    return res.status(err?.statusCode || 400).json({
+      status: 'ERROR', code: err?.code, message: err?.message || 'Gagal memuat ketersediaan kamar untuk edit reservasi.'
+    });
   }
 });
 
