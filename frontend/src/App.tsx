@@ -3661,7 +3661,7 @@ function AppContent() {
                                             const toRoomId = String(room.id);
                                             if (!reservationId || fromRoomId === toRoomId) return;
                                             try {
-                                              const response = await fetch(`/api/reservations/${reservationId}/move`, {
+                                              const response = await authFetch(`/api/reservations/${reservationId}/move`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ property_id: propertyId, to_room_id: toRoomId })

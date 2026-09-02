@@ -83,6 +83,7 @@ import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsS
 import { previewReservationEdit, executeReservationEdit } from './domains/reservations/reservationEditService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
+import { requireAuth } from './domains/auth/authMiddleware';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
@@ -6998,7 +6999,7 @@ app.get('/api/tapechart', async (req, res) => {
 });
 
 // Move reservation (room move)
-app.post('/api/reservations/:id/move', async (req, res) => {
+app.post('/api/reservations/:id/move', requireAuth, async (req, res) => {
   const reservationId = Number(req.params.id);
   const { to_room_id } = req.body;
   if (!to_room_id) return res.status(400).json({ status: 'ERROR', message: 'missing to_room_id' });
