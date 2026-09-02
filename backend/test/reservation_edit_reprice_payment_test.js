@@ -102,6 +102,7 @@ async function run() {
   let targetRoomId6;
   let staleRatePlanId;
   let targetRatePlanId;
+  let alternateTargetRatePlanId;
   let otaSourceId;
   try {
     await client.query('BEGIN');
@@ -111,6 +112,17 @@ async function run() {
       [runId, `E${String(Date.now()).slice(-5)}`]
     );
     tracked.propertyId = property.rows[0].id;
+    await client.query(
+      `INSERT INTO property_pricing_settings (
+         property_id, tax_percent, service_charge_percent, prices_include_tax, prices_include_service
+       ) VALUES ($1, 0, 0, FALSE, FALSE)
+       ON CONFLICT (property_id) DO UPDATE
+       SET tax_percent = EXCLUDED.tax_percent,
+           service_charge_percent = EXCLUDED.service_charge_percent,
+           prices_include_tax = EXCLUDED.prices_include_tax,
+           prices_include_service = EXCLUDED.prices_include_service`,
+      [tracked.propertyId]
+    );
     const category = await client.query(
       `INSERT INTO room_categories (property_id, code, name, is_active)
        VALUES ($1, 'ERP-CAT', 'Edit Reprice', TRUE) RETURNING id`,
@@ -168,6 +180,12 @@ async function run() {
       [tracked.propertyId, targetTypeId]
     );
     targetRatePlanId = targetPlan.rows[0].id;
+    const alternateTargetPlan = await client.query(
+      `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate)
+       VALUES ($1, $2, 'ERP-TARGET-ALT', 'Target Alternate Plan', 650000) RETURNING id`,
+      [tracked.propertyId, targetTypeId]
+    );
+    alternateTargetRatePlanId = alternateTargetPlan.rows[0].id;
     const ota = await client.query(
       `INSERT INTO ota_sources (property_id, code, name)
        VALUES ($1, 'ERP-OTA', 'Edit Reprice OTA') RETURNING id`,
@@ -183,6 +201,38 @@ async function run() {
   }
 
   try {
+    const previewPriceId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 435000, 'PREVIEW-PRICE');
+    const selectedTargetPlanPreview = await previewReservationEdit(pool, previewPriceId, {
+      property_id: tracked.propertyId,
+      room_type_id: targetTypeId,
+      room_id: targetRoomId,
+      rate_plan_id: targetRatePlanId,
+      check_in: '2035-01-01',
+      check_out: '2035-01-02',
+      stay_type: 'OVERNIGHT'
+    });
+    assert.strictEqual(Number(selectedTargetPlanPreview.quote.grand_total), 460000, 'selected target Rate Plan returns its canonical total');
+    assert.strictEqual(Number(selectedTargetPlanPreview.price_difference), 25000, 'target Rate Plan difference is calculated from old total');
+    assert.strictEqual(Number(selectedTargetPlanPreview.quote.room_type_id), Number(targetTypeId), 'preview honors the selected Room Type ID');
+    assert.strictEqual(Number(selectedTargetPlanPreview.quote.rate_plan_id), Number(targetRatePlanId), 'preview honors the selected Rate Plan ID');
+
+    const alternateTargetPlanPreview = await previewReservationEdit(pool, previewPriceId, {
+      property_id: tracked.propertyId,
+      room_type_id: targetTypeId,
+      room_id: targetRoomId,
+      rate_plan_id: alternateTargetRatePlanId,
+      check_in: '2035-01-01',
+      check_out: '2035-01-02',
+      stay_type: 'OVERNIGHT'
+    });
+    assert.strictEqual(Number(alternateTargetPlanPreview.quote.grand_total), 650000, 'alternate Rate Plan returns its own canonical total');
+    assert.strictEqual(Number(alternateTargetPlanPreview.price_difference), 215000, 'alternate Rate Plan recalculates difference');
+    assert.notStrictEqual(
+      Number(alternateTargetPlanPreview.quote.grand_total),
+      Number(selectedTargetPlanPreview.quote.grand_total),
+      'different Rate Plan IDs cannot reuse the prior quote total'
+    );
+
     const quoteSeedId = await createReservation(pool, tracked.propertyId, null, oldTypeId, 1, 'QUOTE');
     const targetPreview = await previewReservationEdit(pool, quoteSeedId, {
       property_id: tracked.propertyId, room_type_id: targetTypeId, room_id: targetRoomId2,

@@ -152,8 +152,6 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       try {
         setAvailabilityLoading(true);
         setAvailableRoomTypes(null);
-        previewRequestRef.current += 1;
-        setPreviewData(null);
         const result = await safeFetchJson<{ data?: { room_types?: any[] } }>(
           `/api/reservations/${reservation.id}/edit-availability?${params.toString()}`,
           { signal: controller.signal },

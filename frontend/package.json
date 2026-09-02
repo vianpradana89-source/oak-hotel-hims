@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:edit-reservation-preview-contract": "node scripts/edit_reservation_preview_contract_test.cjs",
     "test:booking-composer-binding": "node test/booking_composer_room_binding_test.ts",
     "test:occupancy-helpers": "node test/occupancy_reporting_date_helpers_test.ts",
     "test:transaction-ux": "node test/transaction_ux_helpers_test.ts",
