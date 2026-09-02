@@ -722,7 +722,7 @@ function AppContent() {
   const getRoomTypeName = (room: any) => String(room?.name || room?.room_type || 'Standard Room').trim() || 'Standard Room';
 
   const calendarTypeOptions = useMemo(() => {
-    const options = new Map<number, { id: number; label: string; displayOrder: number }>();
+    const options = new Map<number, { id: number; label: string; code?: string; displayOrder: number }>();
     for (const room of rooms as CalendarRoom[]) {
       if (room.room_type_id == null) continue;
       const id = Number(room.room_type_id);
@@ -730,6 +730,7 @@ function AppContent() {
       const name = String(room.room_type_name || room.name || '').trim();
       options.set(id, {
         id,
+        code,
         label: code && code !== name ? `${name} (${code})` : name,
         displayOrder: Number(room.room_type_display_order || 0),
       });
@@ -3798,7 +3799,7 @@ function AppContent() {
               }}
               propertyId={propertyId || 1}
               rooms={rooms}
-              roomTypes={calendarTypeOptions.map((t) => ({ id: t.id, name: t.label }))}
+              roomTypes={calendarTypeOptions.map((t) => ({ id: t.id, name: t.label, code: t.code }))}
               initialRoomId={quickBooking.roomId}
               initialDate={quickBooking.checkIn}
               onBookingSuccess={() => {

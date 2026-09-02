@@ -287,6 +287,32 @@ export default function QuickBookingModal({
     }
   }, [isDayUseAllowed, todayStr]);
 
+  // Helper for resilient room type matching (ID, Code prefix, and Name)
+  const matchRatePlanToRoomType = useCallback((rp: any, targetTypeId: number | null): boolean => {
+    if (!rp.room_type_id) return true;
+    if (!targetTypeId) return false;
+    if (Number(rp.room_type_id) === Number(targetTypeId)) return true;
+
+    const activeType = roomTypes.find(t => Number(t.id) === Number(targetTypeId));
+    if (activeType) {
+      const activeCode = String(activeType.code || '').trim().toUpperCase();
+      const rpCode = String(rp.room_type_code || '').trim().toUpperCase();
+      if (activeCode && rpCode) {
+        if (activeCode === rpCode || activeCode.startsWith(rpCode) || rpCode.startsWith(activeCode)) {
+          return true;
+        }
+      }
+      const activeName = String(activeType.name || '').trim().toLowerCase();
+      const rpName = String(rp.room_type_name || '').trim().toLowerCase();
+      if (activeName && rpName) {
+        if (activeName.includes(rpName) || rpName.includes(activeName)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }, [roomTypes]);
+
   // Auto-fill default rate plan if ratePlanId is missing and channel is not OTA
   useEffect(() => {
     const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
@@ -298,7 +324,7 @@ export default function QuickBookingModal({
         if (!draft.ratePlanId && draft.roomTypeId) {
           const isDayUse = draft.stayType === 'DAY_USE';
           const matchPlan = allPlans.find((rp: any) =>
-            (!rp.room_type_id || Number(rp.room_type_id) === Number(draft.roomTypeId)) &&
+            matchRatePlanToRoomType(rp, draft.roomTypeId) &&
             (isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
           );
           if (matchPlan) {
@@ -310,7 +336,7 @@ export default function QuickBookingModal({
       });
       return changed ? updated : prev;
     });
-  }, [internalRatePlans, ratePlans, channelType]);
+  }, [internalRatePlans, ratePlans, channelType, matchRatePlanToRoomType]);
 
   // --- UI & Submission State ---
   const [submitting, setSubmitting] = useState(false);
@@ -1500,8 +1526,7 @@ export default function QuickBookingModal({
                   const isDayUse = roomDraft.stayType === 'DAY_USE';
                   const availableRPlans = (internalRatePlans.length > 0 ? internalRatePlans : ratePlans).filter(
                     (rp: any) => {
-                      const matchesType = !rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId);
-                      if (!matchesType) return false;
+                      if (!matchRatePlanToRoomType(rp, roomDraft.roomTypeId)) return false;
                       return isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE';
                     }
                   );
@@ -1554,7 +1579,7 @@ export default function QuickBookingModal({
                                   }
                                   const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
                                   const matchingPlan = allPlans.find(
-                                    (rp: any) => (!rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId)) && rp.rate_type !== 'DAY_USE'
+                                    (rp: any) => matchRatePlanToRoomType(rp, roomDraft.roomTypeId) && rp.rate_type !== 'DAY_USE'
                                   );
                                   handleUpdateRoom(roomIdx, {
                                     stayType: 'OVERNIGHT',
@@ -1573,7 +1598,7 @@ export default function QuickBookingModal({
                                 onClick={() => {
                                   const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
                                   const matchingDayPlan = allPlans.find(
-                                    (rp: any) => (!rp.room_type_id || Number(rp.room_type_id) === Number(roomDraft.roomTypeId)) && rp.rate_type === 'DAY_USE'
+                                    (rp: any) => matchRatePlanToRoomType(rp, roomDraft.roomTypeId) && rp.rate_type === 'DAY_USE'
                                   );
                                   handleUpdateRoom(roomIdx, {
                                     stayType: 'DAY_USE',
@@ -1718,7 +1743,7 @@ export default function QuickBookingModal({
                               const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
                               const matchingPlan = allPlans.find(
                                 (rp: any) =>
-                                  (!rp.room_type_id || Number(rp.room_type_id) === newTypeId) &&
+                                  matchRatePlanToRoomType(rp, newTypeId) &&
                                   (roomDraft.stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
                               );
                               handleUpdateRoom(roomIdx, {
@@ -1731,7 +1756,7 @@ export default function QuickBookingModal({
                           >
                             {roomTypes.map(rt => (
                               <option key={rt.id} value={rt.id}>
-                                {rt.name} ({rt.code})
+                                {rt.name}
                               </option>
                             ))}
                           </select>
