@@ -238,7 +238,7 @@ export async function assertCapacityCoverage(
         AND d < $3::date
         AND NOT EXISTS (
           SELECT 1 FROM availability_dates ad
-          WHERE ad.room_type_id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+          WHERE ad.room_type_id = COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot)
             AND ad.date::date = d::date
         )
 
@@ -431,7 +431,7 @@ export async function calculateOccupancy(
     ),
     sold AS (
       SELECT
-        COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
+        COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
         d::date AS hotel_date,
         COUNT(*)::int AS sold_count
       FROM reservations r
@@ -443,7 +443,7 @@ export async function calculateOccupancy(
         AND b.booking_status != 'CANCELLED'
         AND d >= $2::date
         AND d < $3::date
-      GROUP BY COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id), d::date
+      GROUP BY COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot), d::date
     ),
     participating_room_types AS (
       -- Include any room type that has gross capacity > 0, sold stays, blocks, OR is currently active with ledger presence

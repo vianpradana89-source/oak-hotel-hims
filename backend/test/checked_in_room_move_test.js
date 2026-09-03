@@ -100,6 +100,18 @@ async function run() {
     assert.equal(Number(rateRows.rows[0].room_type_id), f.typeA, 'checked-in night retains old room type context');
     assert.equal(Number(rateRows.rows[1].room_type_id), f.typeB, 'future night changes to new room type context');
     assert(rateRows.rows.every(row => Number(row.final_room_rate) === 100000), 'KEEP_CURRENT_RATE preserves money');
+    const postMoveDetail = await pool.query(
+      `SELECT r.room_id, r.booked_room_type_id_snapshot,
+              ro.room_type_id AS physical_room_type_id,
+              rt.name AS physical_room_type_name
+       FROM reservations r
+       JOIN rooms ro ON ro.id = r.room_id
+       JOIN room_types rt ON rt.id = ro.room_type_id
+       WHERE r.id = $1`, [different]);
+    assert.equal(Number(postMoveDetail.rows[0].room_id), f.roomB1, 'room_id points to target room');
+    assert.equal(Number(postMoveDetail.rows[0].physical_room_type_id), f.typeB, 'current physical room type is Type B');
+    assert.equal(postMoveDetail.rows[0].physical_room_type_name, 'Type B', 'physical room type display is Type B');
+    assert.equal(Number(postMoveDetail.rows[0].booked_room_type_id_snapshot), f.typeA, 'booked snapshot preserved as Type A');
     const repriced = await createReservation(f, 'REPRICE', f.roomA1, f.typeA);
     await executeRoomMove(pool, repriced, { property_id: tracked.propertyId, to_room_id: f.roomB3, rate_plan_id: f.ratePlanB, reason_category: 'UPGRADE', reason_detail: 'Upgrade berbayar disetujui.', pricing_treatment: 'APPLY_NEW_RATE', idempotency_key: `${tag}-reprice` }, actor);
     const repriceCheck = await pool.query(`SELECT total_price,rate_plan_id FROM reservations WHERE id=$1`, [repriced]);

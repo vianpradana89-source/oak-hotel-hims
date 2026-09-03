@@ -2218,15 +2218,19 @@ async function getCanonicalReservationDto(clientOrPool: any, reservationId: numb
       ota.name AS ota_source_name,
       ro.room_number,
       ro.floor,
-      COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
-      COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
-      COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
-      COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code
+      COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
+      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type,
+      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type_name,
+      COALESCE(rt_current.code, rt.code) AS room_type_code,
+      r.booked_room_type_id_snapshot AS booked_room_type_id_snapshot,
+      r.booked_room_type_name_snapshot AS booked_room_type_name_snapshot,
+      r.booked_room_type_code_snapshot AS booked_room_type_code_snapshot
     FROM reservations r
     LEFT JOIN bookings b ON b.id = r.booking_id
     LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
     LEFT JOIN rooms ro ON ro.id = r.room_id
-    LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+    LEFT JOIN room_types rt_current ON rt_current.id = ro.room_type_id
+    LEFT JOIN room_types rt ON rt.id = r.booked_room_type_id_snapshot
     WHERE r.id = $1
   `, [reservationId]);
 
@@ -2338,10 +2342,13 @@ app.get('/api/reservations', async (req, res) => {
         r.room_id,
         ro.room_number,
         ro.floor,
-        COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
-        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
-        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
-        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code,
+        COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
+        COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type,
+        COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type_name,
+        COALESCE(rt_current.code, rt.code) AS room_type_code,
+        r.booked_room_type_id_snapshot AS booked_room_type_id_snapshot,
+        r.booked_room_type_name_snapshot AS booked_room_type_name_snapshot,
+        r.booked_room_type_code_snapshot AS booked_room_type_code_snapshot,
         r.check_in,
         r.check_out,
         r.status,
@@ -2357,7 +2364,8 @@ app.get('/api/reservations', async (req, res) => {
       FROM reservations r
       JOIN bookings b ON b.id = r.booking_id
       LEFT JOIN rooms ro ON ro.id = r.room_id
-      LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
+      LEFT JOIN room_types rt_current ON rt_current.id = ro.room_type_id
+      LEFT JOIN room_types rt ON rt.id = r.booked_room_type_id_snapshot
       LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
       WHERE ${whereClause}
       ORDER BY r.check_in DESC, r.id DESC
@@ -2402,19 +2410,23 @@ app.get('/api/reservations/:id', async (req, res) => {
         b.id as booking_id_value,
         COALESCE(r.booker_name, b.booker_name) AS booker_name,
         COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
-        ota.name as ota_source_name,
-        ro.room_number,
-        ro.floor,
-        COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id) AS room_type_id,
-        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type,
-        COALESCE(r.booked_room_type_name_snapshot, rt.name, ro.name, 'Standard Room') AS room_type_name,
-        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type_code
-      FROM reservations r
-      LEFT JOIN bookings b ON b.id = r.booking_id
-      LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
-      LEFT JOIN rooms ro ON ro.id = r.room_id
-      LEFT JOIN room_types rt ON rt.id = COALESCE(r.booked_room_type_id_snapshot, ro.room_type_id)
-      WHERE r.id = $1
+      ota.name as ota_source_name,
+      ro.room_number,
+      ro.floor,
+      COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
+      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type,
+      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type_name,
+      COALESCE(rt_current.code, rt.code) AS room_type_code,
+      r.booked_room_type_id_snapshot AS booked_room_type_id_snapshot,
+      r.booked_room_type_name_snapshot AS booked_room_type_name_snapshot,
+      r.booked_room_type_code_snapshot AS booked_room_type_code_snapshot
+    FROM reservations r
+    LEFT JOIN bookings b ON b.id = r.booking_id
+    LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
+    LEFT JOIN rooms ro ON ro.id = r.room_id
+    LEFT JOIN room_types rt_current ON rt_current.id = ro.room_type_id
+    LEFT JOIN room_types rt ON rt.id = r.booked_room_type_id_snapshot
+    WHERE r.id = $1
     `, [reservationId]);
     if (!hasRows(result)) {
       return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
