@@ -143,38 +143,43 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
 
     for (const acc of seedAccounts) {
       try {
-        const passwordHash = await hashPassword(acc.password);
-        
-        // Upsert into users (by email or username)
+        // Safe query: check if user already exists by email or username
         const existingUser = await pool.query(
-          `SELECT id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1`,
+          `SELECT id, role_id, username, email, password_hash, full_name, is_active,
+                  employee_id, account_status, must_change_password
+           FROM users
+           WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)
+           LIMIT 1`,
           [acc.email, acc.username]
         );
 
         let userId: number;
         if (existingUser.rows.length === 0) {
+          // Only hash password upon first-time creation of missing bootstrap account
+          const passwordHash = await hashPassword(acc.password);
           const ins = await pool.query(
-            `INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-             VALUES (1, $1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+            `INSERT INTO users (
+               property_id, role_id, username, email, password_hash,
+               full_name, is_active, account_status, must_change_password, created_at, updated_at
+             )
+             VALUES (1, $1, $2, $3, $4, $5, TRUE, 'READY', FALSE, NOW(), NOW())
              RETURNING id`,
             [acc.role_id, acc.username, acc.email, passwordHash, acc.full_name]
           );
           userId = Number(ins.rows[0].id);
           console.log(`[AUTH SEED] User created: ${acc.email} / ${acc.username} (Role: ${acc.role_name})`);
         } else {
+          // Established account: DO NOT mutate credentials, role, status, or identity
           userId = Number(existingUser.rows[0].id);
-          await pool.query(
-            `UPDATE users 
-             SET role_id = $1, username = $2, password_hash = $3, full_name = $4, is_active = TRUE, updated_at = NOW()
-             WHERE id = $5`,
-            [acc.role_id, acc.username, passwordHash, acc.full_name, userId]
-          );
-          console.log(`[AUTH SEED] User updated: ${acc.email} / ${acc.username} (Role: ${acc.role_name})`);
+          console.log(`[AUTH SEED] User preserved: ${acc.email} / ${acc.username} (Role ID: ${existingUser.rows[0].role_id}, Status: ${existingUser.rows[0].account_status || 'READY'})`);
         }
 
-        // Sync into hr_employees
+        // Safe HR Employee Sync: Create if missing only. NEVER mutate established HR records.
         const existingEmp = await pool.query(
-          `SELECT id, employee_code FROM hr_employees WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1`,
+          `SELECT id, employee_code, full_name, role, department, is_active
+           FROM hr_employees
+           WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)
+           LIMIT 1`,
           [acc.email, acc.username]
         );
 
@@ -193,16 +198,13 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
              VALUES (1, $1, $2, $3, $4, CURRENT_DATE, 0, 'ACTIVE', $3, $5, $6, TRUE, NOW(), NOW())`,
             [empCode, acc.full_name, acc.role_name, acc.department, acc.username, acc.email]
           );
+          console.log(`[AUTH SEED] HR Employee created: ${acc.email} / ${acc.username}`);
         } else {
-          await pool.query(
-            `UPDATE hr_employees
-             SET full_name = $1, position = $2, department = $3, role = $2, username = $4, is_active = TRUE, updated_at = NOW()
-             WHERE id = $5`,
-            [acc.full_name, acc.role_name, acc.department, acc.username, existingEmp.rows[0].id]
-          );
+          // Established HR employee: NEVER overwrite name, role, department, username, or active status
+          console.log(`[AUTH SEED] HR Employee preserved: ${existingEmp.rows[0].employee_code || existingEmp.rows[0].id}`);
         }
       } catch (userErr: any) {
-        console.warn(`[AUTH SEED] Failed to seed user ${acc.email}:`, userErr.message);
+        console.warn(`[AUTH SEED] Note on seeding user ${acc.email}:`, userErr.message);
       }
     }
   } catch (err: any) {
