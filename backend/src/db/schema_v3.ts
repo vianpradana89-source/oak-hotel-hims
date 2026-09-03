@@ -1788,7 +1788,7 @@ export async function initializeDatabase(pool: Pool) {
         );
         CREATE INDEX IF NOT EXISTS idx_hrd_role_policies_prop ON hrd_role_policies (property_id);
 
-        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE DEFAULT 1;
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE;
         ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'Crew';
         ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS username VARCHAR(100);
         ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS email VARCHAR(150);
@@ -1816,6 +1816,12 @@ export async function initializeDatabase(pool: Pool) {
         `, [prop.id]);
       }
     }
+
+    // Employees must always receive their property from the creating flow.
+    // Drop the legacy implicit Property 1 default without rewriting rows.
+    await auditMigrationClient.query(`
+      ALTER TABLE hr_employees ALTER COLUMN property_id DROP DEFAULT;
+    `);
 
     // -------------------------------------------------------------
     // MIGRATION 14: housekeeping_finding_blocking_schema_v1
@@ -3632,17 +3638,6 @@ export async function initializeDatabase(pool: Pool) {
   `).catch((e) => console.warn('reservations identity and constraint migration warning:', e.message));
 
   // GL accounts & guest seeds removed — fresh DB must remain data-neutral (Rule 11)
-
-  const employeeCount = await pool.query('SELECT COUNT(*) AS total FROM hr_employees');
-  if (Number(employeeCount.rows[0].total) === 0) {
-    await pool.query(`
-      INSERT INTO hr_employees (employee_code, full_name, position, department, hire_date, monthly_salary, status)
-      VALUES
-        ('EMP-001', 'Rina Fitri', 'Front Office Manager', 'Front Office', '2023-01-15', 8500000, 'ACTIVE'),
-        ('EMP-002', 'Dewi Lestari', 'Housekeeping Supervisor', 'Housekeeping', '2023-03-10', 7000000, 'ACTIVE'),
-        ('EMP-003', 'Andi Pratama', 'Technician', 'Maintenance', '2022-11-20', 7500000, 'ACTIVE')
-    `);
-  }
 
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }
