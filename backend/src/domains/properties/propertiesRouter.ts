@@ -19,7 +19,7 @@ export function createPropertiesRouter(pool: Pool): Router {
           p.address,
           p.phone,
           p.timezone,
-          p.currency,
+          COALESCE(NULLIF(BTRIM(p.currency), ''), 'IDR') AS currency,
           p.is_active,
           p.created_at,
           p.updated_at,
@@ -52,7 +52,11 @@ export function createPropertiesRouter(pool: Pool): Router {
     try {
       const { id } = req.params;
       const result = await pool.query(
-        'SELECT id, name, property_code, address, phone, timezone, currency, is_active, created_at, updated_at FROM properties WHERE id = $1',
+        `SELECT id, name, property_code, address, phone, timezone,
+                COALESCE(NULLIF(BTRIM(currency), ''), 'IDR') AS currency,
+                is_active, created_at, updated_at
+         FROM properties
+         WHERE id = $1`,
         [id]
       );
       if (result.rows.length === 0) {
@@ -86,6 +90,7 @@ export function createPropertiesRouter(pool: Pool): Router {
 
       const cleanName = String(name).trim();
       const cleanCode = String(property_code).trim().toUpperCase();
+      const cleanCurrency = String(currency || 'IDR').trim().toUpperCase() || 'IDR';
 
       await client.query('BEGIN');
 
@@ -110,7 +115,7 @@ export function createPropertiesRouter(pool: Pool): Router {
         `INSERT INTO properties (name, property_code, address, phone, timezone, currency, is_active, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, true, NOW(), NOW())
          RETURNING *`,
-        [cleanName, cleanCode, safeAddress, safePhone, timezone, currency]
+        [cleanName, cleanCode, safeAddress, safePhone, timezone, cleanCurrency]
       );
       const newProp = propRes.rows[0];
       const newId = newProp.id;
@@ -229,7 +234,9 @@ export function createPropertiesRouter(pool: Pool): Router {
       const updatedAddress = address !== undefined ? (address ? String(address).trim() : null) : existing.address;
       const updatedPhone = phone !== undefined ? (phone ? String(phone).trim() : null) : existing.phone;
       const updatedTimezone = timezone !== undefined ? String(timezone).trim() : existing.timezone;
-      const updatedCurrency = currency !== undefined ? String(currency).trim() : existing.currency;
+      const updatedCurrency = currency !== undefined
+        ? String(currency || 'IDR').trim().toUpperCase() || 'IDR'
+        : existing.currency;
       const updatedIsActive = is_active !== undefined ? Boolean(is_active) : existing.is_active;
 
       const updateRes = await pool.query(

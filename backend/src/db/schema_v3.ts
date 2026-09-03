@@ -379,6 +379,35 @@ export async function initializeDatabase(pool: Pool) {
 
   await pool.query(q);
 
+  // Property Master owns the canonical currency field. Preserve the legacy
+  // currency_code column for compatibility while backfilling only absent data.
+  await pool.query(`
+    ALTER TABLE properties ADD COLUMN IF NOT EXISTS currency VARCHAR(3);
+
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'properties'
+          AND column_name = 'currency_code'
+      ) THEN
+        UPDATE properties
+        SET currency = UPPER(BTRIM(currency_code))
+        WHERE (currency IS NULL OR BTRIM(currency) = '')
+          AND currency_code IS NOT NULL
+          AND BTRIM(currency_code) <> '';
+      END IF;
+    END $$;
+
+    UPDATE properties
+    SET currency = 'IDR'
+    WHERE currency IS NULL OR BTRIM(currency) = '';
+
+    ALTER TABLE properties ALTER COLUMN currency SET DEFAULT 'IDR';
+  `);
+
   // Bookings foundation: canonical booking entity required by reservation FK.
   // Idempotent CREATE TABLE + triggers. Mirrors 1d_1_bookings_schema.sql
   // production migration but lives in bootstrap for fresh-DB support.
