@@ -76,6 +76,7 @@ async function runTests() {
     assert(createRes.status === 201, 'POST /api/properties returns 201 Created');
     assert(createRes.data.status === 'SUCCESS', 'POST /api/properties returns status SUCCESS');
     assert(createRes.data.data && createRes.data.data.id, 'POST /api/properties returns created property with ID');
+    assert(createRes.data.data.currency === 'IDR', 'POST /api/properties returns canonical currency');
     createdPropId = createRes.data.data.id;
 
     // 2b. Verify default configs created in DB
@@ -111,6 +112,7 @@ async function runTests() {
     assert(updateRes.status === 200, 'PATCH /api/properties/:id returns 200 OK');
     assert(updateRes.data.data.name === 'OAK Test Resort Updated', 'Property name was successfully updated');
     assert(updateRes.data.data.timezone === 'Asia/Makassar', 'Property timezone was successfully updated');
+    assert(updateRes.data.data.currency === 'IDR', 'Property API retains canonical currency');
 
     // 5. DELETE /api/properties/1 (Primary Property deletion blocked)
     const delPrimaryRes = await makeRequest('DELETE', '/api/properties/1');

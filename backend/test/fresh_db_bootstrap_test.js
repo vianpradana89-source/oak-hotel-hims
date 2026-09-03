@@ -113,6 +113,7 @@ async function main() {
     assert(allTablesExist, 'C. all required foundation tables exist');
 
     assert(await tableExists('public', 'properties'), 'D. properties table exists');
+    assert(await columnExists('properties', 'currency'), 'D1. properties has canonical currency column');
     assert(await tableExists('public', 'bookings'), 'E. bookings table exists');
     assert(await columnExists('reservations', 'booking_id'), 'F. reservations has booking_id column');
     assert(await columnExists('reservations', 'stay_sequence'), 'G. reservations has stay_sequence column');
