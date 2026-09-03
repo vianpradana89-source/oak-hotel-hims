@@ -224,6 +224,12 @@ async function cleanupFixture(client) {
   try {
     // Covers checkout-created tasks if an earlier reservation cleanup failed.
     await client.query('DELETE FROM housekeeping_tasks WHERE property_id = $1', [fixture.propertyId]);
+    // Every successful fixture reservation projects its ROOM_CHARGE folio row
+    // into this run-exclusive property's canonical Transaction Domain.
+    await client.query('DELETE FROM transaction_attachments WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transaction_lines WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transactions WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transaction_daily_sequences WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM availability_dates WHERE room_type_id = $1', [fixture.roomTypeId]);
     await client.query('DELETE FROM rate_plans WHERE id = $1', [fixture.ratePlanId]);
     await client.query('DELETE FROM rooms WHERE property_id = $1', [fixture.propertyId]);
@@ -579,6 +585,11 @@ async function cleanupRun(client, roomStatusBaseline, availabilityBaseline) {
          WHERE id = ANY($1::int[])
          ORDER BY id
          FOR UPDATE`,
+        [reservationIds]
+      );
+
+      await client.query(
+        `DELETE FROM transactions WHERE reservation_id = ANY($1::int[])`,
         [reservationIds]
       );
 
