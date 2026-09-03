@@ -3570,6 +3570,48 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // 28. CHECKED-IN AUDITED ROOM MOVE LEDGER
+    const roomMoveMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'checked_in_audited_room_move_v1'"
+    );
+    if ((roomMoveMarker.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS reservation_room_moves (
+          id BIGSERIAL PRIMARY KEY,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          from_room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+          to_room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+          from_room_type_id INTEGER NOT NULL REFERENCES room_types(id) ON DELETE RESTRICT,
+          to_room_type_id INTEGER NOT NULL REFERENCES room_types(id) ON DELETE RESTRICT,
+          effective_from_date DATE NOT NULL,
+          moved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          moved_by_user_id INTEGER,
+          moved_by VARCHAR(100) NOT NULL,
+          moved_by_role VARCHAR(100),
+          reason_category VARCHAR(30) NOT NULL CHECK (reason_category IN ('GUEST_REQUEST', 'MAINTENANCE', 'ROOM_ISSUE', 'UPGRADE', 'DOWNGRADE', 'OPERATIONAL', 'OTHER')),
+          reason_detail TEXT NOT NULL CHECK (LENGTH(TRIM(reason_detail)) > 0),
+          pricing_treatment VARCHAR(30) NOT NULL CHECK (pricing_treatment IN ('KEEP_CURRENT_RATE', 'APPLY_NEW_RATE')),
+          old_rate_context JSONB NOT NULL,
+          new_rate_context JSONB NOT NULL,
+          correlation_id VARCHAR(150),
+          idempotency_key VARCHAR(150),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_room_move_distinct_rooms CHECK (from_room_id <> to_room_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_reservation_room_moves_reservation
+          ON reservation_room_moves(reservation_id, effective_from_date, id);
+        CREATE INDEX IF NOT EXISTS idx_reservation_room_moves_property
+          ON reservation_room_moves(property_id, moved_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_reservation_room_moves_idempotency
+          ON reservation_room_moves(property_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;
+        INSERT INTO schema_migrations(version)
+        VALUES ('checked_in_audited_room_move_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

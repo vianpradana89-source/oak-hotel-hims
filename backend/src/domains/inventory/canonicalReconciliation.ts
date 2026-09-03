@@ -56,7 +56,8 @@ export async function reconcileCanonicalAvailability(
 
     const expected = new Map<string, number>();
     const reservations = await client.query(
-      `SELECT res.check_in, res.check_out, rm.room_type_id
+      `SELECT res.id, res.check_in, res.check_out,
+              COALESCE(res.booked_room_type_id_snapshot, rm.room_type_id) AS initial_room_type_id
        FROM reservations res
        JOIN rooms rm ON rm.id = res.room_id
        WHERE res.status IN ('BOOKED', 'CHECKED_IN')
@@ -64,15 +65,26 @@ export async function reconcileCanonicalAvailability(
          AND res.check_in IS NOT NULL
          AND res.check_out IS NOT NULL
          AND res.check_out > res.check_in
-       ORDER BY rm.room_type_id, res.check_in, res.check_out, res.id`,
-      [roomTypeIds]
-    );
+        ORDER BY res.check_in, res.check_out, res.id`,
+        [roomTypeIds]
+      );
     for (const reservation of reservations.rows) {
-      const roomTypeId = Number(reservation.room_type_id);
+      const moveRows = await client.query(
+        `SELECT to_room_type_id, effective_from_date
+         FROM reservation_room_moves WHERE reservation_id = $1
+         ORDER BY effective_from_date, id`,
+        [reservation.id]
+      ).catch(() => ({ rows: [] as any[] }));
+      const moveTypeByDate = new Map<string, number>(moveRows.rows.map((move: any) => [
+        hotelDateKey(move.effective_from_date), Number(move.to_room_type_id)
+      ]));
+      let roomTypeId = Number(reservation.initial_room_type_id);
       for (const date of enumerateHotelDates(
         hotelDateKey(reservation.check_in),
         hotelDateKey(reservation.check_out)
       )) {
+        roomTypeId = moveTypeByDate.get(date) || roomTypeId;
+        if (!roomTypeIds.includes(roomTypeId)) continue;
         const key = canonicalAvailabilityKey(roomTypeId, date);
         expected.set(key, (expected.get(key) || 0) + 1);
       }
