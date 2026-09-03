@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 const baseUrl = (process.argv[2] || 'http://localhost:5000').replace(/\/$/, '');
 const pool = new Pool({
@@ -121,7 +122,7 @@ function correlationId(label) {
   return `RM1B-${label}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-async function request(method, path, body, corr) {
+async function request(method, path, body, corr, authToken = null) {
   let effectiveBody = body;
   if (method === 'POST' && effectiveBody && typeof effectiveBody === 'object' && propertyId) {
     if (!effectiveBody.property_id) {
@@ -137,9 +138,13 @@ async function request(method, path, body, corr) {
       effectivePath = `${effectivePath}${sep}property_id=${propertyId}`;
     }
   }
+  const headers = { 'Content-Type': 'application/json', 'X-Correlation-Id': corr };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
   const response = await fetchFn(`${baseUrl}${effectivePath}`, {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-Correlation-Id': corr },
+    headers,
     body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   });
   const text = await response.text();
@@ -477,10 +482,10 @@ async function testC3CContractNullIdRejected() {
   passedScenarios += 1;
 }
 
-async function testTapechartExposesCanonicalIdentity() {
+async function testTapechartExposesCanonicalIdentity(authToken) {
   const start = addDays(localDate(), 75);
   const end = addDays(start, 2);
-  const response = await request('GET', `/api/tapechart?start=${start}&end=${end}`, null, correlationId('TAPECHART'));
+  const response = await request('GET', `/api/tapechart?start=${start}&end=${end}`, null, correlationId('TAPECHART'), authToken);
   expect(response.status === 200, `tapechart failed: ${response.text}`);
   const rooms = response.json.rooms;
   expect(Array.isArray(rooms) && rooms.length > 0, 'tapechart returned no rooms');
@@ -583,6 +588,17 @@ async function cleanupFixture() {
 async function main() {
   await pool.query('SELECT 1');
   await createFixture();
+
+  const foAuthToken = generateToken({
+    id: 77001,
+    email: `fo-${runId}@test.oak`,
+    username: `fo-${runId}`,
+    full_name: 'RM1B Front Office Tester',
+    role: 'Front Office',
+    role_id: null,
+    property_id: fixture.propertyId
+  });
+
   let probe = null;
   try {
     probe = await fetchFn(`${baseUrl}/api/rooms?property_id=${propertyId}`);
@@ -600,7 +616,7 @@ async function main() {
     await testCheckoutReleasesInventoryDriftFix();
     await testLockEndpointDualWrite();
     await testC3CContractNullIdRejected();
-    await testTapechartExposesCanonicalIdentity();
+    await testTapechartExposesCanonicalIdentity(foAuthToken);
   } finally {
     for (const cleanup of trackedCleanups) {
       try {
