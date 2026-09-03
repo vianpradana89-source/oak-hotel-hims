@@ -958,7 +958,7 @@ async function run() {
       expect(occupied.status === 201, `F1 occupied create failed: ${occupied.status} ${occupied.text}`);
       const movable = await createReservation(roomA.id, day(25), day(27), 'F2');
       expect(movable.status === 201, `F2 movable create failed: ${movable.status} ${movable.text}`);
-      const move = await request('POST', `/api/reservations/${movable.json?.data?.id}/move`, { property_id: roomA.property_id, to_room_id: roomB.id }, 'F2-move', foAuthToken);
+      const move = await request('POST', `/api/reservations/${movable.json?.data?.id}/move`, { property_id: roomA.property_id, to_room_id: roomB.id, reason_category: 'GUEST_REQUEST', reason_detail: 'Minta pindah kamar.', pricing_treatment: 'KEEP_CURRENT_RATE' }, 'F2-move', foAuthToken);
       expect(move.status === 409, `F move must fail 409, got ${move.status}`);
       if (move.status === 200) {
         trackMoveTransfer(movable.json?.data?.id, roomB.id);
