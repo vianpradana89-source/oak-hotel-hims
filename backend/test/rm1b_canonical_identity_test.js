@@ -202,6 +202,8 @@ async function testBookingCreateDualWritesCanonicalIdentity() {
   const response = await request('POST', '/api/bookings', {
     guest_name: 'RM1B Canonical Guest',
     guest_phone: '081500000001',
+    identity_number: '3171012345678901',
+    has_valid_identity: true,
     property_id: 1,
     reservations: [
       { room_id: room.id, check_in: start, check_out: addDays(start, 2), guest_name: 'RM1B Canonical Guest', total_price: 500000, qty: 1 }
@@ -229,6 +231,7 @@ async function testExtendShortenUsesCanonicalIdentity() {
   const corr = correlationId('EXTEND-SHORTEN');
   const create = await request('POST', '/api/reservations', {
     room_id: room.id, guest_name: 'RM1B Ext Guest', guest_phone: '081500000002',
+    identity_number: '3171012345678901', has_valid_identity: true,
     check_in: start, check_out: midEnd, total_price: 400000, qty: 1
   }, corr);
   expect(create.status === 201, `create for extend failed: ${create.text}`);
@@ -259,6 +262,7 @@ async function testCancelReleasesUnderCanonicalIdentity() {
   const corr = correlationId('CANCEL');
   const create = await request('POST', '/api/reservations', {
     room_id: room.id, guest_name: 'RM1B Cancel Guest', guest_phone: '081500000003',
+    identity_number: '3171012345678901', has_valid_identity: true,
     check_in: start, check_out: end, total_price: 300000, qty: 1
   }, corr);
   expect(create.status === 201, `create for cancel failed: ${create.text}`);
@@ -288,6 +292,7 @@ async function testCheckoutReleasesInventoryDriftFix() {
   const corr = correlationId('CHECKOUT-FIX');
   const create = await request('POST', '/api/reservations', {
     room_id: room.id, guest_name: 'RM1B Checkout Guest', guest_phone: '081500000004',
+    identity_number: '3171012345678901', has_valid_identity: true,
     check_in: start, check_out: end, total_price: 600000, qty: 1
   }, corr);
   expect(create.status === 201, `create for checkout failed: ${create.text}`);

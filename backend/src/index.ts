@@ -81,6 +81,8 @@ import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { getReservationEditAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
+import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
+import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { requireAuth, requireRole } from './domains/auth/authMiddleware';
@@ -5508,8 +5510,10 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservationId}`);
       }
       if (checkoutReservation.stay_type !== 'DAY_USE') {
-        const checkoutIdent = toRoomTypeIdentity(roomTypeResult.rows[0].room_type_id, roomTypeResult.rows[0].room_type);
-        await releaseReservationStayInventory(client, checkoutIdent, checkoutReservation.check_in, checkoutReservation.check_out);
+        await releaseReservationInventoryForCheckout(client, {
+          ...checkoutReservation,
+          current_room_type_id: roomTypeResult.rows[0].room_type_id
+        });
       }
 
       await client.query(
@@ -6704,6 +6708,7 @@ app.use('/api/reports', createReportsRouter(pool));
 app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
+app.use('/api', createRoomMoveRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
@@ -7102,182 +7107,6 @@ app.get('/api/tapechart', async (req, res) => {
   } catch (err: any) {
     console.error('Error /api/tapechart', err);
     return res.status(500).json({ status: 'ERROR', message: err.message });
-  }
-});
-
-// Move reservation (room move)
-app.post('/api/reservations/:id/move', requireAuth, async (req, res) => {
-  const reservationId = Number(req.params.id);
-  const { to_room_id } = req.body;
-  if (!to_room_id) return res.status(400).json({ status: 'ERROR', message: 'missing to_room_id' });
-
-  const client = await pool.connect();
-  try {
-    const propertyId = assertPropertyId(req.body);
-    await assertPropertyExists(pool, propertyId);
-    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
-
-    await client.query('BEGIN');
-
-    // C2C2: Initial plain read to discover source room_id (NOT authoritative).
-    const initialRead = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
-    if (!hasRows(initialRead)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
-    }
-    const initialState = initialRead.rows[0];
-    const sourceRoomId = Number(initialState.room_id);
-    const targetRoomId = Number(to_room_id);
-
-    // C2C2: Lock ALL ROOM rows in deterministic room_id ASC order.
-    const roomIds = Array.from(new Set([sourceRoomId, targetRoomId])).sort((a, b) => a - b);
-    for (const rid of roomIds) {
-      await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [rid]);
-    }
-
-    // C2C2: RESERVATION FOR UPDATE, then revalidate.
-    const rRes = await client.query('SELECT * FROM reservations WHERE id = $1 FOR UPDATE', [reservationId]);
-    if (!hasRows(rRes)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
-    }
-    const reservation = rRes.rows[0];
-
-    // C2C2: Revalidate source room has not changed.
-    if (Number(reservation.room_id) !== sourceRoomId) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: 'reservation room changed during move; retry' });
-    }
-
-    const fromRoomRes = await client.query(`
-      SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type
-      FROM rooms r
-      LEFT JOIN room_types rt ON rt.id = r.room_type_id
-      WHERE r.id = $1
-    `, [sourceRoomId]);
-    const toRoomRes = await client.query(`
-      SELECT r.id, r.room_type_id, COALESCE(rt.name, r.name) AS room_type,
-             r.is_active AS room_is_active,
-             rt.is_active AS room_type_is_active
-      FROM rooms r
-      LEFT JOIN room_types rt ON rt.id = r.room_type_id
-      WHERE r.id = $1
-    `, [targetRoomId]);
-    if (!hasRows(toRoomRes)) throw new Error('target room not found');
-    await assertRoomBelongsToProperty(client, targetRoomId, propertyId);
-    const moveTargetRow = toRoomRes.rows[0];
-    if (moveTargetRow.room_is_active === false || moveTargetRow.room_type_is_active === false) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        status: 'CONFLICT',
-        code: 'ROOM_MASTER_INACTIVE',
-        message: 'target room or its room type is inactive in Room Master; choose another room'
-      });
-    }
-    const fromIdent: RoomTypeIdentity | null = hasRows(fromRoomRes)
-      ? toRoomTypeIdentity(fromRoomRes.rows[0].room_type_id, fromRoomRes.rows[0].room_type)
-      : null;
-    const toIdent = toRoomTypeIdentity(toRoomRes.rows[0].room_type_id, toRoomRes.rows[0].room_type);
-    if (!fromIdent) {
-      throw new Error(`INVENTORY_INTEGRITY_ERROR: source room missing for reservation ${reservationId}`);
-    }
-    const fromRoomTypeId = requireCanonicalRoomTypeId(fromIdent, 'reservation move source');
-    const toRoomTypeId = requireCanonicalRoomTypeId(toIdent, 'reservation move target');
-    const currentStatus = String(reservation.status || '').toUpperCase();
-    if (currentStatus === 'BOOKED' || currentStatus === 'CHECKED_IN') {
-      const overlap = await findActiveRoomOverlap(client, targetRoomId, reservation.check_in, reservation.check_out, reservationId);
-      if (hasRows(overlap)) {
-        await client.query('ROLLBACK');
-        return sendRoomOverlapConflict(res);
-      }
-      const blockOverlap = await findActiveOperationalBlockOverlap(client, targetRoomId, reservation.check_in, reservation.check_out);
-      if (hasRows(blockOverlap)) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'CONFLICT',
-          code: 'ROOM_OUT_OF_SERVICE',
-          message: 'target room is out of order or out of service during requested stay'
-        });
-      }
-    }
-
-    // C2C2: Determine identity change and collect ALL availability identities.
-    const dates = enumerateHotelDates(reservation.check_in, reservation.check_out);
-    const identityChanged = fromRoomTypeId !== toRoomTypeId;
-
-    if (identityChanged && toIdent.roomTypeName) {
-      // C2C2: COLLECT all availability identities (source + target), then LOCK ALL deterministically.
-      const availKeys: AvailabilityLockKey[] = [];
-      for (const date of dates) {
-        availKeys.push({ roomTypeId: toRoomTypeId, roomTypeName: toIdent.roomTypeName, date });
-        availKeys.push({ roomTypeId: fromRoomTypeId, roomTypeName: fromIdent.roomTypeName, date });
-      }
-      const availMap = await lockAvailabilityRows(client, availKeys);
-
-      // C2C2: VALIDATE ALL locked rows BEFORE any mutation.
-      for (const date of dates) {
-        const toKey = availabilityMapKey(toIdent, date);
-        const toAvail = availMap.get(toKey);
-        if (!toAvail) throw new Error(`No availability record for ${toIdent.roomTypeName} on ${date}`);
-        const toBlockedCount = await getBlockedRoomsCountForTypeAndDate(client, toRoomTypeId, date);
-        const toSellableCapacity = toAvail.totalRooms - toBlockedCount;
-        const available = toSellableCapacity - toAvail.reservedQty;
-        if (available < 1) throw new Error(`Not enough availability for ${toIdent.roomTypeName} on ${date}`);
-
-        const srcKey = availabilityMapKey(fromIdent, date);
-        const srcAvail = availMap.get(srcKey);
-        if (!srcAvail) {
-          throw new Error(`INVENTORY_INTEGRITY_ERROR: source availability row missing for ${fromIdent.roomTypeName} on ${date}`);
-        }
-        if (srcAvail.reservedQty < 1) {
-          throw new Error(`INVENTORY_INTEGRITY_ERROR: source reserved_qty underflow for ${fromIdent.roomTypeName} on ${date} (reserved_qty=${srcAvail.reservedQty}, release=1)`);
-        }
-      }
-
-      // C2C2: MUTATE ALL — decrement source, increment target, same date order.
-      for (const date of dates) {
-        await mutateCanonicalAvailabilityRow(client, availMap.get(availabilityMapKey(fromIdent, date))!, -1);
-        await mutateCanonicalAvailabilityRow(client, availMap.get(availabilityMapKey(toIdent, date))!, 1);
-      }
-    }
-
-    // update reservation room assignment
-    await client.query('UPDATE reservations SET room_id = $1 WHERE id = $2', [targetRoomId, reservationId]);
-
-    // Audit
-    await client.query('INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
-      'PMS','MOVE','RESERVATION', reservationId, JSON.stringify({ from_room: sourceRoomId, to_room: targetRoomId }), req.headers['x-correlation-id'] || null, propertyId
-    ]);
-
-    await client.query('COMMIT');
-    // broadcast move event
-    try {
-      broadcastEvent('ReservationMoved', {
-        reservation_id: reservationId,
-        from_room: sourceRoomId,
-        to_room: targetRoomId,
-        check_in: hotelDateKey(reservation.check_in),
-        check_out: hotelDateKey(reservation.check_out),
-        timestamp: new Date().toISOString()
-      });
-    } catch (e) {
-      console.error('Failed to broadcast ReservationMoved', e);
-    }
-
-    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
-    return res.json({ status: 'OK', message: 'moved', reservation_id: reservationId, data: canonicalDto });
-  } catch (err: any) {
-    await client.query('ROLLBACK').catch(() => {});
-    if (err?.statusCode) {
-      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
-    }
-    if (isRoomOverlapViolation(err)) {
-      return sendRoomOverlapConflict(res);
-    }
-    console.error('Move error', err);
-    return res.status(400).json({ status: 'FAILED', message: err.message });
-  } finally {
-    client.release();
   }
 });
 

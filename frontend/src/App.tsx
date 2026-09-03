@@ -3661,17 +3661,13 @@ function AppContent() {
                                             const toRoomId = String(room.id);
                                             if (!reservationId || fromRoomId === toRoomId) return;
                                             try {
-                                              const response = await authFetch(`/api/reservations/${reservationId}/move`, {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ property_id: propertyId, to_room_id: toRoomId })
-                                              });
-                                              const data = await response.json();
-                                              if (response.ok) {
-                                                await fetchDataRef.current();
-                                                alert('Move berhasil');
+                                              const reservation = reservations.find(item => Number(item.id) === Number(reservationId));
+                                              if (String(reservation?.status || '').toUpperCase() === 'CHECKED_IN') {
+                                                setQuickReservation(null);
+                                                setSelectedRes(reservation);
+                                                alert('Gunakan aksi Pindah Kamar pada detail reservasi untuk mencatat alasan dan dampak tarif.');
                                               } else {
-                                                alert('Move gagal: ' + (data.message || data.error || 'Unknown'));
+                                                alert('Perubahan kamar reservasi BOOKED dilakukan melalui Edit Reservasi.');
                                               }
                                             } catch (err) {
                                               console.error('Move error', err);

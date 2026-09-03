@@ -116,6 +116,8 @@ async function createReservation(roomId, checkIn, checkOut, label) {
     property_id: propertyId,
     guest_name: `${runId} ${label}`,
     guest_phone: `0819${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`,
+    identity_number: '3171012345678901',
+    has_valid_identity: true,
     check_in: checkIn,
     check_out: checkOut,
     total_price: 100000,

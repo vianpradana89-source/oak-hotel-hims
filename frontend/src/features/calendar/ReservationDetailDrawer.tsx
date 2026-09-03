@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
+import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
@@ -37,6 +38,7 @@ export default function ReservationDetailDrawer({
   const [loading, setLoading] = useState<boolean>(false);
   const [folioData, setFolioData] = useState<any>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
   const [isAddChargeModalOpen, setIsAddChargeModalOpen] = useState<boolean>(false);
   const [activeRoomFindings, setActiveRoomFindings] = useState<any[]>([]);
   const [isResolveModalOpen, setIsResolveModalOpen] = useState<boolean>(false);
@@ -849,6 +851,14 @@ export default function ReservationDetailDrawer({
             </div>
           </div>
 
+          {isCheckedIn && activePropId && (
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setIsRoomMoveModalOpen(true)} className="rounded-lg bg-emerald-800 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">
+                Pindah Kamar
+              </button>
+            </div>
+          )}
+
           {/* Section 5: Rate Plan & Snapshot Tarif Malam */}
           <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
             <div className="flex items-center justify-between">
@@ -1473,6 +1483,7 @@ export default function ReservationDetailDrawer({
           </div>
         )}
       </div>
+      {activePropId && <RoomMoveModal isOpen={isRoomMoveModalOpen} reservation={data} propertyId={activePropId} onClose={() => setIsRoomMoveModalOpen(false)} onSuccess={() => { loadFullReservation(); onRefresh(); }} />}
     </div>
   );
 }
