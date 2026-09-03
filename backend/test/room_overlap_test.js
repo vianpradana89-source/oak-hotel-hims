@@ -96,7 +96,7 @@ async function request(method, path, body, correlationSuffix = '') {
 
 async function createOverlapFixture(client) {
   const propertyCode = `O${String(Date.now()).slice(-3)}${Math.random().toString(16).slice(2, 4)}`.toUpperCase();
-  const roomTypeCode = `OVL-${runId}`.slice(0, 50);
+  const roomTypeCode = `OVL-${propertyCode}`;
   const roomTypeName = `Overlap ${runId}`.slice(0, 100);
   fixture.identityNumber = `3171${String(Date.now()).slice(-12)}`;
 
