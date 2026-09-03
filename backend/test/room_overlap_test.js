@@ -234,6 +234,9 @@ async function cleanupFixture(client) {
       [fixture.propertyId, `${runId}%`]
     );
     await client.query('DELETE FROM property_pricing_settings WHERE property_id = $1', [fixture.propertyId]);
+    // The generated property is exclusive to this test run, including audit
+    // entries emitted by checkout housekeeping flows without this correlation ID.
+    await client.query('DELETE FROM audit_logs WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM properties WHERE id = $1', [fixture.propertyId]);
     await client.query('COMMIT');
   } catch (err) {
