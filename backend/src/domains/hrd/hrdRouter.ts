@@ -7,9 +7,16 @@ import {
   getEmployees,
   createEmployeeAccount,
   updateEmployeeAccount,
-  deactivateEmployeeAccount
+  deactivateEmployeeAccount,
+  diagnoseEmployeeLoginAccount,
+  repairEmployeeLoginAccount,
+  resetEmployeePassword
 } from './hrdService';
-import type { CreateEmployeePayload, UpdateEmployeePayload } from './hrdTypes';
+import type {
+  CreateEmployeePayload,
+  UpdateEmployeePayload,
+  AccountRepairActionPayload
+} from './hrdTypes';
 
 function parsePropertyId(val: any): number {
   const p = Number(val);
@@ -102,7 +109,7 @@ export function createHrdRouter(pool: Pool): Router {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.body.property_id || req.body.propertyId);
       const payload: CreateEmployeePayload = {
         property_id: propertyId,
         employee_code: req.body.employee_code,
@@ -115,13 +122,14 @@ export function createHrdRouter(pool: Pool): Router {
         phone: req.body.phone,
         hire_date: req.body.hire_date,
         monthly_salary: req.body.monthly_salary ? Number(req.body.monthly_salary) : 0,
-        status: req.body.status || 'ACTIVE'
+        status: req.body.status || 'ACTIVE',
+        create_login_account: req.body.create_login_account !== undefined ? Boolean(req.body.create_login_account) : true
       };
 
       const actor = {
-        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
-        name: req.body.actor_name || 'HRD Admin',
-        role: req.body.actor_role || 'HRD'
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
       const created = await createEmployeeAccount(client, propertyId, payload, actor);
@@ -185,21 +193,105 @@ export function createHrdRouter(pool: Pool): Router {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId || req.body.property_id);
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id);
       const employeeId = Number(req.params.id);
       if (isNaN(employeeId) || employeeId <= 0) {
         throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
       }
 
       const actor = {
-        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
-        name: req.body.actor_name || 'HRD Admin',
-        role: req.body.actor_role || 'HRD'
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
       const deactivated = await deactivateEmployeeAccount(client, propertyId, employeeId, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: deactivated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 8. Diagnose Employee Login Account
+  router.get('/employees/:id/login-account-diagnosis', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const diagnosis = await diagnoseEmployeeLoginAccount(client, propertyId, employeeId);
+      res.json({ status: 'OK', data: diagnosis });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 9. Repair Employee Login Account
+  router.post('/employees/:id/repair-login-account', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.body.property_id || req.body.propertyId);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const payload: AccountRepairActionPayload = {
+        action: req.body.action,
+        target_user_id: req.body.target_user_id ? Number(req.body.target_user_id) : undefined,
+        reason: req.body.reason
+      };
+
+      const result = await repairEmployeeLoginAccount(client, propertyId, employeeId, payload, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 10. Reset Employee Password
+  router.post('/employees/:id/reset-password', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.body.property_id || req.body.propertyId);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const result = await resetEmployeePassword(client, propertyId, employeeId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;

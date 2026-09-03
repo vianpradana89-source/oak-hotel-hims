@@ -11,12 +11,56 @@ interface HrEmployee {
   employee_code?: string;
   role: string;
   department: string;
+  position?: string;
   username?: string;
   email?: string;
   phone?: string;
-  position?: string;
+  hire_date?: string;
+  monthly_salary?: number;
+  status?: string;
   is_active: boolean;
-  created_at: string;
+  user_id?: number | null;
+  account_status?: string | null;
+  user_is_active?: boolean | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface CredentialModalData {
+  title: string;
+  fullName: string;
+  employeeCode?: string;
+  email: string;
+  username: string;
+  temporaryPassword: string;
+  expiresAt?: string;
+}
+
+interface DiagnosisData {
+  employee_id: number;
+  employee_name: string;
+  employee_code: string;
+  employee_email: string | null;
+  employee_username: string | null;
+  employee_role: string;
+  employee_active: boolean;
+  linked_user_id: number | null;
+  login_email: string | null;
+  username: string | null;
+  account_status: string | null;
+  is_active: boolean | null;
+  must_change_password: boolean | null;
+  role_name: string | null;
+  temp_password_expires_at: string | null;
+  diagnosis_state: string;
+  diagnosis_states: string[];
+  candidate_user?: {
+    id: number;
+    username: string;
+    email: string;
+    full_name: string;
+  } | null;
+  mismatch_reasons: string[];
 }
 
 interface HrdWorkspaceProps {
@@ -32,10 +76,6 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [showResetModal, setShowResetModal] = useState(false);
-  const [resetTargetEmployee, setResetTargetEmployee] = useState<HrEmployee | null>(null);
-  const [resetPasswordValue, setResetPasswordValue] = useState('OakHotel2026!');
-  const [resetSuccessNotice, setResetSuccessNotice] = useState<string | null>(null);
 
   const [editingEmployee, setEditingEmployee] = useState<HrEmployee | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -45,12 +85,26 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     name: '',
     username: '',
     email: '',
-    password: '',
     phone: '',
-    role: 'Front Office',
+    position: 'Staff',
     department: 'Front Office',
+    role: 'Front Office',
+    hire_date: new Date().toISOString().slice(0, 10),
+    create_login_account: true,
     is_active: true
   });
+
+  // One-time credential modal state
+  const [credentialModal, setCredentialModal] = useState<CredentialModalData | null>(null);
+  const [copySuccess, setCopySuccess] = useState<string | null>(null);
+
+  // Diagnosis Modal state
+  const [diagnosisTarget, setDiagnosisTarget] = useState<HrEmployee | null>(null);
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
+  const [diagnosisData, setDiagnosisData] = useState<DiagnosisData | null>(null);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
+  const [repairing, setRepairing] = useState(false);
+  const [repairNotice, setRepairNotice] = useState<string | null>(null);
 
   const getAuthHeaders = (): HeadersInit => {
     const token = localStorage.getItem('oak_hims_auth_token');
@@ -63,32 +117,33 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [usersRes, rolesRes] = await Promise.all([
-        fetch(`/api/users?property_id=${propertyId}`, { headers: getAuthHeaders() }),
+      const [empRes, rolesRes] = await Promise.all([
+        fetch(`/api/hrd/employees?property_id=${propertyId}&scope=all`, { headers: getAuthHeaders() }),
         fetch(`/api/hrd/roles?property_id=${propertyId}`, { headers: getAuthHeaders() })
       ]);
 
-      const usersData = await usersRes.json();
+      const empData = await empRes.json();
       const rolesData = await rolesRes.json();
 
-      if (usersData.status === 'OK' && Array.isArray(usersData.data)) {
-        setEmployees(usersData.data);
+      if (empData.status === 'OK' && Array.isArray(empData.data)) {
+        setEmployees(empData.data);
       } else {
-        // Fallback to legacy hrd endpoint if users table is empty
-        const empRes = await fetch(`/api/hrd/employees?property_id=${propertyId}`, { headers: getAuthHeaders() });
-        const empData = await empRes.json();
-        if (empData.status === 'OK') setEmployees(empData.data || []);
+        const fallbackRes = await fetch(`/api/hrd/employees?property_id=${propertyId}`, { headers: getAuthHeaders() });
+        const fallbackData = await fallbackRes.json();
+        if (fallbackData.status === 'OK') setEmployees(fallbackData.data || []);
       }
 
       if (rolesData.status === 'OK') {
-        setAvailableRoles(rolesData.data?.available_roles || [
-          { role: 'Super Admin', category: 'MANAGEMENT', description: 'Akses penuh seluruh sistem' },
-          { role: 'Front Office', category: 'OPERATIONAL', description: 'Reservasi, check-in, check-out' },
-          { role: 'Accounting', category: 'FINANCE', description: 'Keuangan, folio, dan laporan' },
-          { role: 'Housekeeping', category: 'OPERATIONAL', description: 'Pembersihan dan status kamar' },
-          { role: 'General Manager', category: 'MANAGEMENT', description: 'Pengawasan operasional' },
-          { role: 'Crew', category: 'STAFF', description: 'Staf operasional umum' }
-        ]);
+        const rawList = Array.isArray(rolesData.data)
+          ? rolesData.data
+          : (rolesData.data?.available_roles || rolesData.data?.roles);
+        if (Array.isArray(rawList) && rawList.length > 0) {
+          setAvailableRoles(rawList.map((r: any) => ({
+            role: r.role || r.name || r.key,
+            category: r.category || r.department || 'Operations',
+            description: r.description || ''
+          })));
+        }
       }
     } catch (err: any) {
       console.error('Failed to load HRD data', err);
@@ -107,10 +162,12 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       name: '',
       username: '',
       email: '',
-      password: 'OakHotel2026!',
       phone: '',
-      role: 'Front Office',
+      position: 'Staff',
       department: 'Front Office',
+      role: 'Front Office',
+      hire_date: new Date().toISOString().slice(0, 10),
+      create_login_account: true,
       is_active: true
     });
     setEditingEmployee(null);
@@ -124,45 +181,16 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       name: displayName,
       username: emp.username || '',
       email: emp.email || '',
-      password: '',
       phone: emp.phone || '',
-      role: emp.role || 'Front Office',
+      position: emp.position || 'Staff',
       department: emp.department || 'Front Office',
+      role: emp.role || 'Front Office',
+      hire_date: emp.hire_date || new Date().toISOString().slice(0, 10),
+      create_login_account: false,
       is_active: emp.is_active !== false
     });
     setEditingEmployee(emp);
     setShowAddModal(true);
-  };
-
-  const handleOpenResetPassword = (emp: HrEmployee) => {
-    setResetTargetEmployee(emp);
-    setResetPasswordValue('OakHotel2026!');
-    setResetSuccessNotice(null);
-    setShowResetModal(true);
-  };
-
-  const handleExecuteResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!resetTargetEmployee) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch(`/api/users/${resetTargetEmployee.id}/reset-password`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ new_password: resetPasswordValue })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal mereset password');
-      setResetSuccessNotice(`Password untuk ${resetTargetEmployee.full_name || resetTargetEmployee.username} berhasil direset menjadi: ${resetPasswordValue}`);
-      setTimeout(() => {
-        setShowResetModal(false);
-        setResetTargetEmployee(null);
-      }, 2500);
-    } catch (err: any) {
-      alert(err.message || 'Gagal mereset password');
-    } finally {
-      setSubmitting(false);
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -171,46 +199,143 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setSubmitting(true);
     try {
       if (editingEmployee) {
-        const res = await fetch(`/api/users/${editingEmployee.id}`, {
-          method: 'PUT',
+        const res = await fetch(`/api/hrd/employees/${editingEmployee.id}`, {
+          method: 'PATCH',
           headers: getAuthHeaders(),
           body: JSON.stringify({
             property_id: propertyId,
             full_name: formPayload.name,
-            email: formPayload.email,
-            phone: formPayload.phone,
-            role: formPayload.role,
+            email: formPayload.email || null,
+            phone: formPayload.phone || null,
+            position: formPayload.position,
             department: formPayload.department,
+            role: formPayload.role,
+            hire_date: formPayload.hire_date,
             is_active: formPayload.is_active
           })
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Gagal memperbarui akun karyawan');
+        if (!res.ok) throw new Error(data.message || 'Gagal memperbarui data karyawan');
+        setShowAddModal(false);
+        await fetchData();
       } else {
-        const res = await fetch('/api/users', {
+        const res = await fetch('/api/hrd/employees', {
           method: 'POST',
           headers: getAuthHeaders(),
           body: JSON.stringify({
             property_id: propertyId,
             full_name: formPayload.name,
-            username: formPayload.username,
-            email: formPayload.email,
-            password: formPayload.password || 'OakHotel2026!',
-            phone: formPayload.phone,
+            username: formPayload.username || undefined,
+            email: formPayload.email || undefined,
+            phone: formPayload.phone || undefined,
+            position: formPayload.position,
+            department: formPayload.department,
             role: formPayload.role,
-            department: formPayload.department
+            hire_date: formPayload.hire_date,
+            create_login_account: formPayload.create_login_account
           })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.message || 'Gagal mendaftarkan karyawan');
-      }
 
-      setShowAddModal(false);
-      await fetchData();
+        setShowAddModal(false);
+        await fetchData();
+
+        if (data.data?.temporary_password) {
+          setCredentialModal({
+            title: 'AKUN KARYAWAN BERHASIL DIBUAT',
+            fullName: data.data.full_name,
+            employeeCode: data.data.employee_code,
+            email: data.data.email,
+            username: data.data.username,
+            temporaryPassword: data.data.temporary_password,
+            expiresAt: data.data.temp_password_expires_at
+          });
+        }
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Terjadi kesalahan sistem');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleExecuteResetPassword = async (emp: HrEmployee) => {
+    if (!confirm(`Reset password untuk karyawan "${emp.full_name || emp.username}"? Akun akan membutuhkan ganti password saat login pertama.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/hrd/employees/${emp.id}/reset-password`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ property_id: propertyId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mereset password');
+
+      setCredentialModal({
+        title: 'PASSWORD KARYAWAN BERHASIL DIRESET',
+        fullName: emp.full_name,
+        employeeCode: emp.employee_code,
+        email: data.data.email,
+        username: data.data.username,
+        temporaryPassword: data.data.temporary_password,
+        expiresAt: data.data.temp_password_expires_at
+      });
+
+      if (diagnosisTarget && diagnosisTarget.id === emp.id) {
+        await handleOpenDiagnosis(emp);
+      }
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Gagal mereset password');
+    }
+  };
+
+  const handleOpenDiagnosis = async (emp: HrEmployee) => {
+    setDiagnosisTarget(emp);
+    setDiagnosisData(null);
+    setDiagnosisError(null);
+    setRepairNotice(null);
+    setDiagnosisLoading(true);
+    try {
+      const res = await fetch(`/api/hrd/employees/${emp.id}/login-account-diagnosis?property_id=${propertyId}`, {
+        headers: getAuthHeaders()
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal memuat diagnosa akun');
+      setDiagnosisData(data.data);
+    } catch (err: any) {
+      setDiagnosisError(err.message || 'Gagal memuat diagnosa');
+    } finally {
+      setDiagnosisLoading(false);
+    }
+  };
+
+  const handleExecuteRepair = async (action: string, targetUserId?: number) => {
+    if (!diagnosisTarget) return;
+    setRepairing(true);
+    setRepairNotice(null);
+    try {
+      const res = await fetch(`/api/hrd/employees/${diagnosisTarget.id}/repair-login-account`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          property_id: propertyId,
+          action,
+          target_user_id: targetUserId,
+          reason: 'Perbaikan via HRD Workspace UI'
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal melakukan perbaikan akun');
+      setRepairNotice(data.message || 'Perbaikan akun berhasil diproses.');
+      await handleOpenDiagnosis(diagnosisTarget);
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Gagal melakukan perbaikan akun');
+    } finally {
+      setRepairing(false);
     }
   };
 
@@ -220,17 +345,74 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     if (!confirm(`Apakah Anda yakin ingin me-${actionText} akun karyawan "${emp.full_name || emp.username}"?`)) return;
 
     try {
-      const res = await fetch(`/api/users/${emp.id}/status`, {
-        method: 'PATCH',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ is_active: nextStatus })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal memperbarui status');
+      if (nextStatus) {
+        const res = await fetch(`/api/hrd/employees/${emp.id}`, {
+          method: 'PATCH',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ property_id: propertyId, is_active: true, status: 'ACTIVE' })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan karyawan');
+      } else {
+        const res = await fetch(`/api/hrd/employees/${emp.id}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ property_id: propertyId })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Gagal menonaktifkan karyawan');
+      }
       await fetchData();
     } catch (err: any) {
       alert(err.message || 'Gagal mengubah status akun');
     }
+  };
+
+  const getAccountStatusBadge = (emp: HrEmployee) => {
+    if (!emp.user_id) {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-slate-100 text-slate-600 border border-slate-200">
+          Belum Ada Akun
+        </span>
+      );
+    }
+    if (emp.user_is_active === false || emp.is_active === false) {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-rose-100 text-rose-800 border border-rose-200">
+          Dinonaktifkan
+        </span>
+      );
+    }
+    if (emp.account_status === 'FIRST_LOGIN_REQUIRED') {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-200">
+          Menunggu Login Pertama
+        </span>
+      );
+    }
+    if (emp.account_status === 'READY') {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-emerald-100 text-emerald-800 border border-emerald-200">
+          Siap Digunakan
+        </span>
+      );
+    }
+    return (
+      <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-orange-100 text-orange-800 border border-orange-200">
+        Perlu Perbaikan
+      </span>
+    );
+  };
+
+  const handleCopy = (text: string, label: string) => {
+    navigator.clipboard.writeText(text);
+    setCopySuccess(label);
+    setTimeout(() => setCopySuccess(null), 2000);
+  };
+
+  const handleDismissCredentialModal = () => {
+    setCredentialModal(null);
+    setCopySuccess(null);
   };
 
   const filteredEmployees = employees.filter(emp => {
@@ -356,7 +538,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200/80 text-slate-600 font-bold uppercase tracking-wider text-[11px]">
-                    <th className="py-3 px-4">Nama Lengkap & ID</th>
+                    <th className="py-3 px-4">Nama Lengkap & Kode</th>
                     <th className="py-3 px-4">Email & Kontak</th>
                     <th className="py-3 px-4">Role / Peran</th>
                     <th className="py-3 px-4">Departemen</th>
@@ -372,7 +554,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                         <td className="py-3 px-4">
                           <div className="font-bold text-slate-900">{displayName}</div>
                           <div className="text-[11px] text-slate-400">
-                            {emp.employee_code || `EMP-${emp.id}`} • @{emp.username || 'user'}
+                            {emp.employee_code || `EMP-${emp.id}`} {emp.username ? `• @${emp.username}` : ''}
                           </div>
                         </td>
                         <td className="py-3 px-4">
@@ -388,21 +570,21 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                           {emp.department || 'Front Office'}
                         </td>
                         <td className="py-3 px-4 text-center">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
-                              emp.is_active !== false
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-rose-100 text-rose-800'
-                            }`}
-                          >
-                            {emp.is_active !== false ? 'Aktif' : 'Nonaktif'}
-                          </span>
+                          {getAccountStatusBadge(emp)}
                         </td>
                         <td className="py-3 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleOpenResetPassword(emp)}
+                              onClick={() => handleOpenDiagnosis(emp)}
+                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                              title="Diagnosa dan Perbaiki Kredensial Akun"
+                            >
+                              Diagnosa Akun
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExecuteResetPassword(emp)}
                               className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
                               title="Reset Password Karyawan"
                             >
@@ -441,10 +623,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       {/* Add / Edit Modal */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl p-5 space-y-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl p-5 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-2 border-b border-slate-200">
               <h3 className="font-serif font-bold text-base text-slate-900">
-                {editingEmployee ? 'Edit Akun Karyawan' : 'Tambah Akun Karyawan Baru'}
+                {editingEmployee ? 'Edit Data Karyawan' : 'Tambah Karyawan Baru'}
               </h3>
               <button
                 type="button"
@@ -471,26 +653,12 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                   required
                   value={formPayload.name}
                   onChange={(e) => setFormPayload(p => ({ ...p, name: e.target.value }))}
-                  placeholder="Contoh: Sarah Receptionist"
+                  placeholder="Contoh: Nadya Receptionist"
                   className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-slate-700 font-bold mb-1">
-                    Username Login:
-                  </label>
-                  <input
-                    type="text"
-                    value={formPayload.username}
-                    onChange={(e) => setFormPayload(p => ({ ...p, username: e.target.value }))}
-                    placeholder="sarah.fo"
-                    disabled={Boolean(editingEmployee)}
-                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332] disabled:bg-slate-100"
-                  />
-                </div>
-
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">
                     Nomor HP:
@@ -503,40 +671,34 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                     className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Posisi / Jabatan:
+                  </label>
+                  <input
+                    type="text"
+                    value={formPayload.position}
+                    onChange={(e) => setFormPayload(p => ({ ...p, position: e.target.value }))}
+                    placeholder="Receptionist"
+                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                  />
+                </div>
               </div>
 
               <div>
                 <label className="block text-slate-700 font-bold mb-1">
-                  Email Akun <span className="text-red-500">*</span>:
+                  Email Karyawan {formPayload.create_login_account ? <span className="text-red-500">*</span> : '(Opsional)'}:
                 </label>
                 <input
                   type="email"
-                  required
+                  required={formPayload.create_login_account}
                   value={formPayload.email}
                   onChange={(e) => setFormPayload(p => ({ ...p, email: e.target.value }))}
-                  placeholder="sarah@oaklawang.com"
+                  placeholder="nadya@oaklawang.com"
                   className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
                 />
               </div>
-
-              {!editingEmployee && (
-                <div>
-                  <label className="block text-slate-700 font-bold mb-1">
-                    Password Awal <span className="text-red-500">*</span>:
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formPayload.password}
-                    onChange={(e) => setFormPayload(p => ({ ...p, password: e.target.value }))}
-                    placeholder="OakHotel2026!"
-                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-                  />
-                  <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Password sementara yang akan digunakan karyawan saat login pertama kali.
-                  </span>
-                </div>
-              )}
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -554,6 +716,11 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                       </option>
                     ))}
                   </select>
+                  {formPayload.create_login_account && formPayload.role === 'Crew' && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-1.5 mt-1">
+                      Peran "Crew" adalah staf operasional tanpa akun sistem HIMS. Pilih Front Office, Housekeeping, Accounting, GM, atau POS / Resto untuk membuat akun login.
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -575,6 +742,43 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                 </div>
               </div>
 
+              {!editingEmployee && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={formPayload.create_login_account}
+                      onChange={(e) => setFormPayload(p => ({ ...p, create_login_account: e.target.checked }))}
+                      className="rounded border-slate-300 text-[#1b4332] focus:ring-[#1b4332]"
+                    />
+                    <span>Buat Akun Login</span>
+                  </label>
+                  {formPayload.create_login_account ? (
+                    <div className="space-y-2 pl-6">
+                      <p className="text-[11px] text-slate-500">
+                        Akun login HIMS akan dibuat otomatis menggunakan email karyawan dan password sementara yang aman.
+                      </p>
+                      <div>
+                        <label className="block text-[11px] text-slate-600 font-medium mb-1">
+                          Username (Opsional, otomatis dari email jika kosong):
+                        </label>
+                        <input
+                          type="text"
+                          value={formPayload.username}
+                          onChange={(e) => setFormPayload(p => ({ ...p, username: e.target.value }))}
+                          placeholder="nadya.fo"
+                          className="w-full p-2 rounded-lg border border-slate-300 text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500 pl-6">
+                      Karyawan akan didaftarkan tanpa akun login sistem. Akun login dapat dibuat atau dihubungkan kemudian.
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="pt-3 border-t border-slate-200 flex gap-2">
                 <button
                   type="button"
@@ -588,7 +792,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                   disabled={submitting}
                   className="flex-1 py-2.5 rounded-xl bg-[#1b4332] hover:bg-[#143326] text-white font-bold transition cursor-pointer shadow-xs disabled:bg-slate-300"
                 >
-                  {submitting ? 'Menyimpan...' : 'Simpan Akun'}
+                  {submitting ? 'Menyimpan...' : (editingEmployee ? 'Simpan Perubahan' : 'Simpan Karyawan')}
                 </button>
               </div>
             </form>
@@ -596,65 +800,280 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
         </div>
       )}
 
-      {/* Reset Password Modal */}
-      {showResetModal && resetTargetEmployee && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
-              <h3 className="font-serif font-bold text-base text-slate-900">
-                Reset Password Karyawan
+      {/* One-Time Credential Modal */}
+      {credentialModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-emerald-200 shadow-2xl p-6 space-y-4">
+            <div className="text-center pb-2 border-b border-slate-100">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-100 text-emerald-800 text-2xl font-bold mb-2">
+                ✓
+              </div>
+              <h3 className="font-serif font-bold text-base text-slate-900 tracking-tight">
+                {credentialModal.title}
               </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Salin dan berikan kredensial sementara ini kepada karyawan.
+              </p>
+            </div>
+
+            <div className="space-y-2 text-xs bg-slate-50 p-4 rounded-xl border border-slate-200/80">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Nama:</span>
+                <span className="font-bold text-slate-900">{credentialModal.fullName}</span>
+              </div>
+              {credentialModal.employeeCode && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Kode Karyawan:</span>
+                  <span className="font-mono font-semibold text-slate-800">{credentialModal.employeeCode}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span className="text-slate-500">Email:</span>
+                <span className="font-semibold text-slate-800">{credentialModal.email}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Username:</span>
+                <span className="font-mono font-semibold text-slate-800">@{credentialModal.username}</span>
+              </div>
+              <div className="pt-2 border-t border-slate-200">
+                <span className="text-slate-600 block mb-1 font-bold">Password Sementara:</span>
+                <div className="flex items-center justify-between p-2.5 bg-white border border-emerald-300 rounded-lg">
+                  <span className="font-mono font-bold text-base text-emerald-800 tracking-wider select-all">
+                    {credentialModal.temporaryPassword}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(credentialModal.temporaryPassword, 'PASSWORD')}
+                    className="px-2.5 py-1 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md transition cursor-pointer"
+                  >
+                    {copySuccess === 'PASSWORD' ? '✓ Tersalin' : 'Salin Password'}
+                  </button>
+                </div>
+              </div>
+              <p className="text-[11px] text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200 mt-2">
+                ⚠ Berlaku 7 hari. Wajib ganti password pada login pertama.
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setShowResetModal(false)}
+                onClick={() => {
+                  const allInfo = `KREDENSIAL LOGIN OAK HIMS\nNama: ${credentialModal.fullName}\nEmail: ${credentialModal.email}\nUsername: ${credentialModal.username}\nPassword Sementara: ${credentialModal.temporaryPassword}\nCatatan: Berlaku 7 hari. Wajib ganti password saat login pertama.`;
+                  handleCopy(allInfo, 'ALL');
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer"
+              >
+                {copySuccess === 'ALL' ? '✓ Semua Info Tersalin' : 'Salin Semua Info Login'}
+              </button>
+              <button
+                type="button"
+                onClick={handleDismissCredentialModal}
+                className="flex-1 py-2.5 rounded-xl bg-[#1b4332] hover:bg-[#143326] text-white font-bold text-xs transition cursor-pointer shadow-xs"
+              >
+                Selesai
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Diagnosis & Repair Modal */}
+      {diagnosisTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full border border-slate-200 shadow-xl p-5 space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <div>
+                <h3 className="font-serif font-bold text-base text-slate-900">
+                  Diagnosa Akun Login Karyawan
+                </h3>
+                <p className="text-slate-500 text-[11px]">
+                  {diagnosisTarget.full_name} ({diagnosisTarget.employee_code || `EMP-${diagnosisTarget.id}`})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDiagnosisTarget(null)}
                 className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            {resetSuccessNotice ? (
-              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
-                ✓ {resetSuccessNotice}
+            {diagnosisLoading ? (
+              <div className="p-8 text-center text-slate-400">
+                Mendiagnosa relasi data karyawan dan kredensial login...
               </div>
-            ) : (
-              <form onSubmit={handleExecuteResetPassword} className="space-y-3 text-xs">
-                <p className="text-slate-600">
-                  Tetapkan password baru untuk karyawan <strong>{resetTargetEmployee.full_name || resetTargetEmployee.username}</strong>:
-                </p>
+            ) : diagnosisError ? (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800">
+                ⚠ {diagnosisError}
+              </div>
+            ) : diagnosisData ? (
+              <div className="space-y-3">
+                {repairNotice && (
+                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold">
+                    ✓ {repairNotice}
+                  </div>
+                )}
 
-                <div>
-                  <label className="block text-slate-700 font-bold mb-1">
-                    Password Baru:
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={resetPasswordValue}
-                    onChange={(e) => setResetPasswordValue(e.target.value)}
-                    placeholder="Minimal 6 karakter"
-                    className="w-full p-2.5 rounded-xl border border-slate-300 font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-                  />
+                {/* State Card */}
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-700">Status Diagnosa Utama:</span>
+                    <span className="font-mono font-bold px-2 py-0.5 rounded bg-[#1b4332]/10 text-[#1b4332]">
+                      {diagnosisData.diagnosis_state}
+                    </span>
+                  </div>
+                  {diagnosisData.mismatch_reasons.length > 0 && (
+                    <div className="space-y-1">
+                      {diagnosisData.mismatch_reasons.map((r, i) => (
+                        <div key={i} className="text-[11px] text-amber-800 bg-amber-50/80 p-2 rounded-lg border border-amber-200">
+                          • {r}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
-                <div className="pt-3 border-t border-slate-200 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowResetModal(false)}
-                    className="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="flex-1 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold transition cursor-pointer shadow-xs disabled:bg-slate-300"
-                  >
-                    {submitting ? 'Memproses...' : 'Reset Password'}
-                  </button>
+                {/* Relational Table */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-slate-100 text-slate-600 font-bold uppercase text-[10px]">
+                      <tr>
+                        <th className="p-2.5">Parameter</th>
+                        <th className="p-2.5">Data Karyawan (HR)</th>
+                        <th className="p-2.5">Akun Login (Users)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      <tr>
+                        <td className="p-2.5 font-medium text-slate-500">User ID</td>
+                        <td className="p-2.5 font-bold text-slate-800">ID: {diagnosisData.employee_id}</td>
+                        <td className="p-2.5 font-mono text-slate-800">
+                          {diagnosisData.linked_user_id ? `User #${diagnosisData.linked_user_id}` : 'Belum Terhubung'}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="p-2.5 font-medium text-slate-500">Email</td>
+                        <td className="p-2.5 text-slate-800">{diagnosisData.employee_email || '—'}</td>
+                        <td className="p-2.5 text-slate-800">{diagnosisData.login_email || '—'}</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2.5 font-medium text-slate-500">Username</td>
+                        <td className="p-2.5 text-slate-800">@{diagnosisData.employee_username || '—'}</td>
+                        <td className="p-2.5 text-slate-800">@{diagnosisData.username || '—'}</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2.5 font-medium text-slate-500">Role / Hak Akses</td>
+                        <td className="p-2.5 text-slate-800">{diagnosisData.employee_role}</td>
+                        <td className="p-2.5 text-slate-800">{diagnosisData.role_name || '—'}</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2.5 font-medium text-slate-500">Status Akun</td>
+                        <td className="p-2.5 text-slate-800">{diagnosisData.employee_active ? 'Aktif' : 'Nonaktif'}</td>
+                        <td className="p-2.5 text-slate-800">
+                          {diagnosisData.is_active === null ? '—' : (diagnosisData.is_active ? 'Aktif' : 'Nonaktif')} ({diagnosisData.account_status || '—'})
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
-              </form>
-            )}
+
+                {/* Repair Action Section */}
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <div className="font-bold text-slate-800">Tindakan Perbaikan yang Tersedia:</div>
+
+                  {diagnosisData.diagnosis_state === 'UNLINKED_MATCH_FOUND' && diagnosisData.candidate_user && (
+                    <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl space-y-2">
+                      <p className="text-[11px] text-blue-900">
+                        Ditemukan akun user yang cocok: <strong>@{diagnosisData.candidate_user.username}</strong> ({diagnosisData.candidate_user.email}) namun belum terhubung ke data karyawan ini.
+                      </p>
+                      <button
+                        type="button"
+                        disabled={repairing}
+                        onClick={() => handleExecuteRepair('LINK_UNAMBIGUOUS_ACCOUNT', diagnosisData.candidate_user?.id)}
+                        className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition cursor-pointer"
+                      >
+                        {repairing ? 'Memproses...' : 'Hubungkan Akun Secara Otomatis'}
+                      </button>
+                    </div>
+                  )}
+
+                  {diagnosisData.diagnosis_states.includes('EMAIL_MISMATCH') && (
+                    <button
+                      type="button"
+                      disabled={repairing}
+                      onClick={() => handleExecuteRepair('SYNC_LOGIN_EMAIL')}
+                      className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-lg border border-slate-300 transition cursor-pointer text-left px-3 flex justify-between items-center"
+                    >
+                      <span>Sinkronkan Email Login ke Email Karyawan</span>
+                      <span className="text-slate-400">→</span>
+                    </button>
+                  )}
+
+                  {diagnosisData.diagnosis_states.includes('USERNAME_MISMATCH') && (
+                    <button
+                      type="button"
+                      disabled={repairing}
+                      onClick={() => handleExecuteRepair('SYNC_USERNAME')}
+                      className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-lg border border-slate-300 transition cursor-pointer text-left px-3 flex justify-between items-center"
+                    >
+                      <span>Sinkronkan Username Login ke Data Karyawan</span>
+                      <span className="text-slate-400">→</span>
+                    </button>
+                  )}
+
+                  {diagnosisData.diagnosis_states.includes('ROLE_MISMATCH') && (
+                    <button
+                      type="button"
+                      disabled={repairing}
+                      onClick={() => handleExecuteRepair('SYNC_ROLE')}
+                      className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-lg border border-slate-300 transition cursor-pointer text-left px-3 flex justify-between items-center"
+                    >
+                      <span>Sinkronkan Role Akun Login</span>
+                      <span className="text-slate-400">→</span>
+                    </button>
+                  )}
+
+                  {diagnosisData.diagnosis_states.includes('ACCOUNT_DISABLED') && (
+                    <button
+                      type="button"
+                      disabled={repairing}
+                      onClick={() => handleExecuteRepair('REACTIVATE_ACCOUNT')}
+                      className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition cursor-pointer"
+                    >
+                      {repairing ? 'Memproses...' : 'Aktifkan Kembali Akun Login'}
+                    </button>
+                  )}
+
+                  {diagnosisData.diagnosis_states.includes('PASSWORD_RESET_AVAILABLE') && (
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteResetPassword(diagnosisTarget)}
+                      className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg transition cursor-pointer"
+                    >
+                      Reset Password Karyawan
+                    </button>
+                  )}
+
+                  {diagnosisData.diagnosis_state === 'LINKED_OK' && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 font-semibold text-center">
+                      ✓ Akun login terhubung dengan benar dan sinkron dengan data karyawan.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => setDiagnosisTarget(null)}
+                className="w-full py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
           </div>
         </div>
       )}

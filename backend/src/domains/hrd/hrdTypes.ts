@@ -13,6 +13,9 @@ export interface HrEmployee {
   monthly_salary?: number;
   status: string;
   is_active: boolean;
+  user_id?: number | null;
+  account_status?: string | null;
+  user_is_active?: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -41,6 +44,86 @@ export interface CreateEmployeePayload {
   hire_date?: string;
   monthly_salary?: number;
   status?: string;
+  create_login_account?: boolean;
+}
+
+export type DiagnosisState =
+  | 'NO_ACCOUNT'
+  | 'LINKED_OK'
+  | 'UNLINKED_MATCH_FOUND'
+  | 'AMBIGUOUS_MATCH'
+  | 'EMAIL_MISMATCH'
+  | 'USERNAME_MISMATCH'
+  | 'PROPERTY_MISMATCH'
+  | 'ROLE_MISMATCH'
+  | 'ACCOUNT_DISABLED'
+  | 'EMPLOYEE_DISABLED'
+  | 'PASSWORD_RESET_AVAILABLE'
+  | 'ACCOUNT_NOT_READY';
+
+export interface CandidateUser {
+  id: number;
+  property_id: number;
+  username: string;
+  email: string;
+  full_name: string;
+  is_active: boolean;
+  role_name?: string;
+  account_status?: string;
+  employee_id?: number | null;
+}
+
+export interface LoginAccountDiagnosis {
+  employee_id: number;
+  employee_name: string;
+  employee_code: string;
+  employee_email: string | null;
+  employee_username: string | null;
+  employee_role: string;
+  employee_active: boolean;
+  linked_user_id: number | null;
+  login_email: string | null;
+  username: string | null;
+  account_status: string | null;
+  is_active: boolean | null;
+  must_change_password: boolean | null;
+  role_name: string | null;
+  temp_password_expires_at: string | null;
+  diagnosis_state: DiagnosisState;
+  diagnosis_states: DiagnosisState[];
+  candidate_user?: CandidateUser | null;
+  mismatch_reasons: string[];
+}
+
+export type AccountRepairAction =
+  | 'LINK_UNAMBIGUOUS_ACCOUNT'
+  | 'SYNC_LOGIN_EMAIL'
+  | 'SYNC_USERNAME'
+  | 'SYNC_ROLE'
+  | 'REACTIVATE_ACCOUNT';
+
+export interface AccountRepairActionPayload {
+  action: AccountRepairAction;
+  target_user_id?: number;
+  reason?: string;
+}
+
+export interface CreateEmployeeResult extends HrEmployee {
+  auth_account_created: boolean;
+  user_id?: number | null;
+  temporary_password?: string;
+  temp_password_expires_at?: string;
+}
+
+export interface PasswordResetResult {
+  employee_id: number;
+  user_id: number;
+  username: string;
+  email: string;
+  temporary_password: string;
+  temp_password_expires_at: string;
+  must_change_password: boolean;
+  account_status: string;
 }
 
 export interface UpdateEmployeePayload {
