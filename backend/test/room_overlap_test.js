@@ -222,6 +222,8 @@ async function cleanupFixture(client) {
 
   await client.query('BEGIN');
   try {
+    // Covers checkout-created tasks if an earlier reservation cleanup failed.
+    await client.query('DELETE FROM housekeeping_tasks WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM availability_dates WHERE room_type_id = $1', [fixture.roomTypeId]);
     await client.query('DELETE FROM rate_plans WHERE id = $1', [fixture.ratePlanId]);
     await client.query('DELETE FROM rooms WHERE property_id = $1', [fixture.propertyId]);
@@ -233,6 +235,7 @@ async function cleanupFixture(client) {
          AND full_name LIKE $2`,
       [fixture.propertyId, `${runId}%`]
     );
+    await client.query('DELETE FROM property_housekeeping_settings WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM property_pricing_settings WHERE property_id = $1', [fixture.propertyId]);
     // The generated property is exclusive to this test run, including audit
     // entries emitted by checkout housekeeping flows without this correlation ID.
