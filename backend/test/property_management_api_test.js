@@ -88,6 +88,9 @@ async function runTests() {
     const branding = await pool.query('SELECT * FROM property_brandings WHERE property_id = $1', [createdPropId]);
     assert(branding.rows.length === 1, 'Default branding auto-initialized');
 
+    const stayChargeRules = await pool.query('SELECT COUNT(*)::int AS count FROM stay_charge_rules WHERE property_id = $1', [createdPropId]);
+    assert(stayChargeRules.rows[0].count === 7, 'Default stay-charge rules auto-initialized');
+
     // 3. Prevent duplicate property_code
     const dupRes = await makeRequest('POST', '/api/properties', {
       name: 'OAK Duplicate Test',

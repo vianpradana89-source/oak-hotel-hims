@@ -195,6 +195,7 @@ async function runTests() {
       await pool.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1)', [[pId]]);
       await pool.query('DELETE FROM property_quick_booking_rules WHERE property_id = ANY($1)', [[pId]]);
       await pool.query('DELETE FROM property_day_use_durations WHERE property_id = ANY($1)', [[pId]]);
+      await pool.query('DELETE FROM stay_charge_rules WHERE property_id = $1', [pId]);
       await pool.query('DELETE FROM rate_plans WHERE property_id = ANY($1)', [[pId]]);
       await pool.query('DELETE FROM meal_plans WHERE property_id = ANY($1)', [[pId]]);
       await pool.query('DELETE FROM properties WHERE id = $1', [pId]);
