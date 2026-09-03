@@ -3,6 +3,7 @@
 // Usage: node test/room_overlap_test.js [baseUrl]
 
 const { Pool } = require('pg');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 const baseUrl = (process.argv[2] || 'http://localhost:5000').replace(/\/$/, '');
 const runId = `PHASE1C2C-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -74,14 +75,18 @@ function overlaps(rangeA, rangeB) {
   return rangeA.start < rangeB.end && rangeA.end > rangeB.start;
 }
 
-async function request(method, path, body, correlationSuffix = '') {
+async function request(method, path, body, correlationSuffix = '', authToken = null) {
   const correlationId = `${runId}${correlationSuffix ? `-${correlationSuffix}` : ''}`;
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Correlation-Id': correlationId
+  };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
   const resp = await fetchFn(`${baseUrl}${path}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Correlation-Id': correlationId
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await resp.text();
@@ -880,6 +885,16 @@ async function run() {
     const baselineRoomTypes = [...new Set([String(roomA.name), String(roomB.name), String(scenarioDRoom.name)])];
     availabilityBaseline = await getAvailabilitySnapshot(client, baselineRoomTypes, availabilityStart, availabilityEnd);
 
+    const foAuthToken = generateToken({
+      id: 77001,
+      email: `fo-${runId}@test.oak`,
+      username: `fo-${runId}`,
+      full_name: 'Front Office Tester',
+      role: 'Front Office',
+      role_id: null,
+      property_id: fixture.propertyId
+    });
+
     // A. overlapping create -> 409
     {
       const first = await createReservation(roomA.id, day(0), day(2), 'A1');
@@ -943,7 +958,7 @@ async function run() {
       expect(occupied.status === 201, `F1 occupied create failed: ${occupied.status} ${occupied.text}`);
       const movable = await createReservation(roomA.id, day(25), day(27), 'F2');
       expect(movable.status === 201, `F2 movable create failed: ${movable.status} ${movable.text}`);
-      const move = await request('POST', `/api/reservations/${movable.json?.data?.id}/move`, { property_id: roomA.property_id, to_room_id: roomB.id }, 'F2-move');
+      const move = await request('POST', `/api/reservations/${movable.json?.data?.id}/move`, { property_id: roomA.property_id, to_room_id: roomB.id }, 'F2-move', foAuthToken);
       expect(move.status === 409, `F move must fail 409, got ${move.status}`);
       if (move.status === 200) {
         trackMoveTransfer(movable.json?.data?.id, roomB.id);
