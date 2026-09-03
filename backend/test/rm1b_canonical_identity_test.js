@@ -26,7 +26,7 @@ async function createFixture() {
   try {
     await client.query('BEGIN');
 
-    const propertyCode = `RM${String(Date.now()).slice(-3)}${Math.random().toString(16).slice(2, 4)}`.toUpperCase();
+    const propertyCode = `RM${String(Date.now()).slice(-3)}${Math.random().toString(16).slice(2, 3)}`.toUpperCase();
     const roomTypeCode = `RM1B-${propertyCode}`;
 
     const property = await client.query(
