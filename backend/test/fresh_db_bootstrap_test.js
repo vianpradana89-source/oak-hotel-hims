@@ -44,6 +44,14 @@ async function columnIsNotNull(tableName, columnName) {
   return r.rows[0] && r.rows[0].is_nullable === 'NO';
 }
 
+async function columnHasDefault(tableName, columnName) {
+  const r = await testPool.query(
+    "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+    [tableName, columnName]
+  );
+  return Boolean(r.rows[0]?.column_default);
+}
+
 async function countRows(tableName) {
   const r = await testPool.query('SELECT COUNT(*)::int AS cnt FROM ' + tableName);
   return r.rows[0].cnt;
@@ -166,6 +174,8 @@ async function main() {
     assert(await countRows('vendor_payables') === 0, 'W1. zero vendor_payables is valid');
     assert(await countRows('guest_receivables') === 0, 'W2. zero guest_receivables is valid');
     assert(await countRows('audit_logs') === 0, 'W3. zero audit_logs is valid');
+    assert(await countRows('hr_employees') === 0, 'W4. zero hr_employees is valid');
+    assert(!(await columnHasDefault('hr_employees', 'property_id')), 'W5. hr_employees.property_id has no implicit default');
 
     var secondBootError = null;
     try {
@@ -193,7 +203,8 @@ async function main() {
       await countRows('accounting_journal_lines'),
       await countRows('vendor_payables'),
       await countRows('guest_receivables'),
-      await countRows('audit_logs')
+      await countRows('audit_logs'),
+      await countRows('hr_employees')
     ];
     var hasNoResidue = residueCounts.every(function(c) { return c === 0; });
     assert(hasNoResidue, 'Y. no fixture residue (all counts=0)');
