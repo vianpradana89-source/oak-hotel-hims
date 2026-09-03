@@ -6703,6 +6703,10 @@ app.post('/api/availability/lock', async (req, res) => {
   }
 });
 
+// Authentication & User Identity routes (must be mounted before broad /api domain routers)
+app.use('/api/auth', createAuthRouter(pool));
+app.use('/api/users', createUsersRouter(pool));
+
 // Property management routes (CRUD + list)
 app.use('/api/properties', createPropertiesRouter(pool));
 
@@ -6733,8 +6737,6 @@ app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
-app.use('/api/auth', createAuthRouter(pool));
-app.use('/api/users', createUsersRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
 

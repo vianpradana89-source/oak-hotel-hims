@@ -27,9 +27,9 @@ function sendError(res: Response, error: any): Response {
 
 export function createIdentityCustodyRouter(pool: Pool): Router {
   const router = Router();
-  router.use(requireAuth);
+  const allowed = [requireAuth, requireRole(['Front Office'])];
 
-  router.post('/identity-custody', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/identity-custody', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await holdIdentity(pool, {
         propertyId: propertyIdFor(req),
@@ -47,7 +47,7 @@ export function createIdentityCustodyRouter(pool: Pool): Router {
     }
   });
 
-  router.patch('/identity-custody/:id/return', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.patch('/identity-custody/:id/return', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await returnIdentity(pool, {
         propertyId: propertyIdFor(req),
@@ -60,7 +60,7 @@ export function createIdentityCustodyRouter(pool: Pool): Router {
     }
   });
 
-  router.get('/reservations/:id/identity-custody', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.get('/reservations/:id/identity-custody', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await getIdentityCustodyByReservation(pool, propertyIdFor(req), positiveInt(req.params.id, 'reservation_id'));
       return res.json({ status: 'SUCCESS', data: result });

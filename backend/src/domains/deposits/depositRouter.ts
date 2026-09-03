@@ -47,9 +47,9 @@ function sendError(res: Response, error: any): Response {
 
 export function createDepositRouter(pool: Pool): Router {
   const router = Router();
-  router.use(requireAuth);
+  const allowed = [requireAuth, requireRole(['Front Office'])];
 
-  router.post('/deposits', requireRole(['Front Office']), upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/deposits', ...allowed, upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
     try {
       const propertyId = propertyIdFor(req);
       const reservationId = positiveInt(req.body?.reservation_id, 'reservation_id');
@@ -70,7 +70,7 @@ export function createDepositRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/deposits/:id/apply', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/deposits/:id/apply', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await applyDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
@@ -87,7 +87,7 @@ export function createDepositRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/deposits/:id/refund', requireRole(['Front Office']), upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/deposits/:id/refund', ...allowed, upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await refundDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
@@ -107,7 +107,7 @@ export function createDepositRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/deposits/:id/reverse', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.post('/deposits/:id/reverse', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await reverseDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
@@ -123,7 +123,7 @@ export function createDepositRouter(pool: Pool): Router {
     }
   });
 
-  router.get('/reservations/:id/deposits', requireRole(['Front Office']), async (req: AuthenticatedRequest, res: Response) => {
+  router.get('/reservations/:id/deposits', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const propertyId = propertyIdFor(req);
       const reservationId = positiveInt(req.params.id, 'reservation_id');
