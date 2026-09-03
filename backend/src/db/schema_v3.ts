@@ -465,6 +465,15 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE reservations ADD COLUMN IF NOT EXISTS remaining_balance DECIMAL(12,2) DEFAULT 0;
   `);
 
+  // The applied-deposit backfill below predicates on canonical financial state.
+  // These definitions match their later additive migrations so fresh databases
+  // have the required columns before the historical correction can run.
+  await pool.query(`
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS is_voided BOOLEAN DEFAULT FALSE;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS reversal_of_entry_id INTEGER REFERENCES folio_entries(id) ON DELETE SET NULL;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'POSTED';
+  `);
+
   // ==========================================================================
   // Financial invariant backfill: applied_deposit + amount_paid correction.
   // Wrapped in migration_marker so it runs ONCE per database, not every start.
