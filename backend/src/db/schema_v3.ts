@@ -375,6 +375,37 @@ export async function initializeDatabase(pool: Pool) {
       status VARCHAR(30) DEFAULT 'DRAFT',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS roles (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(50) UNIQUE NOT NULL,
+      description TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+      employee_id INTEGER REFERENCES hr_employees(id) ON DELETE RESTRICT,
+      role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE RESTRICT,
+      username VARCHAR(100) NOT NULL,
+      email VARCHAR(150) NOT NULL,
+      password_hash VARCHAR(255),
+      full_name VARCHAR(150) NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      account_status VARCHAR(30) NOT NULL DEFAULT 'READY',
+      must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+      activated_at TIMESTAMP WITH TIME ZONE,
+      temp_password_expires_at TIMESTAMP WITH TIME ZONE,
+      google_sub VARCHAR(255),
+      google_email VARCHAR(150),
+      google_linked_at TIMESTAMP WITH TIME ZONE,
+      local_password_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      last_login_at TIMESTAMP WITH TIME ZONE,
+      last_login_provider VARCHAR(20),
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
   `;
 
   await pool.query(q);
@@ -3646,6 +3677,207 @@ export async function initializeDatabase(pool: Pool) {
           WHERE idempotency_key IS NOT NULL;
         INSERT INTO schema_migrations(version)
         VALUES ('checked_in_audited_room_move_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // 29. AUTH-HR-1 CANONICAL FOUNDATION: EMPLOYEES, USERS, SHIFTS, SCHEDULES, FACE ENROLLMENTS, ATTENDANCE
+    const authHr1Marker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr1_canonical_foundation_v1'"
+    );
+    if ((authHr1Marker.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- Ensure roles and users tables exist
+        CREATE TABLE IF NOT EXISTS roles (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(50) UNIQUE NOT NULL,
+          description TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE RESTRICT,
+          username VARCHAR(100) NOT NULL,
+          email VARCHAR(150) NOT NULL,
+          password_hash VARCHAR(255),
+          full_name VARCHAR(150) NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Add canonical employee link & lifecycle & google-ready fields to users
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_id INTEGER REFERENCES hr_employees(id) ON DELETE RESTRICT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS account_status VARCHAR(30) NOT NULL DEFAULT 'READY';
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS activated_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS temp_password_expires_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(150);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_linked_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS local_password_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_provider VARCHAR(20);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_users_employee_id ON users (employee_id) WHERE employee_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_users_google_sub ON users (google_sub) WHERE google_sub IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_users_account_status ON users (account_status);
+        CREATE INDEX IF NOT EXISTS idx_users_property ON users (property_id);
+
+        -- Canonical Employee Face Enrollments
+        CREATE TABLE IF NOT EXISTS employee_face_enrollments (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES hr_employees(id) ON DELETE RESTRICT,
+          status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+          reference_photo_storage_key TEXT,
+          reference_photo_hash VARCHAR(128),
+          enrolled_at TIMESTAMP WITH TIME ZONE,
+          enrolled_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          enrolled_by_name VARCHAR(150),
+          verification_provider VARCHAR(50),
+          verification_version VARCHAR(50),
+          quality_status VARCHAR(30) NOT NULL DEFAULT 'NOT_EVALUATED',
+          review_status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+          reviewed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          reviewed_at TIMESTAMP WITH TIME ZONE,
+          review_notes TEXT,
+          revoked_at TIMESTAMP WITH TIME ZONE,
+          revoked_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          revocation_reason TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_face_enrollments_emp ON employee_face_enrollments (employee_id);
+        CREATE INDEX IF NOT EXISTS idx_face_enrollments_prop ON employee_face_enrollments (property_id);
+
+        -- Work Shift Master
+        CREATE TABLE IF NOT EXISTS work_shift_templates (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          code VARCHAR(20) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          start_time TIME NOT NULL,
+          end_time TIME NOT NULL,
+          crosses_midnight BOOLEAN NOT NULL DEFAULT FALSE,
+          grace_before_minutes INTEGER NOT NULL DEFAULT 15,
+          late_grace_minutes INTEGER NOT NULL DEFAULT 15,
+          checkout_grace_minutes INTEGER NOT NULL DEFAULT 60,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_work_shift_templates_code UNIQUE (property_id, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_work_shift_templates_prop ON work_shift_templates (property_id);
+
+        -- Employee Work Schedules & Audits
+        CREATE TABLE IF NOT EXISTS employee_work_schedules (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES hr_employees(id) ON DELETE RESTRICT,
+          work_date DATE NOT NULL,
+          shift_template_id INTEGER REFERENCES work_shift_templates(id) ON DELETE RESTRICT,
+          schedule_status VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+          work_status VARCHAR(20) NOT NULL DEFAULT 'WORK',
+          scheduled_start_at TIMESTAMP WITH TIME ZONE,
+          scheduled_end_at TIMESTAMP WITH TIME ZONE,
+          department_snapshot VARCHAR(100),
+          position_snapshot VARCHAR(100),
+          published_at TIMESTAMP WITH TIME ZONE,
+          published_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          published_by_name VARCHAR(150),
+          notes TEXT,
+          created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          updated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_employee_work_schedules_emp_date UNIQUE (property_id, employee_id, work_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_prop_date ON employee_work_schedules (property_id, work_date);
+        CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_emp ON employee_work_schedules (employee_id);
+
+        CREATE TABLE IF NOT EXISTS employee_work_schedule_audits (
+          id BIGSERIAL PRIMARY KEY,
+          schedule_id INTEGER NOT NULL REFERENCES employee_work_schedules(id) ON DELETE RESTRICT,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES hr_employees(id) ON DELETE RESTRICT,
+          action VARCHAR(30) NOT NULL,
+          old_shift_template_id INTEGER,
+          new_shift_template_id INTEGER,
+          old_work_status VARCHAR(20),
+          new_work_status VARCHAR(20),
+          reason TEXT,
+          changed_by_user_id INTEGER,
+          changed_by_name VARCHAR(150),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_audits_schedule ON employee_work_schedule_audits (schedule_id);
+
+        -- Ensure immutable audit invariant: schedule_id must be ON DELETE RESTRICT
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.referential_constraints
+            WHERE constraint_name = 'employee_work_schedule_audits_schedule_id_fkey'
+              AND delete_rule = 'CASCADE'
+          ) THEN
+            ALTER TABLE employee_work_schedule_audits DROP CONSTRAINT employee_work_schedule_audits_schedule_id_fkey;
+            ALTER TABLE employee_work_schedule_audits ADD CONSTRAINT employee_work_schedule_audits_schedule_id_fkey
+              FOREIGN KEY (schedule_id) REFERENCES employee_work_schedules(id) ON DELETE RESTRICT;
+          END IF;
+        END $$;
+
+        -- Canonical Employee Attendance Work-Cycle
+        CREATE TABLE IF NOT EXISTS employee_attendance (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES hr_employees(id) ON DELETE RESTRICT,
+          schedule_id INTEGER REFERENCES employee_work_schedules(id) ON DELETE SET NULL,
+          work_date DATE NOT NULL,
+          scheduled_start_snapshot TIMESTAMP WITH TIME ZONE,
+          scheduled_end_snapshot TIMESTAMP WITH TIME ZONE,
+          shift_code_snapshot VARCHAR(20),
+          shift_name_snapshot VARCHAR(100),
+          clock_in_at TIMESTAMP WITH TIME ZONE,
+          clock_out_at TIMESTAMP WITH TIME ZONE,
+          clock_in_photo_storage_key TEXT,
+          clock_out_photo_storage_key TEXT,
+          clock_in_photo_hash VARCHAR(128),
+          clock_out_photo_hash VARCHAR(128),
+          clock_in_face_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED',
+          clock_out_face_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED',
+          clock_in_liveness_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED',
+          clock_out_liveness_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED',
+          clock_in_location_status VARCHAR(30) DEFAULT 'NOT_EVALUATED',
+          clock_out_location_status VARCHAR(30) DEFAULT 'NOT_EVALUATED',
+          late_minutes INTEGER NOT NULL DEFAULT 0,
+          early_leave_minutes INTEGER NOT NULL DEFAULT 0,
+          overtime_minutes INTEGER NOT NULL DEFAULT 0,
+          worked_minutes INTEGER NOT NULL DEFAULT 0,
+          attendance_status VARCHAR(30) NOT NULL DEFAULT 'PRESENT',
+          review_status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+          reviewed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          reviewed_at TIMESTAMP WITH TIME ZONE,
+          review_note TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_employee_attendance_emp_date UNIQUE (property_id, employee_id, work_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_employee_attendance_prop_date ON employee_attendance (property_id, work_date);
+        CREATE INDEX IF NOT EXISTS idx_employee_attendance_emp ON employee_attendance (employee_id);
+        CREATE INDEX IF NOT EXISTS idx_employee_attendance_status ON employee_attendance (attendance_status);
+
+        -- Additive link for operational tasks
+        ALTER TABLE housekeeping_tasks ADD COLUMN IF NOT EXISTS assigned_employee_id INTEGER REFERENCES hr_employees(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS idx_housekeeping_tasks_assigned_emp ON housekeeping_tasks (assigned_employee_id);
+
+        ALTER TABLE maintenance_tasks ADD COLUMN IF NOT EXISTS assigned_employee_id INTEGER REFERENCES hr_employees(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS idx_maintenance_tasks_assigned_emp ON maintenance_tasks (assigned_employee_id);
+
+        INSERT INTO schema_migrations(version)
+        VALUES ('auth_hr1_canonical_foundation_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }
