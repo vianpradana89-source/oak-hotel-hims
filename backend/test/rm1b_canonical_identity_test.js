@@ -553,6 +553,10 @@ async function cleanupFixture() {
     await client.query('DELETE FROM housekeeping_tasks WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM folio_entries WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE b.property_id = $1)', [fixture.propertyId]);
     await client.query('DELETE FROM payment_transactions WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE b.property_id = $1)', [fixture.propertyId]);
+    await client.query('DELETE FROM transaction_attachments WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transaction_lines WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transactions WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM transaction_daily_sequences WHERE property_id = $1', [fixture.propertyId]);
     await client.query("DELETE FROM audit_logs WHERE property_id = $1", [fixture.propertyId]);
     await client.query('DELETE FROM reservation_room_moves WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM availability_locks WHERE room_type_id = $1', [fixture.roomTypeId]);
@@ -563,6 +567,7 @@ async function cleanupFixture() {
     await client.query('DELETE FROM rooms WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM room_types WHERE id = $1', [fixture.roomTypeId]);
     await client.query('DELETE FROM room_categories WHERE id = $1', [fixture.roomCategoryId]);
+    await client.query('DELETE FROM property_housekeeping_settings WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM property_pricing_settings WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM property_quick_booking_rules WHERE property_id = $1', [fixture.propertyId]);
     await client.query('DELETE FROM properties WHERE id = $1', [fixture.propertyId]);
