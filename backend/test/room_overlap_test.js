@@ -12,6 +12,13 @@ const scenarioResults = {};
 const reservationOwnership = new Map();
 const roomTypeById = new Map();
 const roomPropertyById = new Map();
+const fixture = {
+  propertyId: null,
+  roomTypeId: null,
+  roomCategoryId: null,
+  ratePlanId: null,
+  identityNumber: null
+};
 
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
@@ -87,17 +94,81 @@ async function request(method, path, body, correlationSuffix = '') {
   return { status: resp.status, text, json, correlationId };
 }
 
+async function createOverlapFixture(client) {
+  const propertyCode = `O${String(Date.now()).slice(-3)}${Math.random().toString(16).slice(2, 4)}`.toUpperCase();
+  const roomTypeCode = `OVL-${runId}`.slice(0, 50);
+  const roomTypeName = `Overlap ${runId}`.slice(0, 100);
+  fixture.identityNumber = `3171${String(Date.now()).slice(-12)}`;
+
+  const property = await client.query(
+    `INSERT INTO properties (name, property_code, timezone, currency, address, is_active)
+     VALUES ($1, $2, 'Asia/Jakarta', 'IDR', 'Overlap test fixture', TRUE)
+     RETURNING id`,
+    [runId, propertyCode]
+  );
+  fixture.propertyId = Number(property.rows[0].id);
+
+  await client.query(
+    `INSERT INTO property_pricing_settings (
+       property_id, tax_percent, service_charge_percent, prices_include_tax, prices_include_service
+     ) VALUES ($1, 0, 0, FALSE, FALSE)`,
+    [fixture.propertyId]
+  );
+
+  const category = await client.query(
+    `INSERT INTO room_categories (property_id, code, name, is_active)
+     VALUES ($1, 'OVL', $2, TRUE)
+     RETURNING id`,
+    [fixture.propertyId, `Overlap ${propertyCode}`]
+  );
+  fixture.roomCategoryId = Number(category.rows[0].id);
+
+  const roomType = await client.query(
+    `INSERT INTO room_types (
+       property_id, room_category_id, code, name, base_rate, capacity, is_active
+     ) VALUES ($1, $2, $3, $4, 100000, 2, TRUE)
+     RETURNING id`,
+    [fixture.propertyId, fixture.roomCategoryId, roomTypeCode, roomTypeName]
+  );
+  fixture.roomTypeId = Number(roomType.rows[0].id);
+
+  const ratePlan = await client.query(
+    `INSERT INTO rate_plans (
+       property_id, room_type_id, code, name, base_rate, is_active, is_archived
+     ) VALUES ($1, $2, $3, $4, 100000, TRUE, FALSE)
+     RETURNING id`,
+    [fixture.propertyId, fixture.roomTypeId, `BAR-${propertyCode}`, `BAR ${propertyCode}`]
+  );
+  fixture.ratePlanId = Number(ratePlan.rows[0].id);
+
+  const rooms = await client.query(
+    `INSERT INTO rooms (property_id, room_type_id, room_number, name, status, is_active)
+     VALUES
+       ($1, $2, 'OVL-A', 'OVL-A', 'VACANT_CLEAN', TRUE),
+       ($1, $2, 'OVL-B', 'OVL-B', 'VACANT_CLEAN', TRUE)
+     RETURNING id, room_number`,
+    [fixture.propertyId, fixture.roomTypeId]
+  );
+  expect(rooms.rowCount === 2, 'Overlap fixture must create exactly two active physical rooms');
+
+  await client.query(
+    `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+     SELECT $1, $2, CURRENT_DATE + day_offset, 2, 0
+     FROM generate_series(30, 419) AS day_offset`,
+    [fixture.roomTypeId, roomTypeName]
+  );
+}
+
 async function getRooms() {
-  // Query DB directly — GET /api/rooms now requires property_id (property-scoped endpoint).
-  // This fixture reads from the live DB to remain independent of which property is active.
   const result = await pool.query(`
     SELECT r.id, r.room_number, r.name, r.status, r.property_id,
            COALESCE(rt.name, r.name) AS room_type_name
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
-    WHERE r.status NOT IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
+    WHERE r.property_id = $1
+      AND r.status NOT IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
     ORDER BY r.id ASC
-  `);
+  `, [fixture.propertyId]);
   const rooms = result.rows.map((row) => ({
     id: Number(row.id),
     room_number: String(row.room_number || ''),
@@ -116,8 +187,10 @@ async function createReservation(roomId, checkIn, checkOut, label) {
     property_id: propertyId,
     guest_name: `${runId} ${label}`,
     guest_phone: `0819${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`,
-    identity_number: '3171012345678901',
+    identity_number: fixture.identityNumber,
     has_valid_identity: true,
+    ktp_path: `/uploads/identities/${runId}-${label}.jpg`,
+    rate_plan_id: fixture.ratePlanId,
     check_in: checkIn,
     check_out: checkOut,
     total_price: 100000,
@@ -142,6 +215,31 @@ async function createReservation(roomId, checkIn, checkOut, label) {
     });
   }
   return result;
+}
+
+async function cleanupFixture(client) {
+  if (!fixture.propertyId) return;
+
+  await client.query('BEGIN');
+  try {
+    await client.query('DELETE FROM availability_dates WHERE room_type_id = $1', [fixture.roomTypeId]);
+    await client.query('DELETE FROM rate_plans WHERE id = $1', [fixture.ratePlanId]);
+    await client.query('DELETE FROM rooms WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM room_types WHERE id = $1', [fixture.roomTypeId]);
+    await client.query('DELETE FROM room_categories WHERE id = $1', [fixture.roomCategoryId]);
+    await client.query(
+      `DELETE FROM guests
+       WHERE created_property_id = $1
+         AND full_name LIKE $2`,
+      [fixture.propertyId, `${runId}%`]
+    );
+    await client.query('DELETE FROM property_pricing_settings WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM properties WHERE id = $1', [fixture.propertyId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
 }
 
 function trackCancellationRelease(reservationId) {
@@ -730,6 +828,15 @@ async function run() {
 
   let scenarioFailure = null;
   try {
+    await client.query('BEGIN');
+    try {
+      await createOverlapFixture(client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
+
     const rooms = await getRooms();
     for (const room of rooms) {
       roomTypeById.set(Number(room.id), String(room.name || ''));
@@ -920,6 +1027,11 @@ async function run() {
       }
     } catch (err) {
       cleanupError = err;
+    }
+    try {
+      await cleanupFixture(client);
+    } catch (err) {
+      cleanupError = cleanupError || err;
     } finally {
       client.release();
       await pool.end();
