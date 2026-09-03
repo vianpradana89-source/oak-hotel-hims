@@ -11,12 +11,91 @@ const pool = new Pool({
 
 const fetchFn = globalThis.fetch || require('node-fetch');
 
-let propertyId = null;
+const runId = `RM1B-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
-async function discoverProperty() {
-  const result = await pool.query('SELECT id FROM properties ORDER BY id LIMIT 1');
-  expect(result.rows.length >= 1, 'No properties found');
-  propertyId = Number(result.rows[0].id);
+const fixture = {
+  propertyId: null,
+  roomCategoryId: null,
+  roomTypeId: null,
+  ratePlanId: null,
+  roomIds: []
+};
+
+async function createFixture() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const propertyCode = `RM${String(Date.now()).slice(-3)}${Math.random().toString(16).slice(2, 4)}`.toUpperCase();
+    const roomTypeCode = `RM1B-${propertyCode}`;
+
+    const property = await client.query(
+      `INSERT INTO properties (name, property_code, timezone, currency, address, is_active)
+       VALUES ($1, $2, 'Asia/Jakarta', 'IDR', 'RM1B test fixture', TRUE)
+       RETURNING id`,
+      [runId, propertyCode]
+    );
+    fixture.propertyId = Number(property.rows[0].id);
+
+    await client.query(
+      `INSERT INTO property_pricing_settings (
+         property_id, tax_percent, service_charge_percent, prices_include_tax, prices_include_service
+       ) VALUES ($1, 0, 0, FALSE, FALSE)`,
+      [fixture.propertyId]
+    );
+
+    const category = await client.query(
+      `INSERT INTO room_categories (property_id, code, name, is_active)
+       VALUES ($1, 'RM1B', $2, TRUE)
+       RETURNING id`,
+      [fixture.propertyId, `RM1B ${propertyCode}`]
+    );
+    fixture.roomCategoryId = Number(category.rows[0].id);
+
+    const roomType = await client.query(
+      `INSERT INTO room_types (
+         property_id, room_category_id, code, name, base_rate, capacity, is_active
+       ) VALUES ($1, $2, $3, $4, 100000, 2, TRUE)
+       RETURNING id`,
+      [fixture.propertyId, fixture.roomCategoryId, roomTypeCode, runId]
+    );
+    fixture.roomTypeId = Number(roomType.rows[0].id);
+
+    const ratePlan = await client.query(
+      `INSERT INTO rate_plans (
+         property_id, room_type_id, code, name, base_rate, is_active, is_archived
+       ) VALUES ($1, $2, $3, $4, 100000, TRUE, FALSE)
+       RETURNING id`,
+      [fixture.propertyId, fixture.roomTypeId, `BAR-${propertyCode}`, `BAR ${propertyCode}`]
+    );
+    fixture.ratePlanId = Number(ratePlan.rows[0].id);
+
+    const rooms = await client.query(
+      `INSERT INTO rooms (property_id, room_type_id, room_number, name, status, is_active)
+       VALUES
+         ($1, $2, 'RM1B-A', 'RM1B-A', 'VACANT_CLEAN', TRUE),
+         ($1, $2, 'RM1B-B', 'RM1B-B', 'VACANT_CLEAN', TRUE)
+       RETURNING id, room_number`,
+      [fixture.propertyId, fixture.roomTypeId]
+    );
+    fixture.roomIds = rooms.rows.map((r) => Number(r.id));
+
+    await client.query(
+      `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+       SELECT $1, $2, CURRENT_DATE + day_offset, 2, 0
+       FROM generate_series(30, 429) AS day_offset`,
+      [fixture.roomTypeId, runId]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  propertyId = fixture.propertyId;
 }
 
 function expect(condition, message) {
@@ -134,7 +213,7 @@ async function cleanupCorrelation(corr, identName, identId, dates) {
 
 async function pickSellableRoom() {
   const result = await pool.query(`
-    SELECT r.id, r.status AS room_status, r.room_type_id, COALESCE(rt.name, r.name) AS room_type,
+    SELECT r.id, r.status AS room_status, r.room_type_id, r.property_id, COALESCE(rt.name, r.name) AS room_type,
            (SELECT COUNT(*) FROM rooms x WHERE x.room_type_id = r.room_type_id) AS type_rooms
     FROM rooms r
     LEFT JOIN room_types rt ON rt.id = r.room_type_id
@@ -204,7 +283,7 @@ async function testBookingCreateDualWritesCanonicalIdentity() {
     guest_phone: '081500000001',
     identity_number: '3171012345678901',
     has_valid_identity: true,
-    property_id: 1,
+    property_id: fixture.propertyId,
     reservations: [
       { room_id: room.id, check_in: start, check_out: addDays(start, 2), guest_name: 'RM1B Canonical Guest', total_price: 500000, qty: 1 }
     ]
@@ -466,9 +545,39 @@ async function testInventoryViolationScan() {
   passedScenarios += 1;
 }
 
+async function cleanupFixture() {
+  if (!fixture.propertyId) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM housekeeping_tasks WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM folio_entries WHERE reservation_id IN (SELECT id FROM reservations WHERE property_id = $1)', [fixture.propertyId]);
+    await client.query('DELETE FROM payment_transactions WHERE reservation_id IN (SELECT id FROM reservations WHERE property_id = $1)', [fixture.propertyId]);
+    await client.query("DELETE FROM audit_logs WHERE property_id = $1", [fixture.propertyId]);
+    await client.query('DELETE FROM reservation_room_moves WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM availability_locks WHERE room_type_id = $1', [fixture.roomTypeId]);
+    await client.query('DELETE FROM availability_dates WHERE room_type_id = $1', [fixture.roomTypeId]);
+    await client.query('DELETE FROM reservations WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM bookings WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM rate_plans WHERE id = $1', [fixture.ratePlanId]);
+    await client.query('DELETE FROM rooms WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM room_types WHERE id = $1', [fixture.roomTypeId]);
+    await client.query('DELETE FROM room_categories WHERE id = $1', [fixture.roomCategoryId]);
+    await client.query('DELETE FROM property_pricing_settings WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM property_quick_booking_rules WHERE property_id = $1', [fixture.propertyId]);
+    await client.query('DELETE FROM properties WHERE id = $1', [fixture.propertyId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function main() {
   await pool.query('SELECT 1');
-  await discoverProperty();
+  await createFixture();
   let probe = null;
   try {
     probe = await fetchFn(`${baseUrl}/api/rooms?property_id=${propertyId}`);
@@ -495,6 +604,7 @@ async function main() {
         console.error(`Cleanup warning for ${cleanup.corr}:`, cleanupError.message || cleanupError);
       }
     }
+    await cleanupFixture();
   }
 
   // Final gate must run after all cleanups restored the ledger.
