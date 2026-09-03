@@ -310,7 +310,7 @@ async function applyReservationEdit(
   // 1. Lock reservation row
   const rRes = await client.query(
     `SELECT r.*, b.property_id, b.booker_name AS b_booker_name, b.booker_phone AS b_booker_phone,
-            rm.room_number, COALESCE(r.booked_room_type_id_snapshot, rm.room_type_id) AS current_room_type_id
+            rm.room_number, COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) AS current_room_type_id
      FROM reservations r
      JOIN bookings b ON b.id = r.booking_id
      LEFT JOIN rooms rm ON rm.id = r.room_id
@@ -651,7 +651,7 @@ export async function previewReservationEdit(
 ) {
   const rRes = await pool.query(
     `SELECT r.*, b.property_id, b.booker_name AS b_booker_name, b.booker_phone AS b_booker_phone,
-            rm.room_number, COALESCE(r.booked_room_type_id_snapshot, rm.room_type_id) AS current_room_type_id
+            rm.room_number, COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) AS current_room_type_id
      FROM reservations r
      JOIN bookings b ON b.id = r.booking_id
      LEFT JOIN rooms rm ON rm.id = r.room_id

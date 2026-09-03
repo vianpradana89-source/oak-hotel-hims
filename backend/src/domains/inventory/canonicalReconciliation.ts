@@ -57,7 +57,7 @@ export async function reconcileCanonicalAvailability(
     const expected = new Map<string, number>();
     const reservations = await client.query(
       `SELECT res.id, res.check_in, res.check_out,
-              COALESCE(res.booked_room_type_id_snapshot, rm.room_type_id) AS initial_room_type_id
+              COALESCE(rm.room_type_id, res.booked_room_type_id_snapshot) AS initial_room_type_id
        FROM reservations res
        JOIN rooms rm ON rm.id = res.room_id
        WHERE res.status IN ('BOOKED', 'CHECKED_IN')
