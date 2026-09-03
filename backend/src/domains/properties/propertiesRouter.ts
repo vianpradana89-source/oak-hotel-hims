@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
+import { seedBaselineStayChargeRules } from '../stayCharges/stayChargeRuleDefaults';
 
 export function createPropertiesRouter(pool: Pool): Router {
   const router = Router();
@@ -177,6 +178,9 @@ export function createPropertiesRouter(pool: Pool): Router {
         ON CONFLICT (property_id) DO NOTHING`,
         [newId]
       );
+
+      // 7. Initialize property-scoped operational charge defaults.
+      await seedBaselineStayChargeRules(client, newId);
 
       await client.query('COMMIT');
       res.status(201).json({

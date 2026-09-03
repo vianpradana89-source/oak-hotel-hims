@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { initializeDatabase as initializeV2 } from './schema_v2';
+import { seedBaselineStayChargeRules } from '../domains/stayCharges/stayChargeRuleDefaults';
 
 export async function initializeDatabase(pool: Pool) {
   // Run v2 initialization first (creates availability tables)
@@ -2671,25 +2672,18 @@ export async function initializeDatabase(pool: Pool) {
         CREATE INDEX IF NOT EXISTS idx_folio_entries_res_type ON folio_entries (reservation_id, entry_type, is_voided);
         CREATE INDEX IF NOT EXISTS idx_folio_entries_prop_source ON folio_entries (property_id, source_type);
 
-        -- 5. Seed baseline stay charge rules for Property 1
-        INSERT INTO stay_charge_rules (
-          property_id, charge_type, code, name, description, charge_method,
-          default_amount, percentage_rate, taxable, service_chargeable, requires_note, sort_order, created_by
-        ) VALUES
-          (1, 'EXTRA_BED', 'EXTRA_BED_STD', 'Extra Bed Standar', 'Kasur tambahan dewasa standar dengan sprei dan bantal', 'FIXED_AMOUNT', 150000, 0, true, true, false, 1, 'SYSTEM'),
-          (1, 'EXTRA_PERSON', 'EXTRA_PERSON_ADULT', 'Extra Person Dewasa', 'Tamu tambahan dewasa tanpa kasur tambahan', 'FIXED_AMOUNT', 100000, 0, true, true, false, 2, 'SYSTEM'),
-          (1, 'EARLY_CHECKIN', 'EARLY_CHECKIN_STD', 'Early Check-in Standar', 'Biaya masuk lebih awal (sebelum 14:00)', 'PERCENTAGE_OF_NIGHTLY_RATE', 0, 50.00, true, true, false, 3, 'SYSTEM'),
-          (1, 'LATE_CHECKOUT', 'LATE_CHECKOUT_STD', 'Late Check-out Standar', 'Biaya perpanjangan jam keluar (setelah 12:00)', 'PERCENTAGE_OF_NIGHTLY_RATE', 0, 50.00, true, true, false, 4, 'SYSTEM'),
-          (1, 'PENALTY', 'PENALTY_LOST_KEY', 'Kartu Kunci Hilang', 'Penggantian kartu kunci RFID hilang / rusak', 'FIXED_AMOUNT', 50000, 0, false, false, false, 5, 'SYSTEM'),
-          (1, 'PENALTY', 'PENALTY_SMOKING', 'Denda Merokok (Smoking Charge)', 'Denda merokok di dalam kamar non-smoking', 'FIXED_AMOUNT', 500000, 0, false, false, true, 6, 'SYSTEM'),
-          (1, 'PENALTY', 'PENALTY_DAMAGE', 'Kerusakan Kamar / Properti', 'Penggantian / perbaikan kerusakan fasilitas kamar', 'MANUAL', 0, 0, false, false, true, 7, 'SYSTEM')
-        ON CONFLICT DO NOTHING;
-
+      `);
+      await seedBaselineStayChargeRules(auditMigrationClient);
+      await auditMigrationClient.query(`
         INSERT INTO schema_migrations (version)
         VALUES ('stay_charge_and_day_use_foundation_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }
+
+    // Existing properties may have received the migration before defaults were
+    // provisioned centrally; add only missing baseline codes without edits.
+    await seedBaselineStayChargeRules(auditMigrationClient);
 
     // Migration: stay_charge_financial_ledger_safety_v1
     const stayChargeSafetyCheck = await auditMigrationClient.query(
