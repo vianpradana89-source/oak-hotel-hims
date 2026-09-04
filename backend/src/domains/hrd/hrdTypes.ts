@@ -120,6 +120,7 @@ export interface PasswordResetResult {
   user_id: number;
   username: string;
   email: string;
+  phone?: string | null;
   temporary_password: string;
   temp_password_expires_at: string;
   must_change_password: boolean;

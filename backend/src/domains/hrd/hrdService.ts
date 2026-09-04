@@ -1431,6 +1431,7 @@ export async function resetEmployeePassword(
     user_id: Number(updatedUser.id),
     username: updatedUser.username,
     email: updatedUser.email,
+    phone: emp.phone || null,
     temporary_password: tempPassword,
     temp_password_expires_at: tempExpiresAt.toISOString(),
     must_change_password: true,

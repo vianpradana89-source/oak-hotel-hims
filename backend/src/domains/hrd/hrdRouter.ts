@@ -12,6 +12,7 @@ import {
   repairEmployeeLoginAccount,
   resetEmployeePassword
 } from './hrdService';
+import { auditWhatsAppCredentialOpened } from './hrdWhatsapp';
 import type {
   CreateEmployeePayload,
   UpdateEmployeePayload,
@@ -294,6 +295,33 @@ export function createHrdRouter(pool: Pool): Router {
       res.json({ status: 'OK', data: result });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 11. Audit WhatsApp Credential Opened (click-to-chat audit)
+  router.post('/employees/:id/audit-whatsapp-opened', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.body.property_id || req.body.propertyId);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const phone = req.body.phone;
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      await auditWhatsAppCredentialOpened(client, propertyId, employeeId, phone, actor);
+      res.json({ status: 'OK', message: 'Audit recorded' });
+    } catch (err: any) {
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
     } finally {
