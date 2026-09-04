@@ -46,6 +46,72 @@ export function normalizeRoleName(role?: string | null): string {
   return r;
 }
 
+export function formatCalendarDate(val: any): string | null {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(trimmed);
+    if (match) return match[0];
+  }
+  if (val instanceof Date && !isNaN(val.getTime())) {
+    const year = val.getFullYear();
+    const month = String(val.getMonth() + 1).padStart(2, '0');
+    const day = String(val.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  return null;
+}
+
+export function validateAndNormalizeCalendarDate(
+  val: any,
+  fieldName = 'hire_date'
+): string | null {
+  if (val === undefined) return undefined as any;
+  if (val === null) return null;
+  if (typeof val !== 'string') {
+    throw Object.assign(
+      new Error(`Format tanggal ${fieldName} tidak valid. Gunakan format YYYY-MM-DD.`),
+      { statusCode: 400, code: 'INVALID_DATE_FORMAT' }
+    );
+  }
+  const trimmed = val.trim();
+  if (trimmed === '') return null;
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) {
+    throw Object.assign(
+      new Error(`Format tanggal ${fieldName} harus YYYY-MM-DD (diterima: "${trimmed}").`),
+      { statusCode: 400, code: 'INVALID_DATE_FORMAT' }
+    );
+  }
+
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    throw Object.assign(
+      new Error(`Nilai tanggal ${fieldName} di luar rentang kalender yang valid.`),
+      { statusCode: 400, code: 'INVALID_DATE_VALUE' }
+    );
+  }
+
+  const testDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    testDate.getUTCFullYear() !== year ||
+    testDate.getUTCMonth() !== month - 1 ||
+    testDate.getUTCDate() !== day
+  ) {
+    throw Object.assign(
+      new Error(`Tanggal ${fieldName} "${trimmed}" bukan tanggal kalender yang valid.`),
+      { statusCode: 400, code: 'INVALID_CALENDAR_DATE' }
+    );
+  }
+
+  return trimmed;
+}
+
 export function generateSecureTemporaryPassword(length: number = 12): string {
   const uppers = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   const lowers = 'abcdefghijkmnopqrstuvwxyz';
@@ -309,6 +375,7 @@ export async function getEmployees(
 ): Promise<HrEmployee[]> {
   let sql = `
     SELECT e.*,
+           to_char(e.hire_date, 'YYYY-MM-DD') AS hire_date_formatted,
            u.id AS user_id,
            u.account_status,
            u.is_active AS user_is_active
@@ -351,7 +418,7 @@ export async function getEmployees(
     username: row.username,
     email: row.email,
     phone: row.phone,
-    hire_date: row.hire_date ? String(row.hire_date).slice(0, 10) : null,
+    hire_date: row.hire_date_formatted || formatCalendarDate(row.hire_date),
     monthly_salary: Number(row.monthly_salary || 0),
     status: row.status || 'ACTIVE',
     is_active: row.is_active !== false,
@@ -462,6 +529,10 @@ export async function createEmployeeAccount(
     ? payload.employee_code.trim()
     : `EMP-${propertyId}-${Date.now().toString().slice(-4)}`;
 
+  const normalizedHireDate = payload.hire_date !== undefined
+    ? validateAndNormalizeCalendarDate(payload.hire_date, 'hire_date')
+    : null;
+
   const res = await client.query(
     `INSERT INTO hr_employees (
       property_id, employee_code, full_name, position, department,
@@ -479,7 +550,7 @@ export async function createEmployeeAccount(
       finalUsername,
       cleanEmail,
       payload.phone || null,
-      payload.hire_date || null,
+      normalizedHireDate,
       payload.monthly_salary || 0,
       payload.status || 'ACTIVE'
     ]
@@ -489,6 +560,7 @@ export async function createEmployeeAccount(
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: res.rows[0].is_active !== false,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };
@@ -586,7 +658,8 @@ export async function updateEmployeeAccount(
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<HrEmployee> {
   const currentRes = await client.query(
-    'SELECT * FROM hr_employees WHERE id = $1 AND property_id = $2',
+    `SELECT *, to_char(hire_date, 'YYYY-MM-DD') AS hire_date_formatted
+     FROM hr_employees WHERE id = $1 AND property_id = $2`,
     [employeeId, propertyId]
   );
 
@@ -631,7 +704,10 @@ export async function updateEmployeeAccount(
   const username = payload.username !== undefined ? payload.username : current.username;
   const email = payload.email !== undefined ? payload.email : current.email;
   const phone = payload.phone !== undefined ? payload.phone : current.phone;
-  const hireDate = payload.hire_date !== undefined ? payload.hire_date : current.hire_date;
+  let hireDate: string | null = current.hire_date_formatted || formatCalendarDate(current.hire_date);
+  if (payload.hire_date !== undefined) {
+    hireDate = validateAndNormalizeCalendarDate(payload.hire_date, 'hire_date');
+  }
   const monthlySalary = payload.monthly_salary !== undefined ? payload.monthly_salary : current.monthly_salary;
   const status = payload.status !== undefined ? payload.status : current.status;
   const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : (current.is_active !== false);
@@ -654,6 +730,7 @@ export async function updateEmployeeAccount(
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: res.rows[0].is_active !== false,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };
@@ -690,7 +767,7 @@ export async function deactivateEmployeeAccount(
   client: PoolClient,
   propertyId: number,
   employeeId: number,
-  options?: { reason?: string; effective_date?: string },
+  options?: { reason?: string; effective_date?: string | null },
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<HrEmployee> {
   const currentRes = await client.query(
@@ -725,10 +802,15 @@ export async function deactivateEmployeeAccount(
     [employeeId, propertyId]
   );
 
+  const effectiveDate = options?.effective_date !== undefined
+    ? validateAndNormalizeCalendarDate(options.effective_date, 'effective_date')
+    : formatCalendarDate(new Date());
+
   const deactivated: HrEmployee = {
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: false,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };
@@ -747,7 +829,7 @@ export async function deactivateEmployeeAccount(
         status: 'INACTIVE',
         previous_status: current.status,
         reason: options?.reason || 'Nonaktifkan via HRD',
-        effective_date: options?.effective_date || new Date().toISOString().slice(0, 10),
+        effective_date: effectiveDate,
         auth_users_disabled: userUpdateRes.rows.length > 0,
         disabled_user_ids: userUpdateRes.rows.map((u: any) => u.id)
       }),
@@ -795,6 +877,7 @@ export async function reactivateEmployeeAccount(
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: true,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };

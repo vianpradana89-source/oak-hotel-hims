@@ -41,7 +41,7 @@ export interface CreateEmployeePayload {
   username?: string;
   email?: string;
   phone?: string;
-  hire_date?: string;
+  hire_date?: string | null;
   monthly_salary?: number;
   status?: string;
   create_login_account?: boolean;
@@ -136,7 +136,7 @@ export interface UpdateEmployeePayload {
   username?: string;
   email?: string;
   phone?: string;
-  hire_date?: string;
+  hire_date?: string | null;
   monthly_salary?: number;
   status?: string;
   is_active?: boolean;
@@ -170,7 +170,7 @@ export const PRIVILEGED_ROLE_CATEGORIES: RoleCategoryDef[] = [
 
 export interface DeactivateEmployeePayload {
   reason?: string;
-  effective_date?: string;
+  effective_date?: string | null;
 }
 
 export interface HardDeleteLoginAccountPayload {

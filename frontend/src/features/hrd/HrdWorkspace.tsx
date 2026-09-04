@@ -80,6 +80,39 @@ interface HrdWorkspaceProps {
   onPermissionsUpdated?: (newMap: Record<string, string[]>) => void;
 }
 
+const getTodayCalendarDate = (): string => {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const toCalendarDateInput = (val?: string | null): string => {
+  if (!val) return '';
+  const str = String(val).trim();
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[0] : '';
+};
+
+const serializeCalendarDate = (val?: string | null): string | null => {
+  if (!val) return null;
+  const str = String(val).trim();
+  if (!str) return null;
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[0] : null;
+};
+
+const formatDateDisplay = (dateStr?: string | null): string => {
+  if (!dateStr) return '—';
+  const m = String(dateStr).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const parts = m[0].split('-');
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
+  return String(dateStr);
+};
+
 export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, propertyName, onPermissionsUpdated }) => {
   const [activeTab, setActiveTab] = useState<'EMPLOYEES' | 'PERMISSIONS'>('EMPLOYEES');
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
@@ -100,7 +133,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     position: 'Staff',
     department: 'Front Office',
     role: 'Front Office',
-    hire_date: new Date().toISOString().slice(0, 10),
+    hire_date: getTodayCalendarDate(),
     create_login_account: true,
     is_active: true
   });
@@ -205,7 +238,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       position: 'Staff',
       department: 'Front Office',
       role: 'Front Office',
-      hire_date: new Date().toISOString().slice(0, 10),
+      hire_date: getTodayCalendarDate(),
       create_login_account: true,
       is_active: true
     });
@@ -224,7 +257,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       position: emp.position || 'Staff',
       department: emp.department || 'Front Office',
       role: emp.role || 'Front Office',
-      hire_date: emp.hire_date || new Date().toISOString().slice(0, 10),
+      hire_date: toCalendarDateInput(emp.hire_date),
       create_login_account: false,
       is_active: emp.is_active !== false
     });
@@ -237,6 +270,8 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setErrorMessage('');
     setSubmitting(true);
     try {
+      const safeHireDate = serializeCalendarDate(formPayload.hire_date);
+
       if (editingEmployee) {
         const res = await fetch(`/api/hrd/employees/${editingEmployee.id}`, {
           method: 'PATCH',
@@ -249,7 +284,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             position: formPayload.position,
             department: formPayload.department,
             role: formPayload.role,
-            hire_date: formPayload.hire_date,
+            hire_date: safeHireDate,
             is_active: formPayload.is_active
           })
         });
@@ -270,7 +305,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             position: formPayload.position,
             department: formPayload.department,
             role: formPayload.role,
-            hire_date: formPayload.hire_date,
+            hire_date: safeHireDate,
             create_login_account: formPayload.create_login_account
           })
         });
@@ -391,7 +426,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const handleOpenDeactivateModal = (emp: HrEmployee) => {
     setDeactivateTarget(emp);
     setDeactivateReason('Resign / Pengunduran Diri');
-    setDeactivateEffectiveDate(new Date().toISOString().slice(0, 10));
+    setDeactivateEffectiveDate(getTodayCalendarDate());
   };
 
   const handleExecuteDeactivate = async () => {
@@ -404,7 +439,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
         body: JSON.stringify({
           property_id: propertyId,
           reason: deactivateReason,
-          effective_date: deactivateEffectiveDate
+          effective_date: serializeCalendarDate(deactivateEffectiveDate)
         })
       });
       const data = await res.json();
@@ -787,6 +822,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                             <div className="text-[11px] text-slate-400">
                               {emp.employee_code || `EMP-${emp.id}`}{' '}
                               {emp.username ? `• @${emp.username}` : ''}
+                              {emp.hire_date ? ` • Masuk: ${formatDateDisplay(emp.hire_date)}` : ''}
                             </div>
                           </td>
                           <td className="py-3 px-4">
@@ -1008,6 +1044,18 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                     <option value="Management">Management</option>
                   </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Tanggal Masuk (Hire Date):
+                </label>
+                <input
+                  type="date"
+                  value={formPayload.hire_date || ''}
+                  onChange={(e) => setFormPayload(p => ({ ...p, hire_date: e.target.value }))}
+                  className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                />
               </div>
 
               {!editingEmployee && (

@@ -12,7 +12,8 @@ import {
   hardDeleteAuthAccount,
   diagnoseEmployeeLoginAccount,
   repairEmployeeLoginAccount,
-  resetEmployeePassword
+  resetEmployeePassword,
+  validateAndNormalizeCalendarDate
 } from './hrdService';
 import { auditWhatsAppCredentialOpened } from './hrdWhatsapp';
 import type {
@@ -125,7 +126,9 @@ export function createHrdRouter(pool: Pool): Router {
         username: req.body.username,
         email: req.body.email,
         phone: req.body.phone,
-        hire_date: req.body.hire_date,
+        hire_date: req.body.hire_date !== undefined
+          ? validateAndNormalizeCalendarDate(req.body.hire_date, 'hire_date')
+          : undefined,
         monthly_salary: req.body.monthly_salary ? Number(req.body.monthly_salary) : 0,
         status: req.body.status || 'ACTIVE',
         create_login_account: req.body.create_login_account !== undefined ? Boolean(req.body.create_login_account) : true
@@ -142,8 +145,15 @@ export function createHrdRouter(pool: Pool): Router {
       res.status(201).json({ status: 'OK', data: created });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
-      const sc = err.statusCode || 500;
-      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+      let sc = err.statusCode || 500;
+      let code = err.code || 'INTERNAL_ERROR';
+      let msg = err.message;
+      if (err.code === '22007' || err.code === '22008') {
+        sc = 400;
+        code = 'INVALID_DATE_FORMAT';
+        msg = 'Format tanggal tidak valid. Gunakan format YYYY-MM-DD.';
+      }
+      res.status(sc).json({ status: 'ERROR', code, message: msg });
     } finally {
       client.release();
     }
@@ -169,7 +179,9 @@ export function createHrdRouter(pool: Pool): Router {
         username: req.body.username,
         email: req.body.email,
         phone: req.body.phone,
-        hire_date: req.body.hire_date,
+        hire_date: req.body.hire_date !== undefined
+          ? validateAndNormalizeCalendarDate(req.body.hire_date, 'hire_date')
+          : undefined,
         monthly_salary: req.body.monthly_salary !== undefined ? Number(req.body.monthly_salary) : undefined,
         status: req.body.status,
         is_active: req.body.is_active !== undefined ? Boolean(req.body.is_active) : undefined
@@ -186,8 +198,15 @@ export function createHrdRouter(pool: Pool): Router {
       res.json({ status: 'OK', data: updated });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
-      const sc = err.statusCode || 500;
-      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+      let sc = err.statusCode || 500;
+      let code = err.code || 'INTERNAL_ERROR';
+      let msg = err.message;
+      if (err.code === '22007' || err.code === '22008') {
+        sc = 400;
+        code = 'INVALID_DATE_FORMAT';
+        msg = 'Format tanggal tidak valid. Gunakan format YYYY-MM-DD.';
+      }
+      res.status(sc).json({ status: 'ERROR', code, message: msg });
     } finally {
       client.release();
     }
@@ -212,7 +231,9 @@ export function createHrdRouter(pool: Pool): Router {
 
       const options: DeactivateEmployeePayload = {
         reason: req.body.reason,
-        effective_date: req.body.effective_date
+        effective_date: req.body.effective_date !== undefined
+          ? validateAndNormalizeCalendarDate(req.body.effective_date, 'effective_date')
+          : undefined
       };
 
       const deactivated = await deactivateEmployeeAccount(client, propertyId, employeeId, options, actor);
@@ -224,8 +245,15 @@ export function createHrdRouter(pool: Pool): Router {
       });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
-      const sc = err.statusCode || 500;
-      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+      let sc = err.statusCode || 500;
+      let code = err.code || 'INTERNAL_ERROR';
+      let msg = err.message;
+      if (err.code === '22007' || err.code === '22008') {
+        sc = 400;
+        code = 'INVALID_DATE_FORMAT';
+        msg = 'Format tanggal tidak valid. Gunakan format YYYY-MM-DD.';
+      }
+      res.status(sc).json({ status: 'ERROR', code, message: msg });
     } finally {
       client.release();
     }
