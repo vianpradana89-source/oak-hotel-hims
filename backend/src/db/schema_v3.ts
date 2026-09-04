@@ -2481,11 +2481,11 @@ export async function initializeDatabase(pool: Pool) {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_plans_prop_code_active 
-          ON rate_plans(property_id, UPPER(TRIM(code))) 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_plans_prop_code_active
+          ON rate_plans(property_id, UPPER(TRIM(code)))
           WHERE (is_archived = FALSE);
 
-        CREATE INDEX IF NOT EXISTS idx_rate_plans_property_room_type 
+        CREATE INDEX IF NOT EXISTS idx_rate_plans_property_room_type
           ON rate_plans(property_id, room_type_id, is_active, is_archived);
 
         -- 3. Rate Calendar Overrides table
@@ -2507,7 +2507,7 @@ export async function initializeDatabase(pool: Pool) {
           CONSTRAINT chk_rate_overrides_date_range CHECK (end_date > start_date)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_rate_overrides_plan_dates 
+        CREATE INDEX IF NOT EXISTS idx_rate_overrides_plan_dates
           ON rate_overrides(property_id, rate_plan_id, start_date, end_date, is_active, is_archived);
 
         -- 4. Reservation Nightly Rate Snapshots (Immutable Financial Ledger)
@@ -2532,7 +2532,7 @@ export async function initializeDatabase(pool: Pool) {
           CONSTRAINT uq_reservation_stay_date UNIQUE (reservation_id, stay_date)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_res_nightly_rates_property_stay 
+        CREATE INDEX IF NOT EXISTS idx_res_nightly_rates_property_stay
           ON reservation_nightly_rates(property_id, stay_date);
 
         -- 5. Extend reservations columns safely
@@ -2551,7 +2551,7 @@ export async function initializeDatabase(pool: Pool) {
 
         -- 7. Seed baseline BAR rate plans for active room types of Property 1 (if none exist)
         INSERT INTO rate_plans (property_id, room_type_id, code, name, description, base_rate, meal_plan, refundable, is_active, is_archived, sort_order, created_by)
-        SELECT 
+        SELECT
           rt.property_id,
           rt.id,
           'BAR-' || UPPER(REPLACE(COALESCE(rt.code, 'RT' || rt.id), ' ', '-')),
@@ -2601,8 +2601,8 @@ export async function initializeDatabase(pool: Pool) {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_meal_plans_prop_code_active 
-          ON meal_plans(property_id, UPPER(TRIM(code))) 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_meal_plans_prop_code_active
+          ON meal_plans(property_id, UPPER(TRIM(code)))
           WHERE (is_archived = FALSE);
 
         CREATE INDEX IF NOT EXISTS idx_meal_plans_prop_active_archived
@@ -2712,11 +2712,11 @@ export async function initializeDatabase(pool: Pool) {
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_stay_charge_rules_property_code 
-          ON stay_charge_rules (property_id, UPPER(TRIM(code))) 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_stay_charge_rules_property_code
+          ON stay_charge_rules (property_id, UPPER(TRIM(code)))
           WHERE is_archived = FALSE;
 
-        CREATE INDEX IF NOT EXISTS idx_stay_charge_rules_property_type 
+        CREATE INDEX IF NOT EXISTS idx_stay_charge_rules_property_type
           ON stay_charge_rules (property_id, charge_type, is_active, is_archived);
 
         -- 4. Extend folio_entries with financial & source metadata
@@ -2843,7 +2843,7 @@ export async function initializeDatabase(pool: Pool) {
         SELECT p.id, s.code, s.name, s.display_order
         FROM properties p
         CROSS JOIN (
-          VALUES 
+          VALUES
             ('TIKET_COM', 'Tiket.com', 1),
             ('BOOKING_COM', 'Booking.com', 2),
             ('AGODA', 'Agoda', 3)
@@ -3133,23 +3133,23 @@ export async function initializeDatabase(pool: Pool) {
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_prop_source 
-          ON transactions (property_id, source_type, source_id) 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_prop_source
+          ON transactions (property_id, source_type, source_id)
           WHERE source_id IS NOT NULL AND reversal_of_transaction_id IS NULL;
 
-        CREATE INDEX IF NOT EXISTS idx_transactions_prop_type_date 
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_type_date
           ON transactions (property_id, transaction_type, transaction_date DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_transactions_prop_res 
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_res
           ON transactions (property_id, reservation_id);
 
-        CREATE INDEX IF NOT EXISTS idx_transactions_prop_status 
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_status
           ON transactions (property_id, transaction_status);
 
-        CREATE INDEX IF NOT EXISTS idx_transactions_prop_cat 
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_cat
           ON transactions (property_id, category_code);
 
-        CREATE INDEX IF NOT EXISTS idx_transactions_prop_dept 
+        CREATE INDEX IF NOT EXISTS idx_transactions_prop_dept
           ON transactions (property_id, department_code);
 
         INSERT INTO schema_migrations (version)
@@ -3181,7 +3181,7 @@ export async function initializeDatabase(pool: Pool) {
           uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE INDEX IF NOT EXISTS idx_transaction_attachments_tx 
+        CREATE INDEX IF NOT EXISTS idx_transaction_attachments_tx
           ON transaction_attachments (property_id, transaction_id);
 
         INSERT INTO schema_migrations (version)
@@ -3445,11 +3445,11 @@ export async function initializeDatabase(pool: Pool) {
 
         -- 2. Constraints for entity_type and status
         ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS chk_suppliers_entity_type;
-        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_entity_type 
+        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_entity_type
           CHECK (entity_type IN ('SUPPLIER', 'VENDOR', 'BOTH'));
 
         ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS chk_suppliers_status;
-        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_status 
+        ALTER TABLE suppliers ADD CONSTRAINT chk_suppliers_status
           CHECK (status IN ('ACTIVE', 'INACTIVE', 'BLACKLISTED'));
 
         -- 3. Synchronize status & is_active for existing legacy rows
@@ -3500,8 +3500,8 @@ export async function initializeDatabase(pool: Pool) {
 
       // 6. Indexes & Unique constraints
       await auditMigrationClient.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_property_norm_name 
-          ON suppliers(property_id, LOWER(TRIM(name))) 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_property_norm_name
+          ON suppliers(property_id, LOWER(TRIM(name)))
           WHERE deleted_at IS NULL;
 
         CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_property_code
@@ -3878,6 +3878,389 @@ export async function initializeDatabase(pool: Pool) {
 
         INSERT INTO schema_migrations(version)
         VALUES ('auth_hr1_canonical_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // ------------------------------------------------------------------------
+    // Migration: auth_hr_access1_foundation_v1
+    // HR-ACCESS-1: Department, Position, Dynamic Roles & Granular Permissions
+    // ------------------------------------------------------------------------
+    const access1MigrationCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr_access1_foundation_v1'"
+    );
+
+    if ((access1MigrationCheck.rowCount ?? 0) === 0) {
+      // 1. Sync sequence for roles
+      await auditMigrationClient.query(`
+        SELECT setval(pg_get_serial_sequence('roles', 'id'), COALESCE((SELECT MAX(id) FROM roles), 1));
+      `);
+
+      // 2. Rename existing role_permissions if it has role_name column
+      await auditMigrationClient.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'role_permissions' AND column_name = 'role_name'
+          ) THEN
+            ALTER TABLE role_permissions RENAME TO legacy_role_menu_permissions;
+          END IF;
+        END $$;
+
+        CREATE TABLE IF NOT EXISTS legacy_role_menu_permissions (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          role_name VARCHAR(100) NOT NULL,
+          permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          updated_by VARCHAR(150),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_legacy_role_menu_permissions_prop_role UNIQUE (property_id, role_name)
+        );
+      `);
+
+      // 3. Department Master
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS hr_departments (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          code VARCHAR(20) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          description TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          created_by VARCHAR(255),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_by VARCHAR(255),
+          CONSTRAINT uq_hr_departments_prop_code UNIQUE (property_id, code),
+          CONSTRAINT uq_hr_departments_prop_name UNIQUE (property_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hr_departments_prop ON hr_departments(property_id);
+      `);
+
+      // 4. Position Master
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS hr_positions (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          department_id INTEGER REFERENCES hr_departments(id) ON DELETE RESTRICT,
+          code VARCHAR(20),
+          name VARCHAR(100) NOT NULL,
+          description TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          created_by VARCHAR(255),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_by VARCHAR(255),
+          CONSTRAINT uq_hr_positions_prop_dept_name UNIQUE (property_id, department_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hr_positions_prop ON hr_positions(property_id);
+        CREATE INDEX IF NOT EXISTS idx_hr_positions_dept ON hr_positions(department_id);
+      `);
+
+      // 5. Alter hr_employees
+      await auditMigrationClient.query(`
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES hr_departments(id) ON DELETE RESTRICT;
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS position_id INTEGER REFERENCES hr_positions(id) ON DELETE RESTRICT;
+        CREATE INDEX IF NOT EXISTS idx_hr_employees_dept ON hr_employees(department_id);
+        CREATE INDEX IF NOT EXISTS idx_hr_employees_pos ON hr_employees(position_id);
+      `);
+
+      // 6. Alter roles
+      await auditMigrationClient.query(`
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE;
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_system_role BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS created_by VARCHAR(255);
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS updated_by VARCHAR(255);
+
+        -- Safe property-scoped role uniqueness
+        ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_name_key;
+        DROP INDEX IF EXISTS roles_name_key;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_system_name
+          ON roles (LOWER(TRIM(name)))
+          WHERE (property_id IS NULL);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_property_scoped_name
+          ON roles (property_id, LOWER(TRIM(name)))
+          WHERE (property_id IS NOT NULL);
+
+        UPDATE roles SET property_id = NULL, is_system_role = TRUE WHERE name IN ('Super Admin', 'General Manager', 'Front Office', 'Accounting', 'Housekeeping', 'POS / Resto', 'HRD Admin');
+
+        INSERT INTO roles (property_id, name, description, is_system_role, is_active)
+        SELECT NULL, 'HRD Admin', 'Manajemen staf HRD, absensi, akun karyawan, dan struktur organisasi', TRUE, TRUE
+        WHERE NOT EXISTS (SELECT 1 FROM roles WHERE LOWER(TRIM(name)) = 'hrd admin' AND property_id IS NULL);
+      `);
+
+      // 7. Alter users
+      await auditMigrationClient.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS access_type VARCHAR(30) NOT NULL DEFAULT 'PMS_STAFF';
+      `);
+
+      // 8. Permissions table
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS permissions (
+          id SERIAL PRIMARY KEY,
+          resource VARCHAR(100) NOT NULL,
+          action VARCHAR(50) NOT NULL,
+          key VARCHAR(150) NOT NULL UNIQUE,
+          description TEXT,
+          is_system BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_permissions_resource ON permissions(resource);
+        CREATE INDEX IF NOT EXISTS idx_permissions_key ON permissions(key);
+      `);
+
+      // 9. Relational role_permissions table
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS role_permissions (
+          id SERIAL PRIMARY KEY,
+          role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+          permission_id INTEGER NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+          granted BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          created_by VARCHAR(255),
+          CONSTRAINT uq_role_permission UNIQUE (role_id, permission_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id);
+        CREATE INDEX IF NOT EXISTS idx_role_permissions_perm ON role_permissions(permission_id);
+      `);
+
+      // 10. Seed Departments & Positions
+      const canonicalDepts = [
+        { code: 'FO', name: 'Front Office', sort_order: 10, description: 'Layanan resepsionis, check-in, check-out, reservasi dan informasi tamu' },
+        { code: 'HK', name: 'Housekeeping', sort_order: 20, description: 'Kebersihan kamar, linen, penyiapan turnover, dan public area' },
+        { code: 'FA', name: 'Finance & Accounting', sort_order: 30, description: 'Pengelolaan keuangan, pembukuan, rekonsiliasi, dan audit' },
+        { code: 'FB', name: 'Food & Beverage', sort_order: 40, description: 'Restoran, room service, banquet, dan dapur' },
+        { code: 'EN', name: 'Engineering & Maintenance', sort_order: 50, description: 'Pemeliharaan fasilitas, kelistrikan, mekanikal, dan perbaikan gedung' },
+        { code: 'MG', name: 'Management', sort_order: 60, description: 'Kepemimpinan umum dan operasional properti' },
+        { code: 'HR', name: 'Human Resources / HRD', sort_order: 70, description: 'Manajemen personalia, rekrutmen, absensi, dan pengembangan staf' },
+        { code: 'SC', name: 'Security', sort_order: 80, description: 'Keamanan area hotel, parkir, dan keselamatan tamu' },
+        { code: 'GD', name: 'Gardening / Landscape', sort_order: 90, description: 'Perawatan taman, tanaman lanskap, dan area terbuka hijau' }
+      ];
+
+      const canonicalPositionsByDept: Record<string, string[]> = {
+        FO: ['Receptionist', 'Front Office Supervisor', 'Night Auditor'],
+        HK: ['Room Attendant', 'Housekeeping Supervisor'],
+        FA: ['Finance Staff', 'Accountant'],
+        FB: ['F&B Service Staff', 'Cook / Kitchen Staff', 'F&B Supervisor'],
+        EN: ['Technician', 'Maintenance Supervisor'],
+        MG: ['General Manager', 'Operations Manager'],
+        HR: ['HR Officer', 'HR Manager'],
+        SC: ['Security Guard', 'Security Supervisor'],
+        GD: ['Gardener', 'Landscape Supervisor']
+      };
+
+      const props = await auditMigrationClient.query('SELECT id FROM properties');
+      const propertyIds = props.rows.length > 0 ? props.rows.map(r => r.id) : [1];
+
+      for (const propId of propertyIds) {
+        for (const dept of canonicalDepts) {
+          const dRes = await auditMigrationClient.query(`
+            INSERT INTO hr_departments (property_id, code, name, description, sort_order, is_active)
+            VALUES ($1, $2, $3, $4, $5, TRUE)
+            ON CONFLICT (property_id, code) DO UPDATE SET name = $3, sort_order = $5
+            RETURNING id;
+          `, [propId, dept.code, dept.name, dept.description, dept.sort_order]);
+
+          const deptId = dRes.rows[0].id;
+          const positions = canonicalPositionsByDept[dept.code] || [];
+          for (let i = 0; i < positions.length; i++) {
+            const posName = positions[i];
+            await auditMigrationClient.query(`
+              INSERT INTO hr_positions (property_id, department_id, name, sort_order, is_active)
+              VALUES ($1, $2, $3, $4, TRUE)
+              ON CONFLICT (property_id, department_id, name) DO NOTHING;
+            `, [propId, deptId, posName, (i + 1) * 10]);
+          }
+        }
+      }
+
+      // 11. Seed Permissions
+      const canonicalResources = [
+        'reservations',
+        'folios',
+        'rooms',
+        'housekeeping',
+        'pos',
+        'hrd.employees',
+        'hrd.departments',
+        'hrd.positions',
+        'hrd.roles',
+        'hrd.attendance',
+        'reports',
+        'settings',
+        'inventory'
+      ];
+      const canonicalActions = ['view', 'create', 'edit', 'delete', 'approve'];
+
+      for (const resource of canonicalResources) {
+        for (const action of canonicalActions) {
+          const key = `${resource}.${action}`;
+          const desc = `Hak akses ${action.toUpperCase()} pada modul ${resource}`;
+          await auditMigrationClient.query(`
+            INSERT INTO permissions (resource, action, key, description, is_system)
+            VALUES ($1, $2, $3, $4, TRUE)
+            ON CONFLICT (key) DO NOTHING;
+          `, [resource, action, key, desc]);
+        }
+      }
+
+      // 12. Seed Role Permission Grants
+      const allPermsRes = await auditMigrationClient.query('SELECT id, key FROM permissions');
+      const permsMap = new Map<string, number>();
+      for (const p of allPermsRes.rows) {
+        permsMap.set(p.key, p.id);
+      }
+
+      const allRoles = await auditMigrationClient.query('SELECT id, name FROM roles');
+      for (const role of allRoles.rows) {
+        let allowedKeys: string[] = [];
+        if (role.name === 'Super Admin') {
+          allowedKeys = Array.from(permsMap.keys());
+        } else if (role.name === 'General Manager') {
+          allowedKeys = Array.from(permsMap.keys()).filter(k => !k.endsWith('.delete') || k.startsWith('reservations') || k.startsWith('folios'));
+        } else if (role.name === 'Front Office') {
+          allowedKeys = [
+            'reservations.view', 'reservations.create', 'reservations.edit',
+            'folios.view', 'folios.create', 'folios.edit',
+            'rooms.view', 'housekeeping.view', 'pos.view', 'pos.create',
+            'inventory.view', 'reports.view'
+          ];
+        } else if (role.name === 'Housekeeping') {
+          allowedKeys = [
+            'housekeeping.view', 'housekeeping.create', 'housekeeping.edit',
+            'rooms.view', 'rooms.edit', 'inventory.view'
+          ];
+        } else if (role.name === 'Accounting') {
+          allowedKeys = [
+            'folios.view', 'folios.edit', 'folios.approve',
+            'reservations.view', 'reports.view', 'reports.create', 'reports.edit',
+            'inventory.view'
+          ];
+        } else if (role.name === 'POS / Resto') {
+          allowedKeys = [
+            'pos.view', 'pos.create', 'pos.edit', 'reports.view', 'inventory.view'
+          ];
+        } else if (role.name === 'HRD Admin') {
+          allowedKeys = [
+            'hrd.employees.view', 'hrd.employees.create', 'hrd.employees.edit',
+            'hrd.departments.view', 'hrd.departments.create', 'hrd.departments.edit',
+            'hrd.positions.view', 'hrd.positions.create', 'hrd.positions.edit',
+            'hrd.roles.view',
+            'hrd.attendance.view'
+          ];
+        }
+
+        for (const k of allowedKeys) {
+          const pId = permsMap.get(k);
+          if (pId) {
+            await auditMigrationClient.query(`
+              INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+              VALUES ($1, $2, TRUE, 'SYSTEM_INIT')
+              ON CONFLICT (role_id, permission_id) DO NOTHING;
+            `, [role.id, pId]);
+          }
+        }
+      }
+
+      // 13. Backfill hr_employees
+      const emps = await auditMigrationClient.query('SELECT id, property_id, department, position FROM hr_employees');
+      for (const emp of emps.rows) {
+        let deptCode = 'MG';
+        const d = (emp.department || '').toLowerCase();
+        if (d.includes('front') || d.includes('fo')) deptCode = 'FO';
+        else if (d.includes('house') || d.includes('hk')) deptCode = 'HK';
+        else if (d.includes('finance') || d.includes('account') || d.includes('fa')) deptCode = 'FA';
+        else if (d.includes('beverage') || d.includes('f&b') || d.includes('resto') || d.includes('fb')) deptCode = 'FB';
+        else if (d.includes('engineer') || d.includes('maintenance') || d.includes('en')) deptCode = 'EN';
+        else if (d.includes('hr') || d.includes('personalia')) deptCode = 'HR';
+        else if (d.includes('secur') || d.includes('sc')) deptCode = 'SC';
+        else if (d.includes('garden') || d.includes('land') || d.includes('gd')) deptCode = 'GD';
+
+        const dRow = await auditMigrationClient.query('SELECT id FROM hr_departments WHERE property_id = $1 AND code = $2', [emp.property_id || 1, deptCode]);
+        const deptId = dRow.rows[0]?.id;
+
+        let posId = null;
+        if (deptId && emp.position) {
+          const pRow = await auditMigrationClient.query('SELECT id FROM hr_positions WHERE property_id = $1 AND department_id = $2 AND LOWER(name) = LOWER($3)', [emp.property_id || 1, deptId, emp.position.trim()]);
+          if (pRow.rows.length > 0) {
+            posId = pRow.rows[0].id;
+          } else {
+            const newPos = await auditMigrationClient.query(`
+              INSERT INTO hr_positions (property_id, department_id, name, sort_order, is_active)
+              VALUES ($1, $2, $3, 100, TRUE)
+              ON CONFLICT (property_id, department_id, name) DO UPDATE SET is_active = TRUE
+              RETURNING id;
+            `, [emp.property_id || 1, deptId, emp.position.trim()]);
+            posId = newPos.rows[0]?.id;
+          }
+        }
+
+        await auditMigrationClient.query('UPDATE hr_employees SET department_id = $1, position_id = $2 WHERE id = $3', [deptId, posId, emp.id]);
+      }
+
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr_access1_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // Review Patch: auth_hr_access1_review_patch_v1 (Property-scoped roles, HRD Admin permissions, safe indexes)
+    const reviewPatchCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr_access1_review_patch_v1'"
+    );
+    if ((reviewPatchCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_name_key;
+        DROP INDEX IF EXISTS roles_name_key;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_system_name
+          ON roles (LOWER(TRIM(name)))
+          WHERE (property_id IS NULL);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_property_scoped_name
+          ON roles (property_id, LOWER(TRIM(name)))
+          WHERE (property_id IS NOT NULL);
+
+        -- Ensure system roles have property_id = NULL and is_system_role = TRUE
+        UPDATE roles
+        SET property_id = NULL, is_system_role = TRUE
+        WHERE LOWER(TRIM(name)) IN ('super admin', 'general manager', 'front office', 'accounting', 'housekeeping', 'pos / resto', 'hrd admin');
+
+        -- Update HRD Admin role permissions to recommended catalog subset only
+        DELETE FROM role_permissions
+        WHERE role_id IN (SELECT id FROM roles WHERE LOWER(TRIM(name)) = 'hrd admin');
+
+        INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+        SELECT r.id, p.id, TRUE, 'SYSTEM_INIT'
+        FROM roles r
+        CROSS JOIN permissions p
+        WHERE LOWER(TRIM(r.name)) = 'hrd admin'
+          AND p.key IN (
+            'hrd.employees.view',
+            'hrd.employees.create',
+            'hrd.employees.edit',
+            'hrd.departments.view',
+            'hrd.departments.create',
+            'hrd.departments.edit',
+            'hrd.positions.view',
+            'hrd.positions.create',
+            'hrd.positions.edit',
+            'hrd.roles.view',
+            'hrd.attendance.view'
+          )
+        ON CONFLICT (role_id, permission_id) DO UPDATE SET granted = TRUE;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr_access1_review_patch_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }

@@ -16,6 +16,7 @@ export interface AuthUserPayload {
   scope: 'FULL' | 'ONBOARDING';
   account_status?: string | null;
   must_change_password?: boolean;
+  access_type?: 'MOBILE_ONLY' | 'PMS_STAFF' | 'MANAGER' | 'ADMIN' | string;
 }
 
 export interface LoginResult {
@@ -60,7 +61,7 @@ export async function loginUser(
   const res = await pool.query(
     `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.password_hash,
             u.full_name, u.is_active, u.employee_id, u.account_status,
-            u.must_change_password, u.temp_password_expires_at,
+            u.must_change_password, u.temp_password_expires_at, u.access_type,
             r.name AS role_name
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
@@ -160,7 +161,8 @@ export async function loginUser(
     property_id: userRow.property_id ? Number(userRow.property_id) : 1,
     scope,
     account_status: effectiveAccountStatus,
-    must_change_password: Boolean(userRow.must_change_password)
+    must_change_password: Boolean(userRow.must_change_password),
+    access_type: userRow.access_type || 'PMS_STAFF'
   };
 
   const token = generateToken(user);
@@ -220,7 +222,7 @@ export async function completeInitialPassword(
 
   const userRes = await pool.query(
     `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.full_name,
-            u.password_hash, u.is_active, u.account_status, r.name AS role_name
+            u.password_hash, u.is_active, u.account_status, u.access_type, r.name AS role_name
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
      WHERE u.id = $1`,
@@ -291,7 +293,8 @@ export async function completeInitialPassword(
     property_id: user.property_id ? Number(user.property_id) : 1,
     scope: 'ONBOARDING',
     account_status: 'FACE_ENROLLMENT_REQUIRED',
-    must_change_password: false
+    must_change_password: false,
+    access_type: user.access_type || 'PMS_STAFF'
   };
 
   const newToken = generateToken(updatedPayload);

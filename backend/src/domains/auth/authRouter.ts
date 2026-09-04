@@ -49,6 +49,7 @@ export function createAuthRouter(pool: Pool): Router {
       const result = await pool.query(
         `SELECT u.id, u.property_id, u.role_id, u.username, u.email,
                 u.full_name, u.is_active, u.account_status, u.must_change_password,
+                u.access_type,
                 r.name AS role_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
@@ -80,7 +81,8 @@ export function createAuthRouter(pool: Pool): Router {
             property_id: row.property_id ? Number(row.property_id) : 1,
             scope,
             account_status: row.account_status || 'READY',
-            must_change_password: Boolean(row.must_change_password)
+            must_change_password: Boolean(row.must_change_password),
+            access_type: row.access_type || 'PMS_STAFF'
           }
         }
       });

@@ -2,6 +2,7 @@ import React from 'react';
 import { useAuth } from './AuthContext';
 import { LoginPage } from './LoginPage';
 import { OnboardingWorkspace } from './OnboardingWorkspace';
+import { EmployeeMobileWorkspace } from '../employee/EmployeeMobileWorkspace';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -50,6 +51,20 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   // Strict ONBOARDING boundary: onboarding users MUST NOT enter PMS
   if (user?.scope === 'ONBOARDING') {
     return <OnboardingWorkspace />;
+  }
+
+  // Strict MOBILE_ONLY boundary: mobile-only accounts MUST NOT enter desktop PMS workspace
+  if (user?.access_type === 'MOBILE_ONLY' && user?.role !== 'Super Admin') {
+    return (
+      <EmployeeMobileWorkspace
+        propertyId={user.property_id || 1}
+        currentUser={{
+          id: user.id,
+          name: user.full_name || user.username,
+          role: user.role
+        }}
+      />
+    );
   }
 
   return <>{children}</>;

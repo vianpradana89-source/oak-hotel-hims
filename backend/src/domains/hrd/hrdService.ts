@@ -13,6 +13,17 @@ import {
   type AccountRepairActionPayload,
   type CreateEmployeeResult,
   type PasswordResetResult,
+  type HrDepartment,
+  type CreateDepartmentPayload,
+  type UpdateDepartmentPayload,
+  type HrPosition,
+  type CreatePositionPayload,
+  type UpdatePositionPayload,
+  type DynamicRole,
+  type CreateRolePayload,
+  type UpdateRolePayload,
+  type GranularPermission,
+  type RolePermissionGrant,
   STANDARD_ROLE_CATEGORIES,
   PRIVILEGED_ROLE_CATEGORIES
 } from './hrdTypes';
@@ -153,7 +164,11 @@ export async function resolveUniqueUsername(client: PoolClient, baseUsername: st
   }
 }
 
-export async function resolveCanonicalRoleId(client: PoolClient, roleName: string): Promise<number> {
+export async function resolveCanonicalRoleId(
+  client: PoolClient,
+  roleName: string,
+  propertyId?: number
+): Promise<number> {
   if (!roleName || !roleName.trim()) {
     throw Object.assign(new Error('Role name wajib diisi untuk menentukan peran otorisasi akun login.'), {
       statusCode: 400,
@@ -162,12 +177,26 @@ export async function resolveCanonicalRoleId(client: PoolClient, roleName: strin
   }
 
   const rawTrimmed = roleName.trim();
+  if (rawTrimmed.toLowerCase() === 'crew') {
+    throw Object.assign(
+      new Error("Role 'Crew' bukan peran otorisasi sistem (Auth Role). Untuk staf pelaksana tanpa akses PMS desktop, gunakan tipe akses MOBILE_ONLY."),
+      {
+        statusCode: 400,
+        code: 'INVALID_AUTH_ROLE'
+      }
+    );
+  }
+
   const norm = normalizeRoleName(rawTrimmed);
 
-  // 1. Query canonical role from roles table by normalized name
+  // 1. Query canonical role: check property-scoped custom role first, then fallback to system role (property_id IS NULL)
   const qNorm = await client.query(
-    'SELECT id, name FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1',
-    [norm]
+    `SELECT id, name, property_id, is_system_role FROM roles
+     WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+       AND (property_id IS NULL OR ($2::int IS NOT NULL AND property_id = $2::int))
+     ORDER BY (property_id IS NOT NULL) DESC, id ASC
+     LIMIT 1`,
+    [norm, propertyId || null]
   );
   if (qNorm.rows.length > 0) {
     return Number(qNorm.rows[0].id);
@@ -176,8 +205,12 @@ export async function resolveCanonicalRoleId(client: PoolClient, roleName: strin
   // 2. Query canonical role by raw name if different from normalized
   if (norm.toLowerCase() !== rawTrimmed.toLowerCase()) {
     const qRaw = await client.query(
-      'SELECT id, name FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1',
-      [rawTrimmed]
+      `SELECT id, name, property_id, is_system_role FROM roles
+       WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+         AND (property_id IS NULL OR ($2::int IS NOT NULL AND property_id = $2::int))
+       ORDER BY (property_id IS NOT NULL) DESC, id ASC
+       LIMIT 1`,
+      [rawTrimmed, propertyId || null]
     );
     if (qRaw.rows.length > 0) {
       return Number(qRaw.rows[0].id);
@@ -186,7 +219,7 @@ export async function resolveCanonicalRoleId(client: PoolClient, roleName: strin
 
   // 3. ZERO GUESSING. Reject any role that does not map to a real canonical auth role row!
   throw Object.assign(
-    new Error(`Role '${roleName}' tidak memiliki peran otorisasi sistem (Auth Role) yang valid di database. Peran yang tersedia: Front Office, Accounting, Housekeeping, General Manager, atau POS / Resto.`),
+    new Error(`Role '${roleName}' tidak memiliki peran otorisasi sistem (Auth Role) yang valid di database. Peran yang tersedia: Front Office, Accounting, Housekeeping, General Manager, POS / Resto, atau HRD Admin.`),
     {
       statusCode: 400,
       code: 'INVALID_AUTH_ROLE'
@@ -327,43 +360,17 @@ export async function getAvailableRolesForHrd(
 ): Promise<RoleCategoryDef[]> {
   const policies = await getHrdRolePolicies(client, propertyId);
 
-  // Authoritative dynamic role lookup from roles table (exclude Super Admin / platform admins)
-  const dbRoles = await client.query(
-    `SELECT id, name, description
-     FROM roles
-     WHERE id != 1 AND LOWER(name) NOT LIKE '%admin%'
-     ORDER BY id ASC`
-  );
+  const roles: RoleCategoryDef[] = [...STANDARD_ROLE_CATEGORIES];
 
-  const roles: RoleCategoryDef[] = [];
-
-  for (const r of dbRoles.rows) {
-    if (r.name.toLowerCase() === 'general manager' && !policies.allow_hrd_assign_gm_role) {
-      continue;
-    }
-    let department = 'Operations';
-    const lower = r.name.toLowerCase();
-    if (lower.includes('account') || lower.includes('finance')) department = 'Finance';
-    else if (lower.includes('pos') || lower.includes('resto') || lower.includes('f&b')) department = 'F&B';
-    else if (lower.includes('general') || lower.includes('gm')) department = 'Executive';
-
-    roles.push({
-      key: r.name,
-      label: r.name,
-      department,
-      is_privileged: r.name.toLowerCase() === 'general manager',
-      description: r.description || ''
-    });
+  if (policies.allow_hrd_assign_gm_role) {
+    const gmRole = PRIVILEGED_ROLE_CATEGORIES.find(r => r.key === 'General Manager');
+    if (gmRole) roles.push(gmRole);
   }
 
-  // General employment category without HIMS login account
-  roles.push({
-    key: 'Crew',
-    label: 'Crew (Staf Operasional Tanpa Akun Login)',
-    department: 'Operations',
-    is_privileged: false,
-    description: 'Staf pelaksana operasional harian tanpa akses login HIMS'
-  });
+  if (policies.allow_hrd_assign_owner_role) {
+    const ownerRole = PRIVILEGED_ROLE_CATEGORIES.find(r => r.key === 'Owner');
+    if (ownerRole) roles.push(ownerRole);
+  }
 
   return roles;
 }
@@ -371,16 +378,25 @@ export async function getAvailableRolesForHrd(
 export async function getEmployees(
   client: PoolClient,
   propertyId: number,
-  options?: { scope?: string; department?: string; role?: string }
+  options?: { scope?: string; department?: string; role?: string; department_id?: number }
 ): Promise<HrEmployee[]> {
   let sql = `
     SELECT e.*,
            to_char(e.hire_date, 'YYYY-MM-DD') AS hire_date_formatted,
+           d.name AS department_name,
+           d.code AS department_code,
+           p.name AS position_name,
            u.id AS user_id,
            u.account_status,
-           u.is_active AS user_is_active
+           u.is_active AS user_is_active,
+           u.access_type,
+           u.role_id,
+           r.name AS role_name
     FROM hr_employees e
+    LEFT JOIN hr_departments d ON d.id = e.department_id
+    LEFT JOIN hr_positions p ON p.id = e.position_id
     LEFT JOIN users u ON u.employee_id = e.id
+    LEFT JOIN roles r ON r.id = u.role_id
     WHERE e.property_id = $1
   `;
   const params: any[] = [propertyId];
@@ -394,14 +410,17 @@ export async function getEmployees(
     sql += " AND COALESCE(e.is_active, TRUE) = TRUE AND e.status = 'ACTIVE'";
   }
 
-  if (options?.department) {
+  if (options?.department_id) {
+    params.push(options.department_id);
+    sql += ` AND e.department_id = $${params.length}`;
+  } else if (options?.department) {
     params.push(options.department);
-    sql += ` AND e.department = $${params.length}`;
+    sql += ` AND (e.department = $${params.length} OR d.name = $${params.length})`;
   }
 
   if (options?.role) {
     params.push(options.role);
-    sql += ` AND e.role = $${params.length}`;
+    sql += ` AND (e.role = $${params.length} OR r.name = $${params.length})`;
   }
 
   sql += ' ORDER BY e.full_name ASC';
@@ -412,9 +431,16 @@ export async function getEmployees(
     property_id: Number(row.property_id),
     employee_code: row.employee_code,
     full_name: row.full_name,
-    position: row.position,
-    department: row.department,
-    role: row.role || 'Crew',
+    department_id: row.department_id ? Number(row.department_id) : null,
+    department_name: row.department_name || row.department || null,
+    department_code: row.department_code || null,
+    position_id: row.position_id ? Number(row.position_id) : null,
+    position_name: row.position_name || row.position || null,
+    position: row.position_name || row.position || null,
+    department: row.department_name || row.department || null,
+    role: row.role_name || row.role || 'Crew',
+    role_id: row.role_id ? Number(row.role_id) : null,
+    access_type: row.access_type || 'PMS_STAFF',
     username: row.username,
     email: row.email,
     phone: row.phone,
@@ -440,9 +466,11 @@ export async function validateRoleAssignment(
   const upper = normalized.toUpperCase();
 
   if (
-    upper.includes('ADMIN') ||
+    normalized === 'Super Admin' ||
+    upper === 'SUPER ADMIN' ||
+    upper === 'SUPERADMIN' ||
+    upper === 'ADMIN' ||
     upper.includes('PLATFORM') ||
-    upper.includes('SUPER') ||
     upper.includes('SYSTEM')
   ) {
     throw Object.assign(new Error('Akun Administrator Platform tidak dapat dibuat melalui HRD properti.'), { statusCode: 403, code: 'PLATFORM_ADMIN_PROHIBITED' });
@@ -475,14 +503,120 @@ export async function createEmployeeAccount(
     throw Object.assign(new Error('Nama lengkap karyawan wajib diisi.'), { statusCode: 400, code: 'NAME_REQUIRED' });
   }
 
-  const requestedRole = normalizeRoleName(payload.role);
+  const shouldCreateLogin = Boolean(payload.create_login_account);
+  let requestedRole = payload.role ? normalizeRoleName(payload.role) : '';
+  let canonicalRoleId: number = 2;
+
+  // Resolve Role
+  if (payload.role_id) {
+    const rRes = await client.query('SELECT id, name, is_active FROM roles WHERE id = $1', [payload.role_id]);
+    if (rRes.rows.length === 0) {
+      throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 400, code: 'ROLE_NOT_FOUND' });
+    }
+    if (!rRes.rows[0].is_active) {
+      throw Object.assign(new Error('Role non-aktif tidak dapat ditugaskan ke akun karyawan.'), { statusCode: 400, code: 'ROLE_INACTIVE' });
+    }
+    canonicalRoleId = Number(rRes.rows[0].id);
+    requestedRole = rRes.rows[0].name;
+  } else if (payload.role && payload.role.trim()) {
+    const rRes = await client.query(
+      `SELECT id, name, is_active FROM roles
+       WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+         AND (property_id IS NULL OR property_id = $2)
+       ORDER BY (property_id IS NOT NULL) DESC, id ASC
+       LIMIT 1`,
+      [requestedRole, propertyId]
+    );
+    if (rRes.rows.length > 0) {
+      if (!rRes.rows[0].is_active) {
+        throw Object.assign(new Error('Role non-aktif tidak dapat ditugaskan ke akun karyawan.'), { statusCode: 400, code: 'ROLE_INACTIVE' });
+      }
+      canonicalRoleId = Number(rRes.rows[0].id);
+      requestedRole = rRes.rows[0].name;
+    } else if (shouldCreateLogin) {
+      canonicalRoleId = await resolveCanonicalRoleId(client, requestedRole, propertyId);
+    }
+  } else {
+    requestedRole = 'Crew';
+  }
+
+  if (shouldCreateLogin && (payload.role?.trim().toLowerCase() === 'crew' || requestedRole.toLowerCase() === 'crew')) {
+    throw Object.assign(
+      new Error("Role 'Crew' bukan peran otorisasi sistem (Auth Role). Untuk staf pelaksana tanpa akses PMS desktop, gunakan tipe akses MOBILE_ONLY."),
+      { statusCode: 400, code: 'INVALID_AUTH_ROLE' }
+    );
+  }
+
   await validateRoleAssignment(client, propertyId, requestedRole, actor);
 
-  const shouldCreateLogin = Boolean(payload.create_login_account);
+  // Resolve Department
+  let resolvedDeptId: number | null = null;
+  let resolvedDeptCode: string = 'EMP';
+  let resolvedDeptName: string = payload.department || 'Operations';
+
+  if (payload.department_id) {
+    const dRes = await client.query(
+      'SELECT id, code, name, is_active FROM hr_departments WHERE id = $1 AND property_id = $2',
+      [payload.department_id, propertyId]
+    );
+    if (dRes.rows.length === 0) {
+      throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 400, code: 'DEPARTMENT_NOT_FOUND' });
+    }
+    if (!dRes.rows[0].is_active) {
+      throw Object.assign(new Error('Departemen non-aktif tidak dapat dipilih untuk penugasan karyawan baru.'), { statusCode: 400, code: 'DEPARTMENT_INACTIVE' });
+    }
+    resolvedDeptId = Number(dRes.rows[0].id);
+    resolvedDeptCode = dRes.rows[0].code;
+    resolvedDeptName = dRes.rows[0].name;
+  } else if (payload.department && payload.department.trim()) {
+    const dRes = await client.query(
+      'SELECT id, code, name, is_active FROM hr_departments WHERE property_id = $1 AND (LOWER(name) = LOWER($2) OR LOWER(code) = LOWER($2)) LIMIT 1',
+      [propertyId, payload.department.trim()]
+    );
+    if (dRes.rows.length > 0) {
+      if (!dRes.rows[0].is_active) {
+        throw Object.assign(new Error('Departemen non-aktif tidak dapat dipilih untuk penugasan karyawan baru.'), { statusCode: 400, code: 'DEPARTMENT_INACTIVE' });
+      }
+      resolvedDeptId = Number(dRes.rows[0].id);
+      resolvedDeptCode = dRes.rows[0].code;
+      resolvedDeptName = dRes.rows[0].name;
+    }
+  }
+
+  // Resolve Position
+  let resolvedPosId: number | null = null;
+  let resolvedPosName: string = payload.position || 'Staff';
+
+  if (payload.position_id) {
+    const pRes = await client.query(
+      'SELECT id, name, is_active, department_id FROM hr_positions WHERE id = $1 AND property_id = $2',
+      [payload.position_id, propertyId]
+    );
+    if (pRes.rows.length === 0) {
+      throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 400, code: 'POSITION_NOT_FOUND' });
+    }
+    if (!pRes.rows[0].is_active) {
+      throw Object.assign(new Error('Jabatan non-aktif tidak dapat dipilih untuk penugasan karyawan baru.'), { statusCode: 400, code: 'POSITION_INACTIVE' });
+    }
+    resolvedPosId = Number(pRes.rows[0].id);
+    resolvedPosName = pRes.rows[0].name;
+  } else if (payload.position && payload.position.trim()) {
+    const pRes = await client.query(
+      'SELECT id, name, is_active FROM hr_positions WHERE property_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+      [propertyId, payload.position.trim()]
+    );
+    if (pRes.rows.length > 0) {
+      if (!pRes.rows[0].is_active) {
+        throw Object.assign(new Error('Jabatan non-aktif tidak dapat dipilih untuk penugasan karyawan baru.'), { statusCode: 400, code: 'POSITION_INACTIVE' });
+      }
+      resolvedPosId = Number(pRes.rows[0].id);
+      resolvedPosName = pRes.rows[0].name;
+    }
+  }
+
   const cleanEmail = payload.email ? payload.email.trim().toLowerCase() : null;
 
   let finalUsername: string | null = null;
-  let canonicalRoleId: number = 2;
   let tempPassword: string | null = null;
   let tempExpiresAt: Date | null = null;
 
@@ -515,9 +649,6 @@ export async function createEmployeeAccount(
       finalUsername = await resolveUniqueUsername(client, emailPrefix);
     }
 
-    // Resolve canonical role_id
-    canonicalRoleId = await resolveCanonicalRoleId(client, requestedRole);
-
     // Generate secure temporary password
     tempPassword = generateSecureTemporaryPassword(12);
     tempExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
@@ -525,9 +656,27 @@ export async function createEmployeeAccount(
     finalUsername = payload.username && payload.username.trim() ? payload.username.trim().toLowerCase() : null;
   }
 
-  const employeeCode = payload.employee_code && payload.employee_code.trim()
-    ? payload.employee_code.trim()
-    : `EMP-${propertyId}-${Date.now().toString().slice(-4)}`;
+  // Employee Code generation: strictly immutable once created, patterned <DEPT_CODE>-0001
+  let employeeCode = payload.employee_code && payload.employee_code.trim() ? payload.employee_code.trim() : null;
+  if (!employeeCode) {
+    const prefix = (resolvedDeptCode || 'EMP').toUpperCase();
+    const codeRes = await client.query(
+      `SELECT employee_code FROM hr_employees
+       WHERE property_id = $1 AND employee_code ~ $2
+       ORDER BY id DESC FOR UPDATE`,
+      [propertyId, `^${prefix}-\\d+$`]
+    );
+    let maxSeq = 0;
+    for (const row of codeRes.rows) {
+      const m = row.employee_code.match(new RegExp(`^${prefix}-(\\d+)$`));
+      if (m) {
+        const seq = parseInt(m[1], 10);
+        if (seq > maxSeq) maxSeq = seq;
+      }
+    }
+    const nextSeq = maxSeq + 1;
+    employeeCode = `${prefix}-${String(nextSeq).padStart(4, '0')}`;
+  }
 
   const normalizedHireDate = payload.hire_date !== undefined
     ? validateAndNormalizeCalendarDate(payload.hire_date, 'hire_date')
@@ -536,16 +685,19 @@ export async function createEmployeeAccount(
   const res = await client.query(
     `INSERT INTO hr_employees (
       property_id, employee_code, full_name, position, department,
+      department_id, position_id,
       role, username, email, phone, hire_date, monthly_salary, status, is_active
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
     RETURNING *`,
     [
       propertyId,
       employeeCode,
       payload.full_name.trim(),
-      payload.position || 'Staff',
-      payload.department || 'Operations',
+      resolvedPosName,
+      resolvedDeptName,
+      resolvedDeptId,
+      resolvedPosId,
       requestedRole,
       finalUsername,
       cleanEmail,
@@ -560,6 +712,8 @@ export async function createEmployeeAccount(
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    department_id: res.rows[0].department_id ? Number(res.rows[0].department_id) : null,
+    position_id: res.rows[0].position_id ? Number(res.rows[0].position_id) : null,
     hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: res.rows[0].is_active !== false,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
@@ -574,9 +728,9 @@ export async function createEmployeeAccount(
       `INSERT INTO users (
         property_id, employee_id, role_id, username, email, password_hash,
         full_name, is_active, account_status, must_change_password,
-        local_password_enabled, temp_password_expires_at, created_at, updated_at
+        local_password_enabled, temp_password_expires_at, access_type, created_at, updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'FIRST_LOGIN_REQUIRED', TRUE, TRUE, $8, NOW(), NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'FIRST_LOGIN_REQUIRED', TRUE, TRUE, $8, $9, NOW(), NOW())
       RETURNING id`,
       [
         propertyId,
@@ -586,7 +740,8 @@ export async function createEmployeeAccount(
         cleanEmail,
         passwordHash,
         created.full_name,
-        tempExpiresAt
+        tempExpiresAt,
+        payload.access_type || 'PMS_STAFF'
       ]
     );
 
@@ -642,6 +797,8 @@ export async function createEmployeeAccount(
   return {
     ...created,
     user_id: createdUserId || null,
+    role_id: canonicalRoleId || null,
+    access_type: payload.access_type || 'PMS_STAFF',
     account_status: shouldCreateLogin ? 'FIRST_LOGIN_REQUIRED' : null,
     user_is_active: shouldCreateLogin ? true : null,
     auth_account_created: shouldCreateLogin,
@@ -672,10 +829,45 @@ export async function updateEmployeeAccount(
 
   const current = currentRes.rows[0];
   let targetRole = current.role;
+  let targetRoleId: number | null = null;
 
-  if (payload.role !== undefined) {
+  // Resolve Role
+  if (payload.role_id !== undefined && payload.role_id !== null) {
+    const rRes = await client.query('SELECT id, name, is_active FROM roles WHERE id = $1', [payload.role_id]);
+    if (rRes.rows.length === 0) {
+      throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 400, code: 'ROLE_NOT_FOUND' });
+    }
+    if (!rRes.rows[0].is_active) {
+      throw Object.assign(new Error('Role non-aktif tidak dapat ditugaskan ke akun karyawan.'), { statusCode: 400, code: 'ROLE_INACTIVE' });
+    }
+    targetRoleId = Number(rRes.rows[0].id);
+    targetRole = rRes.rows[0].name;
+  } else if (payload.role !== undefined) {
+    if (payload.role.trim().toLowerCase() === 'crew' && current.user_id) {
+      throw Object.assign(
+        new Error("Role 'Crew' bukan peran otorisasi sistem (Auth Role). Akun login membutuhkan peran otorisasi valid. Untuk staf tanpa hak akses PMS desktop, gunakan tipe akses MOBILE_ONLY."),
+        { statusCode: 400, code: 'INVALID_AUTH_ROLE' }
+      );
+    }
     targetRole = normalizeRoleName(payload.role);
+    const rRes = await client.query(
+      `SELECT id, name, is_active FROM roles
+       WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+         AND (property_id IS NULL OR property_id = $2)
+       ORDER BY (property_id IS NOT NULL) DESC, id ASC
+       LIMIT 1`,
+      [targetRole, propertyId]
+    );
+    if (rRes.rows.length > 0) {
+      if (!rRes.rows[0].is_active) {
+        throw Object.assign(new Error('Role non-aktif tidak dapat ditugaskan ke akun karyawan.'), { statusCode: 400, code: 'ROLE_INACTIVE' });
+      }
+      targetRoleId = Number(rRes.rows[0].id);
+      targetRole = rRes.rows[0].name;
+    }
+  }
 
+  if (payload.role !== undefined || payload.role_id !== undefined) {
     // Platform Admin prohibition
     if (targetRole.toUpperCase().includes('PLATFORM') || targetRole.toUpperCase().includes('SYSTEM_ADMIN') || targetRole.toUpperCase().includes('SUPER_ADMIN')) {
       throw Object.assign(new Error('Akun Administrator Platform tidak dapat diberikan melalui HRD properti.'), { statusCode: 403, code: 'PLATFORM_ADMIN_PROHIBITED' });
@@ -698,9 +890,57 @@ export async function updateEmployeeAccount(
     }
   }
 
+  // Resolve Department
+  let targetDepartmentId: number | null = current.department_id ? Number(current.department_id) : null;
+  let targetDepartment: string = current.department;
+
+  if (payload.department_id !== undefined) {
+    if (payload.department_id === null) {
+      targetDepartmentId = null;
+    } else {
+      const dRes = await client.query(
+        'SELECT id, name, is_active FROM hr_departments WHERE id = $1 AND property_id = $2',
+        [payload.department_id, propertyId]
+      );
+      if (dRes.rows.length === 0) {
+        throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 400, code: 'DEPARTMENT_NOT_FOUND' });
+      }
+      if (!dRes.rows[0].is_active) {
+        throw Object.assign(new Error('Departemen non-aktif tidak dapat dipilih untuk penugasan karyawan.'), { statusCode: 400, code: 'DEPARTMENT_INACTIVE' });
+      }
+      targetDepartmentId = Number(dRes.rows[0].id);
+      targetDepartment = dRes.rows[0].name;
+    }
+  } else if (payload.department !== undefined) {
+    targetDepartment = payload.department;
+  }
+
+  // Resolve Position
+  let targetPositionId: number | null = current.position_id ? Number(current.position_id) : null;
+  let targetPosition: string = current.position;
+
+  if (payload.position_id !== undefined) {
+    if (payload.position_id === null) {
+      targetPositionId = null;
+    } else {
+      const pRes = await client.query(
+        'SELECT id, name, is_active FROM hr_positions WHERE id = $1 AND property_id = $2',
+        [payload.position_id, propertyId]
+      );
+      if (pRes.rows.length === 0) {
+        throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 400, code: 'POSITION_NOT_FOUND' });
+      }
+      if (!pRes.rows[0].is_active) {
+        throw Object.assign(new Error('Jabatan non-aktif tidak dapat dipilih untuk penugasan karyawan.'), { statusCode: 400, code: 'POSITION_INACTIVE' });
+      }
+      targetPositionId = Number(pRes.rows[0].id);
+      targetPosition = pRes.rows[0].name;
+    }
+  } else if (payload.position !== undefined) {
+    targetPosition = payload.position;
+  }
+
   const fullName = payload.full_name !== undefined ? payload.full_name.trim() : current.full_name;
-  const position = payload.position !== undefined ? payload.position : current.position;
-  const department = payload.department !== undefined ? payload.department : current.department;
   const username = payload.username !== undefined ? payload.username : current.username;
   const email = payload.email !== undefined ? payload.email : current.email;
   const phone = payload.phone !== undefined ? payload.phone : current.phone;
@@ -712,17 +952,22 @@ export async function updateEmployeeAccount(
   const status = payload.status !== undefined ? payload.status : current.status;
   const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : (current.is_active !== false);
 
+  // Strictly preserve employee_code! Do not allow modification.
   const res = await client.query(
     `UPDATE hr_employees
      SET full_name = $1, position = $2, department = $3, role = $4,
          username = $5, email = $6, phone = $7, hire_date = $8,
-         monthly_salary = $9, status = $10, is_active = $11, updated_at = NOW()
-     WHERE id = $12 AND property_id = $13
+         monthly_salary = $9, status = $10, is_active = $11,
+         department_id = $12, position_id = $13,
+         updated_at = NOW()
+     WHERE id = $14 AND property_id = $15
      RETURNING *`,
     [
-      fullName, position, department, targetRole,
+      fullName, targetPosition, targetDepartment, targetRole,
       username, email, phone, hireDate,
-      monthlySalary, status, isActive, employeeId, propertyId
+      monthlySalary, status, isActive,
+      targetDepartmentId, targetPositionId,
+      employeeId, propertyId
     ]
   );
 
@@ -730,10 +975,104 @@ export async function updateEmployeeAccount(
     ...res.rows[0],
     id: Number(res.rows[0].id),
     property_id: Number(res.rows[0].property_id),
+    department_id: res.rows[0].department_id ? Number(res.rows[0].department_id) : null,
+    position_id: res.rows[0].position_id ? Number(res.rows[0].position_id) : null,
     hire_date: formatCalendarDate(res.rows[0].hire_date),
     is_active: res.rows[0].is_active !== false,
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };
+
+  // Synchronize users account if linked
+  const userCheck = await client.query(
+    'SELECT id, role_id, access_type FROM users WHERE employee_id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+  if (userCheck.rows.length > 0) {
+    const userRow = userCheck.rows[0];
+    const oldRoleId = userRow.role_id ? Number(userRow.role_id) : null;
+    const newRoleId = targetRoleId || oldRoleId;
+
+    if (targetRoleId && targetRoleId !== oldRoleId) {
+      await client.query(
+        'UPDATE users SET role_id = $1, updated_at = NOW() WHERE id = $2',
+        [targetRoleId, userRow.id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          'HRD',
+          'USER_ROLE_CHANGED',
+          'users',
+          String(userRow.id),
+          JSON.stringify({
+            user_id: userRow.id,
+            employee_id: employeeId,
+            old_role_id: oldRoleId,
+            old_role_name: current.role,
+            new_role_id: newRoleId,
+            new_role_name: targetRole
+          }),
+          actor?.name || 'HRD',
+          propertyId
+        ]
+      );
+    }
+
+    if (payload.access_type && payload.access_type !== userRow.access_type) {
+      await client.query(
+        'UPDATE users SET access_type = $1, updated_at = NOW() WHERE id = $2',
+        [payload.access_type, userRow.id]
+      );
+    }
+  }
+
+  // Audit Department change
+  if (targetDepartmentId && targetDepartmentId !== current.department_id) {
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        'HRD',
+        'EMPLOYEE_DEPARTMENT_CHANGED',
+        'hr_employees',
+        String(employeeId),
+        JSON.stringify({
+          employee_id: employeeId,
+          old_department_id: current.department_id,
+          new_department_id: targetDepartmentId,
+          old_department: current.department,
+          new_department: targetDepartment
+        }),
+        actor?.name || 'HRD',
+        propertyId
+      ]
+    );
+  }
+
+  // Audit Position change
+  if (targetPositionId && targetPositionId !== current.position_id) {
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        'HRD',
+        'EMPLOYEE_POSITION_CHANGED',
+        'hr_employees',
+        String(employeeId),
+        JSON.stringify({
+          employee_id: employeeId,
+          old_position_id: current.position_id,
+          new_position_id: targetPositionId,
+          old_position: current.position,
+          new_position: targetPosition
+        }),
+        actor?.name || 'HRD',
+        propertyId
+      ]
+    );
+  }
 
   // Check if role changed to/from privileged role
   const wasPrivileged = current.role === 'Owner' || current.role === 'General Manager';
@@ -760,7 +1099,11 @@ export async function updateEmployeeAccount(
     ]
   );
 
-  return updated;
+  return {
+    ...updated,
+    role_id: targetRoleId || (userCheck.rows[0]?.role_id ? Number(userCheck.rows[0].role_id) : undefined),
+    access_type: payload.access_type || userCheck.rows[0]?.access_type
+  };
 }
 
 export async function deactivateEmployeeAccount(
@@ -1601,9 +1944,15 @@ export async function repairEmployeeLoginAccount(
         });
       }
       const u = userRes.rows[0];
+      if (emp.role?.trim().toLowerCase() === 'crew') {
+        throw Object.assign(
+          new Error("Role 'Crew' bukan peran otorisasi sistem (Auth Role). Akun login membutuhkan peran otorisasi valid. Untuk staf tanpa hak akses PMS desktop, gunakan tipe akses MOBILE_ONLY."),
+          { statusCode: 400, code: 'INVALID_AUTH_ROLE' }
+        );
+      }
       const targetRoleName = normalizeRoleName(emp.role);
       await validateRoleAssignment(client, propertyId, targetRoleName, actor);
-      const targetRoleId = await resolveCanonicalRoleId(client, targetRoleName);
+      const targetRoleId = await resolveCanonicalRoleId(client, targetRoleName, propertyId);
 
       await client.query('UPDATE users SET role_id = $1, updated_at = NOW() WHERE id = $2', [targetRoleId, u.id]);
 
@@ -1823,4 +2172,761 @@ export async function resetEmployeePassword(
     must_change_password: true,
     account_status: updatedUser.account_status
   };
+}
+
+// ============================================================================
+// HR-ACCESS-1: DEPARTMENT MASTER SERVICE
+// ============================================================================
+
+export async function getDepartments(
+  client: PoolClient,
+  propertyId: number,
+  options?: { include_inactive?: boolean }
+): Promise<HrDepartment[]> {
+  const includeInactive = Boolean(options?.include_inactive);
+  const res = await client.query(
+    `SELECT d.*, COUNT(e.id)::int AS employee_count
+     FROM hr_departments d
+     LEFT JOIN hr_employees e ON e.department_id = d.id AND COALESCE(e.is_active, TRUE) = TRUE
+     WHERE d.property_id = $1
+       AND ($2 = TRUE OR d.is_active = TRUE)
+     GROUP BY d.id
+     ORDER BY d.sort_order ASC, d.name ASC`,
+    [propertyId, includeInactive]
+  );
+
+  return res.rows.map(r => ({
+    id: Number(r.id),
+    property_id: Number(r.property_id),
+    code: r.code,
+    name: r.name,
+    description: r.description,
+    is_active: r.is_active !== false,
+    sort_order: Number(r.sort_order || 0),
+    employee_count: Number(r.employee_count || 0),
+    created_at: r.created_at,
+    created_by: r.created_by,
+    updated_at: r.updated_at,
+    updated_by: r.updated_by
+  }));
+}
+
+export async function createDepartment(
+  client: PoolClient,
+  payload: CreateDepartmentPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrDepartment> {
+  const code = (payload.code || '').trim().toUpperCase();
+  const name = (payload.name || '').trim();
+
+  if (!code || !name) {
+    throw Object.assign(new Error('Kode dan nama departemen wajib diisi.'), { statusCode: 400, code: 'INVALID_INPUT' });
+  }
+
+  // Check code uniqueness
+  const codeCheck = await client.query(
+    'SELECT id FROM hr_departments WHERE property_id = $1 AND UPPER(code) = $2',
+    [payload.property_id, code]
+  );
+  if (codeCheck.rows.length > 0) {
+    throw Object.assign(new Error(`Kode departemen '${code}' sudah digunakan pada properti ini.`), { statusCode: 409, code: 'DEPARTMENT_CODE_EXISTS' });
+  }
+
+  // Check name uniqueness
+  const nameCheck = await client.query(
+    'SELECT id FROM hr_departments WHERE property_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+    [payload.property_id, name]
+  );
+  if (nameCheck.rows.length > 0) {
+    throw Object.assign(new Error(`Nama departemen '${name}' sudah digunakan pada properti ini.`), { statusCode: 409, code: 'DEPARTMENT_NAME_EXISTS' });
+  }
+
+  const res = await client.query(
+    `INSERT INTO hr_departments (property_id, code, name, description, sort_order, is_active, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [
+      payload.property_id,
+      code,
+      name,
+      payload.description || null,
+      payload.sort_order || 0,
+      payload.is_active !== false,
+      actor?.name || 'HRD'
+    ]
+  );
+
+  const created = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'DEPARTMENT_CREATED',
+      'hr_departments',
+      String(created.id),
+      JSON.stringify({ code: created.code, name: created.name }),
+      actor?.name || 'HRD',
+      payload.property_id
+    ]
+  );
+
+  return {
+    ...created,
+    id: Number(created.id),
+    property_id: Number(created.property_id),
+    sort_order: Number(created.sort_order || 0),
+    employee_count: 0,
+    is_active: created.is_active !== false
+  };
+}
+
+export async function updateDepartment(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  payload: UpdateDepartmentPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrDepartment> {
+  const currentRes = await client.query(
+    'SELECT * FROM hr_departments WHERE id = $1 AND property_id = $2',
+    [departmentId, propertyId]
+  );
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  const code = payload.code !== undefined ? payload.code.trim().toUpperCase() : current.code;
+  const name = payload.name !== undefined ? payload.name.trim() : current.name;
+
+  if (code !== current.code) {
+    const codeCheck = await client.query(
+      'SELECT id FROM hr_departments WHERE property_id = $1 AND UPPER(code) = $2 AND id != $3',
+      [propertyId, code, departmentId]
+    );
+    if (codeCheck.rows.length > 0) {
+      throw Object.assign(new Error(`Kode departemen '${code}' sudah digunakan pada properti ini.`), { statusCode: 409, code: 'DEPARTMENT_CODE_EXISTS' });
+    }
+  }
+
+  if (name !== current.name) {
+    const nameCheck = await client.query(
+      'SELECT id FROM hr_departments WHERE property_id = $1 AND LOWER(name) = LOWER($2) AND id != $3',
+      [propertyId, name, departmentId]
+    );
+    if (nameCheck.rows.length > 0) {
+      throw Object.assign(new Error(`Nama departemen '${name}' sudah digunakan pada properti ini.`), { statusCode: 409, code: 'DEPARTMENT_NAME_EXISTS' });
+    }
+  }
+
+  const description = payload.description !== undefined ? payload.description : current.description;
+  const sortOrder = payload.sort_order !== undefined ? payload.sort_order : current.sort_order;
+  const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
+
+  const res = await client.query(
+    `UPDATE hr_departments
+     SET code = $1, name = $2, description = $3, sort_order = $4, is_active = $5, updated_at = NOW(), updated_by = $6
+     WHERE id = $7 AND property_id = $8
+     RETURNING *`,
+    [code, name, description, sortOrder, isActive, actor?.name || 'HRD', departmentId, propertyId]
+  );
+
+  const updated = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'DEPARTMENT_UPDATED',
+      'hr_departments',
+      String(updated.id),
+      JSON.stringify({ previous: current, updated }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
+  return {
+    ...updated,
+    id: Number(updated.id),
+    property_id: Number(updated.property_id),
+    sort_order: Number(updated.sort_order || 0),
+    is_active: updated.is_active !== false
+  };
+}
+
+export async function deleteDepartment(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const empCheck = await client.query(
+    'SELECT id FROM hr_employees WHERE department_id = $1 LIMIT 1',
+    [departmentId]
+  );
+  if (empCheck.rows.length > 0) {
+    throw Object.assign(
+      new Error('Departemen tidak dapat dihapus karena masih memiliki data karyawan terhubung. Silakan nonaktifkan departemen alih-alih menghapusnya.'),
+      { statusCode: 409, code: 'DEPARTMENT_HAS_EMPLOYEES' }
+    );
+  }
+
+  const posCheck = await client.query(
+    'SELECT id FROM hr_positions WHERE department_id = $1 LIMIT 1',
+    [departmentId]
+  );
+  if (posCheck.rows.length > 0) {
+    throw Object.assign(
+      new Error('Departemen tidak dapat dihapus karena masih memiliki daftar jabatan terkait.'),
+      { statusCode: 409, code: 'DEPARTMENT_HAS_POSITIONS' }
+    );
+  }
+
+  await client.query('DELETE FROM hr_departments WHERE id = $1 AND property_id = $2', [departmentId, propertyId]);
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'DEPARTMENT_DELETED', 'hr_departments', String(departmentId), JSON.stringify({ id: departmentId }), actor?.name || 'HRD', propertyId]
+  );
+
+  return { success: true, message: 'Departemen berhasil dihapus.' };
+}
+
+// ============================================================================
+// HR-ACCESS-1: POSITION MASTER SERVICE
+// ============================================================================
+
+export async function getPositions(
+  client: PoolClient,
+  propertyId: number,
+  options?: { department_id?: number; include_inactive?: boolean }
+): Promise<HrPosition[]> {
+  const includeInactive = Boolean(options?.include_inactive);
+  const deptId = options?.department_id ? Number(options.department_id) : null;
+
+  const res = await client.query(
+    `SELECT p.*, d.name AS department_name, d.code AS department_code, COUNT(e.id)::int AS employee_count
+     FROM hr_positions p
+     LEFT JOIN hr_departments d ON d.id = p.department_id
+     LEFT JOIN hr_employees e ON e.position_id = p.id AND COALESCE(e.is_active, TRUE) = TRUE
+     WHERE p.property_id = $1
+       AND ($2 = TRUE OR p.is_active = TRUE)
+       AND ($3::int IS NULL OR p.department_id = $3::int)
+     GROUP BY p.id, d.name, d.code, d.sort_order
+     ORDER BY COALESCE(d.sort_order, 999) ASC, p.sort_order ASC, p.name ASC`,
+    [propertyId, includeInactive, deptId]
+  );
+
+  return res.rows.map(r => ({
+    id: Number(r.id),
+    property_id: Number(r.property_id),
+    department_id: r.department_id ? Number(r.department_id) : null,
+    department_name: r.department_name || null,
+    department_code: r.department_code || null,
+    code: r.code || null,
+    name: r.name,
+    description: r.description || null,
+    is_active: r.is_active !== false,
+    sort_order: Number(r.sort_order || 0),
+    employee_count: Number(r.employee_count || 0),
+    created_at: r.created_at,
+    created_by: r.created_by,
+    updated_at: r.updated_at,
+    updated_by: r.updated_by
+  }));
+}
+
+export async function createPosition(
+  client: PoolClient,
+  payload: CreatePositionPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrPosition> {
+  const name = (payload.name || '').trim();
+  if (!name) {
+    throw Object.assign(new Error('Nama jabatan wajib diisi.'), { statusCode: 400, code: 'INVALID_INPUT' });
+  }
+
+  let deptName = null;
+  let deptCode = null;
+  if (payload.department_id) {
+    const dRes = await client.query('SELECT name, code FROM hr_departments WHERE id = $1 AND property_id = $2', [payload.department_id, payload.property_id]);
+    if (dRes.rows.length === 0) {
+      throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 400, code: 'DEPARTMENT_NOT_FOUND' });
+    }
+    deptName = dRes.rows[0].name;
+    deptCode = dRes.rows[0].code;
+  }
+
+  const dupCheck = await client.query(
+    `SELECT id FROM hr_positions
+     WHERE property_id = $1
+       AND (department_id = $2 OR ($2::int IS NULL AND department_id IS NULL))
+       AND LOWER(name) = LOWER($3)`,
+    [payload.property_id, payload.department_id || null, name]
+  );
+  if (dupCheck.rows.length > 0) {
+    throw Object.assign(new Error(`Jabatan '${name}' sudah ada pada departemen yang dipilih.`), { statusCode: 409, code: 'POSITION_NAME_EXISTS' });
+  }
+
+  const res = await client.query(
+    `INSERT INTO hr_positions (property_id, department_id, code, name, description, sort_order, is_active, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      payload.property_id,
+      payload.department_id || null,
+      payload.code || null,
+      name,
+      payload.description || null,
+      payload.sort_order || 0,
+      payload.is_active !== false,
+      actor?.name || 'HRD'
+    ]
+  );
+
+  const created = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'POSITION_CREATED',
+      'hr_positions',
+      String(created.id),
+      JSON.stringify({ name: created.name, department_id: created.department_id }),
+      actor?.name || 'HRD',
+      payload.property_id
+    ]
+  );
+
+  return {
+    ...created,
+    id: Number(created.id),
+    property_id: Number(created.property_id),
+    department_id: created.department_id ? Number(created.department_id) : null,
+    department_name: deptName,
+    department_code: deptCode,
+    sort_order: Number(created.sort_order || 0),
+    employee_count: 0,
+    is_active: created.is_active !== false
+  };
+}
+
+export async function updatePosition(
+  client: PoolClient,
+  propertyId: number,
+  positionId: number,
+  payload: UpdatePositionPayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrPosition> {
+  const currentRes = await client.query(
+    'SELECT * FROM hr_positions WHERE id = $1 AND property_id = $2',
+    [positionId, propertyId]
+  );
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 404, code: 'POSITION_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  const name = payload.name !== undefined ? payload.name.trim() : current.name;
+  const deptId = payload.department_id !== undefined ? (payload.department_id ? Number(payload.department_id) : null) : current.department_id;
+
+  if (name !== current.name || deptId !== current.department_id) {
+    const dupCheck = await client.query(
+      `SELECT id FROM hr_positions
+       WHERE property_id = $1
+         AND (department_id = $2 OR ($2::int IS NULL AND department_id IS NULL))
+         AND LOWER(name) = LOWER($3)
+         AND id != $4`,
+      [propertyId, deptId, name, positionId]
+    );
+    if (dupCheck.rows.length > 0) {
+      throw Object.assign(new Error(`Jabatan '${name}' sudah ada pada departemen yang dipilih.`), { statusCode: 409, code: 'POSITION_NAME_EXISTS' });
+    }
+  }
+
+  const code = payload.code !== undefined ? payload.code : current.code;
+  const description = payload.description !== undefined ? payload.description : current.description;
+  const sortOrder = payload.sort_order !== undefined ? payload.sort_order : current.sort_order;
+  const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
+
+  const res = await client.query(
+    `UPDATE hr_positions
+     SET department_id = $1, code = $2, name = $3, description = $4, sort_order = $5, is_active = $6, updated_at = NOW(), updated_by = $7
+     WHERE id = $8 AND property_id = $9
+     RETURNING *`,
+    [deptId, code, name, description, sortOrder, isActive, actor?.name || 'HRD', positionId, propertyId]
+  );
+
+  const updated = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'POSITION_UPDATED',
+      'hr_positions',
+      String(updated.id),
+      JSON.stringify({ previous: current, updated }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
+  return {
+    ...updated,
+    id: Number(updated.id),
+    property_id: Number(updated.property_id),
+    department_id: updated.department_id ? Number(updated.department_id) : null,
+    sort_order: Number(updated.sort_order || 0),
+    is_active: updated.is_active !== false
+  };
+}
+
+export async function deletePosition(
+  client: PoolClient,
+  propertyId: number,
+  positionId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const empCheck = await client.query(
+    'SELECT id FROM hr_employees WHERE position_id = $1 LIMIT 1',
+    [positionId]
+  );
+  if (empCheck.rows.length > 0) {
+    throw Object.assign(
+      new Error('Jabatan tidak dapat dihapus karena masih digunakan oleh data karyawan aktif. Silakan nonaktifkan jabatan alih-alih menghapusnya.'),
+      { statusCode: 409, code: 'POSITION_HAS_EMPLOYEES' }
+    );
+  }
+
+  await client.query('DELETE FROM hr_positions WHERE id = $1 AND property_id = $2', [positionId, propertyId]);
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'POSITION_DELETED', 'hr_positions', String(positionId), JSON.stringify({ id: positionId }), actor?.name || 'HRD', propertyId]
+  );
+
+  return { success: true, message: 'Jabatan berhasil dihapus.' };
+}
+
+// ============================================================================
+// HR-ACCESS-1: DYNAMIC ROLE & GRANULAR PERMISSION SERVICE
+// ============================================================================
+
+export async function getDynamicRoles(
+  client: PoolClient,
+  propertyId?: number
+): Promise<DynamicRole[]> {
+  const res = await client.query(
+    `SELECT r.*, COUNT(u.id)::int AS active_user_count
+     FROM roles r
+     LEFT JOIN users u ON u.role_id = r.id AND COALESCE(u.is_active, TRUE) = TRUE
+     WHERE (r.property_id IS NULL OR r.property_id = $1)
+     GROUP BY r.id
+     ORDER BY r.is_system_role DESC, r.id ASC`,
+    [propertyId || 1]
+  );
+
+  return res.rows.map(r => ({
+    id: Number(r.id),
+    property_id: r.property_id ? Number(r.property_id) : null,
+    name: r.name,
+    description: r.description || null,
+    is_system_role: Boolean(r.is_system_role),
+    is_active: r.is_active !== false,
+    active_user_count: Number(r.active_user_count || 0),
+    created_at: r.created_at,
+    created_by: r.created_by,
+    updated_at: r.updated_at,
+    updated_by: r.updated_by
+  }));
+}
+
+export async function createDynamicRole(
+  client: PoolClient,
+  payload: CreateRolePayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<DynamicRole> {
+  const name = (payload.name || '').trim();
+  if (!name) {
+    throw Object.assign(new Error('Nama role wajib diisi.'), { statusCode: 400, code: 'INVALID_INPUT' });
+  }
+
+  if (name.toLowerCase() === 'crew') {
+    throw Object.assign(new Error("Role 'Crew' bukan peran otorisasi sistem yang valid."), { statusCode: 400, code: 'INVALID_AUTH_ROLE' });
+  }
+
+  const targetPropId = payload.property_id ? Number(payload.property_id) : 1;
+
+  // Custom role uniqueness: within target property OR conflicts with global system role
+  const dupCheck = await client.query(
+    `SELECT id FROM roles
+     WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+       AND (
+         is_system_role = TRUE
+         OR property_id = $2
+       )`,
+    [name, targetPropId]
+  );
+  if (dupCheck.rows.length > 0) {
+    throw Object.assign(new Error(`Role dengan nama '${name}' sudah terdaftar untuk properti ini.`), { statusCode: 409, code: 'ROLE_NAME_EXISTS' });
+  }
+
+  const res = await client.query(
+    `INSERT INTO roles (property_id, name, description, is_system_role, is_active, created_by)
+     VALUES ($1, $2, $3, FALSE, $4, $5)
+     RETURNING *`,
+    [
+      targetPropId,
+      name,
+      payload.description || null,
+      payload.is_active !== false,
+      actor?.name || 'HRD'
+    ]
+  );
+
+  const role = res.rows[0];
+
+  if (Array.isArray(payload.permission_keys) && payload.permission_keys.length > 0) {
+    for (const key of payload.permission_keys) {
+      await client.query(
+        `INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+         SELECT $1, id, TRUE, $2 FROM permissions WHERE key = $3
+         ON CONFLICT (role_id, permission_id) DO UPDATE SET granted = TRUE`,
+        [role.id, actor?.name || 'HRD', key]
+      );
+    }
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'ROLE_CREATED', 'roles', String(role.id), JSON.stringify({ name: role.name }), actor?.name || 'HRD', targetPropId]
+  );
+
+  return {
+    ...role,
+    id: Number(role.id),
+    property_id: role.property_id ? Number(role.property_id) : null,
+    is_system_role: false,
+    is_active: role.is_active !== false,
+    active_user_count: 0
+  };
+}
+
+export async function updateDynamicRole(
+  client: PoolClient,
+  roleId: number,
+  payload: UpdateRolePayload,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<DynamicRole> {
+  const currentRes = await client.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  if (current.name === 'Super Admin') {
+    if (payload.name !== undefined && payload.name.trim() !== 'Super Admin') {
+      throw Object.assign(new Error('Role sistem Super Admin tidak dapat diubah namanya.'), { statusCode: 403, code: 'CANNOT_RENAME_SUPER_ADMIN' });
+    }
+    if (payload.is_active === false) {
+      throw Object.assign(new Error('Role sistem Super Admin tidak dapat dinonaktifkan.'), { statusCode: 403, code: 'CANNOT_DEACTIVATE_SUPER_ADMIN' });
+    }
+  }
+
+  const name = payload.name !== undefined ? payload.name.trim() : current.name;
+  if (name !== current.name) {
+    if (name.toLowerCase() === 'crew') {
+      throw Object.assign(new Error("Role 'Crew' bukan peran otorisasi sistem yang valid."), { statusCode: 400, code: 'INVALID_AUTH_ROLE' });
+    }
+    const targetPropId = current.property_id ? Number(current.property_id) : null;
+    const dupCheck = await client.query(
+      `SELECT id FROM roles
+       WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+         AND id != $2
+         AND (
+           is_system_role = TRUE
+           OR ($3::int IS NOT NULL AND property_id = $3::int)
+           OR ($3::int IS NULL AND property_id IS NULL)
+         )`,
+      [name, roleId, targetPropId]
+    );
+    if (dupCheck.rows.length > 0) {
+      throw Object.assign(new Error(`Role dengan nama '${name}' sudah digunakan untuk properti ini.`), { statusCode: 409, code: 'ROLE_NAME_EXISTS' });
+    }
+  }
+
+  const description = payload.description !== undefined ? payload.description : current.description;
+  const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
+
+  const res = await client.query(
+    `UPDATE roles
+     SET name = $1, description = $2, is_active = $3, updated_at = NOW(), updated_by = $4
+     WHERE id = $5
+     RETURNING *`,
+    [name, description, isActive, actor?.name || 'HRD', roleId]
+  );
+
+  const updated = res.rows[0];
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'ROLE_UPDATED', 'roles', String(updated.id), JSON.stringify({ previous: current, updated }), actor?.name || 'HRD', current.property_id || 1]
+  );
+
+  return {
+    ...updated,
+    id: Number(updated.id),
+    property_id: updated.property_id ? Number(updated.property_id) : null,
+    is_system_role: Boolean(updated.is_system_role),
+    is_active: updated.is_active !== false
+  };
+}
+
+export async function deleteDynamicRole(
+  client: PoolClient,
+  roleId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const currentRes = await client.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  if (current.is_system_role || current.name === 'Super Admin') {
+    throw Object.assign(new Error('Role sistem bawaan tidak dapat dihapus.'), { statusCode: 403, code: 'CANNOT_DELETE_SYSTEM_ROLE' });
+  }
+
+  const userCheck = await client.query('SELECT id FROM users WHERE role_id = $1 LIMIT 1', [roleId]);
+  if (userCheck.rows.length > 0) {
+    throw Object.assign(new Error('Role masih digunakan oleh pengguna aktif. Silakan ganti role pengguna terkait sebelum menghapus.'), { statusCode: 409, code: 'ROLE_HAS_USERS' });
+  }
+
+  await client.query('DELETE FROM roles WHERE id = $1', [roleId]);
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'ROLE_DELETED', 'roles', String(roleId), JSON.stringify({ id: roleId, name: current.name }), actor?.name || 'HRD', current.property_id || 1]
+  );
+
+  return { success: true, message: 'Role berhasil dihapus.' };
+}
+
+export async function getGranularPermissions(client: PoolClient): Promise<GranularPermission[]> {
+  const res = await client.query(
+    `SELECT id, resource, action, key, description, is_system, created_at
+     FROM permissions
+     ORDER BY resource ASC, action ASC`
+  );
+
+  return res.rows.map(r => ({
+    id: Number(r.id),
+    resource: r.resource,
+    action: r.action,
+    key: r.key,
+    description: r.description,
+    is_system: Boolean(r.is_system),
+    created_at: r.created_at
+  }));
+}
+
+export async function getRoleGranularPermissions(client: PoolClient, roleId: number): Promise<string[]> {
+  const res = await client.query(
+    `SELECT p.key
+     FROM role_permissions rp
+     JOIN permissions p ON p.id = rp.permission_id
+     WHERE rp.role_id = $1 AND rp.granted = TRUE`,
+    [roleId]
+  );
+  return res.rows.map(r => r.key);
+}
+
+export async function getGranularPermissionsMatrix(client: PoolClient, propertyId?: number): Promise<{
+  roles: DynamicRole[];
+  permissions: GranularPermission[];
+  matrix: Record<number, Record<string, boolean>>;
+}> {
+  const roles = await getDynamicRoles(client, propertyId);
+  const permissions = await getGranularPermissions(client);
+
+  const grantsRes = await client.query(
+    `SELECT rp.role_id, p.key, rp.granted
+     FROM role_permissions rp
+     JOIN permissions p ON p.id = rp.permission_id`
+  );
+
+  const matrix: Record<number, Record<string, boolean>> = {};
+  for (const r of roles) {
+    matrix[r.id] = {};
+  }
+
+  for (const g of grantsRes.rows) {
+    const rId = Number(g.role_id);
+    if (!matrix[rId]) matrix[rId] = {};
+    matrix[rId][g.key] = Boolean(g.granted);
+  }
+
+  return { roles, permissions, matrix };
+}
+
+export async function updateRoleGranularPermissions(
+  client: PoolClient,
+  roleId: number,
+  permissionKeys: string[],
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<string[]> {
+  const roleRes = await client.query('SELECT id, name FROM roles WHERE id = $1', [roleId]);
+  if (roleRes.rows.length === 0) {
+    throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
+  }
+  const role = roleRes.rows[0];
+
+  // Super Admin check: cannot strip critical platform permissions
+  if (role.name === 'Super Admin') {
+    const allPerms = await client.query('SELECT count(*) FROM permissions');
+    const totalPerms = Number(allPerms.rows[0].count);
+    if (permissionKeys.length < totalPerms) {
+      throw Object.assign(new Error('Izin Super Admin tidak dapat dikurangi.'), { statusCode: 403, code: 'CANNOT_ALTER_SUPER_ADMIN_PERMISSIONS' });
+    }
+  }
+
+  await client.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId]);
+
+  for (const key of permissionKeys) {
+    await client.query(
+      `INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+       SELECT $1, id, TRUE, $2 FROM permissions WHERE key = $3
+       ON CONFLICT (role_id, permission_id) DO UPDATE SET granted = TRUE`,
+      [roleId, actor?.name || 'HRD', key]
+    );
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'ROLE_PERMISSIONS_UPDATED',
+      'role_permissions',
+      String(roleId),
+      JSON.stringify({ role_name: role.name, permissions_count: permissionKeys.length }),
+      actor?.name || 'HRD',
+      1
+    ]
+  );
+
+  return getRoleGranularPermissions(client, roleId);
 }

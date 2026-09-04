@@ -91,6 +91,7 @@ export function normalizeRoleName(roleName?: string | null): string {
   if (r === 'HOUSEKEEPING' || r === 'HK') return 'Housekeeping';
   if (r === 'ACCOUNTING' || r === 'FINANCE' || r === 'ACCOUNTANT') return 'Accounting';
   if (r === 'POSRESTO' || r === 'POS' || r === 'POSCREW' || r === 'FB' || r === 'FOODANDBEVERAGE') return 'POS / Resto';
+  if (r === 'HRDADMIN' || r === 'HRD') return 'HRD Admin';
   return roleName;
 }
 
@@ -107,8 +108,24 @@ export function requireRole(allowedRoles: string[]) {
     }
 
     const userRole = normalizeRoleName(req.user.role);
-    // Super Admin and General Manager always have full bypass
-    if (userRole === 'Super Admin' || userRole === 'General Manager' || normalizedAllowed.includes(userRole)) {
+
+    // Super Admin always has full bypass
+    if (userRole === 'Super Admin') {
+      next();
+      return;
+    }
+
+    // Strict MOBILE_ONLY boundary: MOBILE_ONLY users cannot access desktop PMS role-protected operational endpoints
+    if (req.user.access_type === 'MOBILE_ONLY') {
+      res.status(403).json({
+        status: 'ERROR',
+        code: 'MOBILE_ONLY_RESTRICTED',
+        message: 'Akses ditolak: Akun dengan tipe akses MOBILE_ONLY tidak diizinkan mengakses fitur desktop PMS ini.'
+      });
+      return;
+    }
+
+    if (userRole === 'General Manager' || normalizedAllowed.includes(userRole)) {
       next();
       return;
     }
@@ -119,6 +136,33 @@ export function requireRole(allowedRoles: string[]) {
       message: `Akses ditolak. Fitur ini memerlukan salah satu hak akses: ${allowedRoles.join(', ')}.`
     });
   };
+}
+
+export function requirePmsAccess(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({
+      status: 'ERROR',
+      code: 'UNAUTHORIZED',
+      message: 'Akses ditolak. Silakan login terlebih dahulu.'
+    });
+    return;
+  }
+
+  if (normalizeRoleName(req.user.role) === 'Super Admin') {
+    next();
+    return;
+  }
+
+  if (req.user.access_type === 'MOBILE_ONLY') {
+    res.status(403).json({
+      status: 'ERROR',
+      code: 'MOBILE_ONLY_RESTRICTED',
+      message: 'Akses ditolak: Akun dengan tipe akses MOBILE_ONLY tidak diizinkan mengakses workspace operasional desktop PMS.'
+    });
+    return;
+  }
+
+  next();
 }
 
 export function optionalAuth(req: AuthenticatedRequest, _res: Response, next: NextFunction): void {
@@ -132,4 +176,92 @@ export function optionalAuth(req: AuthenticatedRequest, _res: Response, next: Ne
     }
   }
   next();
+}
+
+export async function hasPermission(
+  user: AuthUserPayload | undefined,
+  permissionKey: string,
+  clientOrPool?: any
+): Promise<boolean> {
+  if (!user) return false;
+  const roleName = normalizeRoleName(user.role);
+  if (roleName === 'Super Admin') return true;
+
+  // Dynamically resolve pool to avoid circular dependencies
+  const db = clientOrPool || require('../../index').pool;
+  if (!db) return false;
+
+  if (user.role_id) {
+    const res = await db.query(
+      `SELECT rp.granted
+       FROM role_permissions rp
+       JOIN permissions p ON p.id = rp.permission_id
+       WHERE rp.role_id = $1 AND p.key = $2 AND rp.granted = TRUE`,
+      [user.role_id, permissionKey]
+    );
+    if ((res.rowCount ?? 0) > 0) return true;
+  }
+
+  if (user.role) {
+    const res = await db.query(
+      `SELECT rp.granted
+       FROM role_permissions rp
+       JOIN permissions p ON p.id = rp.permission_id
+       JOIN roles r ON r.id = rp.role_id
+       WHERE r.name = $1 AND p.key = $2 AND rp.granted = TRUE`,
+      [user.role, permissionKey]
+    );
+    if ((res.rowCount ?? 0) > 0) return true;
+  }
+
+  return false;
+}
+
+export function requirePermission(permissionKey: string) {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    if (!req.user) {
+      res.status(401).json({
+        status: 'ERROR',
+        code: 'UNAUTHORIZED',
+        message: 'Akses ditolak. Silakan login terlebih dahulu.'
+      });
+      return;
+    }
+
+    if (normalizeRoleName(req.user.role) === 'Super Admin') {
+      next();
+      return;
+    }
+
+    // Strict MOBILE_ONLY boundary: MOBILE_ONLY users cannot access desktop PMS permissions
+    if (req.user.access_type === 'MOBILE_ONLY') {
+      res.status(403).json({
+        status: 'ERROR',
+        code: 'MOBILE_ONLY_RESTRICTED',
+        message: 'Akses ditolak: Akun dengan tipe akses MOBILE_ONLY tidak diizinkan mengakses fitur operasional desktop PMS.'
+      });
+      return;
+    }
+
+    try {
+      const allowed = await hasPermission(req.user, permissionKey);
+      if (allowed) {
+        next();
+        return;
+      }
+
+      res.status(403).json({
+        status: 'ERROR',
+        code: 'FORBIDDEN',
+        message: `Akses ditolak. Akun Anda tidak memiliki izin '${permissionKey}'.`
+      });
+    } catch (err: any) {
+      console.error('Permission check failure:', err);
+      res.status(500).json({
+        status: 'ERROR',
+        code: 'AUTH_ERROR',
+        message: 'Gagal memverifikasi izin hak akses.'
+      });
+    }
+  };
 }

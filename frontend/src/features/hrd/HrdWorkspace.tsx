@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { AVAILABLE_ROLE_OPTIONS } from '../auth/permissions';
-import { RolePermissionsMatrixTab } from '../settings/RolePermissionsMatrixTab';
+import { DepartmentPositionTab } from './DepartmentPositionTab';
+import { RolePermissionsTab } from './RolePermissionsTab';
+import type { Department, Position, DynamicRole } from './hrdTypes';
 import {
   normalizeIndonesianPhoneNumber,
   buildWhatsAppCredentialMessage,
@@ -18,8 +19,12 @@ interface HrEmployee {
   last_name?: string;
   employee_code?: string;
   role: string;
+  role_id?: number | null;
+  access_type?: string | null;
   department: string;
+  department_id?: number | null;
   position?: string;
+  position_id?: number | null;
   username?: string;
   email?: string;
   phone?: string;
@@ -114,9 +119,11 @@ const formatDateDisplay = (dateStr?: string | null): string => {
 };
 
 export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, propertyName, onPermissionsUpdated }) => {
-  const [activeTab, setActiveTab] = useState<'EMPLOYEES' | 'PERMISSIONS'>('EMPLOYEES');
+  const [activeTab, setActiveTab] = useState<'EMPLOYEES' | 'DEPARTMENTS_POSITIONS' | 'ROLES_PERMISSIONS'>('EMPLOYEES');
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
-  const [availableRoles, setAvailableRoles] = useState<{ role: string; category: string; description: string }[]>(AVAILABLE_ROLE_OPTIONS);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [dynamicRoles, setDynamicRoles] = useState<DynamicRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -130,9 +137,13 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     username: '',
     email: '',
     phone: '',
-    position: 'Staff',
+    department_id: 0,
     department: 'Front Office',
+    position_id: 0,
+    position: 'Staff',
+    role_id: 0,
     role: 'Front Office',
+    access_type: 'PMS_STAFF' as 'PMS_STAFF' | 'MANAGER' | 'MOBILE_ONLY' | 'ADMIN',
     hire_date: getTodayCalendarDate(),
     create_login_account: true,
     is_active: true
@@ -189,13 +200,19 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [empRes, rolesRes] = await Promise.all([
+      const [empRes, deptRes, posRes, dynRolesRes] = await Promise.all([
         fetch(`/api/hrd/employees?property_id=${propertyId}&scope=all`, { headers: getAuthHeaders() }),
-        fetch(`/api/hrd/roles?property_id=${propertyId}`, { headers: getAuthHeaders() })
+        fetch(`/api/hrd/departments?property_id=${propertyId}&include_inactive=false`, { headers: getAuthHeaders() }),
+        fetch(`/api/hrd/positions?property_id=${propertyId}&include_inactive=false`, { headers: getAuthHeaders() }),
+        fetch(`/api/hrd/dynamic-roles?property_id=${propertyId}&include_inactive=false`, { headers: getAuthHeaders() })
       ]);
 
-      const empData = await empRes.json();
-      const rolesData = await rolesRes.json();
+      const [empData, deptData, posData, dynRolesData] = await Promise.all([
+        empRes.json(),
+        deptRes.json(),
+        posRes.json(),
+        dynRolesRes.json()
+      ]);
 
       if (empData.status === 'OK' && Array.isArray(empData.data)) {
         setEmployees(empData.data);
@@ -205,17 +222,16 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
         if (fallbackData.status === 'OK') setEmployees(fallbackData.data || []);
       }
 
-      if (rolesData.status === 'OK') {
-        const rawList = Array.isArray(rolesData.data)
-          ? rolesData.data
-          : (rolesData.data?.available_roles || rolesData.data?.roles);
-        if (Array.isArray(rawList) && rawList.length > 0) {
-          setAvailableRoles(rawList.map((r: any) => ({
-            role: r.role || r.name || r.key,
-            category: r.category || r.department || 'Operations',
-            description: r.description || ''
-          })));
-        }
+      if (deptData.status === 'OK' && Array.isArray(deptData.data)) {
+        setDepartments(deptData.data);
+      }
+
+      if (posData.status === 'OK' && Array.isArray(posData.data)) {
+        setPositions(posData.data);
+      }
+
+      if (dynRolesData.status === 'OK' && Array.isArray(dynRolesData.data)) {
+        setDynamicRoles(dynRolesData.data);
       }
     } catch (err: any) {
       console.error('Failed to load HRD data', err);
@@ -230,14 +246,25 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
   const handleOpenAdd = () => {
     setErrorMessage('');
+    const defaultDept = departments.find(d => d.is_active) || departments[0];
+    const deptId = defaultDept ? defaultDept.id : 0;
+    const deptPositions = positions.filter(p => p.department_id === deptId && p.is_active);
+    const posId = deptPositions[0]?.id || 0;
+    const defaultRole = dynamicRoles.find(r => r.name === 'Front Office' && r.is_active) || dynamicRoles[0];
+    const roleId = defaultRole ? defaultRole.id : 0;
+
     setFormPayload({
       name: '',
       username: '',
       email: '',
       phone: '',
-      position: 'Staff',
-      department: 'Front Office',
-      role: 'Front Office',
+      department_id: deptId,
+      department: defaultDept?.name || 'Front Office',
+      position_id: posId,
+      position: deptPositions[0]?.name || 'Staff',
+      role_id: roleId,
+      role: defaultRole?.name || 'Front Office',
+      access_type: 'PMS_STAFF',
       hire_date: getTodayCalendarDate(),
       create_login_account: true,
       is_active: true
@@ -249,14 +276,22 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const handleOpenEdit = (emp: HrEmployee) => {
     setErrorMessage('');
     const displayName = emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || emp.username || '';
+    const deptId = emp.department_id || departments.find(d => d.name === emp.department)?.id || 0;
+    const posId = emp.position_id || positions.find(p => p.name === emp.position)?.id || 0;
+    const roleId = emp.role_id || dynamicRoles.find(r => r.name === emp.role)?.id || 0;
+
     setFormPayload({
       name: displayName,
       username: emp.username || '',
       email: emp.email || '',
       phone: emp.phone || '',
-      position: emp.position || 'Staff',
+      department_id: deptId,
       department: emp.department || 'Front Office',
+      position_id: posId,
+      position: emp.position || 'Staff',
+      role_id: roleId,
       role: emp.role || 'Front Office',
+      access_type: (emp.access_type as any) || 'PMS_STAFF',
       hire_date: toCalendarDateInput(emp.hire_date),
       create_login_account: false,
       is_active: emp.is_active !== false
@@ -271,6 +306,9 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setSubmitting(true);
     try {
       const safeHireDate = serializeCalendarDate(formPayload.hire_date);
+      const selectedDept = departments.find(d => d.id === Number(formPayload.department_id));
+      const selectedPos = positions.find(p => p.id === Number(formPayload.position_id));
+      const selectedRole = dynamicRoles.find(r => r.id === Number(formPayload.role_id));
 
       if (editingEmployee) {
         const res = await fetch(`/api/hrd/employees/${editingEmployee.id}`, {
@@ -281,9 +319,13 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             full_name: formPayload.name,
             email: formPayload.email || null,
             phone: formPayload.phone || null,
-            position: formPayload.position,
-            department: formPayload.department,
-            role: formPayload.role,
+            department_id: Number(formPayload.department_id) || undefined,
+            department: selectedDept?.name || formPayload.department,
+            position_id: Number(formPayload.position_id) || undefined,
+            position: selectedPos?.name || formPayload.position,
+            role_id: Number(formPayload.role_id) || undefined,
+            role: selectedRole?.name || formPayload.role,
+            access_type: formPayload.access_type,
             hire_date: safeHireDate,
             is_active: formPayload.is_active
           })
@@ -302,9 +344,13 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             username: formPayload.username || undefined,
             email: formPayload.email || undefined,
             phone: formPayload.phone || undefined,
-            position: formPayload.position,
-            department: formPayload.department,
-            role: formPayload.role,
+            department_id: Number(formPayload.department_id) || undefined,
+            department: selectedDept?.name || formPayload.department,
+            position_id: Number(formPayload.position_id) || undefined,
+            position: selectedPos?.name || formPayload.position,
+            role_id: Number(formPayload.role_id) || undefined,
+            role: selectedRole?.name || formPayload.role,
+            access_type: formPayload.access_type,
             hire_date: safeHireDate,
             create_login_account: formPayload.create_login_account
           })
@@ -682,9 +728,24 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
         <button
           type="button"
-          onClick={() => setActiveTab('PERMISSIONS')}
+          onClick={() => setActiveTab('DEPARTMENTS_POSITIONS')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
-            activeTab === 'PERMISSIONS'
+            activeTab === 'DEPARTMENTS_POSITIONS'
+              ? 'bg-[#1b4332] text-white shadow-xs'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+          </svg>
+          Departemen & Jabatan ({departments.length})
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('ROLES_PERMISSIONS')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+            activeTab === 'ROLES_PERMISSIONS'
               ? 'bg-[#1b4332] text-white shadow-xs'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
@@ -692,13 +753,18 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
           </svg>
-          Hak Akses Role (Permissions Matrix)
+          Role & Permission Matrix ({dynamicRoles.length})
         </button>
       </div>
 
-      {/* Tab 2: Dynamic Role Permissions Matrix Tab */}
-      {activeTab === 'PERMISSIONS' && (
-        <RolePermissionsMatrixTab
+      {/* Tab: Departemen & Jabatan */}
+      {activeTab === 'DEPARTMENTS_POSITIONS' && (
+        <DepartmentPositionTab propertyId={propertyId} />
+      )}
+
+      {/* Tab: Dynamic Role & Granular Permissions Matrix */}
+      {activeTab === 'ROLES_PERMISSIONS' && (
+        <RolePermissionsTab
           propertyId={propertyId}
           onPermissionsUpdated={(newMap) => {
             fetchData();
@@ -948,6 +1014,18 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             )}
 
             <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+              {editingEmployee && editingEmployee.employee_code && (
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase font-bold block">Kode Karyawan (Employee Code)</span>
+                    <span className="font-mono font-bold text-slate-900 text-xs">{editingEmployee.employee_code}</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded font-bold">
+                    Tetap & Tidak Berubah Saat Mutasi
+                  </span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-slate-700 font-bold mb-1">
                   Nama Lengkap <span className="text-red-500">*</span>:
@@ -965,7 +1043,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">
-                    Nomor HP:
+                    Nomor HP / WhatsApp:
                   </label>
                   <input
                     type="text"
@@ -978,70 +1056,116 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">
-                    Posisi / Jabatan:
+                    Email Karyawan {formPayload.create_login_account ? <span className="text-red-500">*</span> : '(Opsional)'}:
                   </label>
                   <input
-                    type="text"
-                    value={formPayload.position}
-                    onChange={(e) => setFormPayload(p => ({ ...p, position: e.target.value }))}
-                    placeholder="Receptionist"
+                    type="email"
+                    required={formPayload.create_login_account}
+                    value={formPayload.email}
+                    onChange={(e) => setFormPayload(p => ({ ...p, email: e.target.value }))}
+                    placeholder="nadya@oaklawang.com"
                     className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">
-                  Email Karyawan {formPayload.create_login_account ? <span className="text-red-500">*</span> : '(Opsional)'}:
-                </label>
-                <input
-                  type="email"
-                  required={formPayload.create_login_account}
-                  value={formPayload.email}
-                  onChange={(e) => setFormPayload(p => ({ ...p, email: e.target.value }))}
-                  placeholder="nadya@oaklawang.com"
-                  className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-                />
-              </div>
-
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-slate-700 font-bold mb-1">
-                    Role / Peran <span className="text-red-500">*</span>:
-                  </label>
-                  <select
-                    value={formPayload.role}
-                    onChange={(e) => setFormPayload(p => ({ ...p, role: e.target.value }))}
-                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-                  >
-                    {availableRoles.map(r => (
-                      <option key={r.role} value={r.role}>
-                        {r.role}
-                      </option>
-                    ))}
-                  </select>
-                  {formPayload.create_login_account && formPayload.role === 'Crew' && (
-                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-1.5 mt-1">
-                      Peran "Crew" adalah staf operasional tanpa akun sistem HIMS. Pilih Front Office, Housekeeping, Accounting, GM, atau POS / Resto untuk membuat akun login.
-                    </p>
-                  )}
-                </div>
-
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">
                     Departemen <span className="text-red-500">*</span>:
                   </label>
                   <select
-                    value={formPayload.department}
-                    onChange={(e) => setFormPayload(p => ({ ...p, department: e.target.value }))}
+                    value={formPayload.department_id}
+                    onChange={(e) => {
+                      const newDeptId = Number(e.target.value);
+                      const deptPos = positions.filter(pos => pos.department_id === newDeptId && pos.is_active);
+                      const selDept = departments.find(d => d.id === newDeptId);
+                      setFormPayload(p => ({
+                        ...p,
+                        department_id: newDeptId,
+                        department: selDept?.name || p.department,
+                        position_id: deptPos[0]?.id || 0,
+                        position: deptPos[0]?.name || p.position
+                      }));
+                    }}
                     className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
                   >
-                    <option value="Front Office">Front Office</option>
-                    <option value="Housekeeping">Housekeeping</option>
-                    <option value="Finance & Accounting">Finance & Accounting</option>
-                    <option value="Food & Beverage">Food & Beverage</option>
-                    <option value="Engineering & Maintenance">Engineering & Maintenance</option>
-                    <option value="Management">Management</option>
+                    {departments.filter(d => d.is_active || d.id === formPayload.department_id).map(d => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Posisi / Jabatan <span className="text-red-500">*</span>:
+                  </label>
+                  <select
+                    value={formPayload.position_id}
+                    onChange={(e) => {
+                      const newPosId = Number(e.target.value);
+                      const selPos = positions.find(pos => pos.id === newPosId);
+                      setFormPayload(p => ({
+                        ...p,
+                        position_id: newPosId,
+                        position: selPos?.name || p.position
+                      }));
+                    }}
+                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                  >
+                    <option value={0} disabled>Pilih Jabatan...</option>
+                    {positions
+                      .filter(pos => pos.department_id === Number(formPayload.department_id) && (pos.is_active || pos.id === formPayload.position_id))
+                      .map(pos => (
+                        <option key={pos.id} value={pos.id}>
+                          {pos.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Peran / Role Sistem <span className="text-red-500">*</span>:
+                  </label>
+                  <select
+                    value={formPayload.role_id}
+                    onChange={(e) => {
+                      const newRoleId = Number(e.target.value);
+                      const selRole = dynamicRoles.find(r => r.id === newRoleId);
+                      setFormPayload(p => ({
+                        ...p,
+                        role_id: newRoleId,
+                        role: selRole?.name || p.role
+                      }));
+                    }}
+                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                  >
+                    {dynamicRoles.filter(r => r.is_active || r.id === formPayload.role_id).map(r => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} {r.is_system_role ? '(Sistem)' : '(Kustom)'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Tipe Akses Login <span className="text-red-500">*</span>:
+                  </label>
+                  <select
+                    value={formPayload.access_type}
+                    onChange={(e) => setFormPayload(p => ({ ...p, access_type: e.target.value as any }))}
+                    className="w-full p-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                  >
+                    <option value="PMS_STAFF">PMS Staf (Desktop/Web)</option>
+                    <option value="MANAGER">Manager / SPV</option>
+                    <option value="MOBILE_ONLY">Mobile Staf Operasional</option>
+                    <option value="ADMIN">Hotel Admin</option>
                   </select>
                 </div>
               </div>

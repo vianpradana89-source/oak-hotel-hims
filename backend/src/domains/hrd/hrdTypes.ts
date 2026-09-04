@@ -1,11 +1,135 @@
+export interface HrDepartment {
+  id: number;
+  property_id: number;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+  sort_order: number;
+  employee_count?: number;
+  created_at: string;
+  created_by?: string | null;
+  updated_at: string;
+  updated_by?: string | null;
+}
+
+export interface CreateDepartmentPayload {
+  property_id: number;
+  code: string;
+  name: string;
+  description?: string;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface UpdateDepartmentPayload {
+  code?: string;
+  name?: string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface HrPosition {
+  id: number;
+  property_id: number;
+  department_id?: number | null;
+  department_name?: string | null;
+  department_code?: string | null;
+  code?: string | null;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+  sort_order: number;
+  employee_count?: number;
+  created_at: string;
+  created_by?: string | null;
+  updated_at: string;
+  updated_by?: string | null;
+}
+
+export interface CreatePositionPayload {
+  property_id: number;
+  department_id?: number | null;
+  code?: string | null;
+  name: string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface UpdatePositionPayload {
+  department_id?: number | null;
+  code?: string | null;
+  name?: string;
+  description?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface DynamicRole {
+  id: number;
+  property_id?: number | null;
+  name: string;
+  description?: string | null;
+  is_system_role: boolean;
+  is_active: boolean;
+  active_user_count?: number;
+  created_at: string;
+  created_by?: string | null;
+  updated_at: string;
+  updated_by?: string | null;
+}
+
+export interface CreateRolePayload {
+  property_id?: number | null;
+  name: string;
+  description?: string | null;
+  is_active?: boolean;
+  permission_ids?: number[];
+  permission_keys?: string[];
+}
+
+export interface UpdateRolePayload {
+  name?: string;
+  description?: string | null;
+  is_active?: boolean;
+}
+
+export interface GranularPermission {
+  id: number;
+  resource: string;
+  action: 'view' | 'create' | 'edit' | 'delete' | 'approve' | string;
+  key: string;
+  description?: string | null;
+  is_system: boolean;
+  created_at: string;
+}
+
+export interface RolePermissionGrant {
+  role_id: number;
+  permission_id: number;
+  permission_key: string;
+  resource: string;
+  action: string;
+  granted: boolean;
+}
+
 export interface HrEmployee {
   id: number;
   property_id: number;
   employee_code: string;
   full_name: string;
+  department_id?: number | null;
+  department_name?: string | null;
+  department_code?: string | null;
+  position_id?: number | null;
+  position_name?: string | null;
   position?: string | null;
   department?: string | null;
   role: string;
+  role_id?: number | null;
+  access_type?: 'MOBILE_ONLY' | 'PMS_STAFF' | 'MANAGER' | 'ADMIN' | string;
   username?: string | null;
   email?: string | null;
   phone?: string | null;
@@ -35,9 +159,13 @@ export interface CreateEmployeePayload {
   property_id: number;
   employee_code?: string;
   full_name: string;
+  department_id?: number | null;
+  position_id?: number | null;
   position?: string;
   department?: string;
   role?: string;
+  role_id?: number | null;
+  access_type?: 'MOBILE_ONLY' | 'PMS_STAFF' | 'MANAGER' | 'ADMIN';
   username?: string;
   email?: string;
   phone?: string;
@@ -130,9 +258,13 @@ export interface PasswordResetResult {
 export interface UpdateEmployeePayload {
   employee_code?: string;
   full_name?: string;
+  department_id?: number | null;
+  position_id?: number | null;
   position?: string;
   department?: string;
   role?: string;
+  role_id?: number | null;
+  access_type?: 'MOBILE_ONLY' | 'PMS_STAFF' | 'MANAGER' | 'ADMIN';
   username?: string;
   email?: string;
   phone?: string;

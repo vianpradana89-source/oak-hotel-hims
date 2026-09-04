@@ -11,6 +11,7 @@ export interface AuthUser {
   scope?: 'FULL' | 'ONBOARDING';
   account_status?: string;
   must_change_password?: boolean;
+  access_type?: 'PMS_STAFF' | 'MANAGER' | 'MOBILE_ONLY' | 'ADMIN';
 }
 
 interface AuthContextType {

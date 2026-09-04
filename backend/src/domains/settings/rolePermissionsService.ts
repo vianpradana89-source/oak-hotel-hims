@@ -157,7 +157,7 @@ export async function getRolePermissionsMatrix(
 ): Promise<RolePermissionsMatrixResponse> {
   const res = await client.query(
     `SELECT role_name, permissions, updated_by, updated_at
-     FROM role_permissions
+     FROM legacy_role_menu_permissions
      WHERE property_id = $1`,
     [propertyId]
   );
@@ -228,7 +228,7 @@ export async function updateRolePermissionsMatrix(
     // Super Admin cannot have permissions stripped
     if (roleName === 'Super Admin') {
       await client.query(
-        `INSERT INTO role_permissions (property_id, role_name, permissions, updated_by, updated_at)
+        `INSERT INTO legacy_role_menu_permissions (property_id, role_name, permissions, updated_by, updated_at)
          VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (property_id, role_name)
          DO UPDATE SET permissions = $3, updated_by = $4, updated_at = NOW()`,
@@ -242,7 +242,7 @@ export async function updateRolePermissionsMatrix(
       .filter((p: string) => allMenusKeys.has(p));
 
     await client.query(
-      `INSERT INTO role_permissions (property_id, role_name, permissions, updated_by, updated_at)
+      `INSERT INTO legacy_role_menu_permissions (property_id, role_name, permissions, updated_by, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (property_id, role_name)
        DO UPDATE SET permissions = $3, updated_by = $4, updated_at = NOW()`,
@@ -258,7 +258,7 @@ export async function updateRolePermissionsMatrix(
       [
         'SETTINGS',
         'UPDATE_ROLE_PERMISSIONS_MATRIX',
-        'role_permissions',
+        'legacy_role_menu_permissions',
         String(propertyId),
         JSON.stringify({ updated_roles_count: rolesPayload.length, actor_name: actor.name || 'Admin', timestamp: new Date().toISOString() }),
         `RBAC-UPD-${Date.now()}`,
@@ -279,7 +279,7 @@ export async function resetRolePermissionsToDefault(
 ): Promise<RolePermissionsMatrixResponse> {
   for (const [roleName, defaultPerms] of Object.entries(SOP_DEFAULT_PERMISSIONS)) {
     await client.query(
-      `INSERT INTO role_permissions (property_id, role_name, permissions, updated_by, updated_at)
+      `INSERT INTO legacy_role_menu_permissions (property_id, role_name, permissions, updated_by, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (property_id, role_name)
        DO UPDATE SET permissions = $3, updated_by = $4, updated_at = NOW()`,
@@ -295,7 +295,7 @@ export async function resetRolePermissionsToDefault(
       [
         'SETTINGS',
         'RESET_ROLE_PERMISSIONS_TO_SOP',
-        'role_permissions',
+        'legacy_role_menu_permissions',
         String(propertyId),
         JSON.stringify({ action: 'RESET_TO_SOP_DEFAULT', actor_name: actor.name || 'Admin', timestamp: new Date().toISOString() }),
         `RBAC-RST-${Date.now()}`,
