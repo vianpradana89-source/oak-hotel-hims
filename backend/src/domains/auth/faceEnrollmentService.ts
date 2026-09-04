@@ -248,3 +248,48 @@ export async function enrollFace(
     }
   };
 }
+
+export interface ActiveFaceEnrollmentRecord {
+  id: number;
+  property_id: number;
+  employee_id: number;
+  status: string;
+  reference_photo_storage_key: string;
+  reference_photo_hash: string;
+  enrolled_at: string;
+  quality_status: string;
+  review_status: string;
+}
+
+/**
+ * Authoritative face resolution for attendance verification.
+ * Always resolves the employee's current ACTIVE master face.
+ * Returns null if the employee has no active face enrollment (e.g. revoked or not yet enrolled).
+ */
+export async function getActiveFaceEnrollment(
+  poolOrClient: Pool | import('pg').PoolClient,
+  propertyId: number,
+  employeeId: number
+): Promise<ActiveFaceEnrollmentRecord | null> {
+  const res = await poolOrClient.query(
+    `SELECT id, property_id, employee_id, status, reference_photo_storage_key,
+            reference_photo_hash, enrolled_at, quality_status, review_status
+     FROM employee_face_enrollments
+     WHERE employee_id = $1 AND property_id = $2 AND status = 'ACTIVE'
+     LIMIT 1`,
+    [employeeId, propertyId]
+  );
+  if (res.rows.length === 0) return null;
+  const row = res.rows[0];
+  return {
+    id: Number(row.id),
+    property_id: Number(row.property_id),
+    employee_id: Number(row.employee_id),
+    status: row.status,
+    reference_photo_storage_key: row.reference_photo_storage_key,
+    reference_photo_hash: row.reference_photo_hash,
+    enrolled_at: new Date(row.enrolled_at).toISOString(),
+    quality_status: row.quality_status,
+    review_status: row.review_status
+  };
+}

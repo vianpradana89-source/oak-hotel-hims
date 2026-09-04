@@ -2140,6 +2140,64 @@ export async function resetEmployeePassword(
 
   const updatedUser = updatedUserRes.rows[0];
 
+  // Revoke existing ACTIVE face enrollment if present (AUTH-HR-2D: HR_PASSWORD_RESET)
+  const revokeFaceRes = await client.query(
+    `UPDATE employee_face_enrollments
+     SET status = 'REVOKED',
+         revoked_at = NOW(),
+         revoked_by_user_id = $1,
+         revocation_reason = $2,
+         updated_at = NOW()
+     WHERE employee_id = $3 AND property_id = $4 AND status = 'ACTIVE'
+     RETURNING id, reference_photo_storage_key, reference_photo_hash`,
+    [actor?.id || null, 'HR_PASSWORD_RESET', employeeId, propertyId]
+  );
+
+  // Audit log for each revoked face enrollment (preserve history, do not delete)
+  for (const faceRow of revokeFaceRes.rows) {
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        'AUTH',
+        'FACE_ENROLLMENT_REVOKED_FOR_PASSWORD_RESET',
+        'EMPLOYEE_FACE_ENROLLMENT',
+        String(faceRow.id),
+        JSON.stringify({
+          employee_id: employeeId,
+          target_user_id: updatedUser.id,
+          revoked_by_user_id: actor?.id || null,
+          revoked_by_name: actor?.name || 'HRD Admin',
+          revocation_reason: 'HR_PASSWORD_RESET',
+          storage_key: faceRow.reference_photo_storage_key,
+          photo_hash: faceRow.reference_photo_hash
+        }),
+        actor?.name || 'HRD',
+        propertyId
+      ]
+    );
+  }
+
+  // Audit log: Mandatory face re-enrollment required
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'AUTH',
+      'FACE_REENROLLMENT_REQUIRED',
+      'USER_AUTH',
+      String(updatedUser.id),
+      JSON.stringify({
+        employee_id: employeeId,
+        target_user_id: updatedUser.id,
+        reason: 'HR_PASSWORD_RESET',
+        prior_active_face_revoked: revokeFaceRes.rows.length > 0
+      }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
   // Audit log - NEVER log password or hash
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
@@ -2154,7 +2212,9 @@ export async function resetEmployeePassword(
         employee_id: employeeId,
         account_status: 'FIRST_LOGIN_REQUIRED',
         must_change_password: true,
-        temp_password_expires_at: tempExpiresAt.toISOString()
+        temp_password_expires_at: tempExpiresAt.toISOString(),
+        prior_active_face_revoked: revokeFaceRes.rows.length > 0,
+        face_revocation_count: revokeFaceRes.rows.length
       }),
       actor?.name || 'HRD',
       propertyId
@@ -2170,7 +2230,8 @@ export async function resetEmployeePassword(
     temporary_password: tempPassword,
     temp_password_expires_at: tempExpiresAt.toISOString(),
     must_change_password: true,
-    account_status: updatedUser.account_status
+    account_status: updatedUser.account_status,
+    face_revoked: revokeFaceRes.rows.length > 0
   };
 }
 

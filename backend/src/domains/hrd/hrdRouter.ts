@@ -497,6 +497,28 @@ export function createHrdRouter(pool: Pool): Router {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const actorUser = (req as any).user;
+      const actorRole = actorUser?.role || req.body.actor_role;
+      const normalizedRole = actorRole ? actorRole.toLowerCase().trim() : '';
+      const isAuthorized =
+        Boolean(normalizedRole) && (
+          normalizedRole.includes('admin') ||
+          normalizedRole.includes('owner') ||
+          normalizedRole.includes('general manager') ||
+          normalizedRole === 'gm' ||
+          normalizedRole.includes('hr') ||
+          normalizedRole.includes('hrd')
+        );
+
+      if (!isAuthorized) {
+        const statusCode = actorUser ? 403 : 401;
+        const code = actorUser ? 'FORBIDDEN' : 'UNAUTHORIZED';
+        const msg = actorUser
+          ? 'Akses ditolak: Hanya HRD atau Admin yang diizinkan mereset password karyawan.'
+          : 'Autentikasi diperlukan untuk mereset password karyawan.';
+        throw Object.assign(new Error(msg), { statusCode, code });
+      }
+
       const propertyId = parsePropertyId((req as any).user?.property_id || req.body.property_id || req.body.propertyId);
       const employeeId = Number(req.params.id);
       if (isNaN(employeeId) || employeeId <= 0) {
@@ -504,9 +526,9 @@ export function createHrdRouter(pool: Pool): Router {
       }
 
       const actor = {
-        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
-        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
-        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+        id: actorUser?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: actorUser?.full_name || req.body.actor_name || 'HRD Admin',
+        role: actorRole || 'HRD'
       };
 
       const result = await resetEmployeePassword(client, propertyId, employeeId, actor);

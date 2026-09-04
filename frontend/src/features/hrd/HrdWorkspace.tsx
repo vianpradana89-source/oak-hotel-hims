@@ -589,8 +589,8 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     }
     if (emp.account_status === 'FIRST_LOGIN_REQUIRED') {
       return (
-        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-200">
-          Menunggu Login Pertama
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-200" title="Karyawan perlu login dan membuat password baru">
+          Password Perlu Dibuat
         </span>
       );
     }

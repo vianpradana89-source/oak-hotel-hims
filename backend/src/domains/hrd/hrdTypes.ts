@@ -254,6 +254,7 @@ export interface PasswordResetResult {
   temp_password_expires_at: string;
   must_change_password: boolean;
   account_status: string;
+  face_revoked?: boolean;
 }
 
 export interface UpdateEmployeePayload {

@@ -322,12 +322,15 @@ export function createUsersRouter(pool: Pool): Router {
 
   // 5. POST /api/users/:id/reset-password - Admin password reset
   router.post('/:id/reset-password', async (req: AuthenticatedRequest, res: Response) => {
+    const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       const userId = Number(req.params.id);
       const { new_password } = req.body;
       const passwordToSet = new_password || 'OakHotel2026!';
 
       if (passwordToSet.length < 6) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           status: 'ERROR',
           code: 'WEAK_PASSWORD',
@@ -335,26 +338,126 @@ export function createUsersRouter(pool: Pool): Router {
         });
       }
 
-      const passwordHash = await hashPassword(passwordToSet);
-      const resUpdate = await pool.query(
-        `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id, username, email`,
-        [passwordHash, userId]
-      );
-
-      if (resUpdate.rows.length === 0) {
+      const userRes = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
+      if (userRes.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ status: 'ERROR', code: 'USER_NOT_FOUND', message: 'User tidak ditemukan.' });
       }
+
+      const targetUser = userRes.rows[0];
+      const passwordHash = await hashPassword(passwordToSet);
+
+      const hasEmployee = Boolean(targetUser.employee_id);
+      const accountStatusToSet = hasEmployee ? 'FIRST_LOGIN_REQUIRED' : targetUser.account_status;
+
+      const resUpdate = await client.query(
+        `UPDATE users
+         SET password_hash = $1,
+             must_change_password = TRUE,
+             account_status = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING id, username, email, account_status, must_change_password, employee_id, property_id`,
+        [passwordHash, accountStatusToSet, userId]
+      );
+
+      let faceRevoked = false;
+      if (hasEmployee) {
+        const revokeRes = await client.query(
+          `UPDATE employee_face_enrollments
+           SET status = 'REVOKED',
+               revoked_at = NOW(),
+               revoked_by_user_id = $1,
+               revocation_reason = 'HR_PASSWORD_RESET',
+               updated_at = NOW()
+           WHERE employee_id = $2 AND property_id = $3 AND status = 'ACTIVE'
+           RETURNING id, reference_photo_storage_key, reference_photo_hash`,
+          [req.user?.id || null, targetUser.employee_id, targetUser.property_id]
+        );
+
+        faceRevoked = revokeRes.rows.length > 0;
+
+        for (const faceRow of revokeRes.rows) {
+          await client.query(
+            `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              'AUTH',
+              'FACE_ENROLLMENT_REVOKED_FOR_PASSWORD_RESET',
+              'EMPLOYEE_FACE_ENROLLMENT',
+              String(faceRow.id),
+              JSON.stringify({
+                employee_id: targetUser.employee_id,
+                target_user_id: targetUser.id,
+                revoked_by_user_id: req.user?.id || null,
+                revoked_by_name: req.user?.full_name || 'Admin',
+                revocation_reason: 'HR_PASSWORD_RESET',
+                storage_key: faceRow.reference_photo_storage_key,
+                photo_hash: faceRow.reference_photo_hash
+              }),
+              req.user?.username || 'ADMIN',
+              targetUser.property_id
+            ]
+          );
+        }
+
+        await client.query(
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            'AUTH',
+            'FACE_REENROLLMENT_REQUIRED',
+            'USER_AUTH',
+            String(targetUser.id),
+            JSON.stringify({
+              employee_id: targetUser.employee_id,
+              target_user_id: targetUser.id,
+              reason: 'HR_PASSWORD_RESET',
+              prior_active_face_revoked: faceRevoked
+            }),
+            req.user?.username || 'ADMIN',
+            targetUser.property_id
+          ]
+        );
+      }
+
+      // Audit log on USER_AUTH
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          'USERS',
+          'PASSWORD_RESET',
+          'USER_AUTH',
+          String(targetUser.id),
+          JSON.stringify({
+            target_user_id: targetUser.id,
+            employee_id: targetUser.employee_id,
+            account_status: accountStatusToSet,
+            must_change_password: true,
+            face_revoked: faceRevoked
+          }),
+          req.user?.username || 'ADMIN',
+          targetUser.property_id
+        ]
+      );
+
+      await client.query('COMMIT');
 
       return res.json({
         status: 'OK',
         message: 'Password karyawan berhasil direset.',
         data: {
           user: resUpdate.rows[0],
-          temporary_password: passwordToSet
+          temporary_password: passwordToSet,
+          face_revoked: faceRevoked
         }
       });
     } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
       return res.status(500).json({ status: 'ERROR', code: 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
     }
   });
 
