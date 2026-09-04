@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { DepartmentPositionTab } from './DepartmentPositionTab';
 import { RolePermissionsTab } from './RolePermissionsTab';
+import { ScheduleTab } from './ScheduleTab';
 import type { Department, Position, DynamicRole } from './hrdTypes';
 import {
   normalizeIndonesianPhoneNumber,
@@ -119,7 +120,7 @@ const formatDateDisplay = (dateStr?: string | null): string => {
 };
 
 export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, propertyName, onPermissionsUpdated }) => {
-  const [activeTab, setActiveTab] = useState<'EMPLOYEES' | 'DEPARTMENTS_POSITIONS' | 'ROLES_PERMISSIONS'>('EMPLOYEES');
+  const [activeTab, setActiveTab] = useState<'EMPLOYEES' | 'DEPARTMENTS_POSITIONS' | 'ROLES_PERMISSIONS' | 'JADWAL_KERJA'>('EMPLOYEES');
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -755,6 +756,21 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
           </svg>
           Role & Permission Matrix ({dynamicRoles.length})
         </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('JADWAL_KERJA')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+            activeTab === 'JADWAL_KERJA'
+              ? 'bg-[#1b4332] text-white shadow-xs'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+          Jadwal Kerja
+        </button>
       </div>
 
       {/* Tab: Departemen & Jabatan */}
@@ -771,6 +787,11 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             if (onPermissionsUpdated) onPermissionsUpdated(newMap);
           }}
         />
+      )}
+
+      {/* Tab: Jadwal Kerja / Work Schedule */}
+      {activeTab === 'JADWAL_KERJA' && (
+        <ScheduleTab propertyId={propertyId} />
       )}
 
       {/* Tab 1: Employees List Table Card */}

@@ -124,6 +124,7 @@ export type FaceVerificationStatus =
 export type ScheduleStatus =
   | 'DRAFT'
   | 'PUBLISHED'
+  | 'CHANGED'
   | 'CANCELLED';
 
 /**

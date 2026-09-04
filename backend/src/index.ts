@@ -65,6 +65,7 @@ import { createHousekeepingRouter } from './domains/housekeeping/housekeepingRou
 import { ensureDirtyRoomCleaningTask, ensureCheckoutRoomCleaningTask, getPropertyHousekeepingSettings } from './domains/housekeeping/housekeepingService';
 import { createAttendanceRouter } from './domains/attendance/attendanceRouter';
 import { createHrdRouter } from './domains/hrd/hrdRouter';
+import { createScheduleRouter } from './domains/schedule/scheduleRouter';
 import { createFeatureRouter } from './domains/features/featureRouter';
 import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
@@ -6756,6 +6757,7 @@ app.use('/api', createRoomMoveRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
+app.use('/api/schedule', createScheduleRouter(pool));
 app.use('/api/pricing', createPricingRouter(pool));
 app.use('/api/stay-charges', createStayChargesRouter(pool));
 app.use('/api/transactions', createTransactionsRouter(pool));
