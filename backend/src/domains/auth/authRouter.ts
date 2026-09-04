@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
+import multer from 'multer';
 import {
   loginUser,
   hashPassword,
@@ -8,6 +9,7 @@ import {
   getOnboardingStatus
 } from './authService';
 import { requireAuth, type AuthenticatedRequest } from './authMiddleware';
+import { enrollFace } from './faceEnrollmentService';
 
 export function createAuthRouter(pool: Pool): Router {
   const router = Router();
@@ -141,6 +143,64 @@ export function createAuthRouter(pool: Pool): Router {
       });
     }
   });
+
+  // 4b. POST /api/auth/face-enrollment (Protected - ONBOARDING scope allowed)
+  const faceUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 5 * 1024 * 1024 // 5 MB
+    }
+  });
+
+  router.post(
+    '/face-enrollment',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response, next) => {
+      faceUpload.single('photo')(req, res, (err: any) => {
+        if (err) {
+          if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(400).json({
+              status: 'ERROR',
+              code: 'FILE_TOO_LARGE',
+              message: 'Ukuran file melebihi batas maksimal 5 MB.'
+            });
+          }
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'UPLOAD_ERROR',
+            message: err.message || 'Gagal mengunggah file foto wajah.'
+          });
+        }
+        next();
+      });
+    },
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const userId = req.user?.id;
+        if (!userId) {
+          return res.status(401).json({
+            status: 'ERROR',
+            code: 'UNAUTHORIZED',
+            message: 'User ID tidak ditemukan.'
+          });
+        }
+
+        const result = await enrollFace(pool, userId, req.file);
+        return res.json({
+          status: 'OK',
+          message: 'Pendaftaran foto wajah berhasil. Akun Anda siap digunakan.',
+          data: result
+        });
+      } catch (err: any) {
+        const statusCode = err.statusCode || 500;
+        return res.status(statusCode).json({
+          status: 'ERROR',
+          code: err.code || 'FACE_ENROLLMENT_ERROR',
+          message: err.message || 'Gagal memproses pendaftaran foto wajah.'
+        });
+      }
+    }
+  );
 
   // 5. POST /api/auth/logout (Protected / Public safe)
   router.post('/logout', async (_req: Request, res: Response) => {

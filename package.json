@@ -12,5 +12,9 @@
     "build": "npm --prefix backend run build && npm --prefix frontend run build",
     "start:backend": "npm --prefix backend run start",
     "start:frontend": "npm --prefix frontend run preview"
+  },
+  "overrides": {
+    "@types/express": "^4.17.21",
+    "@types/express-serve-static-core": "^4.19.0"
   }
 }

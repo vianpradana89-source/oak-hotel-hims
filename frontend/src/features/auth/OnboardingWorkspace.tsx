@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from './AuthContext';
 
 export const OnboardingWorkspace: React.FC = () => {
@@ -252,44 +252,13 @@ export const OnboardingWorkspace: React.FC = () => {
             </form>
           )}
 
-          {/* Step 2: FACE ENROLLMENT PLACEHOLDER (AUTH-HR-2B) */}
+          {/* Step 2: FACE ENROLLMENT (AUTH-HR-2C) */}
           {step === 'FACE' && (
-            <div className="p-6 space-y-5 text-center">
-              <div className="w-16 h-16 mx-auto rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center text-2xl font-bold">
-                ✓
-              </div>
-
-              <div className="space-y-2">
-                <h3 className="text-base font-bold text-stone-900">
-                  Password Anda Berhasil Dibuat
-                </h3>
-                <p className="text-xs text-stone-600 leading-relaxed">
-                  Langkah berikutnya adalah mendaftarkan foto wajah untuk verifikasi absensi.
-                </p>
-              </div>
-
-              <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-4 text-left">
-                <div className="flex items-start space-x-2.5">
-                  <span className="text-amber-700 text-lg">ⓘ</span>
-                  <div className="text-xs text-amber-900 space-y-1">
-                    <p className="font-semibold">Tahap Pendaftaran Wajah (AUTH-HR-2C)</p>
-                    <p className="text-amber-800/90 leading-relaxed">
-                      Fitur pendaftaran wajah akan dilanjutkan pada tahap berikutnya. Akun Anda saat ini tetap dalam mode onboarding terbatas dan belum dapat membuka dashboard operasional PMS.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={logout}
-                  className="w-full py-2.5 px-4 bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium text-xs rounded-lg transition-colors border border-stone-300"
-                >
-                  Selesai & Keluar dari Sesi
-                </button>
-              </div>
-            </div>
+            <FaceEnrollmentStep
+              authFetch={authFetch}
+              logout={logout}
+              updateSessionToken={updateSessionToken}
+            />
           )}
         </div>
       </main>
@@ -298,6 +267,358 @@ export const OnboardingWorkspace: React.FC = () => {
       <footer className="py-4 text-center text-[11px] text-stone-400 border-t border-stone-200">
         OAK Hotel Integrated Management System &copy; {new Date().getFullYear()}
       </footer>
+    </div>
+  );
+};
+
+interface FaceEnrollmentStepProps {
+  authFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  logout: () => void;
+  updateSessionToken: (newToken: string, updatedUserPartial?: any) => void;
+}
+
+const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
+  authFetch,
+  logout,
+  updateSessionToken
+}) => {
+  const [cameraState, setCameraState] = useState<
+    'IDLE' | 'REQUESTING' | 'READY' | 'CAPTURED' | 'UPLOADING' | 'SUCCESS' | 'ERROR'
+  >('IDLE');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
+  const [capturedPreviewUrl, setCapturedPreviewUrl] = useState<string | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+
+  const stopCamera = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const startCamera = async () => {
+    setErrorMessage(null);
+    setCameraState('REQUESTING');
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('UNSUPPORTED_BROWSER');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 640 }
+        },
+        audio: false
+      });
+
+      mediaStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+      setCameraState('READY');
+    } catch (err: any) {
+      stopCamera();
+      let msg = 'Gagal mengakses kamera perangkat.';
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        msg = 'Izin kamera ditolak. Silakan izinkan akses kamera di pengaturan browser Anda.';
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        msg = 'Kamera tidak ditemukan pada perangkat Anda.';
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        msg = 'Kamera sedang digunakan oleh aplikasi lain.';
+      } else if (err.message === 'UNSUPPORTED_BROWSER') {
+        msg = 'Browser Anda tidak mendukung akses kamera langsung.';
+      }
+      setErrorMessage(msg);
+      setCameraState('ERROR');
+    }
+  };
+
+  const captureFrame = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const width = video.videoWidth || 640;
+    const height = video.videoHeight || 480;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Mirror horizontally so saved image matches selfie preview
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, width, height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          setCapturedBlob(blob);
+          const url = URL.createObjectURL(blob);
+          setCapturedPreviewUrl(url);
+          stopCamera();
+          setCameraState('CAPTURED');
+        }
+      },
+      'image/jpeg',
+      0.85
+    );
+  };
+
+  const retakePhoto = () => {
+    if (capturedPreviewUrl) {
+      URL.revokeObjectURL(capturedPreviewUrl);
+      setCapturedPreviewUrl(null);
+    }
+    setCapturedBlob(null);
+    startCamera();
+  };
+
+  const submitPhoto = async () => {
+    if (!capturedBlob) return;
+    setCameraState('UPLOADING');
+    setErrorMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('photo', capturedBlob, 'face-reference.jpg');
+
+      const res = await authFetch('/api/auth/face-enrollment', {
+        method: 'POST',
+        body: formData
+      });
+
+      const json = await res.json();
+      if (res.ok && json.status === 'OK') {
+        setSuccessMessage('Foto wajah berhasil didaftarkan. Akun Anda sekarang siap digunakan.');
+        setCameraState('SUCCESS');
+        if (json.data?.token) {
+          setTimeout(() => {
+            updateSessionToken(json.data.token, {
+              account_status: 'READY',
+              scope: 'FULL'
+            });
+          }, 1200);
+        }
+      } else {
+        setErrorMessage(json.message || 'Gagal mendaftarkan foto wajah.');
+        setCameraState('CAPTURED');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Terjadi kesalahan jaringan saat mengunggah foto.');
+      setCameraState('CAPTURED');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      if (capturedPreviewUrl) {
+        URL.revokeObjectURL(capturedPreviewUrl);
+      }
+    };
+  }, [capturedPreviewUrl]);
+
+  return (
+    <div className="p-6 space-y-4">
+      {errorMessage && (
+        <div className="p-3 text-xs rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex items-start space-x-2">
+          <span className="text-rose-600 font-bold">!</span>
+          <span className="flex-1">{errorMessage}</span>
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="p-3 text-xs rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 flex items-start space-x-2">
+          <span className="text-emerald-600 font-bold">✓</span>
+          <span className="flex-1">{successMessage}</span>
+        </div>
+      )}
+
+      {/* STATE: IDLE */}
+      {cameraState === 'IDLE' && (
+        <div className="space-y-4 text-center">
+          <div className="w-16 h-16 mx-auto rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center text-2xl font-bold shadow-sm">
+            📷
+          </div>
+
+          <div className="space-y-1.5">
+            <h3 className="text-base font-bold text-stone-900">
+              Pendaftaran Foto Wajah (Master Face)
+            </h3>
+            <p className="text-xs text-stone-600 leading-relaxed max-w-sm mx-auto">
+              Foto wajah ini akan digunakan sebagai foto referensi utama untuk validasi presensi harian Anda.
+            </p>
+          </div>
+
+          <div className="bg-stone-50 border border-stone-200 rounded-xl p-3.5 text-left text-xs text-stone-600 space-y-2">
+            <p className="font-semibold text-stone-800">Petunjuk Pengambilan Foto:</p>
+            <ul className="space-y-1.5 text-[11px] list-disc list-inside text-stone-600">
+              <li>Posisikan wajah Anda tegak menghadap kamera</li>
+              <li>Pastikan pencahayaan cukup dan wajah terlihat jelas</li>
+              <li>Lepaskan masker dan kacamata hitam</li>
+              <li>Hanya satu orang dalam bingkai kamera</li>
+            </ul>
+          </div>
+
+          <button
+            type="button"
+            onClick={startCamera}
+            className="w-full py-2.5 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-sm rounded-lg shadow-sm transition-all flex items-center justify-center space-x-2"
+          >
+            <span>Buka Kamera & Mulai</span>
+          </button>
+        </div>
+      )}
+
+      {/* STATE: REQUESTING */}
+      {cameraState === 'REQUESTING' && (
+        <div className="py-12 text-center space-y-3">
+          <div className="w-10 h-10 border-3 border-emerald-700/20 border-t-emerald-700 rounded-full animate-spin mx-auto" />
+          <p className="text-xs font-medium text-stone-600">
+            Menghubungkan ke kamera perangkat...
+          </p>
+        </div>
+      )}
+
+      {/* STATE: READY (Live Preview) */}
+      {cameraState === 'READY' && (
+        <div className="space-y-4">
+          <div className="relative w-full aspect-square max-w-[280px] mx-auto bg-black rounded-2xl overflow-hidden shadow-inner border-2 border-[#2C4A3E]">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover transform -scale-x-100"
+            />
+            {/* Face Oval Overlay Guide */}
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+              <div className="w-48 h-60 rounded-[50%] border-2 border-dashed border-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+            </div>
+            <div className="absolute bottom-2 inset-x-0 text-center">
+              <span className="text-[10px] font-medium text-white/90 bg-black/60 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                Posisikan wajah di dalam lingkaran
+              </span>
+            </div>
+          </div>
+
+          <div className="flex space-x-2">
+            <button
+              type="button"
+              onClick={stopCamera}
+              className="flex-1 py-2 px-3 border border-stone-300 text-stone-700 hover:bg-stone-50 rounded-lg text-xs font-medium transition-colors"
+            >
+              Batal
+            </button>
+            <button
+              type="button"
+              onClick={captureFrame}
+              className="flex-2 py-2.5 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-sm rounded-lg shadow-sm transition-all flex items-center justify-center space-x-1.5"
+            >
+              <span>Ambil Foto</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STATE: CAPTURED (Preview Captured Frame) */}
+      {cameraState === 'CAPTURED' && capturedPreviewUrl && (
+        <div className="space-y-4">
+          <div className="relative w-full aspect-square max-w-[280px] mx-auto rounded-2xl overflow-hidden shadow-md border-2 border-emerald-600">
+            <img
+              src={capturedPreviewUrl}
+              alt="Pratinjau Foto Wajah"
+              className="w-full h-full object-cover"
+            />
+          </div>
+
+          <div className="text-center text-xs text-stone-600">
+            Apakah foto wajah Anda sudah jelas dan menghadap lurus?
+          </div>
+
+          <div className="flex space-x-2">
+            <button
+              type="button"
+              onClick={retakePhoto}
+              className="flex-1 py-2 px-3 border border-stone-300 text-stone-700 hover:bg-stone-50 rounded-lg text-xs font-medium transition-colors"
+            >
+              Foto Ulang
+            </button>
+            <button
+              type="button"
+              onClick={submitPhoto}
+              className="flex-2 py-2.5 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-sm rounded-lg shadow-sm transition-all flex items-center justify-center space-x-1.5"
+            >
+              <span>Gunakan & Selesaikan</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STATE: UPLOADING */}
+      {cameraState === 'UPLOADING' && (
+        <div className="py-10 text-center space-y-3">
+          <div className="w-10 h-10 border-3 border-emerald-700/20 border-t-emerald-700 rounded-full animate-spin mx-auto" />
+          <p className="text-xs font-medium text-stone-700">
+            Menyimpan master foto wajah dan memverifikasi akun...
+          </p>
+          <p className="text-[11px] text-stone-400">Mohon jangan menutup halaman ini.</p>
+        </div>
+      )}
+
+      {/* STATE: SUCCESS */}
+      {cameraState === 'SUCCESS' && (
+        <div className="py-8 text-center space-y-3">
+          <div className="w-14 h-14 mx-auto rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center text-2xl font-bold shadow-sm">
+            ✓
+          </div>
+          <h3 className="text-base font-bold text-stone-900">
+            Pendaftaran Berhasil!
+          </h3>
+          <p className="text-xs text-stone-600 max-w-xs mx-auto">
+            Foto wajah Anda telah terdaftar sebagai master foto referensi. Mengalihkan ke sistem...
+          </p>
+        </div>
+      )}
+
+      {/* STATE: ERROR */}
+      {cameraState === 'ERROR' && (
+        <div className="space-y-4 text-center">
+          <div className="w-14 h-14 mx-auto rounded-full bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center text-2xl font-bold">
+            !
+          </div>
+          <p className="text-xs text-stone-600">
+            Tidak dapat melanjutkan tanpa foto wajah. Silakan coba kembali atau periksa izin browser.
+          </p>
+          <div className="flex space-x-2">
+            <button
+              type="button"
+              onClick={logout}
+              className="flex-1 py-2 px-3 border border-stone-300 text-stone-700 hover:bg-stone-50 rounded-lg text-xs font-medium transition-colors"
+            >
+              Keluar
+            </button>
+            <button
+              type="button"
+              onClick={startCamera}
+              className="flex-2 py-2 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-xs rounded-lg transition-colors"
+            >
+              Coba Lagi
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

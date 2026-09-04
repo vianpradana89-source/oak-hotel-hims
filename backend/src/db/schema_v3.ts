@@ -3752,6 +3752,7 @@ export async function initializeDatabase(pool: Pool) {
         );
         CREATE INDEX IF NOT EXISTS idx_face_enrollments_emp ON employee_face_enrollments (employee_id);
         CREATE INDEX IF NOT EXISTS idx_face_enrollments_prop ON employee_face_enrollments (property_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_face_enrollments_active_employee ON employee_face_enrollments (employee_id) WHERE (status = 'ACTIVE');
 
         -- Work Shift Master
         CREATE TABLE IF NOT EXISTS work_shift_templates (
@@ -4367,6 +4368,22 @@ export async function initializeDatabase(pool: Pool) {
       await auditMigrationClient.query(`
         INSERT INTO schema_migrations (version)
         VALUES ('auth_hr_access1_provenance_position_cleanup_v2')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // AUTH-HR-2C: Enforce unique active master face enrollment per employee
+    const faceMigRes = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'auth_hr_access1_face_enrollment_unique_active_v1'`
+    );
+    if (faceMigRes.rows.length === 0) {
+      await auditMigrationClient.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_face_enrollments_active_employee
+        ON employee_face_enrollments (employee_id)
+        WHERE (status = 'ACTIVE');
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr_access1_face_enrollment_unique_active_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
     }
