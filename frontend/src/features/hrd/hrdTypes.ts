@@ -34,7 +34,8 @@ export interface DynamicRole {
   description?: string;
   is_system_role: boolean;
   is_active: boolean;
-  sort_order: number;
+  sort_order?: number;
+  active_user_count?: number;
   user_count?: number;
   permissions_count?: number;
   created_at?: string;

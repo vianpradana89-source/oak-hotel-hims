@@ -374,6 +374,7 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
         role_id: 1,
         role_name: 'Super Admin',
         department: 'Management',
+        position: null,
         password: 'OakLawang2026!'
       },
       {
@@ -383,6 +384,7 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
         role_id: 2,
         role_name: 'Front Office',
         department: 'Front Office',
+        position: 'Receptionist',
         password: 'FrontOffice2026!'
       },
       {
@@ -392,6 +394,7 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
         role_id: 4,
         role_name: 'Housekeeping',
         department: 'Housekeeping',
+        position: 'Room Attendant',
         password: 'Housekeeping2026!'
       }
     ];
@@ -450,8 +453,8 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
                property_id, employee_code, full_name, position, department,
                hire_date, monthly_salary, status, role, username, email, is_active, created_at, updated_at
              )
-             VALUES (1, $1, $2, $3, $4, CURRENT_DATE, 0, 'ACTIVE', $3, $5, $6, TRUE, NOW(), NOW())`,
-            [empCode, acc.full_name, acc.role_name, acc.department, acc.username, acc.email]
+             VALUES (1, $1, $2, $3, $4, CURRENT_DATE, 0, 'ACTIVE', $5, $6, $7, TRUE, NOW(), NOW())`,
+            [empCode, acc.full_name, acc.position, acc.department, acc.role_name, acc.username, acc.email]
           );
           console.log(`[AUTH SEED] HR Employee created: ${acc.email} / ${acc.username}`);
         } else {

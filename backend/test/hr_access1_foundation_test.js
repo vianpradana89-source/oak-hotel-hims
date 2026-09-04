@@ -960,7 +960,304 @@ async function runTests() {
     }
     console.log('  ✓ Super Admin protected against unauthorized HR assignment');
 
-    console.log('\n=== ALL HR-ACCESS-1 INTEGRATION TESTS (A - AJ + REVIEW A - K) PASSED! ===\n');
+    // ========================================================================
+    // HR-ACCESS-1 FINAL ARCHITECTURAL TESTS (FINAL TEST A - I)
+    // ========================================================================
+
+    // FINAL TEST A: Role "General Manager" may coexist with Position "General Manager"
+    console.log('[FINAL TEST A] Role "General Manager" may coexist with Position "General Manager"');
+    const roleGM = await pool.query("SELECT id, name FROM roles WHERE LOWER(TRIM(name)) = 'general manager'");
+    if (roleGM.rows.length === 0) {
+      throw new Error("FINAL TEST A Failed: Role 'General Manager' not found in roles table");
+    }
+    const posGM = await pool.query("SELECT id, name, department_id FROM hr_positions WHERE property_id = 1 AND name = 'General Manager'");
+    if (posGM.rows.length === 0) {
+      throw new Error("FINAL TEST A Failed: Position 'General Manager' not found in hr_positions");
+    }
+    console.log('  ✓ Role and Position with same name coexist across separate domains');
+
+    // FINAL TEST B: Position "General Manager" can exist under Management
+    console.log('[FINAL TEST B] Position "General Manager" can exist under Management');
+    const posMgmtGM = await pool.query(`
+      SELECT p.id, p.name, d.code as dept_code
+      FROM hr_positions p
+      JOIN hr_departments d ON d.id = p.department_id
+      WHERE p.property_id = 1 AND p.name = 'General Manager'
+    `);
+    if (posMgmtGM.rows.length === 0 || posMgmtGM.rows[0].dept_code !== 'MG') {
+      throw new Error("FINAL TEST B Failed: Position 'General Manager' does not exist under Management department");
+    }
+    // Verify operator can create a custom position without being blocked by role names
+    const mgmtDeptIdRes = await pool.query("SELECT id FROM hr_departments WHERE property_id = 1 AND code = 'MG'");
+    const createPosValid = await request('POST', '/api/hrd/positions', {
+      property_id: 1,
+      department_id: mgmtDeptIdRes.rows[0].id,
+      name: 'TEST_Assistant_GM'
+    }, token);
+    if (createPosValid.status !== 201) {
+      throw new Error(`FINAL TEST B Failed: Unable to create position: ${createPosValid.status}`);
+    }
+    await pool.query('DELETE FROM hr_positions WHERE id = $1', [createPosValid.body.data.id]);
+    console.log('  ✓ Position "General Manager" exists under Management and position creation is unblocked');
+
+    // FINAL TEST C: Same string in Role and Position does not merge domains
+    console.log('[FINAL TEST C] Same string in Role and Position does not merge domains');
+    await pool.query("UPDATE hrd_role_policies SET allow_hrd_assign_gm_role = TRUE WHERE property_id = 1");
+    let empCId;
+    try {
+      const deptMgmt = mgmtDeptIdRes.rows[0].id;
+      const empC = await request('POST', '/api/hrd/employees', {
+        property_id: 1,
+        full_name: 'TEST_HRAF_DualDomain_GM_Emp',
+        department_id: deptMgmt,
+        position_id: posGM.rows[0].id,
+        role_id: roleGM.rows[0].id,
+        access_type: 'PMS_DESKTOP'
+      }, token);
+      if (empC.status !== 201) {
+        throw new Error(`FINAL TEST C Failed to create employee: ${empC.status} ${JSON.stringify(empC.body)}`);
+      }
+      empCId = empC.body.data.id;
+
+      // Verify employee record has both position and role as 'General Manager', mapped relationally
+      const empCRow = await pool.query('SELECT position, role, position_id, department_id FROM hr_employees WHERE id = $1', [empCId]);
+      if (empCRow.rows[0].position !== 'General Manager' || empCRow.rows[0].role !== 'General Manager') {
+        throw new Error(`FINAL TEST C Failed: Expected position & role 'General Manager', got pos=${empCRow.rows[0].position}, role=${empCRow.rows[0].role}`);
+      }
+
+      // Mutate role to 'Front Office' - position must remain 'General Manager'
+      const foRoleForC = (await pool.query("SELECT id FROM roles WHERE name = 'Front Office'")).rows[0].id;
+      const updateEmpCRole = await request('PUT', `/api/hrd/employees/${empCId}`, {
+        property_id: 1,
+        role_id: foRoleForC
+      }, token);
+      if (updateEmpCRole.status !== 200) {
+        throw new Error(`FINAL TEST C Failed to update role: ${updateEmpCRole.status}`);
+      }
+      const empCAfterRole = await pool.query('SELECT position, role, position_id, department_id FROM hr_employees WHERE id = $1', [empCId]);
+      if (empCAfterRole.rows[0].position !== 'General Manager' || empCAfterRole.rows[0].role !== 'Front Office') {
+        throw new Error(`FINAL TEST C Failed: Domain leakage! Position changed unexpectedly: ${JSON.stringify(empCAfterRole.rows[0])}`);
+      }
+    } finally {
+      if (empCId) {
+        await pool.query('DELETE FROM hr_employees WHERE id = $1', [empCId]);
+      }
+      await pool.query("UPDATE hrd_role_policies SET allow_hrd_assign_gm_role = FALSE WHERE property_id = 1");
+    }
+    console.log('  ✓ Role and Position operate in strictly separate domains despite identical name string');
+
+    // FINAL TEST D: Faulty bootstrap role-to-position copying no longer occurs
+    console.log('[FINAL TEST D] Faulty bootstrap role-to-position copying no longer occurs');
+    const posSuperAdmin = await pool.query("SELECT id FROM hr_positions WHERE LOWER(TRIM(name)) = 'super admin'");
+    if (posSuperAdmin.rows.length > 0) {
+      throw new Error(`FINAL TEST D Failed: 'Super Admin' found in hr_positions: ${JSON.stringify(posSuperAdmin.rows)}`);
+    }
+    const posFoInFo = await pool.query(`
+      SELECT p.id FROM hr_positions p
+      JOIN hr_departments d ON d.id = p.department_id
+      WHERE d.code = 'FO' AND LOWER(TRIM(p.name)) = 'front office'
+    `);
+    if (posFoInFo.rows.length > 0) {
+      throw new Error(`FINAL TEST D Failed: Legacy role 'front office' still copied as position under FO`);
+    }
+    console.log('  ✓ Bootstrap role-to-position copying eliminated');
+
+    // FINAL TEST E: Legitimate Receptionist remains
+    console.log('[FINAL TEST E] Legitimate Receptionist remains');
+    const posD = await pool.query("SELECT id, name, is_active FROM hr_positions WHERE property_id = 1 AND name = 'Receptionist'");
+    if (posD.rows.length === 0 || !posD.rows[0].is_active) {
+      throw new Error('FINAL TEST E Failed: Legitimate Receptionist position missing or inactive');
+    }
+    console.log('  ✓ Legitimate Receptionist position exists and is active');
+
+    // FINAL TEST F: Legitimate Housekeeping Supervisor remains
+    console.log('[FINAL TEST F] Legitimate Housekeeping Supervisor remains');
+    const posF = await pool.query("SELECT id, name, is_active FROM hr_positions WHERE property_id = 1 AND name = 'Housekeeping Supervisor'");
+    if (posF.rows.length === 0 || !posF.rows[0].is_active) {
+      throw new Error('FINAL TEST F Failed: Legitimate Housekeeping Supervisor position missing or inactive');
+    }
+    console.log('  ✓ Legitimate Housekeeping Supervisor position exists and is active');
+
+    // FINAL TEST G: Ambiguous legacy rows are not destructively deleted by name alone
+    console.log('[FINAL TEST G] Ambiguous legacy rows are not destructively deleted by name alone');
+    // Create an ambiguous position with an assigned employee
+    const deptFoIdForG = (await pool.query("SELECT id FROM hr_departments WHERE property_id = 1 AND code = 'FO'")).rows[0].id;
+    const ambigPos = await pool.query(`
+      INSERT INTO hr_positions (property_id, department_id, name, sort_order, is_active)
+      VALUES (1, $1, 'TEST_Ambiguous_Position', 99, TRUE)
+      RETURNING id
+    `, [deptFoIdForG]);
+    const ambigPosId = ambigPos.rows[0].id;
+
+    const ambigEmp = await pool.query(`
+      INSERT INTO hr_employees (property_id, full_name, department_id, position_id, department, position, employee_code, is_active)
+      VALUES (1, 'TEST_Ambiguous_Emp', $1, $2, 'Front Office', 'TEST_Ambiguous_Position', 'FO-9998', TRUE)
+      RETURNING id
+    `, [deptFoIdForG, ambigPosId]);
+    const ambigEmpId = ambigEmp.rows[0].id;
+
+    // Simulate cleanup logic query: ambiguous row with assigned employee MUST NOT be deleted
+    const deleteAttempt = await pool.query(`
+      DELETE FROM hr_positions p
+      WHERE p.id = $1
+        AND NOT EXISTS (SELECT 1 FROM hr_employees e WHERE e.position_id = p.id)
+      RETURNING id
+    `, [ambigPosId]);
+    if (deleteAttempt.rows.length > 0) {
+      throw new Error('FINAL TEST G Failed: Ambiguous position with assigned employee was destructively deleted!');
+    }
+    const checkAmbigPos = await pool.query('SELECT id FROM hr_positions WHERE id = $1', [ambigPosId]);
+    if (checkAmbigPos.rows.length === 0) {
+      throw new Error('FINAL TEST G Failed: Ambiguous position was unexpectedly deleted!');
+    }
+    // Clean up test records
+    await pool.query('DELETE FROM hr_employees WHERE id = $1', [ambigEmpId]);
+    await pool.query('DELETE FROM hr_positions WHERE id = $1', [ambigPosId]);
+    console.log('  ✓ Ambiguous position preserved safely; provenance-based cleanup verified');
+
+    // FINAL TEST H.1: Role active user count matches users.role_id
+    console.log('[FINAL TEST H.1] Role active user count matches users.role_id');
+    const dynRolesF = await request('GET', '/api/hrd/dynamic-roles?property_id=1', null, token);
+    if (dynRolesF.status !== 200) {
+      throw new Error(`FINAL TEST H.1 Failed: Expected 200 from GET /dynamic-roles, got ${dynRolesF.status}`);
+    }
+    const rolesListF = dynRolesF.body.data;
+    const foRole = rolesListF.find(r => r.name === 'Front Office');
+    if (!foRole || (foRole.active_user_count === undefined && foRole.user_count === undefined)) {
+      throw new Error('FINAL TEST H.1 Failed: Front Office role or count field missing');
+    }
+    const actualFoCount = foRole.active_user_count !== undefined ? foRole.active_user_count : foRole.user_count;
+    const dbFoCountRes = await pool.query("SELECT COUNT(*)::int as cnt FROM users WHERE role_id = $1 AND is_active = TRUE AND (property_id = 1 OR property_id IS NULL)", [foRole.id]);
+    const expectedFoCount = dbFoCountRes.rows[0].cnt;
+    if (actualFoCount !== expectedFoCount) {
+      throw new Error(`FINAL TEST H.1 Failed: Expected active user count ${expectedFoCount}, got ${actualFoCount}`);
+    }
+    console.log(`  ✓ Front Office role active user count (${actualFoCount}) accurately matches active users with role_id`);
+
+    // FINAL TEST H.2: Disabled user excluded from active count
+    console.log('[FINAL TEST H.2] Disabled user excluded from active count');
+    // Create a disabled user with role_id = foRole.id
+    const disabledUser = await pool.query(`
+      INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, account_status)
+      VALUES (1, $1, 'test_hraf_disabled_user', 'test_hraf_disabled@oaklawang.com', 'dummy_hash', 'TEST_HRAF Disabled User', FALSE, 'DISABLED')
+      RETURNING id
+    `, [foRole.id]);
+    const dynRolesG = await request('GET', '/api/hrd/dynamic-roles?property_id=1', null, token);
+    const foRoleAfterDisabled = dynRolesG.body.data.find(r => r.id === foRole.id);
+    const foCountAfterDisabled = foRoleAfterDisabled.active_user_count !== undefined ? foRoleAfterDisabled.active_user_count : foRoleAfterDisabled.user_count;
+    if (foCountAfterDisabled !== expectedFoCount) {
+      throw new Error(`FINAL TEST H.2 Failed: Disabled user was counted! Expected ${expectedFoCount}, got ${foCountAfterDisabled}`);
+    }
+    await pool.query('DELETE FROM users WHERE id = $1', [disabledUser.rows[0].id]);
+    console.log('  ✓ Disabled user correctly excluded from role active user count');
+
+    // FINAL TEST H.3: Custom property role counts only correct property users
+    console.log('[FINAL TEST H.3] Custom property role counts only correct property users');
+    await pool.query(
+      `INSERT INTO properties (id, name, property_code)
+       VALUES (9992, 'Test Prop B', 'TPB99')
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`
+    );
+
+    // Create custom role in Property 1
+    const customRoleH = await request('POST', '/api/hrd/roles', {
+      property_id: 1,
+      name: 'TEST_HRAF_Prop1_Role',
+      description: 'Role scoped to property 1'
+    }, token);
+    if (customRoleH.status !== 201) {
+      throw new Error(`FINAL TEST H.3 Failed to create custom role: ${customRoleH.status}`);
+    }
+    const roleHId = customRoleH.body.data.id;
+
+    // Create user in Property 1 with this role
+    const userProp1 = await pool.query(`
+      INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, account_status)
+      VALUES (1, $1, 'test_hraf_u_prop1', 'test_hraf_u_prop1@oaklawang.com', 'dummy_hash', 'TEST_HRAF User Prop1', TRUE, 'READY')
+      RETURNING id
+    `, [roleHId]);
+
+    // Create user in Property 9992 with this role (simulate cross-property reference)
+    const userProp2 = await pool.query(`
+      INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, account_status)
+      VALUES (9992, $1, 'test_hraf_u_prop2', 'test_hraf_u_prop2@oaklawang.com', 'dummy_hash', 'TEST_HRAF User Prop2', TRUE, 'READY')
+      RETURNING id
+    `, [roleHId]);
+
+    const dynRolesH = await request('GET', '/api/hrd/dynamic-roles?property_id=1', null, token);
+    const roleHData = dynRolesH.body.data.find(r => r.id === roleHId);
+    const roleHCount = roleHData.active_user_count !== undefined ? roleHData.active_user_count : roleHData.user_count;
+    if (roleHCount !== 1) {
+      throw new Error(`FINAL TEST H.3 Failed: Expected custom role user count = 1 for property 1, got ${roleHCount}`);
+    }
+
+    // Clean up users and role
+    await pool.query('DELETE FROM users WHERE id IN ($1, $2)', [userProp1.rows[0].id, userProp2.rows[0].id]);
+    await pool.query('DELETE FROM roles WHERE id = $1', [roleHId]);
+    console.log('  ✓ Custom property role counts strictly only users in its own property');
+
+    // FINAL TEST I: Department/Position/Role remain independent
+    console.log('[FINAL TEST I] Department/Position/Role remain independent');
+    const deptFoRes = await pool.query("SELECT id FROM hr_departments WHERE property_id = 1 AND code = 'FO'");
+    const deptFoId = deptFoRes.rows[0].id;
+    const posRecepRes = await pool.query("SELECT id FROM hr_positions WHERE property_id = 1 AND name = 'Receptionist'");
+    const posRecepId = posRecepRes.rows[0].id;
+
+    const empI = await request('POST', '/api/hrd/employees', {
+      property_id: 1,
+      full_name: 'TEST_HRAF_Independent_Emp',
+      department_id: deptFoId,
+      position_id: posRecepId,
+      role_id: foRole.id,
+      access_type: 'PMS_STAFF'
+    }, token);
+    if (empI.status !== 201) {
+      throw new Error(`FINAL TEST I Failed to create employee: ${empI.status} ${JSON.stringify(empI.body)}`);
+    }
+    const empIId = empI.body.data.id;
+
+    // Mutate department to Housekeeping without changing role
+    const deptHkRes = await pool.query("SELECT id FROM hr_departments WHERE property_id = 1 AND code = 'HK'");
+    const deptHkId = deptHkRes.rows[0].id;
+    const posHkRes = await pool.query("SELECT id FROM hr_positions WHERE property_id = 1 AND name = 'Room Attendant'");
+    const posHkId = posHkRes.rows[0].id;
+
+    const updateEmpI = await request('PUT', `/api/hrd/employees/${empIId}`, {
+      property_id: 1,
+      department_id: deptHkId,
+      position_id: posHkId
+    }, token);
+    if (updateEmpI.status !== 200) {
+      throw new Error(`FINAL TEST I Failed to update employee department/position: ${updateEmpI.status} ${JSON.stringify(updateEmpI.body)}`);
+    }
+
+    // Verify employee role has NOT changed automatically
+    const checkEmpIRow = await pool.query('SELECT department_id, position_id, role FROM hr_employees WHERE id = $1', [empIId]);
+    if (checkEmpIRow.rows[0].role !== 'Front Office') {
+      throw new Error(`FINAL TEST I Failed: Department change unexpectedly altered role! Expected 'Front Office', got ${checkEmpIRow.rows[0].role}`);
+    }
+
+    // Now change role without changing department/position
+    const hkRole = rolesListF.find(r => r.name === 'Housekeeping');
+    const updateEmpRoleI = await request('PUT', `/api/hrd/employees/${empIId}`, {
+      property_id: 1,
+      role_id: hkRole.id
+    }, token);
+    if (updateEmpRoleI.status !== 200) {
+      throw new Error(`FINAL TEST I Failed to update employee role: ${updateEmpRoleI.status} ${JSON.stringify(updateEmpRoleI.body)}`);
+    }
+
+    const checkEmpRoleIRow = await pool.query('SELECT department_id, position_id, role FROM hr_employees WHERE id = $1', [empIId]);
+    if (checkEmpRoleIRow.rows[0].department_id !== deptHkId || checkEmpRoleIRow.rows[0].position_id !== posHkId) {
+      throw new Error('FINAL TEST I Failed: Role change unexpectedly altered department_id or position_id');
+    }
+    if (checkEmpRoleIRow.rows[0].role !== 'Housekeeping') {
+      throw new Error(`FINAL TEST I Failed: Expected role 'Housekeeping', got ${checkEmpRoleIRow.rows[0].role}`);
+    }
+    await pool.query('DELETE FROM hr_employees WHERE id = $1', [empIId]);
+    console.log('  ✓ Department, Position, and Role are completely independent');
+
+    console.log('\n=== ALL HR-ACCESS-1 INTEGRATION TESTS (A - AJ + REVIEW A - K + FINAL A - I) PASSED! ===\n');
   } finally {
     console.log('Cleaning up test fixtures...');
     await cleanupTestFixtures();

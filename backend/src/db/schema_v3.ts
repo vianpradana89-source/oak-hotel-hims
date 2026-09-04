@@ -4188,8 +4188,14 @@ export async function initializeDatabase(pool: Pool) {
         const deptId = dRow.rows[0]?.id;
 
         let posId = null;
-        if (deptId && emp.position) {
-          const pRow = await auditMigrationClient.query('SELECT id FROM hr_positions WHERE property_id = $1 AND department_id = $2 AND LOWER(name) = LOWER($3)', [emp.property_id || 1, deptId, emp.position.trim()]);
+        const legacyPos = (emp.position || '').trim();
+        // Provenance guard: Do not auto-create positions for platform role 'super admin'
+        // or where legacy employee position was simply a copied bootstrap role ('front office' in FO, 'housekeeping' in HK)
+        const isCopiedBootstrapRole = ['front office', 'housekeeping'].includes(legacyPos.toLowerCase()) &&
+          ['front office', 'housekeeping', 'fo', 'hk'].includes((emp.department || '').toLowerCase());
+        const isPlatformRole = legacyPos.toLowerCase() === 'super admin';
+        if (deptId && legacyPos && !isCopiedBootstrapRole && !isPlatformRole) {
+          const pRow = await auditMigrationClient.query('SELECT id FROM hr_positions WHERE property_id = $1 AND department_id = $2 AND LOWER(name) = LOWER($3)', [emp.property_id || 1, deptId, legacyPos]);
           if (pRow.rows.length > 0) {
             posId = pRow.rows[0].id;
           } else {
@@ -4198,7 +4204,7 @@ export async function initializeDatabase(pool: Pool) {
               VALUES ($1, $2, $3, 100, TRUE)
               ON CONFLICT (property_id, department_id, name) DO UPDATE SET is_active = TRUE
               RETURNING id;
-            `, [emp.property_id || 1, deptId, emp.position.trim()]);
+            `, [emp.property_id || 1, deptId, legacyPos]);
             posId = newPos.rows[0]?.id;
           }
         }
@@ -4261,6 +4267,106 @@ export async function initializeDatabase(pool: Pool) {
 
         INSERT INTO schema_migrations (version)
         VALUES ('auth_hr_access1_review_patch_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // ------------------------------------------------------------------------
+    // HR-ACCESS-1 SMOKE PATCH: Clean polluted positions from canonical roles
+    // ------------------------------------------------------------------------
+    const cleanPollutedPositionsMig = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr_access1_clean_polluted_positions_v1'"
+    );
+    if (cleanPollutedPositionsMig.rows.length === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Detach employees from provably polluted platform role 'super admin'
+        UPDATE hr_employees e
+        SET position_id = NULL
+        FROM hr_positions p
+        WHERE e.position_id = p.id
+          AND LOWER(TRIM(p.name)) = 'super admin';
+
+        -- 2. Delete provably polluted platform role 'super admin'
+        DELETE FROM hr_positions
+        WHERE LOWER(TRIM(name)) = 'super admin';
+
+        -- 3. Delete unassigned bootstrap residue positions 'front office' under FO and 'housekeeping' under HK
+        DELETE FROM hr_positions p
+        WHERE (
+          (LOWER(TRIM(p.name)) = 'front office' AND EXISTS (SELECT 1 FROM hr_departments d WHERE d.id = p.department_id AND d.code = 'FO'))
+          OR
+          (LOWER(TRIM(p.name)) = 'housekeeping' AND EXISTS (SELECT 1 FROM hr_departments d WHERE d.id = p.department_id AND d.code = 'HK'))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM hr_employees e WHERE e.position_id = p.id
+        );
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr_access1_clean_polluted_positions_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // ------------------------------------------------------------------------
+    // HR-ACCESS-1 ARCHITECTURAL CORRECTION: Restore General Manager & Provenance Position Cleanup
+    // ------------------------------------------------------------------------
+    const provenanceCleanupMig = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr_access1_provenance_position_cleanup_v2'"
+    );
+    if (provenanceCleanupMig.rows.length === 0) {
+      // 1. Ensure canonical 'General Manager' position exists under Management (MG) for all properties
+      await auditMigrationClient.query(`
+        INSERT INTO hr_positions (property_id, department_id, name, sort_order, is_active)
+        SELECT d.property_id, d.id, 'General Manager', 10, TRUE
+        FROM hr_departments d
+        WHERE d.code = 'MG'
+        ON CONFLICT (property_id, department_id, name) DO UPDATE SET is_active = TRUE;
+      `);
+
+      // 2. Re-link any management employee whose position was 'General Manager'
+      await auditMigrationClient.query(`
+        UPDATE hr_employees e
+        SET position_id = p.id
+        FROM hr_positions p
+        JOIN hr_departments d ON d.id = p.department_id
+        WHERE d.code = 'MG'
+          AND p.name = 'General Manager'
+          AND e.property_id = p.property_id
+          AND e.department_id = d.id
+          AND e.position_id IS NULL
+          AND LOWER(TRIM(COALESCE(e.position, ''))) = 'general manager';
+      `);
+
+      // 3. Provenance-safe cleanup of proven bootstrap pollution:
+      // Super Admin is purely a platform security role, never a hotel employee position
+      await auditMigrationClient.query(`
+        UPDATE hr_employees e
+        SET position_id = NULL
+        FROM hr_positions p
+        WHERE e.position_id = p.id
+          AND LOWER(TRIM(p.name)) = 'super admin';
+
+        DELETE FROM hr_positions
+        WHERE LOWER(TRIM(name)) = 'super admin';
+      `);
+
+      // 4. Remove unassigned bootstrap residue for 'front office' under FO and 'housekeeping' under HK
+      // ONLY if zero employees are assigned (provenance safety: ambiguous rows with assigned employees are preserved)
+      await auditMigrationClient.query(`
+        DELETE FROM hr_positions p
+        WHERE (
+          (LOWER(TRIM(p.name)) = 'front office' AND EXISTS (SELECT 1 FROM hr_departments d WHERE d.id = p.department_id AND d.code = 'FO'))
+          OR
+          (LOWER(TRIM(p.name)) = 'housekeeping' AND EXISTS (SELECT 1 FROM hr_departments d WHERE d.id = p.department_id AND d.code = 'HK'))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM hr_employees e WHERE e.position_id = p.id
+        );
+      `);
+
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr_access1_provenance_position_cleanup_v2')
         ON CONFLICT (version) DO NOTHING;
       `);
     }

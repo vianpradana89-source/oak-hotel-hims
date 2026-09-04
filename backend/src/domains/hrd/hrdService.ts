@@ -2537,6 +2537,7 @@ export async function updatePosition(
   const name = payload.name !== undefined ? payload.name.trim() : current.name;
   const deptId = payload.department_id !== undefined ? (payload.department_id ? Number(payload.department_id) : null) : current.department_id;
 
+
   if (name !== current.name || deptId !== current.department_id) {
     const dupCheck = await client.query(
       `SELECT id FROM hr_positions
@@ -2626,14 +2627,30 @@ export async function getDynamicRoles(
   client: PoolClient,
   propertyId?: number
 ): Promise<DynamicRole[]> {
+  const targetPropId = propertyId ? Number(propertyId) : 1;
   const res = await client.query(
-    `SELECT r.*, COUNT(u.id)::int AS active_user_count
+    `SELECT r.*,
+       COUNT(
+         CASE
+           WHEN u.id IS NOT NULL
+             AND u.is_active = TRUE
+             AND (
+               -- Custom role: only users in its property
+               (r.property_id IS NOT NULL AND u.property_id = r.property_id)
+               OR
+               -- System role: users in requested property context ($1) or global/unscoped users
+               (r.property_id IS NULL AND (u.property_id = $1 OR u.property_id IS NULL))
+             )
+           THEN 1
+           ELSE NULL
+         END
+       )::int AS active_user_count
      FROM roles r
-     LEFT JOIN users u ON u.role_id = r.id AND COALESCE(u.is_active, TRUE) = TRUE
+     LEFT JOIN users u ON u.role_id = r.id AND u.is_active = TRUE
      WHERE (r.property_id IS NULL OR r.property_id = $1)
      GROUP BY r.id
      ORDER BY r.is_system_role DESC, r.id ASC`,
-    [propertyId || 1]
+    [targetPropId]
   );
 
   return res.rows.map(r => ({
@@ -2644,6 +2661,7 @@ export async function getDynamicRoles(
     is_system_role: Boolean(r.is_system_role),
     is_active: r.is_active !== false,
     active_user_count: Number(r.active_user_count || 0),
+    user_count: Number(r.active_user_count || 0),
     created_at: r.created_at,
     created_by: r.created_by,
     updated_at: r.updated_at,
@@ -2719,7 +2737,8 @@ export async function createDynamicRole(
     property_id: role.property_id ? Number(role.property_id) : null,
     is_system_role: false,
     is_active: role.is_active !== false,
-    active_user_count: 0
+    active_user_count: 0,
+    user_count: 0
   };
 }
 

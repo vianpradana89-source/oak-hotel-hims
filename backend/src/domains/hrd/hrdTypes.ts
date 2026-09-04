@@ -75,6 +75,7 @@ export interface DynamicRole {
   is_system_role: boolean;
   is_active: boolean;
   active_user_count?: number;
+  user_count?: number;
   created_at: string;
   created_by?: string | null;
   updated_at: string;

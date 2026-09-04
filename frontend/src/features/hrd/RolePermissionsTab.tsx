@@ -90,7 +90,7 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
     setRoleForm({
       name: r.name,
       description: r.description || '',
-      sort_order: r.sort_order,
+      sort_order: r.sort_order ?? 0,
       is_active: r.is_active
     });
     setFeedback(null);
@@ -393,7 +393,7 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                       </td>
                       <td className="py-3 px-4 text-center">
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-100">
-                          {r.user_count || 0}
+                          {r.active_user_count ?? r.user_count ?? 0}
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
@@ -416,7 +416,7 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                             Edit
                           </button>
                         )}
-                        {!r.is_system_role && Number(r.user_count || 0) === 0 && (
+                        {!r.is_system_role && Number(r.active_user_count ?? r.user_count ?? 0) === 0 && (
                           <button
                             type="button"
                             onClick={() => handleDeleteRole(r)}
