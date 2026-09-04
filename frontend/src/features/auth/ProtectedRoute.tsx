@@ -1,13 +1,14 @@
-﻿import React from 'react';
+import React from 'react';
 import { useAuth } from './AuthContext';
 import { LoginPage } from './LoginPage';
+import { OnboardingWorkspace } from './OnboardingWorkspace';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
 }
 
 export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { user, isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -44,6 +45,11 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 
   if (!isAuthenticated) {
     return <LoginPage />;
+  }
+
+  // Strict ONBOARDING boundary: onboarding users MUST NOT enter PMS
+  if (user?.scope === 'ONBOARDING') {
+    return <OnboardingWorkspace />;
   }
 
   return <>{children}</>;

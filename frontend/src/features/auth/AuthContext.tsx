@@ -1,4 +1,4 @@
-﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
 export interface AuthUser {
   id: number;
@@ -8,6 +8,9 @@ export interface AuthUser {
   role: string;
   role_id: number;
   property_id: number;
+  scope?: 'FULL' | 'ONBOARDING';
+  account_status?: string;
+  must_change_password?: boolean;
 }
 
 interface AuthContextType {
@@ -18,6 +21,7 @@ interface AuthContextType {
   login: (emailOrUsername: string, password: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => void;
   authFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  updateSessionToken: (newToken: string, updatedUserPartial?: Partial<AuthUser>) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -145,6 +149,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
   };
 
+  const updateSessionToken = (newToken: string, updatedUserPartial?: Partial<AuthUser>) => {
+    localStorage.setItem(TOKEN_KEY, newToken);
+    setToken(newToken);
+    if (updatedUserPartial) {
+      setUser((prev) => (prev ? { ...prev, ...updatedUserPartial } : null));
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -155,6 +167,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         login,
         logout,
         authFetch,
+        updateSessionToken,
       }}
     >
       {children}

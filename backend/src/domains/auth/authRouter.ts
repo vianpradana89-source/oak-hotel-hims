@@ -1,6 +1,12 @@
-﻿import { Router, type Request, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import type { Pool } from 'pg';
-import { loginUser, hashPassword, comparePassword } from './authService';
+import {
+  loginUser,
+  hashPassword,
+  comparePassword,
+  completeInitialPassword,
+  getOnboardingStatus
+} from './authService';
 import { requireAuth, type AuthenticatedRequest } from './authMiddleware';
 
 export function createAuthRouter(pool: Pool): Router {
@@ -42,7 +48,8 @@ export function createAuthRouter(pool: Pool): Router {
       const userId = req.user?.id;
       const result = await pool.query(
         `SELECT u.id, u.property_id, u.role_id, u.username, u.email,
-                u.full_name, u.is_active, r.name AS role_name
+                u.full_name, u.is_active, u.account_status, u.must_change_password,
+                r.name AS role_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
          WHERE u.id = $1
@@ -59,6 +66,7 @@ export function createAuthRouter(pool: Pool): Router {
       }
 
       const row = result.rows[0];
+      const scope = req.user?.scope || (row.account_status === 'READY' || !row.account_status ? 'FULL' : 'ONBOARDING');
       return res.json({
         status: 'OK',
         data: {
@@ -69,7 +77,10 @@ export function createAuthRouter(pool: Pool): Router {
             full_name: row.full_name,
             role: row.role_name || 'Super Admin',
             role_id: row.role_id ? Number(row.role_id) : 1,
-            property_id: row.property_id ? Number(row.property_id) : 1
+            property_id: row.property_id ? Number(row.property_id) : 1,
+            scope,
+            account_status: row.account_status || 'READY',
+            must_change_password: Boolean(row.must_change_password)
           }
         }
       });
@@ -82,7 +93,62 @@ export function createAuthRouter(pool: Pool): Router {
     }
   });
 
-  // 3. POST /api/auth/change-password (Protected)
+  // 3. GET /api/auth/onboarding-status (Protected - allows ONBOARDING scope)
+  router.get('/onboarding-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User ID tidak ditemukan.' });
+      }
+
+      const statusData = await getOnboardingStatus(pool, userId);
+      return res.json({
+        status: 'OK',
+        data: statusData
+      });
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'ONBOARDING_STATUS_ERROR',
+        message: err.message || 'Gagal mengambil status onboarding.'
+      });
+    }
+  });
+
+  // 4. POST /api/auth/complete-initial-password (Protected - ONBOARDING scope)
+  router.post('/complete-initial-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User ID tidak ditemukan.' });
+      }
+
+      const result = await completeInitialPassword(pool, userId, req.body || {});
+      return res.json({
+        status: 'OK',
+        message: 'Password pribadi berhasil dibuat. Silakan lanjutkan pendaftaran wajah.',
+        data: result
+      });
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'COMPLETE_PASSWORD_ERROR',
+        message: err.message || 'Gagal memperbarui password awal.'
+      });
+    }
+  });
+
+  // 5. POST /api/auth/logout (Protected / Public safe)
+  router.post('/logout', async (_req: Request, res: Response) => {
+    return res.json({
+      status: 'OK',
+      message: 'Logout berhasil.'
+    });
+  });
+
+  // 6. POST /api/auth/change-password (Protected - FULL scope only)
   router.post('/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const userId = req.user?.id;

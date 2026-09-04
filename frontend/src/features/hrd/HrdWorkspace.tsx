@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useAuth } from '../auth/AuthContext';
 import { AVAILABLE_ROLE_OPTIONS } from '../auth/permissions';
 import { RolePermissionsMatrixTab } from '../settings/RolePermissionsMatrixTab';
 import {
@@ -117,6 +118,32 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
   const [repairing, setRepairing] = useState(false);
   const [repairNotice, setRepairNotice] = useState<string | null>(null);
+  const { user: currentUser } = useAuth();
+  const [employeeScopeTab, setEmployeeScopeTab] = useState<'ACTIVE' | 'ARCHIVE'>('ACTIVE');
+
+  // Deactivation Modal state
+  const [deactivateTarget, setDeactivateTarget] = useState<HrEmployee | null>(null);
+  const [deactivateReason, setDeactivateReason] = useState('Resign / Pengunduran Diri');
+  const [deactivateEffectiveDate, setDeactivateEffectiveDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [deactivating, setDeactivating] = useState(false);
+
+  // Reactivation Modal state
+  const [reactivateTarget, setReactivateTarget] = useState<HrEmployee | null>(null);
+  const [reactivating, setReactivating] = useState(false);
+
+  // Hard Delete Login Account Modal state (Super Admin / GM only)
+  const [deleteAccountTarget, setDeleteAccountTarget] = useState<HrEmployee | null>(null);
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
+  const [deleteAccountHistoryDetails, setDeleteAccountHistoryDetails] = useState<string[]>([]);
+
+  const isSuperAdminOrGM = Boolean(
+    currentUser?.role &&
+      (currentUser.role.toLowerCase().includes('admin') ||
+        currentUser.role.toLowerCase().includes('gm') ||
+        currentUser.role.toLowerCase().includes('general manager'))
+  );
 
   const getAuthHeaders = (): HeadersInit => {
     const token = localStorage.getItem('oak_hims_auth_token');
@@ -361,32 +388,99 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     }
   };
 
-  const handleToggleStatus = async (emp: HrEmployee) => {
-    const nextStatus = !emp.is_active;
-    const actionText = nextStatus ? 'aktifkan' : 'nonaktifkan';
-    if (!confirm(`Apakah Anda yakin ingin me-${actionText} akun karyawan "${emp.full_name || emp.username}"?`)) return;
+  const handleOpenDeactivateModal = (emp: HrEmployee) => {
+    setDeactivateTarget(emp);
+    setDeactivateReason('Resign / Pengunduran Diri');
+    setDeactivateEffectiveDate(new Date().toISOString().slice(0, 10));
+  };
 
+  const handleExecuteDeactivate = async () => {
+    if (!deactivateTarget) return;
+    setDeactivating(true);
     try {
-      if (nextStatus) {
-        const res = await fetch(`/api/hrd/employees/${emp.id}`, {
-          method: 'PATCH',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ property_id: propertyId, is_active: true, status: 'ACTIVE' })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan karyawan');
-      } else {
-        const res = await fetch(`/api/hrd/employees/${emp.id}`, {
-          method: 'DELETE',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ property_id: propertyId })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Gagal menonaktifkan karyawan');
-      }
+      const res = await fetch(`/api/hrd/employees/${deactivateTarget.id}/deactivate`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          property_id: propertyId,
+          reason: deactivateReason,
+          effective_date: deactivateEffectiveDate
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal menonaktifkan karyawan');
+      setDeactivateTarget(null);
       await fetchData();
     } catch (err: any) {
-      alert(err.message || 'Gagal mengubah status akun');
+      alert(err.message || 'Gagal menonaktifkan karyawan');
+    } finally {
+      setDeactivating(false);
+    }
+  };
+
+  const handleOpenReactivateModal = (emp: HrEmployee) => {
+    setReactivateTarget(emp);
+  };
+
+  const handleExecuteReactivate = async () => {
+    if (!reactivateTarget) return;
+    setReactivating(true);
+    try {
+      const res = await fetch(`/api/hrd/employees/${reactivateTarget.id}/reactivate`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ property_id: propertyId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan kembali karyawan');
+      const targetEmp = reactivateTarget;
+      setReactivateTarget(null);
+      await fetchData();
+      // Requirement 16: Automatically run diagnosis to offer login account activation/creation
+      await handleOpenDiagnosis(targetEmp);
+    } catch (err: any) {
+      alert(err.message || 'Gagal mengaktifkan kembali karyawan');
+    } finally {
+      setReactivating(false);
+    }
+  };
+
+  const handleOpenDeleteAccountModal = (emp: HrEmployee) => {
+    setDeleteAccountTarget(emp);
+    setDeleteConfirmInput('');
+    setDeleteAccountError(null);
+    setDeleteAccountHistoryDetails([]);
+  };
+
+  const handleExecuteDeleteAccount = async () => {
+    if (!deleteAccountTarget) return;
+    setDeletingAccount(true);
+    setDeleteAccountError(null);
+    setDeleteAccountHistoryDetails([]);
+    try {
+      const res = await fetch(`/api/hrd/employees/${deleteAccountTarget.id}/login-account`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          property_id: propertyId,
+          confirm_identity: deleteConfirmInput
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.code === 'ACCOUNT_HAS_HISTORY' && Array.isArray(data.details)) {
+          setDeleteAccountHistoryDetails(data.details);
+        }
+        throw new Error(data.message || 'Gagal menghapus akun login');
+      }
+      setDeleteAccountTarget(null);
+      setDeleteConfirmInput('');
+      await fetchData();
+      alert('Akun login berhasil dihapus permanen. Data kepegawaian tetap tersimpan.');
+    } catch (err: any) {
+      setDeleteAccountError(err.message || 'Gagal menghapus akun');
+    } finally {
+      setDeletingAccount(false);
     }
   };
 
@@ -398,10 +492,17 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
         </span>
       );
     }
-    if (emp.user_is_active === false || emp.is_active === false) {
+    if (emp.user_is_active === false || emp.is_active === false || emp.account_status === 'DISABLED') {
       return (
         <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-rose-100 text-rose-800 border border-rose-200">
           Dinonaktifkan
+        </span>
+      );
+    }
+    if (emp.account_status === 'SUSPENDED') {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-red-100 text-red-800 border border-red-200">
+          Ditangguhkan
         </span>
       );
     }
@@ -409,6 +510,13 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       return (
         <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-200">
           Menunggu Login Pertama
+        </span>
+      );
+    }
+    if (emp.account_status === 'FACE_ENROLLMENT_REQUIRED') {
+      return (
+        <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-sky-100 text-sky-800 border border-sky-200">
+          Menunggu Foto Wajah
         </span>
       );
     }
@@ -474,7 +582,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setWhatsAppOpened(false);
   };
 
-  const filteredEmployees = employees.filter(emp => {
+  const activeEmployeesList = employees.filter(emp => emp.is_active !== false && emp.status === 'ACTIVE');
+  const archiveEmployeesList = employees.filter(emp => emp.is_active === false || emp.status !== 'ACTIVE');
+
+  const displayedEmployees = (employeeScopeTab === 'ACTIVE' ? activeEmployeesList : archiveEmployeesList).filter(emp => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     const fullName = (emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`).toLowerCase();
@@ -517,7 +628,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
         )}
       </div>
 
-      {/* Workspace Sub-Tabs Navigation */}
+      {/* Workspace Top-Level Sub-Tabs Navigation */}
       <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
         <button
           type="button"
@@ -531,7 +642,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
           </svg>
-          Daftar Karyawan & Akun ({employees.length})
+          Daftar Karyawan ({employees.length})
         </button>
 
         <button
@@ -563,119 +674,217 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
       {/* Tab 1: Employees List Table Card */}
       {activeTab === 'EMPLOYEES' && (
-        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-          {/* Search Bar */}
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-4">
-            <div className="relative flex-1 max-w-sm">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Cari karyawan berdasarkan nama, role, atau email..."
-                className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-              />
-              <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-            </div>
-            <span className="text-xs text-slate-500 font-medium">
-              Total: <strong>{filteredEmployees.length}</strong> Karyawan
-            </span>
+        <div className="space-y-4">
+          {/* Sub-Tabs: Karyawan Aktif vs Nonaktif / Arsip */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setEmployeeScopeTab('ACTIVE')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer border ${
+                employeeScopeTab === 'ACTIVE'
+                  ? 'bg-[#1b4332] text-white border-[#1b4332] shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+              }`}
+            >
+              <span>Karyawan Aktif</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  employeeScopeTab === 'ACTIVE' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {activeEmployeesList.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setEmployeeScopeTab('ARCHIVE')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer border ${
+                employeeScopeTab === 'ARCHIVE'
+                  ? 'bg-stone-800 text-white border-stone-800 shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+              }`}
+            >
+              <span>Nonaktif / Arsip</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  employeeScopeTab === 'ARCHIVE' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {archiveEmployeesList.length}
+              </span>
+            </button>
           </div>
 
-          {loading ? (
-            <div className="p-12 text-center text-xs text-slate-500">
-              <div className="w-8 h-8 rounded-full border-2 border-emerald-600 border-t-transparent animate-spin mx-auto mb-2" />
-              Memuat daftar karyawan...
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
+            {/* Search Bar */}
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-4">
+              <div className="relative flex-1 max-w-sm">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Cari karyawan berdasarkan nama, role, atau email..."
+                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                />
+                <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <span className="text-xs text-slate-500 font-medium">
+                Total: <strong>{displayedEmployees.length}</strong> Karyawan
+              </span>
             </div>
-          ) : filteredEmployees.length === 0 ? (
-            <div className="p-12 text-center text-slate-400 text-xs">
-              Tidak ada data karyawan yang sesuai dengan pencarian.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200/80 text-slate-600 font-bold uppercase tracking-wider text-[11px]">
-                    <th className="py-3 px-4">Nama Lengkap & Kode</th>
-                    <th className="py-3 px-4">Email & Kontak</th>
-                    <th className="py-3 px-4">Role / Peran</th>
-                    <th className="py-3 px-4">Departemen</th>
-                    <th className="py-3 px-4 text-center">Status Akun</th>
-                    <th className="py-3 px-4 text-right">Aksi</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredEmployees.map((emp) => {
-                    const displayName = emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || emp.username || 'Staf OAK';
-                    return (
-                      <tr key={emp.id} className="hover:bg-slate-50/80 transition">
-                        <td className="py-3 px-4">
-                          <div className="font-bold text-slate-900">{displayName}</div>
-                          <div className="text-[11px] text-slate-400">
-                            {emp.employee_code || `EMP-${emp.id}`} {emp.username ? `• @${emp.username}` : ''}
-                          </div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="text-slate-800 font-medium">{emp.email || '—'}</div>
-                          <div className="text-[11px] text-slate-400">{emp.phone || '—'}</div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#1b4332]/10 text-[#1b4332] border border-[#1b4332]/20">
-                            {emp.role || 'Crew'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-slate-600 font-medium">
-                          {emp.department || 'Front Office'}
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          {getAccountStatusBadge(emp)}
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleOpenDiagnosis(emp)}
-                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
-                              title="Diagnosa dan Perbaiki Kredensial Akun"
-                            >
-                              Diagnosa Akun
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleExecuteResetPassword(emp)}
-                              className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
-                              title="Reset Password Karyawan"
-                            >
-                              Reset Password
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEdit(emp)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleToggleStatus(emp)}
-                              className={`px-2 py-1 text-[11px] font-semibold rounded-lg transition cursor-pointer ${
-                                emp.is_active !== false
-                                  ? 'text-rose-700 bg-rose-50 hover:bg-rose-100'
-                                  : 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'
-                              }`}
-                            >
-                              {emp.is_active !== false ? 'Nonaktifkan' : 'Aktifkan'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+
+            {loading ? (
+              <div className="p-12 text-center text-xs text-slate-500">
+                <div className="w-8 h-8 rounded-full border-2 border-emerald-600 border-t-transparent animate-spin mx-auto mb-2" />
+                Memuat daftar karyawan...
+              </div>
+            ) : displayedEmployees.length === 0 ? (
+              <div className="p-12 text-center text-slate-400 text-xs">
+                {employeeScopeTab === 'ACTIVE'
+                  ? 'Tidak ada data karyawan aktif yang sesuai dengan pencarian.'
+                  : 'Tidak ada karyawan dalam arsip / nonaktif.'}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200/80 text-slate-600 font-bold uppercase tracking-wider text-[11px]">
+                      <th className="py-3 px-4">Nama Lengkap & Kode</th>
+                      <th className="py-3 px-4">Email & Kontak</th>
+                      <th className="py-3 px-4">
+                        {employeeScopeTab === 'ACTIVE' ? 'Role / Peran' : 'Role Terakhir'}
+                      </th>
+                      <th className="py-3 px-4">Departemen</th>
+                      <th className="py-3 px-4 text-center">Status Akun</th>
+                      {employeeScopeTab === 'ARCHIVE' && (
+                        <th className="py-3 px-4">Tanggal Diperbarui</th>
+                      )}
+                      <th className="py-3 px-4 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {displayedEmployees.map((emp) => {
+                      const displayName =
+                        emp.full_name ||
+                        `${emp.first_name || ''} ${emp.last_name || ''}`.trim() ||
+                        emp.username ||
+                        'Staf OAK';
+
+                      return (
+                        <tr key={emp.id} className="hover:bg-slate-50/80 transition">
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-900">{displayName}</span>
+                              {employeeScopeTab === 'ARCHIVE' && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-stone-100 text-stone-700 border border-stone-200">
+                                  Arsip / Nonaktif
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              {emp.employee_code || `EMP-${emp.id}`}{' '}
+                              {emp.username ? `• @${emp.username}` : ''}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="text-slate-800 font-medium">{emp.email || '—'}</div>
+                            <div className="text-[11px] text-slate-400">{emp.phone || '—'}</div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#1b4332]/10 text-[#1b4332] border border-[#1b4332]/20">
+                              {emp.role || 'Crew'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600 font-medium">
+                            {emp.department || 'Front Office'}
+                          </td>
+                          <td className="py-3 px-4 text-center">
+                            {getAccountStatusBadge(emp)}
+                          </td>
+                          {employeeScopeTab === 'ARCHIVE' && (
+                            <td className="py-3 px-4 text-slate-500 text-[11px]">
+                              {emp.updated_at ? new Date(emp.updated_at).toLocaleDateString('id-ID') : '—'}
+                            </td>
+                          )}
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {employeeScopeTab === 'ACTIVE' ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDiagnosis(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                                    title="Diagnosa dan Perbaiki Kredensial Akun"
+                                  >
+                                    Diagnosa Akun
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleExecuteResetPassword(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
+                                    title="Reset Password Karyawan"
+                                  >
+                                    Reset Password
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEdit(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeactivateModal(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
+                                    title="Nonaktifkan Karyawan dan Pindahkan ke Arsip"
+                                  >
+                                    Nonaktifkan
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDiagnosis(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                                    title="Lihat Detail Diagnosis Akun"
+                                  >
+                                    Lihat
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenReactivateModal(emp)}
+                                    className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                                    title="Aktifkan Kembali Karyawan"
+                                  >
+                                    Aktifkan Kembali
+                                  </button>
+                                  {emp.user_id && isSuperAdminOrGM && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenDeleteAccountModal(emp)}
+                                      className="px-2 py-1 text-[11px] font-semibold text-red-600 hover:text-red-800 hover:bg-red-50 border border-red-200 rounded-lg transition cursor-pointer"
+                                      title="Hapus Permanen Akun Login Auth (Khusus Super Admin / GM)"
+                                    >
+                                      Hapus Akun Login
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1172,6 +1381,212 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                 className="w-full py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition cursor-pointer"
               >
                 Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deactivation Modal */}
+      {deactivateTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-slate-900">
+                Nonaktifkan Karyawan & Arsipkan
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDeactivateTarget(null)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-600 space-y-1">
+              <div>Karyawan: <strong className="text-slate-900">{deactivateTarget.full_name || deactivateTarget.username}</strong></div>
+              <div>Kode: <strong className="text-slate-900">{deactivateTarget.employee_code || `EMP-${deactivateTarget.id}`}</strong></div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Alasan Nonaktif
+                </label>
+                <select
+                  value={deactivateReason}
+                  onChange={(e) => setDeactivateReason(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-rose-500"
+                >
+                  <option value="Resign / Pengunduran Diri">Resign / Pengunduran Diri</option>
+                  <option value="Pemutusan Hubungan Kerja (PHK)">Pemutusan Hubungan Kerja (PHK)</option>
+                  <option value="Habis Masa Kontrak">Habis Masa Kontrak</option>
+                  <option value="Pensiun">Pensiun</option>
+                  <option value="Mutasi / Pindah Tugas">Mutasi / Pindah Tugas</option>
+                  <option value="Lainnya">Lainnya</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Tanggal Efektif
+                </label>
+                <input
+                  type="date"
+                  value={deactivateEffectiveDate}
+                  onChange={(e) => setDeactivateEffectiveDate(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-rose-500"
+                />
+              </div>
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 space-y-1">
+                <p className="font-bold">Informasi Keamanan:</p>
+                <p>
+                  Menonaktifkan karyawan akan secara otomatis menonaktifkan akun login auth dan mencabut seluruh sesi aktif. Data operasional historis (transaksi, jadwal, audit log) tetap tersimpan aman di database.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeactivateTarget(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deactivating}
+                onClick={handleExecuteDeactivate}
+                className="flex-1 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold transition cursor-pointer"
+              >
+                {deactivating ? 'Menonaktifkan...' : 'Konfirmasi Nonaktifkan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reactivation Modal */}
+      {reactivateTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-slate-900">
+                Aktifkan Kembali Karyawan
+              </h3>
+              <button
+                type="button"
+                onClick={() => setReactivateTarget(null)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Apakah Anda yakin ingin mengaktifkan kembali data personil untuk{' '}
+              <strong className="text-slate-900">{reactivateTarget.full_name || reactivateTarget.username}</strong>?
+            </p>
+
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 space-y-1">
+              <p className="font-bold">Kebijakan Keamanan Akun:</p>
+              <p>
+                Tindakan ini hanya mengaktifkan kembali data kepegawaian. Akun login auth <strong>TIDAK</strong> akan diaktifkan secara otomatis. Setelah pengaktifan, sistem akan menampilkan opsi diagnosis untuk mengaktifkan kembali atau membuat akun login auth baru secara aman.
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setReactivateTarget(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={reactivating}
+                onClick={handleExecuteReactivate}
+                className="flex-1 py-2.5 rounded-xl bg-[#1b4332] hover:bg-[#143326] text-white text-xs font-bold transition cursor-pointer"
+              >
+                {reactivating ? 'Mengaktifkan...' : 'Konfirmasi Aktifkan Kembali'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hard Delete Auth Account Modal (Super Admin / GM Only) */}
+      {deleteAccountTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-red-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-red-100">
+              <h3 className="font-serif font-bold text-base text-red-900">
+                Hapus Permanen Akun Login Auth
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDeleteAccountTarget(null)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-900 space-y-1.5">
+              <p className="font-bold uppercase tracking-wider">Perhatian Keras (Super Admin / GM):</p>
+              <p>
+                Tindakan ini <strong>HANYA</strong> menghapus akun kredensial login (tabel <code>users</code>). Data personil karyawan (<code>hr_employees</code>) tetap tersimpan utuh di sistem.
+              </p>
+              <p>
+                Jika akun ini pernah memiliki histori login atau transaksi operasional (transaksi kasir, folio, jadwal kerja, audit), penghapusan akan <strong>DITOLAK</strong> demi integritas jejak audit hotel.
+              </p>
+            </div>
+
+            {deleteAccountError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold space-y-1">
+                <div>⚠ {deleteAccountError}</div>
+                {deleteAccountHistoryDetails.length > 0 && (
+                  <ul className="list-disc pl-4 text-[11px] space-y-0.5 mt-1 font-normal">
+                    {deleteAccountHistoryDetails.map((detail, idx) => (
+                      <li key={idx}>{detail}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Ketik persis username ({deleteAccountTarget.username || '—'}) atau email ({deleteAccountTarget.email || '—'}) untuk konfirmasi:
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmInput}
+                onChange={(e) => setDeleteConfirmInput(e.target.value)}
+                placeholder="Ketik username atau email akun login..."
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-red-500 font-mono"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteAccountTarget(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deletingAccount || !deleteConfirmInput.trim()}
+                onClick={handleExecuteDeleteAccount}
+                className="flex-1 py-2.5 rounded-xl bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-xs font-bold transition cursor-pointer"
+              >
+                {deletingAccount ? 'Memeriksa...' : 'Hapus Permanen Akun'}
               </button>
             </div>
           </div>

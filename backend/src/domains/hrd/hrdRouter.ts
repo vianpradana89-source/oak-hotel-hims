@@ -8,6 +8,8 @@ import {
   createEmployeeAccount,
   updateEmployeeAccount,
   deactivateEmployeeAccount,
+  reactivateEmployeeAccount,
+  hardDeleteAuthAccount,
   diagnoseEmployeeLoginAccount,
   repairEmployeeLoginAccount,
   resetEmployeePassword
@@ -16,7 +18,9 @@ import { auditWhatsAppCredentialOpened } from './hrdWhatsapp';
 import type {
   CreateEmployeePayload,
   UpdateEmployeePayload,
-  AccountRepairActionPayload
+  AccountRepairActionPayload,
+  DeactivateEmployeePayload,
+  HardDeleteLoginAccountPayload
 } from './hrdTypes';
 
 function parsePropertyId(val: any): number {
@@ -189,8 +193,8 @@ export function createHrdRouter(pool: Pool): Router {
     }
   });
 
-  // 7. Soft Delete / Deactivate Employee Account
-  router.delete('/employees/:id', async (req: Request, res: Response) => {
+  // 7. Deactivate Employee (Soft Delete / Archive) - both DELETE and POST supported
+  const handleDeactivate = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -206,13 +210,128 @@ export function createHrdRouter(pool: Pool): Router {
         role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
-      const deactivated = await deactivateEmployeeAccount(client, propertyId, employeeId, actor);
+      const options: DeactivateEmployeePayload = {
+        reason: req.body.reason,
+        effective_date: req.body.effective_date
+      };
+
+      const deactivated = await deactivateEmployeeAccount(client, propertyId, employeeId, options, actor);
       await client.query('COMMIT');
-      res.json({ status: 'OK', data: deactivated });
+      res.json({
+        status: 'OK',
+        message: 'Karyawan berhasil dinonaktifkan dan dipindahkan ke arsip.',
+        data: deactivated
+      });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+
+  router.delete('/employees/:id', handleDeactivate);
+  router.post('/employees/:id/deactivate', handleDeactivate);
+
+  // 7b. Reactivate Employee Personnel Record
+  router.post('/employees/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const reactivated = await reactivateEmployeeAccount(client, propertyId, employeeId, actor);
+      await client.query('COMMIT');
+      res.json({
+        status: 'OK',
+        message: 'Data kepegawaian berhasil diaktifkan kembali. Akun login tetap nonaktif sampai dilakukan verifikasi/perbaikan.',
+        data: reactivated
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 7c. Hard Delete Auth Login Account (Super Admin / GM only)
+  router.delete('/employees/:id/login-account', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          const { verifyToken } = require('../auth/authService');
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorRole = actorUser?.role || req.body.actor_role;
+      const normalizedRole = actorRole ? actorRole.toLowerCase().trim() : '';
+      const isPrivileged =
+        normalizedRole.includes('admin') ||
+        normalizedRole.includes('owner') ||
+        normalizedRole.includes('general manager') ||
+        normalizedRole === 'gm';
+
+      if (!isPrivileged) {
+        throw Object.assign(
+          new Error('Akses ditolak: Hanya Super Admin atau General Manager yang diizinkan menghapus permanen akun login.'),
+          { statusCode: 403, code: 'FORBIDDEN' }
+        );
+      }
+
+      const confirmIdentity = req.body.confirm_identity || req.body.confirmIdentity;
+      if (!confirmIdentity) {
+        throw Object.assign(
+          new Error('Konfirmasi identitas (email atau username) wajib diisi untuk menghapus akun login.'),
+          { statusCode: 400, code: 'CONFIRMATION_REQUIRED' }
+        );
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'Super Admin',
+        role: actorRole || 'Super Admin'
+      };
+
+      const result = await hardDeleteAuthAccount(client, propertyId, employeeId, confirmIdentity, actor);
+      await client.query('COMMIT');
+      res.json({
+        status: 'OK',
+        message: 'Akun login berhasil dihapus permanen. Data karyawan tetap tersimpan.',
+        data: result
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message,
+        details: err.details
+      });
     } finally {
       client.release();
     }

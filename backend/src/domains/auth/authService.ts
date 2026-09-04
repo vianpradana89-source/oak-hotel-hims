@@ -13,6 +13,18 @@ export interface AuthUserPayload {
   role: string;
   role_id: number | null;
   property_id: number;
+  scope: 'FULL' | 'ONBOARDING';
+  account_status?: string | null;
+  must_change_password?: boolean;
+}
+
+export interface LoginResult {
+  token: string;
+  user: AuthUserPayload;
+  scope: 'FULL' | 'ONBOARDING';
+  account_status: string;
+  must_change_password: boolean;
+  next_step: 'CHANGE_PASSWORD' | 'ENROLL_FACE' | 'COMPLETE';
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -35,7 +47,7 @@ export function verifyToken(token: string): AuthUserPayload {
 export async function loginUser(
   pool: Pool | PoolClient,
   credentials: { emailOrUsername: string; password: string }
-): Promise<{ token: string; user: AuthUserPayload }> {
+): Promise<LoginResult> {
   const term = (credentials.emailOrUsername || '').trim().toLowerCase();
   
   if (!term || !credentials.password) {
@@ -47,7 +59,9 @@ export async function loginUser(
 
   const res = await pool.query(
     `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.password_hash,
-            u.full_name, u.is_active, r.name AS role_name
+            u.full_name, u.is_active, u.employee_id, u.account_status,
+            u.must_change_password, u.temp_password_expires_at,
+            r.name AS role_name
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
      WHERE LOWER(u.email) = $1 OR LOWER(u.username) = $1
@@ -64,19 +78,76 @@ export async function loginUser(
 
   const userRow = res.rows[0];
 
-  if (userRow.is_active === false) {
-    const err: any = new Error('Akun ini telah dinonaktifkan. Hubungi Administrator.');
+  // 1. Check account disabled
+  if (userRow.is_active === false || userRow.account_status === 'DISABLED') {
+    const err: any = new Error('Akun login Anda dinonaktifkan. Hubungi HRD/Administrator.');
     err.statusCode = 403;
     err.code = 'ACCOUNT_DISABLED';
     throw err;
   }
 
+  // 2. Check account suspended
+  if (userRow.account_status === 'SUSPENDED') {
+    const err: any = new Error('Akun Anda sedang ditangguhkan. Hubungi HRD/Administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_SUSPENDED';
+    throw err;
+  }
+
+  // 3. Check linked employee status
+  if (userRow.employee_id) {
+    const empRes = await pool.query(
+      'SELECT is_active, status FROM hr_employees WHERE id = $1',
+      [userRow.employee_id]
+    );
+    if (empRes.rows.length > 0) {
+      const emp = empRes.rows[0];
+      if (emp.is_active === false || (emp.status && emp.status !== 'ACTIVE')) {
+        const err: any = new Error('Data kepegawaian Anda berstatus non-aktif. Hubungi HRD.');
+        err.statusCode = 403;
+        err.code = 'EMPLOYEE_DISABLED';
+        throw err;
+      }
+    }
+  }
+
+  // 4. Verify password
   const isValid = await comparePassword(credentials.password, userRow.password_hash);
   if (!isValid) {
     const err: any = new Error('Password yang dimasukkan salah.');
     err.statusCode = 401;
     err.code = 'INVALID_CREDENTIALS';
     throw err;
+  }
+
+  // 5. Check temporary password expiry (applies ONLY to temporary password)
+  if (userRow.must_change_password && userRow.temp_password_expires_at) {
+    const expiresAt = new Date(userRow.temp_password_expires_at);
+    if (expiresAt.getTime() < Date.now()) {
+      const err: any = new Error('Password sementara sudah kedaluwarsa. Hubungi HRD untuk membuat ulang akses login.');
+      err.statusCode = 401;
+      err.code = 'TEMP_PASSWORD_EXPIRED';
+      throw err;
+    }
+  }
+
+  // 6. Determine scope & next_step
+  let scope: 'FULL' | 'ONBOARDING' = 'FULL';
+  let nextStep: 'CHANGE_PASSWORD' | 'ENROLL_FACE' | 'COMPLETE' = 'COMPLETE';
+  let effectiveAccountStatus = userRow.account_status || 'READY';
+
+  if (userRow.account_status === 'FIRST_LOGIN_REQUIRED' || userRow.must_change_password === true) {
+    scope = 'ONBOARDING';
+    nextStep = 'CHANGE_PASSWORD';
+    effectiveAccountStatus = 'FIRST_LOGIN_REQUIRED';
+  } else if (userRow.account_status === 'FACE_ENROLLMENT_REQUIRED') {
+    scope = 'ONBOARDING';
+    nextStep = 'ENROLL_FACE';
+    effectiveAccountStatus = 'FACE_ENROLLMENT_REQUIRED';
+  } else {
+    scope = 'FULL';
+    nextStep = 'COMPLETE';
+    effectiveAccountStatus = 'READY';
   }
 
   const user: AuthUserPayload = {
@@ -86,11 +157,192 @@ export async function loginUser(
     full_name: userRow.full_name,
     role: userRow.role_name || 'Super Admin',
     role_id: userRow.role_id ? Number(userRow.role_id) : 1,
-    property_id: userRow.property_id ? Number(userRow.property_id) : 1
+    property_id: userRow.property_id ? Number(userRow.property_id) : 1,
+    scope,
+    account_status: effectiveAccountStatus,
+    must_change_password: Boolean(userRow.must_change_password)
   };
 
   const token = generateToken(user);
-  return { token, user };
+  return {
+    token,
+    user,
+    scope,
+    account_status: effectiveAccountStatus,
+    must_change_password: Boolean(userRow.must_change_password),
+    next_step: nextStep
+  };
+}
+
+export async function completeInitialPassword(
+  pool: Pool | PoolClient,
+  userId: number,
+  payload: { new_password?: string; confirm_password?: string }
+): Promise<{
+  token: string;
+  account_status: string;
+  must_change_password: boolean;
+  next_step: 'ENROLL_FACE';
+}> {
+  const { new_password, confirm_password } = payload;
+  if (!new_password || !confirm_password) {
+    const err: any = new Error('Password baru dan konfirmasi password wajib diisi.');
+    err.statusCode = 400;
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+
+  if (new_password !== confirm_password) {
+    const err: any = new Error('Konfirmasi password tidak cocok dengan password baru.');
+    err.statusCode = 400;
+    err.code = 'PASSWORD_CONFIRMATION_MISMATCH';
+    throw err;
+  }
+
+  if (new_password.length < 8) {
+    const err: any = new Error('Password baru minimal harus 8 karakter.');
+    err.statusCode = 400;
+    err.code = 'INVALID_PASSWORD';
+    throw err;
+  }
+
+  const hasUpper = /[A-Z]/.test(new_password);
+  const hasLower = /[a-z]/.test(new_password);
+  const hasNumber = /[0-9]/.test(new_password);
+  const hasSpecial = /[^A-Za-z0-9]/.test(new_password);
+
+  if (!hasUpper || !hasLower || !hasNumber || !hasSpecial) {
+    const err: any = new Error('Password harus mengandung huruf besar, huruf kecil, angka, dan simbol/karakter khusus.');
+    err.statusCode = 400;
+    err.code = 'INVALID_PASSWORD';
+    throw err;
+  }
+
+  const userRes = await pool.query(
+    `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.full_name,
+            u.password_hash, u.is_active, u.account_status, r.name AS role_name
+     FROM users u
+     LEFT JOIN roles r ON r.id = u.role_id
+     WHERE u.id = $1`,
+    [userId]
+  );
+
+  if (userRes.rows.length === 0) {
+    const err: any = new Error('User tidak ditemukan.');
+    err.statusCode = 404;
+    err.code = 'USER_NOT_FOUND';
+    throw err;
+  }
+
+  const user = userRes.rows[0];
+
+  const isSame = await comparePassword(new_password, user.password_hash);
+  if (isSame) {
+    const err: any = new Error('Password baru tidak boleh sama dengan password sementara sebelumnya.');
+    err.statusCode = 400;
+    err.code = 'PASSWORD_MUST_BE_NEW';
+    throw err;
+  }
+
+  const newHash = await hashPassword(new_password);
+
+  // Update user: personal password set, temp expiry cleared, status -> FACE_ENROLLMENT_REQUIRED
+  await pool.query(
+    `UPDATE users
+     SET password_hash = $1,
+         must_change_password = FALSE,
+         temp_password_expires_at = NULL,
+         account_status = 'FACE_ENROLLMENT_REQUIRED',
+         updated_at = NOW()
+     WHERE id = $2`,
+    [newHash, userId]
+  );
+
+  // Audit log: NEVER log plaintext password or hash
+  await pool.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'AUTH',
+      'INITIAL_PASSWORD_CHANGED',
+      'USER_AUTH',
+      String(userId),
+      JSON.stringify({
+        user_id: userId,
+        username: user.username,
+        account_status: 'FACE_ENROLLMENT_REQUIRED',
+        must_change_password: false,
+        temp_password_expires_at: null,
+        timestamp: new Date().toISOString()
+      }),
+      user.username || 'ONBOARDING',
+      user.property_id || 1
+    ]
+  );
+
+  // Issue refreshed ONBOARDING token with updated state
+  const updatedPayload: AuthUserPayload = {
+    id: Number(user.id),
+    email: user.email,
+    username: user.username,
+    full_name: user.full_name,
+    role: user.role_name || 'Crew',
+    role_id: user.role_id ? Number(user.role_id) : 1,
+    property_id: user.property_id ? Number(user.property_id) : 1,
+    scope: 'ONBOARDING',
+    account_status: 'FACE_ENROLLMENT_REQUIRED',
+    must_change_password: false
+  };
+
+  const newToken = generateToken(updatedPayload);
+
+  return {
+    token: newToken,
+    account_status: 'FACE_ENROLLMENT_REQUIRED',
+    must_change_password: false,
+    next_step: 'ENROLL_FACE'
+  };
+}
+
+export async function getOnboardingStatus(
+  pool: Pool | PoolClient,
+  userId: number
+): Promise<{
+  account_status: string;
+  must_change_password: boolean;
+  next_step: 'CHANGE_PASSWORD' | 'ENROLL_FACE' | 'COMPLETE';
+}> {
+  const res = await pool.query(
+    `SELECT account_status, must_change_password, is_active
+     FROM users WHERE id = $1`,
+    [userId]
+  );
+
+  if (res.rows.length === 0) {
+    const err: any = new Error('User tidak ditemukan.');
+    err.statusCode = 404;
+    err.code = 'USER_NOT_FOUND';
+    throw err;
+  }
+
+  const row = res.rows[0];
+  const accountStatus = row.account_status || 'READY';
+  const mustChange = Boolean(row.must_change_password);
+
+  let nextStep: 'CHANGE_PASSWORD' | 'ENROLL_FACE' | 'COMPLETE' = 'COMPLETE';
+  if (accountStatus === 'FIRST_LOGIN_REQUIRED' || mustChange) {
+    nextStep = 'CHANGE_PASSWORD';
+  } else if (accountStatus === 'FACE_ENROLLMENT_REQUIRED') {
+    nextStep = 'ENROLL_FACE';
+  } else {
+    nextStep = 'COMPLETE';
+  }
+
+  return {
+    account_status: accountStatus,
+    must_change_password: mustChange,
+    next_step: nextStep
+  };
 }
 
 export async function seedSuperAdmin(pool: Pool): Promise<void> {

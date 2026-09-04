@@ -85,7 +85,7 @@ import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
-import { requireAuth, requireRole } from './domains/auth/authMiddleware';
+import { requireAuth, requireRole, onboardingSecurityGuard } from './domains/auth/authMiddleware';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
@@ -93,6 +93,7 @@ import { createRolePermissionsRouter } from './domains/settings/rolePermissionsR
 const app: any = express();
 app.use(cors());
 app.use(express.json());
+app.use(onboardingSecurityGuard);
 
 const uploadDir = path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });

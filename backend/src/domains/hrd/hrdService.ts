@@ -318,8 +318,13 @@ export async function getEmployees(
   `;
   const params: any[] = [propertyId];
 
-  if (options?.scope !== 'all') {
-    sql += ' AND COALESCE(e.is_active, TRUE) = TRUE';
+  if (options?.scope === 'inactive' || options?.scope === 'archive') {
+    sql += " AND (COALESCE(e.is_active, TRUE) = FALSE OR e.status != 'ACTIVE')";
+  } else if (options?.scope === 'all') {
+    // all records, no filter
+  } else {
+    // default: active employees
+    sql += " AND COALESCE(e.is_active, TRUE) = TRUE AND e.status = 'ACTIVE'";
   }
 
   if (options?.department) {
@@ -685,6 +690,7 @@ export async function deactivateEmployeeAccount(
   client: PoolClient,
   propertyId: number,
   employeeId: number,
+  options?: { reason?: string; effective_date?: string },
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<HrEmployee> {
   const currentRes = await client.query(
@@ -701,11 +707,21 @@ export async function deactivateEmployeeAccount(
 
   const current = currentRes.rows[0];
 
+  // 1. Deactivate employee personnel record
   const res = await client.query(
     `UPDATE hr_employees
      SET is_active = FALSE, status = 'INACTIVE', updated_at = NOW()
      WHERE id = $1 AND property_id = $2
      RETURNING *`,
+    [employeeId, propertyId]
+  );
+
+  // 2. Deactivate linked users auth account (is_active = FALSE, account_status = 'DISABLED')
+  const userUpdateRes = await client.query(
+    `UPDATE users
+     SET is_active = FALSE, account_status = 'DISABLED', updated_at = NOW()
+     WHERE employee_id = $1 AND property_id = $2
+     RETURNING id, username, email, account_status`,
     [employeeId, propertyId]
   );
 
@@ -717,6 +733,7 @@ export async function deactivateEmployeeAccount(
     monthly_salary: Number(res.rows[0].monthly_salary || 0)
   };
 
+  // 3. Audit deactivation with reason & effective date
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -725,13 +742,299 @@ export async function deactivateEmployeeAccount(
       'EMPLOYEE_ACCOUNT_DEACTIVATED',
       'EMPLOYEE_ROLE',
       String(deactivated.id),
-      JSON.stringify({ is_active: false, status: 'INACTIVE', previous_status: current.status }),
+      JSON.stringify({
+        is_active: false,
+        status: 'INACTIVE',
+        previous_status: current.status,
+        reason: options?.reason || 'Nonaktifkan via HRD',
+        effective_date: options?.effective_date || new Date().toISOString().slice(0, 10),
+        auth_users_disabled: userUpdateRes.rows.length > 0,
+        disabled_user_ids: userUpdateRes.rows.map((u: any) => u.id)
+      }),
       actor?.name || 'HRD',
       propertyId
     ]
   );
 
   return deactivated;
+}
+
+export async function reactivateEmployeeAccount(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrEmployee> {
+  const currentRes = await client.query(
+    'SELECT * FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(currentRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan pada properti ini.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+
+  const current = currentRes.rows[0];
+
+  // Reactivate personnel record ONLY
+  const res = await client.query(
+    `UPDATE hr_employees
+     SET is_active = TRUE, status = 'ACTIVE', updated_at = NOW()
+     WHERE id = $1 AND property_id = $2
+     RETURNING *`,
+    [employeeId, propertyId]
+  );
+
+  // CRITICAL INVARIANT: DO NOT BLINDLY RESTORE AUTH ACCOUNT.
+  // The login account remains DISABLED until HR explicitly evaluates and triggers diagnosis/repair.
+
+  const reactivated: HrEmployee = {
+    ...res.rows[0],
+    id: Number(res.rows[0].id),
+    property_id: Number(res.rows[0].property_id),
+    is_active: true,
+    monthly_salary: Number(res.rows[0].monthly_salary || 0)
+  };
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'EMPLOYEE_PERSONNEL_REACTIVATED',
+      'EMPLOYEE_ROLE',
+      String(reactivated.id),
+      JSON.stringify({
+        is_active: true,
+        status: 'ACTIVE',
+        previous_status: current.status,
+        auth_account_restored: false,
+        note: 'Personnel record reactivated. Auth account remains unchanged pending explicit diagnosis/repair.'
+      }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
+  return reactivated;
+}
+
+export async function checkUserHasOperationalHistory(
+  client: PoolClient,
+  userId: number
+): Promise<{ hasHistory: boolean; reasons: string[] }> {
+  const reasons: string[] = [];
+
+  // 1. User login history
+  const userRes = await client.query(
+    'SELECT last_login_at, google_sub, username FROM users WHERE id = $1',
+    [userId]
+  );
+  if (userRes.rows.length > 0) {
+    if (userRes.rows[0].last_login_at) {
+      reasons.push('User sudah memiliki riwayat login sistem');
+    }
+    if (userRes.rows[0].google_sub) {
+      reasons.push('User terhubung dengan Google Account');
+    }
+  }
+
+  // 2. Attendance references
+  const attRes = await client.query(
+    'SELECT COUNT(*) FROM employee_attendance WHERE reviewed_by_user_id = $1',
+    [userId]
+  );
+  if (Number(attRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat review absensi oleh user ini');
+  }
+
+  // 3. Face enrollment references
+  const faceRes = await client.query(
+    'SELECT COUNT(*) FROM employee_face_enrollments WHERE enrolled_by_user_id = $1 OR reviewed_by_user_id = $1 OR revoked_by_user_id = $1',
+    [userId]
+  );
+  if (Number(faceRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat pendaftaran/verifikasi wajah oleh user ini');
+  }
+
+  // 4. Work schedules and audits
+  const schedRes = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedules WHERE created_by_user_id = $1 OR updated_by_user_id = $1 OR published_by_user_id = $1',
+    [userId]
+  );
+  if (Number(schedRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat pembuatan/pembaruan jadwal kerja');
+  }
+
+  const schedAuditRes = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedule_audits WHERE changed_by_user_id = $1',
+    [userId]
+  );
+  if (Number(schedAuditRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat audit jadwal kerja');
+  }
+
+  // 5. Folio & transactions
+  const folioRes = await client.query(
+    'SELECT COUNT(*) FROM folio_entries WHERE actor_user_id = $1',
+    [userId]
+  );
+  if (Number(folioRes.rows[0].count) > 0) {
+    reasons.push('Terdapat entri folio/transaksi kamar');
+  }
+
+  const txRes = await client.query(
+    'SELECT COUNT(*) FROM transactions WHERE created_by = $1 OR deleted_by_user_id = $2 OR verified_by_user_id = $2',
+    [String(userId), userId]
+  );
+  if (Number(txRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat transaksi finansial/kasir');
+  }
+
+  // 6. Housekeeping tasks & findings
+  const hkRes = await client.query(
+    'SELECT COUNT(*) FROM housekeeping_tasks WHERE assigned_user_id = $1 OR requested_by_user_id = $1',
+    [userId]
+  );
+  if (Number(hkRes.rows[0].count) > 0) {
+    reasons.push('Terdapat penugasan housekeeping');
+  }
+
+  const hkFindingsRes = await client.query(
+    'SELECT COUNT(*) FROM housekeeping_task_findings WHERE reported_by_user_id = $1 OR resolved_by_user_id = $1 OR verified_by_user_id = $1',
+    [userId]
+  );
+  if (Number(hkFindingsRes.rows[0].count) > 0) {
+    reasons.push('Terdapat temuan inspeksi housekeeping');
+  }
+
+  // 7. Payment evidences
+  const paymentEvRes = await client.query(
+    'SELECT COUNT(*) FROM payment_evidences WHERE uploaded_by_user_id = $1 OR deactivated_by_user_id = $1',
+    [userId]
+  );
+  if (Number(paymentEvRes.rows[0].count) > 0) {
+    reasons.push('Terdapat bukti pembayaran yang diunggah/diproses');
+  }
+
+  // 8. Room moves
+  const roomMoveRes = await client.query(
+    'SELECT COUNT(*) FROM reservation_room_moves WHERE moved_by_user_id = $1',
+    [userId]
+  );
+  if (Number(roomMoveRes.rows[0].count) > 0) {
+    reasons.push('Terdapat riwayat pemindahan kamar reservasi');
+  }
+
+  // 9. Operational audit logs where this user was the actor
+  if (userRes.rows.length > 0 && userRes.rows[0].username) {
+    const auditActorRes = await client.query(
+      `SELECT COUNT(*) FROM audit_logs
+       WHERE correlation_id = $1
+         AND action NOT IN ('WHATSAPP_CREDENTIAL_OPENED', 'EMPLOYEE_ACCOUNT_CREATED')`,
+      [userRes.rows[0].username]
+    );
+    if (Number(auditActorRes.rows[0].count) > 0) {
+      reasons.push('Terdapat log aktivitas operasional atas nama akun ini');
+    }
+  }
+
+  return {
+    hasHistory: reasons.length > 0,
+    reasons
+  };
+}
+
+export async function hardDeleteAuthAccount(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  confirmIdentity: string,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ deleted_user_id: number; username: string; email: string }> {
+  // Check employee exists
+  const empRes = await client.query(
+    'SELECT * FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+
+  // Find linked user
+  const userRes = await client.query(
+    'SELECT * FROM users WHERE employee_id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+  if (!hasRows(userRes)) {
+    throw Object.assign(new Error('Karyawan ini tidak memiliki akun login untuk dihapus.'), {
+      statusCode: 404,
+      code: 'LOGIN_ACCOUNT_NOT_FOUND'
+    });
+  }
+
+  const user = userRes.rows[0];
+
+  // Validate typed confirmation (must match username or email, case-insensitive)
+  const trimmedInput = (confirmIdentity || '').trim().toLowerCase();
+  const matchesUsername = trimmedInput === (user.username || '').toLowerCase();
+  const matchesEmail = trimmedInput === (user.email || '').toLowerCase();
+
+  if (!matchesUsername && !matchesEmail) {
+    throw Object.assign(
+      new Error('Konfirmasi tidak sesuai. Harap ketik username atau email login akun yang akan dihapus.'),
+      { statusCode: 400, code: 'CONFIRMATION_MISMATCH' }
+    );
+  }
+
+  // Check operational history dependencies
+  const historyCheck = await checkUserHasOperationalHistory(client, user.id);
+  if (historyCheck.hasHistory) {
+    throw Object.assign(
+      new Error('Akun ini sudah memiliki histori aktivitas dan tidak dapat dihapus permanen. Gunakan Nonaktifkan Akun.'),
+      {
+        statusCode: 409,
+        code: 'ACCOUNT_HAS_HISTORY',
+        details: historyCheck.reasons
+      }
+    );
+  }
+
+  // Safe to delete users row ONLY (hr_employees row is preserved!)
+  await client.query('DELETE FROM users WHERE id = $1', [user.id]);
+
+  // Audit deletion (CRITICAL: employee record remains intact!)
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'EMPLOYEE_AUTH_ACCOUNT_DELETED',
+      'USER_AUTH',
+      String(employeeId),
+      JSON.stringify({
+        deleted_user_id: user.id,
+        username: user.username,
+        email: user.email,
+        employee_id: employeeId,
+        timestamp: new Date().toISOString()
+      }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
+  return {
+    deleted_user_id: Number(user.id),
+    username: user.username,
+    email: user.email
+  };
 }
 
 export async function diagnoseEmployeeLoginAccount(

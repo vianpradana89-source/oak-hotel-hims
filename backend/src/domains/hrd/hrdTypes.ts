@@ -167,3 +167,12 @@ export const PRIVILEGED_ROLE_CATEGORIES: RoleCategoryDef[] = [
   { key: 'General Manager', label: 'General Manager (GM)', department: 'Executive', is_privileged: true, description: 'Pimpinan tertinggi operasional hotel' },
   { key: 'Owner', label: 'Owner / Direksi Properti', department: 'Executive', is_privileged: true, description: 'Pemilik properti atau dewan komisaris/direksi' }
 ];
+
+export interface DeactivateEmployeePayload {
+  reason?: string;
+  effective_date?: string;
+}
+
+export interface HardDeleteLoginAccountPayload {
+  confirm_identity: string;
+}
