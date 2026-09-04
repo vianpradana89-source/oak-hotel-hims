@@ -4388,6 +4388,38 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // HR-SCHEDULE-1C: Add department_id to work_shift_templates for department-scoped templates
+    const deptScopeMigRes = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'hr_schedule1c_dept_scoped_templates_v1'`
+    );
+    if (deptScopeMigRes.rows.length === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE work_shift_templates
+        ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES hr_departments(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_work_shift_templates_dept ON work_shift_templates (department_id);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('hr_schedule1c_dept_scoped_templates_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // HR-SCHEDULE-1C-B: Add color_key to work_shift_templates for manual soft color per template
+    const colorKeyMigRes = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'hr_schedule1c_color_key_v1'`
+    );
+    if (colorKeyMigRes.rows.length === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE work_shift_templates
+        ADD COLUMN IF NOT EXISTS color_key VARCHAR(20) DEFAULT 'soft_slate';
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('hr_schedule1c_color_key_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

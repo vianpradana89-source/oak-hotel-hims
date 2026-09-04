@@ -14,9 +14,24 @@ import type {
   PublishScheduleResult,
   GetScheduleForAttendanceQuery,
   AttendanceScheduleResult,
+  MonthlyRosterQuery,
+  MonthlyRosterResponse,
+  MonthlyRosterEmployee,
   WorkShiftTemplate,
   EmployeeWorkSchedule,
+  ShiftTemplateTeamMember,
 } from './scheduleTypes';
+
+export const VALID_COLOR_KEYS = [
+  'soft_green', 'soft_blue', 'soft_amber', 'soft_purple',
+  'soft_rose', 'soft_cyan', 'soft_slate',
+] as const;
+
+export type ColorKey = typeof VALID_COLOR_KEYS[number];
+
+export function isValidColorKey(val: any): val is ColorKey {
+  return typeof val === 'string' && (VALID_COLOR_KEYS as readonly string[]).includes(val);
+}
 
 function parseTimeToMinutes(time: string): number {
   const [h, m] = time.split(':').map(Number);
@@ -122,6 +137,8 @@ function formatShiftTemplate(row: any): WorkShiftTemplate {
     late_grace_minutes: row.late_grace_minutes,
     checkout_grace_minutes: row.checkout_grace_minutes,
     is_active: row.is_active,
+    department_id: row.department_id ?? null,
+    color_key: row.color_key || 'soft_slate',
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -181,14 +198,33 @@ function getSunday(dateStr: string): string {
 export async function getShiftTemplates(
   client: PoolClient,
   propertyId: number,
-  includeInactive = false
+  includeInactive = false,
+  departmentId?: number | null
 ): Promise<WorkShiftTemplate[]> {
-  const where = includeInactive
-    ? 'WHERE wst.property_id = $1'
-    : 'WHERE wst.property_id = $1 AND wst.is_active = TRUE';
+  const conditions: string[] = ['wst.property_id = $1'];
+  const params: any[] = [propertyId];
+  let idx = 2;
+
+  if (!includeInactive) {
+    conditions.push('wst.is_active = TRUE');
+  }
+
+  if (departmentId !== undefined && departmentId !== null) {
+    if (departmentId === 0) {
+      // Global templates only
+      conditions.push('wst.department_id IS NULL');
+    } else {
+      // Specific department + global templates
+      conditions.push(`(wst.department_id = $${idx} OR wst.department_id IS NULL)`);
+      params.push(departmentId);
+      idx++;
+    }
+  }
+
+  const where = conditions.join(' AND ');
   const res = await client.query(
-    `SELECT wst.* FROM work_shift_templates wst ${where} ORDER BY wst.code ASC`,
-    [propertyId]
+    `SELECT wst.* FROM work_shift_templates wst WHERE ${where} ORDER BY wst.code ASC`,
+    params
   );
   return res.rows.map(formatShiftTemplate);
 }
@@ -217,20 +253,46 @@ export async function createShiftTemplate(
     late_grace_minutes = 15,
     checkout_grace_minutes = 60,
     is_active = true,
+    department_id = null,
+    color_key = 'soft_slate',
   } = payload;
+
+  // Validate color_key
+  if (!isValidColorKey(color_key)) {
+    throw Object.assign(
+      new Error(`Warna tidak valid. Pilihan: ${VALID_COLOR_KEYS.join(', ')}`),
+      { statusCode: 422, code: 'SHIFT_TEMPLATE_COLOR_INVALID' }
+    );
+  }
 
   const crosses_midnight = forceCrossesMidnight !== undefined
     ? forceCrossesMidnight
     : computeCrossesMidnight(start_time, end_time);
 
+  // Cross-property department validation
+  if (department_id != null) {
+    const deptCheck = await client.query(
+      'SELECT id, property_id FROM hr_departments WHERE id = $1', [department_id]
+    );
+    if (deptCheck.rowCount === 0) {
+      throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+    }
+    if (deptCheck.rows[0].property_id !== property_id) {
+      throw Object.assign(
+        new Error('Departemen bukan milik properti ini.'),
+        { statusCode: 422, code: 'DEPARTMENT_PROPERTY_MISMATCH' }
+      );
+    }
+  }
+
   const res = await client.query(
     `INSERT INTO work_shift_templates
       (property_id, code, name, start_time, end_time, crosses_midnight,
-       grace_before_minutes, late_grace_minutes, checkout_grace_minutes, is_active)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       grace_before_minutes, late_grace_minutes, checkout_grace_minutes, is_active, department_id, color_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [property_id, code, name, start_time, end_time, crosses_midnight,
-     grace_before_minutes, late_grace_minutes, checkout_grace_minutes, is_active]
+     grace_before_minutes, late_grace_minutes, checkout_grace_minutes, is_active, department_id, color_key]
   );
 
   const template = formatShiftTemplate(res.rows[0]);
@@ -247,6 +309,7 @@ export async function createShiftTemplate(
 const SHIFT_TEMPLATE_MUTABLE_FIELDS = [
   'code', 'name', 'start_time', 'end_time', 'crosses_midnight',
   'grace_before_minutes', 'late_grace_minutes', 'checkout_grace_minutes', 'is_active',
+  'department_id', 'color_key',
 ] as const;
 
 export async function updateShiftTemplate(
@@ -259,6 +322,30 @@ export async function updateShiftTemplate(
   const existing = await getShiftTemplateById(client, propertyId, templateId);
   if (!existing) {
     throw Object.assign(new Error('Shift template tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  // Cross-property department validation
+  if (payload.department_id !== undefined && payload.department_id !== null) {
+    const deptCheck = await client.query(
+      'SELECT id, property_id FROM hr_departments WHERE id = $1', [payload.department_id]
+    );
+    if (deptCheck.rowCount === 0) {
+      throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+    }
+    if (deptCheck.rows[0].property_id !== propertyId) {
+      throw Object.assign(
+        new Error('Departemen bukan milik properti ini.'),
+        { statusCode: 422, code: 'DEPARTMENT_PROPERTY_MISMATCH' }
+      );
+    }
+  }
+
+  // Color key validation
+  if (payload.color_key !== undefined && !isValidColorKey(payload.color_key)) {
+    throw Object.assign(
+      new Error(`Warna tidak valid. Pilihan: ${VALID_COLOR_KEYS.join(', ')}`),
+      { statusCode: 422, code: 'SHIFT_TEMPLATE_COLOR_INVALID' }
+    );
   }
 
   const fields: string[] = [];
@@ -318,6 +405,53 @@ export async function deactivateShiftTemplate(
      VALUES ('HR_SCHEDULE', 'SHIFT_TEMPLATE_DEACTIVATED', 'work_shift_templates', $1, $2, $3)`,
     [templateId, JSON.stringify(existing), propertyId]
   );
+}
+
+// ─── Shift Template Team (employees assigned to a template in a period) ───
+
+export async function getShiftTemplateTeam(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  startDate: string,
+  endDate: string
+): Promise<ShiftTemplateTeamMember[]> {
+  const template = await getShiftTemplateById(client, propertyId, templateId);
+  if (!template) {
+    throw Object.assign(new Error('Shift template tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    `SELECT
+       e.id as employee_id,
+       e.full_name as employee_name,
+       e.employee_code,
+       p.name as position_name,
+       e.department_id,
+       d.name as department_name,
+       COUNT(s.id)::int as schedule_count
+     FROM employee_work_schedules s
+     JOIN hr_employees e ON e.id = s.employee_id
+     LEFT JOIN hr_positions p ON p.id = e.position_id
+     LEFT JOIN hr_departments d ON d.id = e.department_id
+     WHERE s.property_id = $1
+       AND s.shift_template_id = $2
+       AND s.work_date >= $3
+       AND s.work_date <= $4
+     GROUP BY e.id, e.full_name, e.employee_code, p.name, e.department_id, d.name
+     ORDER BY e.full_name ASC`,
+    [propertyId, templateId, startDate, endDate]
+  );
+
+  return res.rows.map((r) => ({
+    employee_id: r.employee_id,
+    employee_name: r.employee_name,
+    employee_code: r.employee_code,
+    position_name: r.position_name,
+    department_id: r.department_id,
+    department_name: r.department_name,
+    schedule_count: r.schedule_count,
+  }));
 }
 
 // ─── Employee Schedule CRUD ───
@@ -397,6 +531,79 @@ export async function getWeeklyRoster(
   return { start_date: monday, end_date: sunday, dates, employees, shift_templates };
 }
 
+export async function getMonthlyRoster(
+  client: PoolClient,
+  query: MonthlyRosterQuery
+): Promise<MonthlyRosterResponse> {
+  const { property_id, year, month, department_id } = query;
+
+  const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
+  const lastDay = new Date(year, month, 0);
+  const lastDateStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+
+  const dates: string[] = [];
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    dates.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+  }
+
+  // Fetch employees
+  let empQuery = `
+    SELECT e.id as employee_id, e.full_name as employee_name, e.employee_code,
+           e.department_id, d.name as department_name, p.name as position_name
+    FROM hr_employees e
+    LEFT JOIN hr_departments d ON d.id = e.department_id
+    LEFT JOIN hr_positions p ON p.id = e.position_id
+    WHERE e.property_id = $1 AND e.is_active = TRUE
+  `;
+  const empParams: any[] = [property_id];
+  let paramIdx = 2;
+
+  if (department_id) {
+    empQuery += ` AND e.department_id = $${paramIdx}`;
+    empParams.push(department_id);
+    paramIdx++;
+  }
+
+  empQuery += ' ORDER BY d.sort_order, e.full_name ASC';
+
+  const empRes = await client.query(empQuery, empParams);
+
+  // Fetch schedules for the month
+  const schedRes = await client.query(
+    `SELECT * FROM employee_work_schedules
+     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
+    [property_id, firstDay, lastDateStr]
+  );
+
+  const scheduleMap = new Map<string, EmployeeWorkSchedule>();
+  for (const row of schedRes.rows) {
+    const sched = formatSchedule(row);
+    const key = `${sched.employee_id}_${sched.work_date}`;
+    scheduleMap.set(key, sched);
+  }
+
+  const employees: MonthlyRosterEmployee[] = empRes.rows.map((emp) => {
+    const schedules: Record<string, EmployeeWorkSchedule | null> = {};
+    for (const date of dates) {
+      const key = `${emp.employee_id}_${date}`;
+      schedules[date] = scheduleMap.get(key) || null;
+    }
+    return {
+      employee_id: emp.employee_id,
+      employee_name: emp.employee_name,
+      employee_code: emp.employee_code,
+      department_id: emp.department_id,
+      department_name: emp.department_name,
+      position_name: emp.position_name,
+      schedules,
+    };
+  });
+
+  const shift_templates = await getShiftTemplates(client, property_id);
+
+  return { year, month, dates, employees, shift_templates };
+}
+
 export async function assignSchedule(
   client: PoolClient,
   payload: AssignSchedulePayload,
@@ -429,6 +636,19 @@ export async function assignSchedule(
       const t = tmpl.rows[0];
       if (!t.is_active) {
         throw Object.assign(new Error('Shift template sudah tidak aktif.'), { statusCode: 422, code: 'SHIFT_TEMPLATE_INACTIVE' });
+      }
+      // Department scope validation: template must be global or match employee's department
+      if (t.department_id != null) {
+        const empDeptRes = await client.query(
+          'SELECT department_id FROM hr_employees WHERE id = $1', [employee_id]
+        );
+        const empDeptId = empDeptRes.rows[0]?.department_id ?? null;
+        if (empDeptId !== t.department_id) {
+          throw Object.assign(
+            new Error('Shift template tidak cocok dengan departemen karyawan.'),
+            { statusCode: 422, code: 'SHIFT_TEMPLATE_DEPARTMENT_MISMATCH' }
+          );
+        }
       }
       const ts = buildScheduledTimestamps(work_date, t.start_time, t.end_time, t.crosses_midnight, propertyTimezone);
       scheduled_start_at = ts.scheduled_start_at;
@@ -494,6 +714,13 @@ export async function assignSchedule(
     const t = tmpl.rows[0];
     if (!t.is_active) {
       throw Object.assign(new Error('Shift template sudah tidak aktif.'), { statusCode: 422, code: 'SHIFT_TEMPLATE_INACTIVE' });
+    }
+    // Department scope validation: template must be global or match employee's department
+    if (t.department_id != null && t.department_id !== emp.department_id) {
+      throw Object.assign(
+        new Error('Shift template tidak cocok dengan departemen karyawan.'),
+        { statusCode: 422, code: 'SHIFT_TEMPLATE_DEPARTMENT_MISMATCH' }
+      );
     }
     const ts = buildScheduledTimestamps(work_date, t.start_time, t.end_time, t.crosses_midnight, propertyTimezone);
     scheduled_start_at = ts.scheduled_start_at;

@@ -8,7 +8,9 @@ import {
   createShiftTemplate,
   updateShiftTemplate,
   deactivateShiftTemplate,
+  getShiftTemplateTeam,
   getWeeklyRoster,
+  getMonthlyRoster,
   assignSchedule,
   bulkAssignSchedule,
   copyWeek,
@@ -75,7 +77,10 @@ export function createScheduleRouter(pool: Pool): Router {
     try {
       const propertyId = parsePropertyId(req.query.property_id, req);
       const includeInactive = req.query.include_inactive === 'true';
-      const templates = await getShiftTemplates(client, propertyId, includeInactive);
+      const departmentId = req.query.department_id !== undefined && req.query.department_id !== ''
+        ? Number(req.query.department_id)
+        : undefined;
+      const templates = await getShiftTemplates(client, propertyId, includeInactive, departmentId);
       res.json({ status: 'OK', data: templates });
     } catch (err: any) {
       const sc = err.statusCode || 500;
@@ -123,6 +128,8 @@ export function createScheduleRouter(pool: Pool): Router {
         late_grace_minutes: req.body.late_grace_minutes,
         checkout_grace_minutes: req.body.checkout_grace_minutes,
         is_active: req.body.is_active,
+        department_id: req.body.department_id,
+        color_key: req.body.color_key,
       };
       const actor = {
         id: (req as any).user?.id,
@@ -160,6 +167,8 @@ export function createScheduleRouter(pool: Pool): Router {
       if (req.body.late_grace_minutes !== undefined) payload.late_grace_minutes = req.body.late_grace_minutes;
       if (req.body.checkout_grace_minutes !== undefined) payload.checkout_grace_minutes = req.body.checkout_grace_minutes;
       if (req.body.is_active !== undefined) payload.is_active = req.body.is_active;
+      if (req.body.department_id !== undefined) payload.department_id = req.body.department_id;
+      if (req.body.color_key !== undefined) payload.color_key = req.body.color_key;
 
       const actor = {
         id: (req as any).user?.id,
@@ -203,6 +212,30 @@ export function createScheduleRouter(pool: Pool): Router {
     }
   });
 
+  // 5b. Get shift template team (employees assigned for a period)
+  router.get('/shift-templates/:id/team', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, req);
+      const templateId = Number(req.params.id);
+      if (isNaN(templateId) || templateId <= 0) {
+        throw Object.assign(new Error('ID template tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const startDate = req.query.start_date as string;
+      const endDate = req.query.end_date as string;
+      if (!startDate || !endDate) {
+        throw Object.assign(new Error('start_date dan end_date wajib diisi.'), { statusCode: 400, code: 'MISSING_DATES' });
+      }
+      const team = await getShiftTemplateTeam(client, propertyId, templateId, startDate, endDate);
+      res.json({ status: 'OK', data: team });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   // 6. Get weekly roster
   router.get('/roster', async (req: Request, res: Response) => {
     const client = await pool.connect();
@@ -223,6 +256,33 @@ export function createScheduleRouter(pool: Pool): Router {
         end_date: startDate,
         department_id: departmentId,
         employee_ids: employeeIds,
+      });
+      res.json({ status: 'OK', data: roster });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 6b. Get monthly roster
+  router.get('/roster-monthly', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, req);
+      const year = Number(req.query.year);
+      const month = Number(req.query.month);
+      if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
+        throw Object.assign(new Error('year dan month wajib diisi valid.'), { statusCode: 400, code: 'INVALID_YEAR_MONTH' });
+      }
+      const departmentId = req.query.department_id ? Number(req.query.department_id) : undefined;
+
+      const roster = await getMonthlyRoster(client, {
+        property_id: propertyId,
+        year,
+        month,
+        department_id: departmentId,
       });
       res.json({ status: 'OK', data: roster });
     } catch (err: any) {

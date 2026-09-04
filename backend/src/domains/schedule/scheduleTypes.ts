@@ -7,6 +7,7 @@ export type { WorkShiftTemplate, EmployeeWorkSchedule, WorkScheduleAudit, Schedu
 export interface ShiftTemplateListQuery {
   property_id: number;
   include_inactive?: boolean;
+  department_id?: number | null; // null = all, 0 = global only, >0 = specific dept
 }
 
 export interface CreateShiftTemplatePayload {
@@ -20,6 +21,8 @@ export interface CreateShiftTemplatePayload {
   late_grace_minutes?: number;
   checkout_grace_minutes?: number;
   is_active?: boolean;
+  department_id?: number | null; // null = global, number = department-scoped
+  color_key?: string; // manual soft color token
 }
 
 export interface UpdateShiftTemplatePayload {
@@ -32,6 +35,18 @@ export interface UpdateShiftTemplatePayload {
   late_grace_minutes?: number;
   checkout_grace_minutes?: number;
   is_active?: boolean;
+  department_id?: number | null;
+  color_key?: string;
+}
+
+export interface ShiftTemplateTeamMember {
+  employee_id: number;
+  employee_name: string;
+  employee_code: string | null;
+  position_name: string | null;
+  department_id: number | null;
+  department_name: string | null;
+  schedule_count: number; // number of scheduled days in the queried period
 }
 
 export interface WeeklyRosterQuery {
@@ -117,4 +132,29 @@ export interface AttendanceScheduleResult {
   found: boolean;
   schedule: EmployeeWorkSchedule | null;
   shift_template: WorkShiftTemplate | null;
+}
+
+export interface MonthlyRosterQuery {
+  property_id: number;
+  year: number;
+  month: number; // 1-12
+  department_id?: number;
+}
+
+export interface MonthlyRosterEmployee {
+  employee_id: number;
+  employee_name: string;
+  employee_code: string | null;
+  department_id: number | null;
+  department_name: string | null;
+  position_name: string | null;
+  schedules: Record<string, EmployeeWorkSchedule | null>; // key: YYYY-MM-DD
+}
+
+export interface MonthlyRosterResponse {
+  year: number;
+  month: number;
+  dates: string[]; // all dates in the month
+  employees: MonthlyRosterEmployee[];
+  shift_templates: WorkShiftTemplate[];
 }

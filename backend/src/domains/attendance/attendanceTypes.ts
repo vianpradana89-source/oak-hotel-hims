@@ -178,6 +178,8 @@ export interface WorkShiftTemplate {
   late_grace_minutes: number;
   checkout_grace_minutes: number;
   is_active: boolean;
+  department_id: number | null; // null = global/shared, number = department-scoped
+  color_key: string; // manual soft color token e.g. 'soft_green', 'soft_blue', etc.
   created_at?: string;
   updated_at?: string;
 }
