@@ -289,23 +289,42 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
   const [capturedPreviewUrl, setCapturedPreviewUrl] = useState<string | null>(null);
+  const [isVideoReady, setIsVideoReady] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const cameraRequestIdRef = useRef<number>(0);
 
   const stopCamera = () => {
+    cameraRequestIdRef.current++;
     if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          // ignore
+        }
+      });
       mediaStreamRef.current = null;
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    setIsVideoReady(false);
+  };
+
+  const cancelCamera = () => {
+    stopCamera();
+    setErrorMessage(null);
+    setCameraState('IDLE');
   };
 
   const startCamera = async () => {
+    stopCamera();
     setErrorMessage(null);
     setCameraState('REQUESTING');
+    const requestId = ++cameraRequestIdRef.current;
+
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('UNSUPPORTED_BROWSER');
@@ -320,11 +339,19 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
         audio: false
       });
 
-      mediaStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+      // Guard against superseded request or cancellation while awaiting permission
+      if (cameraRequestIdRef.current !== requestId) {
+        stream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch (e) {
+            // ignore
+          }
+        });
+        return;
       }
+
+      mediaStreamRef.current = stream;
       setCameraState('READY');
     } catch (err: any) {
       stopCamera();
@@ -343,17 +370,69 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
     }
   };
 
-  const captureFrame = () => {
-    if (!videoRef.current) return;
+  // Post-render stream attachment & mobile playback
+  useEffect(() => {
+    if (cameraState !== 'READY') return;
+
+    let isSubscribed = true;
     const video = videoRef.current;
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
+    const stream = mediaStreamRef.current;
+
+    if (!video || !stream) return;
+
+    video.srcObject = stream;
+
+    const startPlayback = async () => {
+      try {
+        await video.play();
+        if (isSubscribed && video.videoWidth > 0 && video.videoHeight > 0) {
+          setIsVideoReady(true);
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        if (!isSubscribed) return;
+        console.warn('Video play failed:', err);
+        stopCamera();
+        setCameraState('ERROR');
+        setErrorMessage('Gagal memutar pratinjau video kamera. Silakan periksa izin browser atau coba lagi.');
+      }
+    };
+
+    startPlayback();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [cameraState]);
+
+  const handleVideoCanPlay = () => {
+    if (videoRef.current && videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
+      setIsVideoReady(true);
+    }
+  };
+
+  const captureFrame = () => {
+    if (!videoRef.current || !isVideoReady) {
+      setErrorMessage('Kamera belum siap mengambil gambar. Pastikan pratinjau wajah telah tampil jelas.');
+      return;
+    }
+    const video = videoRef.current;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    if (!width || !height) {
+      setErrorMessage('Dimensi gambar kamera tidak valid. Silakan tunggu beberapa saat.');
+      return;
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      setErrorMessage('Gagal memproses gambar pada perangkat Anda.');
+      return;
+    }
 
     // Mirror horizontally so saved image matches selfie preview
     ctx.translate(width, 0);
@@ -368,6 +447,8 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
           setCapturedPreviewUrl(url);
           stopCamera();
           setCameraState('CAPTURED');
+        } else {
+          setErrorMessage('Gagal menghasilkan file foto wajah. Silakan coba kembali.');
         }
       },
       'image/jpeg',
@@ -420,9 +501,16 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
     }
   };
 
+  // Component unmount cleanup for camera stream
   useEffect(() => {
     return () => {
       stopCamera();
+    };
+  }, []);
+
+  // Object URL cleanup when capturedPreviewUrl changes or unmounts
+  useEffect(() => {
+    return () => {
       if (capturedPreviewUrl) {
         URL.revokeObjectURL(capturedPreviewUrl);
       }
@@ -500,6 +588,8 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
               autoPlay
               playsInline
               muted
+              onLoadedMetadata={handleVideoCanPlay}
+              onCanPlay={handleVideoCanPlay}
               className="w-full h-full object-cover transform -scale-x-100"
             />
             {/* Face Oval Overlay Guide */}
@@ -516,17 +606,18 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
           <div className="flex space-x-2">
             <button
               type="button"
-              onClick={stopCamera}
+              onClick={cancelCamera}
               className="flex-1 py-2 px-3 border border-stone-300 text-stone-700 hover:bg-stone-50 rounded-lg text-xs font-medium transition-colors"
             >
               Batal
             </button>
             <button
               type="button"
+              disabled={!isVideoReady}
               onClick={captureFrame}
-              className="flex-2 py-2.5 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-sm rounded-lg shadow-sm transition-all flex items-center justify-center space-x-1.5"
+              className="flex-2 py-2.5 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-sm rounded-lg shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-1.5"
             >
-              <span>Ambil Foto</span>
+              <span>{isVideoReady ? 'Ambil Foto' : 'Menyiapkan Kamera...'}</span>
             </button>
           </div>
         </div>
@@ -604,17 +695,24 @@ const FaceEnrollmentStep: React.FC<FaceEnrollmentStepProps> = ({
           <div className="flex space-x-2">
             <button
               type="button"
-              onClick={logout}
+              onClick={cancelCamera}
               className="flex-1 py-2 px-3 border border-stone-300 text-stone-700 hover:bg-stone-50 rounded-lg text-xs font-medium transition-colors"
             >
-              Keluar
+              Batal
             </button>
             <button
               type="button"
               onClick={startCamera}
-              className="flex-2 py-2 px-4 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-xs rounded-lg transition-colors"
+              className="flex-1 py-2 px-3 bg-[#2C4A3E] hover:bg-[#233b32] text-white font-medium text-xs rounded-lg transition-colors"
             >
               Coba Lagi
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="py-2 px-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-lg text-xs font-medium transition-colors"
+            >
+              Keluar
             </button>
           </div>
         </div>
