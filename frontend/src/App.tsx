@@ -66,6 +66,7 @@ import RoomTypeGroup from './features/calendar/RoomTypeGroup';
 import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
+import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
 import { buildAvailabilityRequest, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
 import {
   addHotelDays,
@@ -230,6 +231,7 @@ function AppContent() {
   const [pendingCheckoutInspectionsCount, setPendingCheckoutInspectionsCount] = useState<number>(0);
   const [selectedCheckoutInspection, setSelectedCheckoutInspection] = useState<any | null>(null);
   const [maintenanceTasks, setMaintenanceTasks] = useState<any[]>([]);
+  const [summaryDrawerType, setSummaryDrawerType] = useState<string | null>(null);
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
   const [financeSummary, setFinanceSummary] = useState<any>(null);
@@ -3314,130 +3316,15 @@ function AppContent() {
                   {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-                <StatCard title="Total Reservasi" value={String(calendarSummary.totalReservations)} color="hotel-stat-card--primary" />
-                <StatCard title="Booked" value={String(calendarSummary.bookedReservations)} color="hotel-stat-card--booked" />
-                <StatCard title="Check In" value={String(calendarSummary.checkedInReservations)} color="hotel-stat-card--checkedin" />
-                <StatCard title="Check Out" value={String(calendarSummary.checkedOutReservations)} color="hotel-stat-card--checkout" />
-                <StatCard title="Kamar Kotor" value={String(calendarSummary.dirtyRooms)} color="hotel-stat-card--dirty" />
-                <StatCard title="Vacant Clean" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-bold text-sm text-slate-900">PEMERIKSAAN CHECKOUT</h3>
-                    <span className="text-[10px] text-slate-400 font-mono">FO Room Check</span>
-                  </div>
-                  <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold border ${
-                    pendingCheckoutInspectionsCount > 0
-                      ? 'bg-amber-50 text-amber-800 border-amber-300'
-                      : 'bg-emerald-50 text-emerald-800 border-emerald-200/80'
-                  }`}>
-                    {pendingCheckoutInspectionsCount} Menunggu
-                  </span>
-                </div>
-
-                {checkoutInspections.length === 0 ? (
-                  <div className="py-6 text-center text-xs text-slate-400">
-                    Tidak ada permintaan pemeriksaan checkout saat ini.
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    <div className="grid grid-cols-12 text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-1 border-b border-slate-100">
-                      <div className="col-span-4">Kamar</div>
-                      <div className="col-span-4 text-center">Status</div>
-                      <div className="col-span-4 text-right">Waktu</div>
-                    </div>
-                    {checkoutInspections.slice(0, 5).map((chk: any) => {
-                      const isPending = ['REQUESTED', 'ASSIGNED'].includes(chk.status);
-                      const isInProgress = ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(chk.status);
-                      const isClear = chk.status === 'DONE' && chk.inspection_result === 'CLEAR';
-                      const isIssue = chk.status === 'DONE' && chk.inspection_result === 'ISSUE_FOUND';
-
-                      const statusLabel = isPending
-                        ? 'MENUNGGU'
-                        : isInProgress
-                        ? 'SEDANG DICEK'
-                        : isClear
-                        ? '✓ AMAN'
-                        : isIssue
-                        ? '⚠ ADA TEMUAN'
-                        : chk.status;
-
-                      const statusBadge = isPending
-                        ? 'bg-amber-100 text-amber-900 border-amber-300'
-                        : isInProgress
-                        ? 'bg-blue-100 text-blue-900 border-blue-300'
-                        : isClear
-                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300 font-extrabold'
-                        : isIssue
-                        ? 'bg-rose-100 text-rose-900 border-rose-300 font-extrabold'
-                        : 'bg-slate-100 text-slate-700 border-slate-200';
-
-                      const timeStr = chk.completed_at
-                        ? new Date(chk.completed_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
-                        : chk.created_at
-                        ? new Date(chk.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
-                        : '-';
-
-                      return (
-                        <div
-                          key={chk.id}
-                          onClick={() => setSelectedCheckoutInspection(chk)}
-                          className="grid grid-cols-12 items-center p-2 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition cursor-pointer"
-                        >
-                          <div className="col-span-4 font-bold text-slate-900 flex items-center gap-1.5">
-                            <span className={`w-2 h-2 rounded-full ${isClear ? 'bg-emerald-500' : isIssue ? 'bg-rose-500' : 'bg-amber-500'}`} />
-                            <span>Kamar {chk.room_number || '-'}</span>
-                          </div>
-                          <div className="col-span-4 text-center">
-                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold border ${statusBadge}`}>
-                              {statusLabel}
-                            </span>
-                          </div>
-                          <div className="col-span-4 text-right font-mono text-[11px] text-slate-500">
-                            {timeStr}
-                          </div>
-                        </div>
-                      );
-                    })}
-
-                    {checkoutInspections.length > 5 && (
-                      <div className="pt-1 text-center">
-                        <button
-                          type="button"
-                          onClick={() => handleSelectMenu('Housekeeping')}
-                          className="text-xs font-semibold text-[#1b4332] hover:underline cursor-pointer"
-                        >
-                          Lihat Semua ({checkoutInspections.length} pemeriksaan) &rarr;
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm text-slate-900">Maintenance</h3>
-                  <span className="text-xs bg-amber-50 text-amber-800 border border-amber-200/80 px-2.5 py-0.5 rounded-full font-semibold">{maintenanceTasks.length} task</span>
-                </div>
-                <div className="space-y-2">
-                  {maintenanceTasks.slice(0, 4).map((task: any) => (
-                    <div key={task.id} className="flex justify-between items-center border border-slate-100 bg-slate-50/60 hover:bg-slate-50/90 rounded-lg p-2.5 text-xs transition-colors">
-                      <div>
-                        <div className="font-semibold text-slate-800">Kamar {task.room_number || '-'}</div>
-                        <div className="text-slate-500 text-[11px] mt-0.5">{task.issue_type}</div>
-                      </div>
-                      <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
-                        {task.status}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-8">
+                <StatCard title="Total Reservasi" value={String(calendarSummary.totalReservations)} color="hotel-stat-card--primary" onClick={() => setSummaryDrawerType('total')} />
+                <StatCard title="Booked" value={String(calendarSummary.bookedReservations)} color="hotel-stat-card--booked" onClick={() => setSummaryDrawerType('booked')} />
+                <StatCard title="Check In" value={String(calendarSummary.checkedInReservations)} color="hotel-stat-card--checkedin" onClick={() => setSummaryDrawerType('checkin')} />
+                <StatCard title="Check Out" value={String(calendarSummary.checkedOutReservations)} color="hotel-stat-card--checkout" onClick={() => setSummaryDrawerType('checkout')} />
+                <StatCard title="Kamar Kotor" value={String(calendarSummary.dirtyRooms)} color="hotel-stat-card--dirty" onClick={() => setSummaryDrawerType('dirty')} />
+                <StatCard title="Vacant Clean" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" onClick={() => setSummaryDrawerType('ready')} />
+                <StatCard title="Checkout Check" value={String(pendingCheckoutInspectionsCount)} color="hotel-stat-card--inspection" onClick={() => setSummaryDrawerType('inspection')} badge={pendingCheckoutInspectionsCount} />
+                <StatCard title="Maintenance" value={String(maintenanceTasks.length)} color="hotel-stat-card--maintenance" onClick={() => setSummaryDrawerType('maintenance')} badge={maintenanceTasks.length} />
               </div>
             </div>
 
@@ -4237,6 +4124,162 @@ function AppContent() {
           </div>
         </div>
       )}
+
+      <OperationalSummaryDrawer
+        isOpen={summaryDrawerType !== null}
+        onClose={() => setSummaryDrawerType(null)}
+        title={summaryDrawerType === 'total' ? 'Total Reservasi' : summaryDrawerType === 'booked' ? 'Booked' : summaryDrawerType === 'checkin' ? 'Check In' : summaryDrawerType === 'checkout' ? 'Check Out' : summaryDrawerType === 'dirty' ? 'Kamar Kotor' : summaryDrawerType === 'ready' ? 'Vacant Clean' : summaryDrawerType === 'inspection' ? 'Pemeriksaan Checkout' : summaryDrawerType === 'maintenance' ? 'Maintenance' : ''}
+        count={
+          summaryDrawerType === 'total' ? calendarSummary.totalReservations :
+          summaryDrawerType === 'booked' ? calendarSummary.bookedReservations :
+          summaryDrawerType === 'checkin' ? calendarSummary.checkedInReservations :
+          summaryDrawerType === 'checkout' ? calendarSummary.checkedOutReservations :
+          summaryDrawerType === 'dirty' ? calendarSummary.dirtyRooms :
+          summaryDrawerType === 'ready' ? calendarSummary.readyRooms :
+          summaryDrawerType === 'inspection' ? pendingCheckoutInspectionsCount :
+          summaryDrawerType === 'maintenance' ? maintenanceTasks.length : 0
+        }
+        countLabel={
+          summaryDrawerType === 'inspection' ? 'menunggu' :
+          summaryDrawerType === 'maintenance' ? 'task' :
+          summaryDrawerType === 'dirty' || summaryDrawerType === 'ready' ? 'kamar' : 'reservasi'
+        }
+        badgeColor={
+          summaryDrawerType === 'inspection' ? 'amber' :
+          summaryDrawerType === 'maintenance' ? 'amber' :
+          summaryDrawerType === 'dirty' ? 'amber' :
+          summaryDrawerType === 'ready' ? 'emerald' : 'slate'
+        }
+      >
+        {summaryDrawerType === 'inspection' ? (
+          checkoutInspections.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-400">
+              Tidak ada pemeriksaan checkout yang menunggu saat ini.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {checkoutInspections.map((chk: any) => {
+                const isPending = ['REQUESTED', 'ASSIGNED'].includes(chk.status);
+                const isInProgress = ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(chk.status);
+                const isClear = chk.status === 'DONE' && chk.inspection_result === 'CLEAR';
+                const isIssue = chk.status === 'DONE' && chk.inspection_result === 'ISSUE_FOUND';
+                const statusLabel = isPending ? 'MENUNGGU' : isInProgress ? 'SEDANG DICEK' : isClear ? '✓ AMAN' : isIssue ? '⚠ ADA TEMUAN' : chk.status;
+                const statusBadge = isPending ? 'bg-amber-100 text-amber-900 border-amber-300' : isInProgress ? 'bg-blue-100 text-blue-900 border-blue-300' : isClear ? 'bg-emerald-100 text-emerald-900 border-emerald-300' : isIssue ? 'bg-rose-100 text-rose-900 border-rose-300' : 'bg-slate-100 text-slate-700 border-slate-200';
+                return (
+                  <div key={chk.id} onClick={() => { setSummaryDrawerType(null); setSelectedCheckoutInspection(chk); }} className="p-3 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition cursor-pointer">
+                    <div className="flex items-center justify-between">
+                      <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                        <span className={`w-2 h-2 rounded-full ${isClear ? 'bg-emerald-500' : isIssue ? 'bg-rose-500' : 'bg-amber-500'}`} />
+                        Kamar {chk.room_number || '-'}
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${statusBadge}`}>{statusLabel}</span>
+                    </div>
+                    <div className="text-slate-500 text-[11px] mt-1">
+                      {chk.created_at ? new Date(chk.created_at).toLocaleString('id-ID') : '-'}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+        ) : summaryDrawerType === 'maintenance' ? (
+          maintenanceTasks.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-400">
+              Tidak ada task maintenance aktif.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {maintenanceTasks.map((task: any) => (
+                <div key={task.id} className="p-3 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition">
+                  <div className="flex items-center justify-between">
+                    <div className="font-bold text-slate-900">Kamar {task.room_number || '-'}</div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-rose-50 text-rose-700 border-rose-200'}`}>
+                      {task.status}
+                    </span>
+                  </div>
+                  <div className="text-slate-500 text-[11px] mt-1">{task.issue_type}</div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : summaryDrawerType === 'dirty' || summaryDrawerType === 'ready' ? (
+          (() => {
+            const filteredRooms = rooms.filter((room: any) => {
+              const status = roomStatuses[String(room.id)];
+              return summaryDrawerType === 'dirty' ? status === 'Kotor' : status === 'Ready';
+            });
+            return filteredRooms.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                {summaryDrawerType === 'dirty' ? 'Tidak ada kamar kotor saat ini.' : 'Tidak ada kamar vacant clean saat ini.'}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {filteredRooms.map((room: any) => (
+                  <div key={room.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-slate-900">{room.room_number}</span>
+                      <span className="text-slate-500 ml-2">{room.room_type_name || ''}</span>
+                    </div>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${summaryDrawerType === 'dirty' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                      {roomStatuses[String(room.id)] || '-'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()
+        ) : (
+          (() => {
+            const filteredReservations = reservations.filter((r: any) => {
+              const status = String(r?.status || '').toUpperCase();
+              if (summaryDrawerType === 'total') return true;
+              if (summaryDrawerType === 'booked') return status !== 'CHECKED_IN' && status !== 'CHECKED_OUT' && status !== 'CANCELLED';
+              if (summaryDrawerType === 'checkin') return status === 'CHECKED_IN';
+              if (summaryDrawerType === 'checkout') return status === 'CHECKED_OUT';
+              return true;
+            });
+            return filteredReservations.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                Tidak ada reservasi untuk kategori ini.
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {filteredReservations.slice(0, 50).map((res: any) => {
+                  const room = rooms.find((r: any) => Number(r.id) === Number(res.room_id));
+                  return (
+                    <div key={res.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-900">{res.guest_name || '-'}</span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                          res.status === 'CHECKED_IN' ? 'bg-emerald-100 text-emerald-800' :
+                          res.status === 'CHECKED_OUT' ? 'bg-slate-100 text-slate-700' :
+                          res.status === 'CANCELLED' ? 'bg-rose-100 text-rose-800' :
+                          'bg-blue-50 text-blue-800'
+                        }`}>
+                          {res.status}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
+                        <span>{res.booking_number || res.bid || '-'}</span>
+                        <span>·</span>
+                        <span>Kamar {room?.room_number || '-'}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5">
+                        {res.check_in ? new Date(res.check_in).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '?'} → {res.check_out ? new Date(res.check_out).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '?'}
+                      </div>
+                    </div>
+                  );
+                })}
+                {filteredReservations.length > 50 && (
+                  <div className="text-center text-[11px] text-slate-400 pt-2">
+                    Menampilkan 50 dari {filteredReservations.length} data
+                  </div>
+                )}
+              </div>
+            );
+          })()
+        )}
+      </OperationalSummaryDrawer>
 
       {quickReservation && (
         <QuickReservationDetail
@@ -5191,10 +5234,27 @@ function AppContent() {
 
 
 
-function StatCard({ title, value, color }: any) {
+function StatCard({ title, value, color, onClick, isActive, badge }: any) {
+  const isClickable = typeof onClick === 'function';
   return (
-    <div className={`hotel-stat-card ${color}`}>
-      <p className="hotel-stat-label">{title}</p>
+    <div
+      className={`hotel-stat-card ${color} ${isClickable ? 'hotel-stat-card--clickable' : ''} ${isActive ? 'hotel-stat-card--active' : ''}`}
+      onClick={onClick}
+      onKeyDown={isClickable ? (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      aria-label={isClickable ? `${title}: ${value}` : undefined}
+    >
+      <div className="flex items-center justify-between">
+        <p className="hotel-stat-label">{title}</p>
+        {badge != null && (
+          <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold leading-none ${
+            badge > 0 ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-50 text-emerald-700 border border-emerald-200/80'
+          }`}>
+            {badge}
+          </span>
+        )}
+      </div>
       <p className="hotel-stat-value">{value}</p>
     </div>
   );

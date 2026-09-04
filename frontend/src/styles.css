@@ -727,6 +727,30 @@ body {
 .hotel-stat-card--dirty .hotel-stat-value { color: #8a6a2e; }
 .hotel-stat-card--ready .hotel-stat-value { color: #3f6d49; }
 
+.hotel-stat-card--inspection .hotel-stat-value { color: #92700a; }
+.hotel-stat-card--maintenance .hotel-stat-value { color: #7c3a2e; }
+
+.hotel-stat-card--clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+.hotel-stat-card--clickable:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  border-color: #c5cbd3;
+}
+.hotel-stat-card--clickable:focus-visible {
+  outline: 2px solid var(--oak-primary, #1b4332);
+  outline-offset: 2px;
+}
+.hotel-stat-card--clickable:active {
+  transform: scale(0.98);
+}
+.hotel-stat-card--active {
+  border-color: var(--oak-primary, #1b4332);
+  box-shadow: 0 0 0 1px var(--oak-primary, #1b4332);
+}
+
 .calendar-grid-shell {
   border: 1px solid var(--oak-border);
   border-radius: 12px;
