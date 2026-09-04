@@ -55,6 +55,7 @@
     "test:anka-layout": "node test/transaction_anka_layout_test.js",
     "test:transaction-2c": "node test/transaction_2c_penjualan_regression_test.js",
     "test:property-safety": "node test/property_master_creation_safety_test.js",
+    "test:room-assignment-guard": "node test/room_assignment_guard_test.js",
     "test:role-permissions": "node test/role_permissions_matrix_test.js",
     "test:batal-dedup": "npm run build && node test/batal_cancellation_group_dedup_test.js",
     "test:vendor-supplier": "npm run build && node test/vendor_supplier_canonical_master_test.js",

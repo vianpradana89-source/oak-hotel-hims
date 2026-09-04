@@ -5280,6 +5280,15 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       });
     }
 
+    if (!current.room_id) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'ROOM_NOT_ASSIGNED',
+        message: 'Kamar belum ditentukan untuk reservasi ini.'
+      });
+    }
+
     // C2C2: Overlap check after ROOM + RESERVATION locks.
     const overlap = await findActiveRoomOverlap(client, roomId, current.check_in, current.check_out, reservationId);
     if (hasRows(overlap)) {
@@ -5463,6 +5472,24 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
 
     let checkoutReservation = targetReservation;
     if (targetStatus !== 'CHECKED_OUT') {
+      if (!targetReservation.room_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'ROOM_NOT_ASSIGNED',
+          message: 'Kamar belum ditentukan untuk reservasi ini.'
+        });
+      }
+
+      if (!targetReservation.booked_room_type_id_snapshot) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'ROOM_TYPE_SNAPSHOT_MISSING',
+          message: 'Data tipe kamar reservasi tidak lengkap. Silakan edit reservasi untuk menetapkan tipe kamar.'
+        });
+      }
+
       // Check mandatory checkout inspection policy
       const isHkEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.enabled');
       const isCheckoutCheckFeature = isHkEnabled && (await isFeatureEnabled(client, propertyId, 'housekeeping.checkout_inspection'));

@@ -32,18 +32,6 @@ async function runTests() {
   };
 
   try {
-    const propRes = await pool.query('SELECT id FROM properties ORDER BY id ASC LIMIT 1');
-    const propertyId = Number(propRes.rows[0]?.id || 1);
-
-    // Create a secondary property for isolation tests
-    const prop2Res = await pool.query(
-      `INSERT INTO properties (property_code, name, address, is_active)
-       VALUES ($1, $2, 'Secondary Address', true) RETURNING id`,
-      [`P${Math.floor(10000 + Math.random() * 90000)}`, 'Property 2 Isolasi']
-    );
-    const propertyId2 = Number(prop2Res.rows[0].id);
-    cleanupIds.properties.push(propertyId2);
-
     const now = new Date();
     const formatIsoDate = (d) => {
       const year = d.getFullYear();
@@ -68,6 +56,26 @@ async function runTests() {
     const lastMonthEnd = formatIsoDate(lastDayLastMonth);
 
     const uniqueSuffix = Date.now();
+
+    // Create a dedicated test property to avoid polluting production data.
+    // All ANKA fixtures MUST be created under this property.
+    const testPropRes = await pool.query(
+      `INSERT INTO properties (property_code, name, address, is_active)
+       VALUES ($1, $2, 'ANKA Test Address', true) RETURNING id`,
+      [`T${Math.floor(10000 + Math.random() * 90000)}`, `ANKA Test Property ${uniqueSuffix}`]
+    );
+    const propertyId = Number(testPropRes.rows[0].id);
+    cleanupIds.properties.push(propertyId);
+
+    // Create a secondary property for isolation tests
+    const prop2Res = await pool.query(
+      `INSERT INTO properties (property_code, name, address, is_active)
+       VALUES ($1, $2, 'Secondary Address', true) RETURNING id`,
+      [`P${Math.floor(10000 + Math.random() * 90000)}`, 'Property 2 Isolasi']
+    );
+    const propertyId2 = Number(prop2Res.rows[0].id);
+    cleanupIds.properties.push(propertyId2);
+
     const testBID = `BID-ANKA-${uniqueSuffix}`;
     const guestName = `Tamu ANKA ${uniqueSuffix}`;
 
