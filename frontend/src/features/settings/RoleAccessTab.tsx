@@ -160,33 +160,39 @@ export const RoleAccessTab: React.FC<RoleAccessTabProps> = ({ propertyId, onAcce
           </div>
         )}
 
-        <div className="max-h-[min(32rem,62vh)] overflow-auto px-3 py-2.5 space-y-3">
+        <div className="max-h-[min(32rem,62vh)] overflow-y-auto overflow-x-hidden px-3 py-2.5 space-y-3">
           {groupedResources.map(group => (
             <div key={group.group}>
               <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1">{group.group}</div>
               <div className="border border-slate-200 rounded-lg">
-                <table className="w-full text-left text-xs border-collapse">
+                <table className="w-full table-fixed text-left text-xs border-collapse">
+                  <colgroup>
+                    <col />
+                    <col className="w-[76px]" />
+                    <col className="w-[76px]" />
+                    <col className="w-[76px]" />
+                  </colgroup>
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
-                      <th className="py-1.5 px-2.5">Menu</th>
+                      <th className="py-1.5 px-2.5 text-left">Menu</th>
                       {ACCESS_ACTIONS.map(action => (
-                        <th key={action} className="py-1.5 px-2 text-center w-16">{ACCESS_ACTION_LABELS[action]}</th>
+                        <th key={action} className="py-1.5 px-1 text-center">{ACCESS_ACTION_LABELS[action]}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {group.resources.map(resource => (
                       <tr key={resource.key} className="hover:bg-slate-50/60 transition">
-                        <td className="py-1.5 px-2.5">
-                          <div className="font-bold text-slate-800 text-[11px] leading-tight">{resource.label}</div>
-                          <div className="text-[9px] text-slate-400 leading-tight">{resource.description}</div>
+                        <td className="py-1.5 px-2.5 min-w-0">
+                          <div className="font-bold text-slate-800 text-[11px] leading-tight break-words">{resource.label}</div>
+                          <div className="text-[9px] text-slate-400 leading-snug break-words">{resource.description}</div>
                         </td>
                         {ACCESS_ACTIONS.map(action => {
                           const checked = selectedRole?.is_protected
                             ? true
                             : draft[resource.key]?.[action] === true;
                           return (
-                            <td key={action} className="py-1.5 px-2 text-center">
+                            <td key={action} className="py-1.5 px-1 text-center align-middle">
                               <input
                                 type="checkbox"
                                 checked={checked}

@@ -3,7 +3,7 @@ import { useAuth } from '../auth/AuthContext';
 import { RoleAccessTab } from '../settings/RoleAccessTab';
 import { UserAccessTab } from '../settings/UserAccessTab';
 import type { DynamicRole } from './hrdTypes';
-import { HrdActionCluster, HrdActionIcons, HrdIconAction } from './hrdActionUi';
+import { HRD_ACTION_CELL, HrdActionCluster, HrdActionIcons, HrdIconAction } from './hrdActionUi';
 
 interface RolePermissionsTabProps {
   propertyId: number;
@@ -247,16 +247,24 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
             </button>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+          <div className="overflow-x-hidden">
+            <table className="w-full table-fixed text-left border-collapse text-xs">
+              <colgroup>
+                <col className="w-[22%]" />
+                <col className="w-[32%]" />
+                <col className="w-[11%]" />
+                <col className="w-[11%]" />
+                <col className="w-[12%]" />
+                <col className="w-[12%]" />
+              </colgroup>
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/80 text-slate-600 font-bold">
-                  <th className="py-2.5 px-4">Nama Peran / Role</th>
-                  <th className="py-2.5 px-4">Deskripsi</th>
-                  <th className="py-2.5 px-4 text-center">Tipe</th>
-                  <th className="py-2.5 px-4 text-center">Status</th>
-                  <th className="py-2.5 px-4 text-center">Pengguna Aktif</th>
-                  <th className="py-2.5 px-1.5 text-center whitespace-nowrap w-px">Aksi</th>
+                  <th className="py-2.5 px-3">Nama Peran / Role</th>
+                  <th className="py-2.5 px-3">Deskripsi</th>
+                  <th className="py-2.5 px-2 text-center">Tipe</th>
+                  <th className="py-2.5 px-2 text-center">Status</th>
+                  <th className="py-2.5 px-2 text-center leading-tight">Pengguna Aktif</th>
+                  <th className={`py-2.5 ${HRD_ACTION_CELL}`}>Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -269,18 +277,18 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                 ) : (
                   roles.map(r => (
                     <tr key={r.id} className="hover:bg-slate-50/50 transition">
-                      <td className="py-3 px-4 font-bold text-slate-900">
+                      <td className="py-3 px-3 font-bold text-slate-900 min-w-0 break-words">
                         {r.name}
                         {r.name === 'Super Admin' && (
-                          <span className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-200">
+                          <span className="ml-1.5 align-middle px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-200 whitespace-nowrap">
                             PROTECTED
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-slate-600 max-w-xs">
+                      <td className="py-3 px-3 text-slate-600 min-w-0 break-words leading-snug">
                         {r.description || '—'}
                       </td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-3 px-2 text-center">
                         {r.is_system_role ? (
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
                             Sistem
@@ -291,7 +299,7 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-3 px-2 text-center">
                         {r.is_active ? (
                           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
                             Aktif
@@ -302,12 +310,12 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-3 px-2 text-center">
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-100">
                           {r.active_user_count ?? r.user_count ?? 0}
                         </span>
                       </td>
-                      <td className="py-3 px-1.5 text-center w-px whitespace-nowrap">
+                      <td className={`py-3 ${HRD_ACTION_CELL}`}>
                         {r.name === 'Super Admin' ? (
                           <span className="sr-only">Role Platform Super Admin dilindungi</span>
                         ) : (

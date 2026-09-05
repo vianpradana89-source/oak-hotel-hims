@@ -64,6 +64,9 @@ const TONE_CLASS: Record<HrdIconTone, string> = {
 const ICON_BUTTON_CLASS =
   'peer inline-flex items-center justify-center w-7 h-7 rounded-md border border-transparent transition-colors duration-150 cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1b4332]/35 focus-visible:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-current';
 
+/** Compact centered action cell. Do not use w-px — it paints a 1px column seam. */
+export const HRD_ACTION_CELL = 'px-1.5 text-center align-middle whitespace-nowrap';
+
 export function HrdActionCluster({ children }: { children: React.ReactNode }) {
   return (
     <div className="inline-flex items-center justify-center gap-0.5 whitespace-nowrap">

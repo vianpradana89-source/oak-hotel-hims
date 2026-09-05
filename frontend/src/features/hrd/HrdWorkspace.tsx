@@ -5,7 +5,7 @@ import { RolePermissionsTab } from './RolePermissionsTab';
 import { ScheduleTab } from './ScheduleTab';
 import { TestDataPurgeTab } from './TestDataPurgeTab';
 import type { Department, Position, DynamicRole } from './hrdTypes';
-import { HrdActionCluster, HrdActionIcons, HrdActionMenu, HrdIconAction } from './hrdActionUi';
+import { HRD_ACTION_CELL, HrdActionCluster, HrdActionIcons, HrdActionMenu, HrdIconAction } from './hrdActionUi';
 import {
   normalizeIndonesianPhoneNumber,
   buildWhatsAppCredentialMessage,
@@ -916,15 +916,15 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                     <tr className="bg-slate-50 border-b border-slate-200/80 text-slate-600 font-bold uppercase tracking-wider text-[11px]">
                       <th className="py-3 px-4">Nama Lengkap & Kode</th>
                       <th className="py-3 px-4">Email & Kontak</th>
-                      <th className="py-3 px-4">
+                      <th className="py-3 px-3">
                         {employeeScopeTab === 'ACTIVE' ? 'Role / Peran' : 'Role Terakhir'}
                       </th>
-                      <th className="py-3 px-4">Departemen</th>
-                      <th className="py-3 px-4 text-center">Status Akun</th>
+                      <th className="py-3 px-3">Departemen</th>
+                      <th className="py-3 px-3 text-center">Status Akun</th>
                       {employeeScopeTab === 'ARCHIVE' && (
-                        <th className="py-3 px-4">Tanggal Diperbarui</th>
+                        <th className="py-3 px-3">Tanggal Diperbarui</th>
                       )}
-                      <th className="py-3 px-1.5 text-center whitespace-nowrap w-px">Aksi</th>
+                      <th className={`py-3 ${HRD_ACTION_CELL}`}>Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -937,9 +937,9 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
 
                       return (
                         <tr key={emp.id} className="hover:bg-slate-50/80 transition">
-                          <td className="py-3 px-4">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900">{displayName}</span>
+                          <td className="py-3 px-4 min-w-0">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="font-bold text-slate-900 break-words">{displayName}</span>
                               {employeeScopeTab === 'ARCHIVE' && (
                                 <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-stone-100 text-stone-700 border border-stone-200">
                                   Arsip / Nonaktif
@@ -952,27 +952,27 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                               {emp.hire_date ? ` • Masuk: ${formatDateDisplay(emp.hire_date)}` : ''}
                             </div>
                           </td>
-                          <td className="py-3 px-4">
-                            <div className="text-slate-800 font-medium">{emp.email || '—'}</div>
+                          <td className="py-3 px-4 min-w-0">
+                            <div className="text-slate-800 font-medium break-words">{emp.email || '—'}</div>
                             <div className="text-[11px] text-slate-400">{emp.phone || '—'}</div>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             <span className="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#1b4332]/10 text-[#1b4332] border border-[#1b4332]/20">
                               {emp.role || 'Crew'}
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-slate-600 font-medium">
+                          <td className="py-3 px-3 text-slate-600 font-medium break-words">
                             {emp.department || 'Front Office'}
                           </td>
-                          <td className="py-3 px-4 text-center">
+                          <td className="py-3 px-3 text-center">
                             {getAccountStatusBadge(emp)}
                           </td>
                           {employeeScopeTab === 'ARCHIVE' && (
-                            <td className="py-3 px-4 text-slate-500 text-[11px]">
+                            <td className="py-3 px-3 text-slate-500 text-[11px]">
                               {emp.updated_at ? new Date(emp.updated_at).toLocaleDateString('id-ID') : '—'}
                             </td>
                           )}
-                          <td className="py-3 px-1.5 text-center w-px whitespace-nowrap">
+                          <td className={`py-3 ${HRD_ACTION_CELL}`}>
                             <HrdActionCluster>
                               <HrdIconAction
                                 label={employeeScopeTab === 'ACTIVE' ? 'Diagnosa Akun' : 'Lihat Diagnosa Akun'}

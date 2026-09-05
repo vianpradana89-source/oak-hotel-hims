@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import type { Department, Position } from './hrdTypes';
+import { HRD_ACTION_CELL, HrdActionCluster, HrdActionIcons, HrdIconAction } from './hrdActionUi';
 
 interface DepartmentPositionTabProps {
   propertyId: number;
@@ -381,7 +382,7 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                   <th className="py-2.5 px-3">Nama Departemen</th>
                   <th className="py-2.5 px-3 text-center">Staf</th>
                   <th className="py-2.5 px-3 text-center">Status</th>
-                  <th className="py-2.5 px-3 text-right">Aksi</th>
+                  <th className={`py-2.5 ${HRD_ACTION_CELL}`}>Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -405,10 +406,10 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                           {d.code}
                         </span>
                       </td>
-                      <td className="py-2.5 px-3 font-medium text-slate-900">
+                      <td className="py-2.5 px-3 font-medium text-slate-900 min-w-0">
                         {d.name}
                         {d.description && (
-                          <span className="block text-[10px] text-slate-400 truncate max-w-[180px]">
+                          <span className="block text-[10px] text-slate-400 leading-snug break-words">
                             {d.description}
                           </span>
                         )}
@@ -429,64 +430,37 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                           </span>
                         )}
                       </td>
-                      <td className="py-2.5 px-3 text-right space-x-1 whitespace-nowrap">
-                        {d.is_active ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEditDept(d)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
+                      <td className={`py-2.5 ${HRD_ACTION_CELL}`}>
+                        <HrdActionCluster>
+                          <HrdIconAction
+                            label="Edit"
+                            icon={HrdActionIcons.pencil}
+                            onClick={() => handleOpenEditDept(d)}
+                          />
+                          {d.is_active ? (
+                            <HrdIconAction
+                              label="Nonaktifkan Departemen"
+                              icon={HrdActionIcons.power}
+                              tone="warning"
                               onClick={() => handleDeactivateDept(d)}
-                              className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
-                              title="Nonaktifkan Departemen"
-                            >
-                              Nonaktifkan
-                            </button>
-                            {isPlatformSuperAdmin && (
-                              <button
-                                type="button"
-                                onClick={() => { setHardDeleteDeptTarget(d); setHardDeleteError(null); }}
-                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                title="Hapus Permanen (Super Admin Only)"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
+                            />
+                          ) : (
+                            <HrdIconAction
+                              label="Aktifkan Kembali Departemen"
+                              icon={HrdActionIcons.power}
+                              tone="success"
                               onClick={() => handleReactivateDept(d)}
-                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
-                              title="Aktifkan Kembali Departemen"
-                            >
-                              Aktifkan
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEditDept(d)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            {isPlatformSuperAdmin && (
-                              <button
-                                type="button"
-                                onClick={() => { setHardDeleteDeptTarget(d); setHardDeleteError(null); }}
-                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                title="Hapus Permanen (Super Admin Only)"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                          </>
-                        )}
+                            />
+                          )}
+                          {isPlatformSuperAdmin && (
+                            <HrdIconAction
+                              label="Hapus Permanen (Super Admin Only)"
+                              icon={HrdActionIcons.trash}
+                              tone="danger"
+                              onClick={() => { setHardDeleteDeptTarget(d); setHardDeleteError(null); }}
+                            />
+                          )}
+                        </HrdActionCluster>
                       </td>
                     </tr>
                   ))
@@ -552,7 +526,7 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                   <th className="py-2.5 px-3">Departemen</th>
                   <th className="py-2.5 px-3 text-center">Staf</th>
                   <th className="py-2.5 px-3 text-center">Status</th>
-                  <th className="py-2.5 px-3 text-right">Aksi</th>
+                  <th className={`py-2.5 ${HRD_ACTION_CELL}`}>Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -571,7 +545,7 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                 ) : (
                   filteredPositions.map(p => (
                     <tr key={p.id} className="hover:bg-slate-50/50 transition">
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 min-w-0 break-words">
                         {p.name}
                         {p.code && (
                           <span className="ml-1.5 text-[10px] text-slate-400 font-mono">
@@ -600,64 +574,37 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                           </span>
                         )}
                       </td>
-                      <td className="py-2.5 px-3 text-right space-x-1 whitespace-nowrap">
-                        {p.is_active ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEditPos(p)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
+                      <td className={`py-2.5 ${HRD_ACTION_CELL}`}>
+                        <HrdActionCluster>
+                          <HrdIconAction
+                            label="Edit"
+                            icon={HrdActionIcons.pencil}
+                            onClick={() => handleOpenEditPos(p)}
+                          />
+                          {p.is_active ? (
+                            <HrdIconAction
+                              label="Nonaktifkan Jabatan"
+                              icon={HrdActionIcons.power}
+                              tone="warning"
                               onClick={() => handleDeactivatePos(p)}
-                              className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
-                              title="Nonaktifkan Jabatan"
-                            >
-                              Nonaktifkan
-                            </button>
-                            {isPlatformSuperAdmin && (
-                              <button
-                                type="button"
-                                onClick={() => { setHardDeletePosTarget(p); setHardDeleteError(null); }}
-                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                title="Hapus Permanen (Super Admin Only)"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
+                            />
+                          ) : (
+                            <HrdIconAction
+                              label="Aktifkan Kembali Jabatan"
+                              icon={HrdActionIcons.power}
+                              tone="success"
                               onClick={() => handleReactivatePos(p)}
-                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
-                              title="Aktifkan Kembali Jabatan"
-                            >
-                              Aktifkan
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEditPos(p)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            {isPlatformSuperAdmin && (
-                              <button
-                                type="button"
-                                onClick={() => { setHardDeletePosTarget(p); setHardDeleteError(null); }}
-                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                title="Hapus Permanen (Super Admin Only)"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                          </>
-                        )}
+                            />
+                          )}
+                          {isPlatformSuperAdmin && (
+                            <HrdIconAction
+                              label="Hapus Permanen (Super Admin Only)"
+                              icon={HrdActionIcons.trash}
+                              tone="danger"
+                              onClick={() => { setHardDeletePosTarget(p); setHardDeleteError(null); }}
+                            />
+                          )}
+                        </HrdActionCluster>
                       </td>
                     </tr>
                   ))
