@@ -7,12 +7,19 @@ interface DepartmentPositionTabProps {
 }
 
 export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ propertyId }) => {
-  const { authFetch } = useAuth();
+  const { user, authFetch } = useAuth();
+  const isPlatformSuperAdmin = user?.role === 'Super Admin';
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Hard Delete Modal States (Platform Super Admin Only)
+  const [hardDeleteDeptTarget, setHardDeleteDeptTarget] = useState<Department | null>(null);
+  const [hardDeletePosTarget, setHardDeletePosTarget] = useState<Position | null>(null);
+  const [deletingHard, setDeletingHard] = useState(false);
+  const [hardDeleteError, setHardDeleteError] = useState<string | null>(null);
 
   // Filters
   const [deptSearch, setDeptSearch] = useState<string>('');
@@ -134,19 +141,48 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
     }
   };
 
-  const handleDeleteDept = async (d: Department) => {
-    if (!window.confirm(`Yakin ingin menghapus departemen "${d.name}"? Aksi ini tidak dapat dibatalkan.`)) {
-      return;
-    }
+  const handleDeactivateDept = async (d: Department) => {
     try {
-      const res = await authFetch(`/api/hrd/departments/${d.id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/hrd/departments/${d.id}?property_id=${propertyId}`, { method: 'DELETE' });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal menghapus departemen');
+      if (!res.ok) throw new Error(data.message || 'Gagal menonaktifkan departemen');
 
-      setFeedback({ type: 'success', message: 'Departemen berhasil dihapus' });
+      setFeedback({ type: 'success', message: 'Departemen berhasil dinonaktifkan' });
       await fetchData();
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleReactivateDept = async (d: Department) => {
+    try {
+      const res = await authFetch(`/api/hrd/departments/${d.id}/reactivate?property_id=${propertyId}`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan departemen');
+
+      setFeedback({ type: 'success', message: 'Departemen berhasil diaktifkan kembali' });
+      await fetchData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleExecuteHardDeleteDept = async () => {
+    if (!hardDeleteDeptTarget) return;
+    setDeletingHard(true);
+    setHardDeleteError(null);
+    try {
+      const res = await authFetch(`/api/hrd/departments/${hardDeleteDeptTarget.id}/hard-delete?property_id=${propertyId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal menghapus departemen permanen');
+
+      setHardDeleteDeptTarget(null);
+      setFeedback({ type: 'success', message: 'Departemen berhasil dihapus permanen' });
+      await fetchData();
+    } catch (err: any) {
+      setHardDeleteError(err.message || 'Gagal menghapus departemen permanen');
+    } finally {
+      setDeletingHard(false);
     }
   };
 
@@ -220,19 +256,48 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
     }
   };
 
-  const handleDeletePos = async (p: Position) => {
-    if (!window.confirm(`Yakin ingin menghapus jabatan "${p.name}"?`)) {
-      return;
-    }
+  const handleDeactivatePos = async (p: Position) => {
     try {
-      const res = await authFetch(`/api/hrd/positions/${p.id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/hrd/positions/${p.id}?property_id=${propertyId}`, { method: 'DELETE' });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal menghapus jabatan');
+      if (!res.ok) throw new Error(data.message || 'Gagal menonaktifkan jabatan');
 
-      setFeedback({ type: 'success', message: 'Jabatan berhasil dihapus' });
+      setFeedback({ type: 'success', message: 'Jabatan berhasil dinonaktifkan' });
       await fetchData();
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleReactivatePos = async (p: Position) => {
+    try {
+      const res = await authFetch(`/api/hrd/positions/${p.id}/reactivate?property_id=${propertyId}`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan jabatan');
+
+      setFeedback({ type: 'success', message: 'Jabatan berhasil diaktifkan kembali' });
+      await fetchData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleExecuteHardDeletePos = async () => {
+    if (!hardDeletePosTarget) return;
+    setDeletingHard(true);
+    setHardDeleteError(null);
+    try {
+      const res = await authFetch(`/api/hrd/positions/${hardDeletePosTarget.id}/hard-delete?property_id=${propertyId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal menghapus jabatan permanen');
+
+      setHardDeletePosTarget(null);
+      setFeedback({ type: 'success', message: 'Jabatan berhasil dihapus permanen' });
+      await fetchData();
+    } catch (err: any) {
+      setHardDeleteError(err.message || 'Gagal menghapus jabatan permanen');
+    } finally {
+      setDeletingHard(false);
     }
   };
 
@@ -365,21 +430,62 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                         )}
                       </td>
                       <td className="py-2.5 px-3 text-right space-x-1 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditDept(d)}
-                          className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                        >
-                          Edit
-                        </button>
-                        {Number(d.employee_count || 0) === 0 && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteDept(d)}
-                            className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition"
-                          >
-                            Hapus
-                          </button>
+                        {d.is_active ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditDept(d)}
+                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeactivateDept(d)}
+                              className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
+                              title="Nonaktifkan Departemen"
+                            >
+                              Nonaktifkan
+                            </button>
+                            {isPlatformSuperAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => { setHardDeleteDeptTarget(d); setHardDeleteError(null); }}
+                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
+                                title="Hapus Permanen (Super Admin Only)"
+                              >
+                                Hapus
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleReactivateDept(d)}
+                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                              title="Aktifkan Kembali Departemen"
+                            >
+                              Aktifkan
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditDept(d)}
+                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            {isPlatformSuperAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => { setHardDeleteDeptTarget(d); setHardDeleteError(null); }}
+                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
+                                title="Hapus Permanen (Super Admin Only)"
+                              >
+                                Hapus
+                              </button>
+                            )}
+                          </>
                         )}
                       </td>
                     </tr>
@@ -495,21 +601,62 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                         )}
                       </td>
                       <td className="py-2.5 px-3 text-right space-x-1 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditPos(p)}
-                          className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                        >
-                          Edit
-                        </button>
-                        {Number(p.employee_count || 0) === 0 && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeletePos(p)}
-                            className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition"
-                          >
-                            Hapus
-                          </button>
+                        {p.is_active ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditPos(p)}
+                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeactivatePos(p)}
+                              className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
+                              title="Nonaktifkan Jabatan"
+                            >
+                              Nonaktifkan
+                            </button>
+                            {isPlatformSuperAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => { setHardDeletePosTarget(p); setHardDeleteError(null); }}
+                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
+                                title="Hapus Permanen (Super Admin Only)"
+                              >
+                                Hapus
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleReactivatePos(p)}
+                              className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
+                              title="Aktifkan Kembali Jabatan"
+                            >
+                              Aktifkan
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditPos(p)}
+                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            {isPlatformSuperAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => { setHardDeletePosTarget(p); setHardDeleteError(null); }}
+                                className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
+                                title="Hapus Permanen (Super Admin Only)"
+                              >
+                                Hapus
+                              </button>
+                            )}
+                          </>
                         )}
                       </td>
                     </tr>
@@ -742,6 +889,104 @@ export const DepartmentPositionTab: React.FC<DepartmentPositionTabProps> = ({ pr
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Hard Delete Department Modal (Platform Super Admin Only) */}
+      {hardDeleteDeptTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-rose-900">
+                Hapus Departemen
+              </h3>
+              <button
+                type="button"
+                onClick={() => { setHardDeleteDeptTarget(null); setHardDeleteError(null); }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Yakin ingin menghapus data ini? Data akan dihapus permanen.
+            </p>
+
+            {hardDeleteError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                {hardDeleteError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setHardDeleteDeptTarget(null); setHardDeleteError(null); }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                disabled={deletingHard}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteHardDeleteDept}
+                disabled={deletingHard}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer disabled:opacity-50"
+              >
+                {deletingHard ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hard Delete Position Modal (Platform Super Admin Only) */}
+      {hardDeletePosTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-rose-900">
+                Hapus Jabatan
+              </h3>
+              <button
+                type="button"
+                onClick={() => { setHardDeletePosTarget(null); setHardDeleteError(null); }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Yakin ingin menghapus data ini? Data akan dihapus permanen.
+            </p>
+
+            {hardDeleteError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                {hardDeleteError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setHardDeletePosTarget(null); setHardDeleteError(null); }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                disabled={deletingHard}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteHardDeletePos}
+                disabled={deletingHard}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer disabled:opacity-50"
+              >
+                {deletingHard ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </div>
           </div>
         </div>
       )}

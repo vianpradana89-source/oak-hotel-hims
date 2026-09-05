@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { PropertyHoliday } from './scheduleTypes';
+import { useAuth } from '../auth/AuthContext';
 
 interface HolidayCalendarDrawerProps {
   propertyId: number;
@@ -14,6 +15,9 @@ const HOLIDAY_TYPES = [
 ];
 
 export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ propertyId, onClose, onHolidaysUpdated }) => {
+  const { user, authFetch } = useAuth();
+  const isPlatformSuperAdmin = user?.role === 'Super Admin';
+
   const [holidays, setHolidays] = useState<PropertyHoliday[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -28,15 +32,15 @@ export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ pr
   });
   const [error, setError] = useState('');
 
-  const getAuthHeaders = (): HeadersInit => {
-    const token = localStorage.getItem('oak_hims_auth_token');
-    return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-  };
+  // Hard Delete Modal States (Platform Super Admin Only)
+  const [hardDeleteHolidayTarget, setHardDeleteHolidayTarget] = useState<PropertyHoliday | null>(null);
+  const [deletingHolidayHard, setDeletingHolidayHard] = useState(false);
+  const [hardDeleteHolidayError, setHardDeleteHolidayError] = useState<string | null>(null);
 
   const fetchHolidays = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/schedule/holidays?property_id=${propertyId}&include_inactive=true&year=${filterYear}`, { headers: getAuthHeaders() });
+      const res = await authFetch(`/api/schedule/holidays?property_id=${propertyId}&include_inactive=true&year=${filterYear}`);
       const data = await res.json();
       if (data.status === 'OK') setHolidays(data.data || []);
     } catch { /* ignore */ } finally { setLoading(false); }
@@ -59,7 +63,11 @@ export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ pr
       const url = editHoliday ? `/api/schedule/holidays/${editHoliday.id}` : '/api/schedule/holidays';
       const method = editHoliday ? 'PATCH' : 'POST';
 
-      const res = await fetch(url, { method, headers: getAuthHeaders(), body: JSON.stringify(body) });
+      const res = await authFetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Gagal menyimpan');
 
@@ -69,6 +77,58 @@ export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ pr
       await fetchHolidays();
       onHolidaysUpdated();
     } catch (err: any) { setError(err.message); } finally { setSaving(false); }
+  };
+
+  const handleDeactivate = async (id: number) => {
+    try {
+      const res = await authFetch(`/api/schedule/holidays/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || 'Gagal menonaktifkan hari libur');
+      }
+      await fetchHolidays();
+      onHolidaysUpdated();
+    } catch (err: any) { setError(err.message); }
+  };
+
+  const handleReactivate = async (id: number) => {
+    try {
+      const res = await authFetch(`/api/schedule/holidays/${id}/reactivate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || 'Gagal mengaktifkan hari libur');
+      }
+      await fetchHolidays();
+      onHolidaysUpdated();
+    } catch (err: any) { setError(err.message); }
+  };
+
+  const handleExecuteHardDelete = async () => {
+    if (!hardDeleteHolidayTarget) return;
+    setDeletingHolidayHard(true);
+    setHardDeleteHolidayError(null);
+    try {
+      const res = await authFetch(`/api/schedule/holidays/${hardDeleteHolidayTarget.id}/hard-delete?property_id=${propertyId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal menghapus hari libur permanen');
+      setHardDeleteHolidayTarget(null);
+      await fetchHolidays();
+      onHolidaysUpdated();
+    } catch (err: any) {
+      setHardDeleteHolidayError(err.message || 'Gagal menghapus hari libur permanen');
+    } finally {
+      setDeletingHolidayHard(false);
+    }
   };
 
   const handleEdit = (holiday: PropertyHoliday) => {
@@ -199,7 +259,61 @@ export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ pr
                         </span>
                       </td>
                       <td className="py-1.5 px-3">
-                        <button onClick={() => handleEdit(h)} className="text-[10px] font-bold text-[#1b4332] hover:underline cursor-pointer">Edit</button>
+                        <div className="flex items-center gap-1">
+                          {h.is_active ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleEdit(h)}
+                                className="px-2 py-0.5 text-[10px] font-bold rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeactivate(h.id)}
+                                className="px-2 py-0.5 text-[10px] font-bold rounded border border-amber-200 text-amber-700 hover:bg-amber-50 cursor-pointer"
+                              >
+                                Nonaktifkan
+                              </button>
+                              {isPlatformSuperAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setHardDeleteHolidayTarget(h); setHardDeleteHolidayError(null); }}
+                                  className="px-2 py-0.5 text-[10px] font-bold rounded border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                                >
+                                  Hapus
+                                </button>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleReactivate(h.id)}
+                                className="px-2 py-0.5 text-[10px] font-bold rounded border border-emerald-200 text-emerald-800 hover:bg-emerald-50 cursor-pointer"
+                              >
+                                Aktifkan
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleEdit(h)}
+                                className="px-2 py-0.5 text-[10px] font-bold rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                              >
+                                Edit
+                              </button>
+                              {isPlatformSuperAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setHardDeleteHolidayTarget(h); setHardDeleteHolidayError(null); }}
+                                  className="px-2 py-0.5 text-[10px] font-bold rounded border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                                >
+                                  Hapus
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -209,6 +323,55 @@ export const HolidayCalendarDrawer: React.FC<HolidayCalendarDrawerProps> = ({ pr
           )}
         </div>
       </div>
+
+      {/* Hard Delete Holiday Modal (Platform Super Admin Only) */}
+      {hardDeleteHolidayTarget && (
+        <div className="fixed inset-0 z-60 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-rose-900">
+                Hapus Hari Libur
+              </h3>
+              <button
+                type="button"
+                onClick={() => { setHardDeleteHolidayTarget(null); setHardDeleteHolidayError(null); }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Yakin ingin menghapus data ini? Data akan dihapus permanen.
+            </p>
+
+            {hardDeleteHolidayError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                {hardDeleteHolidayError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setHardDeleteHolidayTarget(null); setHardDeleteHolidayError(null); }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                disabled={deletingHolidayHard}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteHardDelete}
+                disabled={deletingHolidayHard}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer disabled:opacity-50"
+              >
+                {deletingHolidayHard ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

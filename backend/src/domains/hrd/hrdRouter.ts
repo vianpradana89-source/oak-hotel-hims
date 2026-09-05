@@ -10,6 +10,7 @@ import {
   deactivateEmployeeAccount,
   reactivateEmployeeAccount,
   hardDeleteAuthAccount,
+  hardDeleteEmployeeAccount,
   diagnoseEmployeeLoginAccount,
   repairEmployeeLoginAccount,
   resetEmployeePassword,
@@ -17,14 +18,23 @@ import {
   getDepartments,
   createDepartment,
   updateDepartment,
+  deactivateDepartment,
+  reactivateDepartment,
+  hardDeleteDepartment,
   deleteDepartment,
   getPositions,
   createPosition,
   updatePosition,
+  deactivatePosition,
+  reactivatePosition,
+  hardDeletePosition,
   deletePosition,
   getDynamicRoles,
   createDynamicRole,
   updateDynamicRole,
+  deactivateDynamicRole,
+  reactivateDynamicRole,
+  hardDeleteDynamicRole,
   deleteDynamicRole,
   getGranularPermissions,
   getRoleGranularPermissions,
@@ -37,7 +47,6 @@ import type {
   UpdateEmployeePayload,
   AccountRepairActionPayload,
   DeactivateEmployeePayload,
-  HardDeleteLoginAccountPayload,
   CreateDepartmentPayload,
   UpdateDepartmentPayload,
   CreatePositionPayload,
@@ -45,7 +54,7 @@ import type {
   CreateRolePayload,
   UpdateRolePayload
 } from './hrdTypes';
-import { verifyToken } from '../auth/authService';
+import { verifyToken, assertPlatformSuperAdmin } from '../auth/authService';
 
 function parsePropertyId(val: any, req?: Request): number {
   const candidate = val ?? (req as any)?.user?.property_id ?? req?.query?.property_id ?? req?.query?.propertyId ?? req?.body?.property_id ?? req?.body?.propertyId;
@@ -367,7 +376,7 @@ export function createHrdRouter(pool: Pool): Router {
     }
   });
 
-  // 7c. Hard Delete Auth Login Account (Super Admin / GM only)
+  // 7c. Hard Delete Auth Login Account (Platform Super Admin only)
   router.delete('/employees/:id/login-account', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
@@ -381,47 +390,75 @@ export function createHrdRouter(pool: Pool): Router {
       let actorUser = (req as any).user;
       if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
         try {
-          const { verifyToken } = require('../auth/authService');
           actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
           (req as any).user = actorUser;
         } catch {}
       }
 
-      const actorRole = actorUser?.role || req.body.actor_role;
-      const normalizedRole = actorRole ? actorRole.toLowerCase().trim() : '';
-      const isPrivileged =
-        normalizedRole.includes('admin') ||
-        normalizedRole.includes('owner') ||
-        normalizedRole.includes('general manager') ||
-        normalizedRole === 'gm';
-
-      if (!isPrivileged) {
-        throw Object.assign(
-          new Error('Akses ditolak: Hanya Super Admin atau General Manager yang diizinkan menghapus permanen akun login.'),
-          { statusCode: 403, code: 'FORBIDDEN' }
-        );
-      }
-
-      const confirmIdentity = req.body.confirm_identity || req.body.confirmIdentity;
-      if (!confirmIdentity) {
-        throw Object.assign(
-          new Error('Konfirmasi identitas (email atau username) wajib diisi untuk menghapus akun login.'),
-          { statusCode: 400, code: 'CONFIRMATION_REQUIRED' }
-        );
-      }
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
 
       const actor = {
-        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
-        name: (req as any).user?.full_name || req.body.actor_name || 'Super Admin',
-        role: actorRole || 'Super Admin'
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin',
+        role: 'Super Admin'
       };
 
-      const result = await hardDeleteAuthAccount(client, propertyId, employeeId, confirmIdentity, actor);
+      const result = await hardDeleteAuthAccount(client, propertyId, employeeId, actor);
       await client.query('COMMIT');
       res.json({
         status: 'OK',
         message: 'Akun login berhasil dihapus permanen. Data karyawan tetap tersimpan.',
         data: result
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message,
+        details: err.details
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 7d. Hard Delete Employee (Platform Super Admin only)
+  router.delete('/employees/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin',
+        role: 'Super Admin'
+      };
+
+      const result = await hardDeleteEmployeeAccount(client, propertyId, employeeId, actor);
+      await client.query('COMMIT');
+      res.json({
+        status: 'OK',
+        message: result.message,
+        data: result.deleted_employee
       });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
@@ -669,7 +706,76 @@ export function createHrdRouter(pool: Pool): Router {
         role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
-      const result = await deleteDepartment(client, propertyId, departmentId, actor);
+      const result = await deactivateDepartment(client, propertyId, departmentId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 15b. Reactivate Department
+  router.post('/departments/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.query.property_id || req.body.property_id, req);
+      const departmentId = Number(req.params.id);
+      if (isNaN(departmentId) || departmentId <= 0) {
+        throw Object.assign(new Error('ID Departemen tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const result = await reactivateDepartment(client, propertyId, departmentId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 15c. Hard Delete Department (Super Admin only)
+  router.delete('/departments/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.query.property_id || req.body.property_id, req);
+      const departmentId = Number(req.params.id);
+      if (isNaN(departmentId) || departmentId <= 0) {
+        throw Object.assign(new Error('ID Departemen tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin',
+        role: 'Super Admin'
+      };
+
+      const result = await hardDeleteDepartment(client, propertyId, departmentId, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: result });
     } catch (err: any) {
@@ -782,7 +888,76 @@ export function createHrdRouter(pool: Pool): Router {
         role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
-      const result = await deletePosition(client, propertyId, positionId, actor);
+      const result = await deactivatePosition(client, propertyId, positionId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 19b. Reactivate Position
+  router.post('/positions/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.query.property_id || req.body.property_id, req);
+      const positionId = Number(req.params.id);
+      if (isNaN(positionId) || positionId <= 0) {
+        throw Object.assign(new Error('ID Jabatan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const result = await reactivatePosition(client, propertyId, positionId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 19c. Hard Delete Position (Super Admin only)
+  router.delete('/positions/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.query.property_id || req.body.property_id, req);
+      const positionId = Number(req.params.id);
+      if (isNaN(positionId) || positionId <= 0) {
+        throw Object.assign(new Error('ID Jabatan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin',
+        role: 'Super Admin'
+      };
+
+      const result = await hardDeletePosition(client, propertyId, positionId, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: result });
     } catch (err: any) {
@@ -889,7 +1064,74 @@ export function createHrdRouter(pool: Pool): Router {
         role: (req as any).user?.role || req.body.actor_role || 'HRD'
       };
 
-      const result = await deleteDynamicRole(client, roleId, actor);
+      const result = await deactivateDynamicRole(client, roleId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 23b. Reactivate Dynamic Role
+  router.post('/roles/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const roleId = Number(req.params.id);
+      if (isNaN(roleId) || roleId <= 0) {
+        throw Object.assign(new Error('ID Role tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const actor = {
+        id: (req as any).user?.id || (req.body.actor_id ? Number(req.body.actor_id) : undefined),
+        name: (req as any).user?.full_name || req.body.actor_name || 'HRD Admin',
+        role: (req as any).user?.role || req.body.actor_role || 'HRD'
+      };
+
+      const result = await reactivateDynamicRole(client, roleId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 23c. Hard Delete Dynamic Role (Super Admin only)
+  router.delete('/roles/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const roleId = Number(req.params.id);
+      if (isNaN(roleId) || roleId <= 0) {
+        throw Object.assign(new Error('ID Role tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin',
+        role: 'Super Admin'
+      };
+
+      const result = await hardDeleteDynamicRole(client, roleId, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: result });
     } catch (err: any) {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { ScheduleGroup, Department } from './scheduleTypes';
+import { useAuth } from '../auth/AuthContext';
 
 interface KelolaGroupDrawerProps {
   propertyId: number;
@@ -14,6 +15,9 @@ interface DepartmentWithCategory extends Department {
 }
 
 export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId, onClose, onGroupsUpdated }) => {
+  const { user, authFetch } = useAuth();
+  const isPlatformSuperAdmin = user?.role === 'Super Admin';
+
   const [groups, setGroups] = useState<ScheduleGroup[]>([]);
   const [departments, setDepartments] = useState<DepartmentWithCategory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -29,15 +33,18 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
   });
   const [error, setError] = useState('');
 
-  const getAuthHeaders = (): HeadersInit => {
-    const token = localStorage.getItem('oak_hims_auth_token');
-    return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-  };
+  // Department Schedule Classification Toast
+  const [deptCategoryToast, setDeptCategoryToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Hard Delete Modal States (Platform Super Admin Only)
+  const [hardDeleteGroupTarget, setHardDeleteGroupTarget] = useState<ScheduleGroup | null>(null);
+  const [deletingGroupHard, setDeletingGroupHard] = useState(false);
+  const [hardDeleteGroupError, setHardDeleteGroupError] = useState<string | null>(null);
 
   const fetchGroups = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/schedule/groups?property_id=${propertyId}&include_inactive=true`, { headers: getAuthHeaders() });
+      const res = await authFetch(`/api/schedule/groups?property_id=${propertyId}&include_inactive=true`);
       const data = await res.json();
       if (data.status === 'OK' && Array.isArray(data.data)) {
         setGroups(data.data);
@@ -53,7 +60,7 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
 
   const fetchDepartments = async (): Promise<Department[]> => {
     try {
-      const res = await fetch(`/api/hrd/departments?property_id=${propertyId}&include_inactive=false`, { headers: getAuthHeaders() });
+      const res = await authFetch(`/api/hrd/departments?property_id=${propertyId}&include_inactive=false`);
       const data = await res.json();
       if (data.status === 'OK' && Array.isArray(data.data)) {
         setDepartments(data.data);
@@ -65,7 +72,7 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
 
   const fetchDepartmentCategories = async (currentDepts?: Department[]) => {
     try {
-      const res = await fetch(`/api/schedule/department-categories?property_id=${propertyId}`, { headers: getAuthHeaders() });
+      const res = await authFetch(`/api/schedule/department-categories?property_id=${propertyId}`);
       const data = await res.json();
       const categoryMap = new Map<number, DepartmentCategory>();
 
@@ -101,18 +108,23 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
   };
 
   const updateDepartmentCategory = async (departmentId: number, category: DepartmentCategory) => {
+    setDeptCategoryToast(null);
     try {
-      const res = await fetch(`/api/schedule/department-categories/${departmentId}`, {
+      const res = await authFetch(`/api/schedule/department-categories/${departmentId}`, {
         method: 'PATCH',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: propertyId,
-          category,
+          schedule_category: category,
         }),
       });
-      if (!res.ok) throw new Error((await res.json()).message);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal memperbarui tipe jadwal.');
       setDepartments(prev => (Array.isArray(prev) ? prev : []).map(d => d.id === departmentId ? { ...d, schedule_category: category } : d));
-    } catch (err: any) { alert(err.message); }
+      setDeptCategoryToast({ type: 'success', message: 'Tipe jadwal berhasil diperbarui.' });
+    } catch {
+      setDeptCategoryToast({ type: 'error', message: 'Gagal memperbarui tipe jadwal.' });
+    }
   };
 
   useEffect(() => {
@@ -139,7 +151,11 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
       const url = editGroup ? `/api/schedule/groups/${editGroup.id}` : '/api/schedule/groups';
       const method = editGroup ? 'PATCH' : 'POST';
 
-      const res = await fetch(url, { method, headers: getAuthHeaders(), body: JSON.stringify(body) });
+      const res = await authFetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Gagal menyimpan');
 
@@ -152,17 +168,55 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
   };
 
   const handleDeactivate = async (groupId: number) => {
-    if (!confirm('Nonaktifkan group ini?')) return;
     try {
-      const res = await fetch(`/api/schedule/groups/${groupId}`, {
+      const res = await authFetch(`/api/schedule/groups/${groupId}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId }),
       });
-      if (!res.ok) throw new Error((await res.json()).message);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || 'Gagal menonaktifkan group');
+      }
       await fetchGroups();
       onGroupsUpdated();
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { setError(err.message); }
+  };
+
+  const handleReactivate = async (groupId: number) => {
+    try {
+      const res = await authFetch(`/api/schedule/groups/${groupId}/reactivate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || 'Gagal mengaktifkan group');
+      }
+      await fetchGroups();
+      onGroupsUpdated();
+    } catch (err: any) { setError(err.message); }
+  };
+
+  const handleExecuteHardDelete = async () => {
+    if (!hardDeleteGroupTarget) return;
+    setDeletingGroupHard(true);
+    setHardDeleteGroupError(null);
+    try {
+      const res = await authFetch(`/api/schedule/groups/${hardDeleteGroupTarget.id}/hard-delete?property_id=${propertyId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal menghapus group permanen');
+      setHardDeleteGroupTarget(null);
+      await fetchGroups();
+      onGroupsUpdated();
+    } catch (err: any) {
+      setHardDeleteGroupError(err.message || 'Gagal menghapus group permanen');
+    } finally {
+      setDeletingGroupHard(false);
+    }
   };
 
   const handleEdit = (group: ScheduleGroup) => {
@@ -258,16 +312,68 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
           ) : (
             <div className="space-y-2">
               {(Array.isArray(groups) ? groups : []).map(group => (
-                <div key={group.id} className={`border rounded-xl p-3 ${group.is_active ? 'border-slate-200 bg-white' : 'border-slate-100 bg-slate-50 opacity-60'}`}>
+                <div key={group.id} className={`border rounded-xl p-3 ${group.is_active ? 'border-slate-200 bg-white' : 'border-slate-100 bg-slate-50'}`}>
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-xs font-bold text-slate-900">{group.name}</div>
                       <div className="text-[10px] text-slate-500">Kode: {group.code} | Urutan: {group.display_order}</div>
                     </div>
-                    <div className="flex gap-1">
-                      <button onClick={() => handleEdit(group)} className="px-2 py-1 text-[10px] font-bold rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">Edit</button>
-                      {group.is_active && (
-                        <button onClick={() => handleDeactivate(group.id)} className="px-2 py-1 text-[10px] font-bold rounded border border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer">Nonaktif</button>
+                    <div className="flex items-center gap-1">
+                      {group.is_active ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleEdit(group)}
+                            className="px-2 py-1 text-[10px] font-bold rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeactivate(group.id)}
+                            className="px-2 py-1 text-[10px] font-bold rounded border border-amber-200 text-amber-700 hover:bg-amber-50 cursor-pointer"
+                          >
+                            Nonaktifkan
+                          </button>
+                          {isPlatformSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => { setHardDeleteGroupTarget(group); setHardDeleteGroupError(null); }}
+                              className="px-2 py-1 text-[10px] font-bold rounded border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-200 text-slate-600">
+                            NONAKTIF
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleReactivate(group.id)}
+                            className="px-2 py-1 text-[10px] font-bold rounded border border-emerald-200 text-emerald-800 hover:bg-emerald-50 cursor-pointer"
+                          >
+                            Aktifkan
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleEdit(group)}
+                            className="px-2 py-1 text-[10px] font-bold rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          {isPlatformSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => { setHardDeleteGroupTarget(group); setHardDeleteGroupError(null); }}
+                              className="px-2 py-1 text-[10px] font-bold rounded border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -289,7 +395,7 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
           <div className="pt-4 border-t border-slate-200">
             <button onClick={() => setShowDeptClassification(!showDeptClassification)}
               className="flex items-center justify-between w-full px-3 py-2 text-[11px] font-bold text-slate-700 hover:bg-slate-50 rounded-lg transition cursor-pointer">
-              <span>Klasifikasi Departemen (Operasional / Non-Operasional)</span>
+              <span>Tipe Jadwal Departemen</span>
               <svg className={`w-4 h-4 text-slate-400 transition ${showDeptClassification ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
               </svg>
@@ -297,8 +403,15 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
             {showDeptClassification && (
               <div className="mt-2 space-y-2">
                 <p className="text-[9px] text-slate-500 px-3">
-                  Klasifikasi menentukan departemen mana yang muncul di tampilan Operasional (dengan shift) dan Non-Operasional (Kerja/OFF/Cuti/Sakit/Ijin/Libur).
+                  Klasifikasi menentukan apakah departemen mengikuti jadwal Operasional (Shift) atau Non-Operasional (Jam Kerja kantor).
                 </p>
+
+                {deptCategoryToast && (
+                  <div className={`p-2 rounded-lg text-[11px] font-medium ${deptCategoryToast.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'}`}>
+                    {deptCategoryToast.message}
+                  </div>
+                )}
+
                 <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-64 overflow-y-auto">
                   {(Array.isArray(departments) ? departments : []).filter(d => d.is_active).map(dept => (
                     <div key={dept.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 transition">
@@ -308,9 +421,9 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
                           value={dept.schedule_category || ''}
                           onChange={e => updateDepartmentCategory(dept.id, (e.target.value || null) as DepartmentCategory)}
                           className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-[#1b4332] cursor-pointer">
-                          <option value="">Belum Diklasifikasi</option>
-                          <option value="OPERATIONAL">Operasional</option>
-                          <option value="NON_OPERATIONAL">Non-Operasional</option>
+                          <option value="OPERATIONAL">Operasional / Shift</option>
+                          <option value="NON_OPERATIONAL">Non-Operasional / Jam Kerja</option>
+                          <option value="">Belum Ditentukan</option>
                         </select>
                       </div>
                     </div>
@@ -318,13 +431,13 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
                 </div>
                 <div className="flex gap-2 text-[9px] text-slate-500">
                   <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Operasional
+                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Operasional / Shift
                   </span>
                   <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-slate-400"></span> Non-Operasional
+                    <span className="w-2 h-2 rounded-full bg-slate-400"></span> Non-Operasional / Jam Kerja
                   </span>
                   <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-amber-400"></span> Belum Diklasifikasi
+                    <span className="w-2 h-2 rounded-full bg-amber-400"></span> Belum Ditentukan
                   </span>
                 </div>
               </div>
@@ -332,6 +445,55 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
           </div>
         </div>
       </div>
+
+      {/* Hard Delete Group Modal (Platform Super Admin Only) */}
+      {hardDeleteGroupTarget && (
+        <div className="fixed inset-0 z-60 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-rose-900">
+                Hapus Group
+              </h3>
+              <button
+                type="button"
+                onClick={() => { setHardDeleteGroupTarget(null); setHardDeleteGroupError(null); }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Yakin ingin menghapus data ini? Data akan dihapus permanen.
+            </p>
+
+            {hardDeleteGroupError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                {hardDeleteGroupError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setHardDeleteGroupTarget(null); setHardDeleteGroupError(null); }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                disabled={deletingGroupHard}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteHardDelete}
+                disabled={deletingGroupHard}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer disabled:opacity-50"
+              >
+                {deletingGroupHard ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1542,6 +1542,57 @@ export async function deactivateScheduleGroup(
   );
 }
 
+export async function reactivateScheduleGroup(
+  client: PoolClient,
+  propertyId: number,
+  groupId: number,
+  actor: { id?: number; name: string }
+): Promise<ScheduleGroup> {
+  const existing = await getScheduleGroupById(client, propertyId, groupId);
+  if (!existing) {
+    throw Object.assign(new Error('Group tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  await client.query(
+    'UPDATE schedule_groups SET is_active = TRUE, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND property_id = $3',
+    [actor.name, groupId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SCHEDULE_GROUP_ACTIVATED', 'schedule_groups', $1, $2, $3)`,
+    [groupId, JSON.stringify({ id: groupId, is_active: true }), propertyId]
+  );
+
+  return (await getScheduleGroupById(client, propertyId, groupId))!;
+}
+
+export async function hardDeleteScheduleGroup(
+  client: PoolClient,
+  propertyId: number,
+  groupId: number,
+  actor: { id?: number; name: string }
+): Promise<{ success: boolean; message: string }> {
+  const existing = await getScheduleGroupById(client, propertyId, groupId);
+  if (!existing) {
+    throw Object.assign(new Error('Group tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  // Remove mapped departments in schedule_group_departments
+  await client.query('DELETE FROM schedule_group_departments WHERE group_id = $1', [groupId]);
+
+  // Delete group
+  await client.query('DELETE FROM schedule_groups WHERE id = $1 AND property_id = $2', [groupId, propertyId]);
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SCHEDULE_GROUP_HARD_DELETED', 'schedule_groups', $1, $2, $3)`,
+    [groupId, JSON.stringify({ id: groupId, name: existing.name }), propertyId]
+  );
+
+  return { success: true, message: 'Group operasional berhasil dihapus permanen.' };
+}
+
 // ─── Department Work Patterns (Non-Operational Office Hours) ───
 
 export async function getDepartmentWorkPatterns(
@@ -1808,6 +1859,111 @@ export async function updatePropertyHoliday(
     created_by: r.created_by,
     updated_by: r.updated_by,
   };
+}
+
+export async function deactivatePropertyHoliday(
+  client: PoolClient,
+  propertyId: number,
+  holidayId: number,
+  actor: { id?: number; name: string }
+): Promise<PropertyHoliday> {
+  const existing = await client.query(
+    'SELECT * FROM property_holidays WHERE id = $1 AND property_id = $2',
+    [holidayId, propertyId]
+  );
+  if (existing.rows.length === 0) {
+    throw Object.assign(new Error('Hari libur tidak ditemukan.'), { statusCode: 404, code: 'HOLIDAY_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    `UPDATE property_holidays SET is_active = FALSE, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
+    [actor.name, holidayId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'HOLIDAY_DEACTIVATED', 'property_holidays', $1, $2, $3)`,
+    [holidayId, JSON.stringify({ id: holidayId, is_active: false }), propertyId]
+  );
+
+  const r = res.rows[0];
+  return {
+    id: r.id,
+    property_id: r.property_id,
+    holiday_date: typeof r.holiday_date === 'string' ? r.holiday_date.split('T')[0] : new Date(r.holiday_date).toISOString().split('T')[0],
+    name: r.name,
+    holiday_type: r.holiday_type,
+    is_active: false,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    created_by: r.created_by,
+    updated_by: r.updated_by,
+  };
+}
+
+export async function reactivatePropertyHoliday(
+  client: PoolClient,
+  propertyId: number,
+  holidayId: number,
+  actor: { id?: number; name: string }
+): Promise<PropertyHoliday> {
+  const existing = await client.query(
+    'SELECT * FROM property_holidays WHERE id = $1 AND property_id = $2',
+    [holidayId, propertyId]
+  );
+  if (existing.rows.length === 0) {
+    throw Object.assign(new Error('Hari libur tidak ditemukan.'), { statusCode: 404, code: 'HOLIDAY_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    `UPDATE property_holidays SET is_active = TRUE, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
+    [actor.name, holidayId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'HOLIDAY_ACTIVATED', 'property_holidays', $1, $2, $3)`,
+    [holidayId, JSON.stringify({ id: holidayId, is_active: true }), propertyId]
+  );
+
+  const r = res.rows[0];
+  return {
+    id: r.id,
+    property_id: r.property_id,
+    holiday_date: typeof r.holiday_date === 'string' ? r.holiday_date.split('T')[0] : new Date(r.holiday_date).toISOString().split('T')[0],
+    name: r.name,
+    holiday_type: r.holiday_type,
+    is_active: true,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    created_by: r.created_by,
+    updated_by: r.updated_by,
+  };
+}
+
+export async function hardDeletePropertyHoliday(
+  client: PoolClient,
+  propertyId: number,
+  holidayId: number,
+  actor: { id?: number; name: string }
+): Promise<{ success: boolean; message: string }> {
+  const existing = await client.query(
+    'SELECT * FROM property_holidays WHERE id = $1 AND property_id = $2',
+    [holidayId, propertyId]
+  );
+  if (existing.rows.length === 0) {
+    throw Object.assign(new Error('Hari libur tidak ditemukan.'), { statusCode: 404, code: 'HOLIDAY_NOT_FOUND' });
+  }
+
+  await client.query('DELETE FROM property_holidays WHERE id = $1 AND property_id = $2', [holidayId, propertyId]);
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'HOLIDAY_HARD_DELETED', 'property_holidays', $1, $2, $3)`,
+    [holidayId, JSON.stringify({ id: holidayId, name: existing.rows[0].name }), propertyId]
+  );
+
+  return { success: true, message: 'Hari libur berhasil dihapus permanen.' };
 }
 
 // ─── Non-Operational Multi-Month Bulk Pattern ───

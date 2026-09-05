@@ -308,5 +308,5 @@ export interface DeactivateEmployeePayload {
 }
 
 export interface HardDeleteLoginAccountPayload {
-  confirm_identity: string;
+  property_id?: number;
 }

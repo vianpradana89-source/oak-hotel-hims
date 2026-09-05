@@ -26,11 +26,16 @@ import {
   createScheduleGroup,
   updateScheduleGroup,
   deactivateScheduleGroup,
+  reactivateScheduleGroup,
+  hardDeleteScheduleGroup,
   getDepartmentWorkPatterns,
   upsertDepartmentWorkPattern,
   getPropertyHolidays,
   createPropertyHoliday,
   updatePropertyHoliday,
+  deactivatePropertyHoliday,
+  reactivatePropertyHoliday,
+  hardDeletePropertyHoliday,
   previewNonOpBulkPattern,
   applyNonOpBulkPattern,
   getGroupedRoster,
@@ -615,8 +620,9 @@ export function createScheduleRouter(pool: Pool): Router {
       if (isNaN(departmentId) || departmentId <= 0) {
         throw Object.assign(new Error('ID departemen tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
       }
+      const rawCategory = req.body.schedule_category !== undefined ? req.body.schedule_category : req.body.category;
       const actor = { id: (req as any).user?.id, name: (req as any).user?.full_name || 'HRD Admin' };
-      await updateDepartmentCategory(client, propertyId, departmentId, { schedule_category: req.body.schedule_category }, actor);
+      await updateDepartmentCategory(client, propertyId, departmentId, { schedule_category: rawCategory }, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', message: 'Kategori jadwal departemen berhasil diperbarui.' });
     } catch (err: any) {
@@ -746,6 +752,64 @@ export function createScheduleRouter(pool: Pool): Router {
     }
   });
 
+  // 19b. Reactivate schedule group
+  router.post('/groups/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const groupId = Number(req.params.id);
+      if (isNaN(groupId) || groupId <= 0) {
+        throw Object.assign(new Error('ID group tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const actor = { id: (req as any).user?.id, name: (req as any).user?.full_name || 'HRD Admin' };
+      const updated = await reactivateScheduleGroup(client, propertyId, groupId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: 'Group berhasil diaktifkan kembali.', data: updated });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 19c. Hard Delete schedule group (Platform Super Admin only)
+  router.delete('/groups/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const groupId = Number(req.params.id);
+      if (isNaN(groupId) || groupId <= 0) {
+        throw Object.assign(new Error('ID group tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = { id: actorUserId, name: actorUser?.full_name || 'Super Admin' };
+      const result = await hardDeleteScheduleGroup(client, propertyId, groupId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: result.message });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   // ─── Department Work Patterns (Non-Operational Office Hours) ───
 
   // 20. List department work patterns
@@ -854,6 +918,87 @@ export function createScheduleRouter(pool: Pool): Router {
       const holiday = await updatePropertyHoliday(client, propertyId, holidayId, payload, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: holiday });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 24b. Deactivate property holiday
+  router.delete('/holidays/:id', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const holidayId = Number(req.params.id);
+      if (isNaN(holidayId) || holidayId <= 0) {
+        throw Object.assign(new Error('ID hari libur tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const actor = { id: (req as any).user?.id, name: (req as any).user?.full_name || 'HRD Admin' };
+      const holiday = await deactivatePropertyHoliday(client, propertyId, holidayId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: 'Hari libur berhasil dinonaktifkan.', data: holiday });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 24c. Reactivate property holiday
+  router.post('/holidays/:id/reactivate', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const holidayId = Number(req.params.id);
+      if (isNaN(holidayId) || holidayId <= 0) {
+        throw Object.assign(new Error('ID hari libur tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const actor = { id: (req as any).user?.id, name: (req as any).user?.full_name || 'HRD Admin' };
+      const holiday = await reactivatePropertyHoliday(client, propertyId, holidayId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: 'Hari libur berhasil diaktifkan kembali.', data: holiday });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 24d. Hard Delete property holiday (Platform Super Admin only)
+  router.delete('/holidays/:id/hard-delete', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const holidayId = Number(req.params.id);
+      if (isNaN(holidayId) || holidayId <= 0) {
+        throw Object.assign(new Error('ID hari libur tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const actor = { id: actorUserId, name: actorUser?.full_name || 'Super Admin' };
+      const result = await hardDeletePropertyHoliday(client, propertyId, holidayId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: result.message });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;

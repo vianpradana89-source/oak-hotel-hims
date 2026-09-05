@@ -1378,7 +1378,6 @@ export async function hardDeleteAuthAccount(
   client: PoolClient,
   propertyId: number,
   employeeId: number,
-  confirmIdentity: string,
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<{ deleted_user_id: number; username: string; email: string }> {
   // Check employee exists
@@ -1406,18 +1405,6 @@ export async function hardDeleteAuthAccount(
   }
 
   const user = userRes.rows[0];
-
-  // Validate typed confirmation (must match username or email, case-insensitive)
-  const trimmedInput = (confirmIdentity || '').trim().toLowerCase();
-  const matchesUsername = trimmedInput === (user.username || '').toLowerCase();
-  const matchesEmail = trimmedInput === (user.email || '').toLowerCase();
-
-  if (!matchesUsername && !matchesEmail) {
-    throw Object.assign(
-      new Error('Konfirmasi tidak sesuai. Harap ketik username atau email login akun yang akan dihapus.'),
-      { statusCode: 400, code: 'CONFIRMATION_MISMATCH' }
-    );
-  }
 
   // Check operational history dependencies
   const historyCheck = await checkUserHasOperationalHistory(client, user.id);
@@ -1460,6 +1447,185 @@ export async function hardDeleteAuthAccount(
     deleted_user_id: Number(user.id),
     username: user.username,
     email: user.email
+  };
+}
+
+export async function hardDeleteEmployeeAccount(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; deleted_employee: { id: number; employee_code: string; full_name: string } }> {
+  // 1. Fetch employee
+  const empRes = await client.query(
+    'SELECT * FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+  const emp = empRes.rows[0];
+
+  // 2. Check operational & history references
+  // 2a. Work schedules
+  const schedRes = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedules WHERE employee_id = $1',
+    [employeeId]
+  );
+  if (Number(schedRes.rows[0].count) > 0) {
+    throw Object.assign(
+      new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat operasional jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
+      { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_HISTORY' }
+    );
+  }
+
+  // 2b. Schedule audits
+  const schedAuditRes = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedule_audits WHERE employee_id = $1',
+    [employeeId]
+  );
+  if (Number(schedAuditRes.rows[0].count) > 0) {
+    throw Object.assign(
+      new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat audit jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
+      { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_AUDIT' }
+    );
+  }
+
+  // 2c. Attendance
+  try {
+    const attRes = await client.query(
+      'SELECT COUNT(*) FROM employee_attendance WHERE employee_id = $1',
+      [employeeId]
+    );
+    if (Number(attRes.rows[0].count) > 0) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki data kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+      );
+    }
+  } catch (err: any) {
+    if (err.statusCode === 409) throw err;
+  }
+
+  try {
+    const attRecRes = await client.query(
+      'SELECT COUNT(*) FROM employee_attendance_records WHERE employee_id = $1',
+      [employeeId]
+    );
+    if (Number(attRecRes.rows[0].count) > 0) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat catatan kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+      );
+    }
+  } catch (err: any) {
+    if (err.statusCode === 409) throw err;
+  }
+
+  // 2d. Payroll
+  try {
+    const payrollRes = await client.query(
+      'SELECT COUNT(*) FROM payroll_records WHERE employee_id = $1',
+      [employeeId]
+    );
+    if (Number(payrollRes.rows[0].count) > 0) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat slip gaji/payroll. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_PAYROLL' }
+      );
+    }
+  } catch (err: any) {
+    if (err.statusCode === 409) throw err;
+  }
+
+  // 2e. Face enrollment
+  try {
+    const faceRes = await client.query(
+      'SELECT COUNT(*) FROM employee_face_enrollments WHERE employee_id = $1',
+      [employeeId]
+    );
+    if (Number(faceRes.rows[0].count) > 0) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki data biometrik/face enrollment. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_FACE_ENROLLMENT' }
+      );
+    }
+  } catch (err: any) {
+    if (err.statusCode === 409) throw err;
+  }
+
+  // 3. Linked users account check
+  const userRes = await client.query(
+    'SELECT * FROM users WHERE employee_id = $1',
+    [employeeId]
+  );
+  if (userRes.rows.length > 0) {
+    const linkedUser = userRes.rows[0];
+    const userHistory = await checkUserHasOperationalHistory(client, linkedUser.id);
+    if (userHistory.hasHistory) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung memiliki riwayat operasional. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_USER_HAS_HISTORY', details: userHistory.reasons }
+      );
+    }
+
+    // Check if user is referenced in schedules as creator or publisher
+    const userSchedRes = await client.query(
+      'SELECT COUNT(*) FROM employee_work_schedules WHERE created_by_user_id = $1 OR published_by_user_id = $1 OR updated_by_user_id = $1',
+      [linkedUser.id]
+    );
+    if (Number(userSchedRes.rows[0].count) > 0) {
+      throw Object.assign(
+        new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung tercatat sebagai pembuat/penerbit jadwal. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_USER_HAS_SCHEDULE_HISTORY' }
+      );
+    }
+
+    // If safe, delete user permission overrides if table exists, then delete the user
+    const tblCheck = await client.query("SELECT to_regclass('user_permission_overrides') as tbl");
+    if (tblCheck.rows[0]?.tbl) {
+      await client.query('DELETE FROM user_permission_overrides WHERE user_id = $1', [linkedUser.id]);
+    }
+    await client.query('DELETE FROM users WHERE id = $1', [linkedUser.id]);
+  }
+
+  // 4. Safe to delete hr_employees
+  await client.query(
+    'DELETE FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+
+  // 5. Audit log
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'EMPLOYEE_HARD_DELETED',
+      'hr_employees',
+      String(employeeId),
+      JSON.stringify({
+        id: employeeId,
+        employee_code: emp.employee_code,
+        full_name: emp.full_name,
+        timestamp: new Date().toISOString()
+      }),
+      actor?.name || 'Super Admin',
+      propertyId
+    ]
+  );
+
+  return {
+    success: true,
+    message: 'Karyawan berhasil dihapus permanen.',
+    deleted_employee: {
+      id: Number(emp.id),
+      employee_code: emp.employee_code,
+      full_name: emp.full_name
+    }
   };
 }
 
@@ -2419,19 +2585,92 @@ export async function updateDepartment(
   };
 }
 
-export async function deleteDepartment(
+export async function deactivateDepartment(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; department: HrDepartment }> {
+  const current = await client.query('SELECT * FROM hr_departments WHERE id = $1 AND property_id = $2', [departmentId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    'UPDATE hr_departments SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND property_id = $2 RETURNING *',
+    [departmentId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'DEPARTMENT_DEACTIVATED', 'hr_departments', String(departmentId), JSON.stringify({ id: departmentId, is_active: false }), actor?.name || 'HRD', propertyId]
+  );
+
+  return {
+    success: true,
+    message: 'Departemen berhasil dinonaktifkan.',
+    department: {
+      ...res.rows[0],
+      id: Number(res.rows[0].id),
+      property_id: Number(res.rows[0].property_id),
+      is_active: false
+    }
+  };
+}
+
+export async function reactivateDepartment(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; department: HrDepartment }> {
+  const current = await client.query('SELECT * FROM hr_departments WHERE id = $1 AND property_id = $2', [departmentId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    'UPDATE hr_departments SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND property_id = $2 RETURNING *',
+    [departmentId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'DEPARTMENT_ACTIVATED', 'hr_departments', String(departmentId), JSON.stringify({ id: departmentId, is_active: true }), actor?.name || 'HRD', propertyId]
+  );
+
+  return {
+    success: true,
+    message: 'Departemen berhasil diaktifkan kembali.',
+    department: {
+      ...res.rows[0],
+      id: Number(res.rows[0].id),
+      property_id: Number(res.rows[0].property_id),
+      is_active: true
+    }
+  };
+}
+
+export async function hardDeleteDepartment(
   client: PoolClient,
   propertyId: number,
   departmentId: number,
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<{ success: boolean; message: string }> {
+  const current = await client.query('SELECT * FROM hr_departments WHERE id = $1 AND property_id = $2', [departmentId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
   const empCheck = await client.query(
     'SELECT id FROM hr_employees WHERE department_id = $1 LIMIT 1',
     [departmentId]
   );
   if (empCheck.rows.length > 0) {
     throw Object.assign(
-      new Error('Departemen tidak dapat dihapus karena masih memiliki data karyawan terhubung. Silakan nonaktifkan departemen alih-alih menghapusnya.'),
+      new Error('Departemen tidak dapat dihapus permanen karena masih memiliki data karyawan terhubung. Nonaktifkan departemen alih-alih menghapusnya.'),
       { statusCode: 409, code: 'DEPARTMENT_HAS_EMPLOYEES' }
     );
   }
@@ -2442,20 +2681,51 @@ export async function deleteDepartment(
   );
   if (posCheck.rows.length > 0) {
     throw Object.assign(
-      new Error('Departemen tidak dapat dihapus karena masih memiliki daftar jabatan terkait.'),
+      new Error('Departemen tidak dapat dihapus permanen karena masih memiliki daftar jabatan terkait.'),
       { statusCode: 409, code: 'DEPARTMENT_HAS_POSITIONS' }
     );
   }
+
+  // Check schedule group departments
+  try {
+    const groupCheck = await client.query(
+      'SELECT group_id FROM schedule_group_departments WHERE department_id = $1 LIMIT 1',
+      [departmentId]
+    );
+    if (groupCheck.rows.length > 0) {
+      throw Object.assign(
+        new Error('Departemen tidak dapat dihapus permanen karena masih terdaftar dalam group operasional jadwal.'),
+        { statusCode: 409, code: 'DEPARTMENT_HAS_SCHEDULE_GROUPS' }
+      );
+    }
+  } catch (err: any) {
+    if (err.statusCode === 409) throw err;
+  }
+
+  // Clean 1:1 department work pattern if present
+  try {
+    await client.query('DELETE FROM department_work_patterns WHERE department_id = $1', [departmentId]);
+  } catch {}
 
   await client.query('DELETE FROM hr_departments WHERE id = $1 AND property_id = $2', [departmentId, propertyId]);
 
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    ['HRD', 'DEPARTMENT_DELETED', 'hr_departments', String(departmentId), JSON.stringify({ id: departmentId }), actor?.name || 'HRD', propertyId]
+    ['HRD', 'DEPARTMENT_HARD_DELETED', 'hr_departments', String(departmentId), JSON.stringify({ id: departmentId, name: current.rows[0].name }), actor?.name || 'Super Admin', propertyId]
   );
 
-  return { success: true, message: 'Departemen berhasil dihapus.' };
+  return { success: true, message: 'Departemen berhasil dihapus permanen.' };
+}
+
+export async function deleteDepartment(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const result = await deactivateDepartment(client, propertyId, departmentId, actor);
+  return { success: true, message: result.message };
 }
 
 // ============================================================================
@@ -2652,19 +2922,94 @@ export async function updatePosition(
   };
 }
 
-export async function deletePosition(
+export async function deactivatePosition(
+  client: PoolClient,
+  propertyId: number,
+  positionId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; position: HrPosition }> {
+  const current = await client.query('SELECT * FROM hr_positions WHERE id = $1 AND property_id = $2', [positionId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 404, code: 'POSITION_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    'UPDATE hr_positions SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND property_id = $2 RETURNING *',
+    [positionId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'POSITION_DEACTIVATED', 'hr_positions', String(positionId), JSON.stringify({ id: positionId, is_active: false }), actor?.name || 'HRD', propertyId]
+  );
+
+  return {
+    success: true,
+    message: 'Jabatan berhasil dinonaktifkan.',
+    position: {
+      ...res.rows[0],
+      id: Number(res.rows[0].id),
+      property_id: Number(res.rows[0].property_id),
+      department_id: res.rows[0].department_id ? Number(res.rows[0].department_id) : null,
+      is_active: false
+    }
+  };
+}
+
+export async function reactivatePosition(
+  client: PoolClient,
+  propertyId: number,
+  positionId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; position: HrPosition }> {
+  const current = await client.query('SELECT * FROM hr_positions WHERE id = $1 AND property_id = $2', [positionId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 404, code: 'POSITION_NOT_FOUND' });
+  }
+
+  const res = await client.query(
+    'UPDATE hr_positions SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND property_id = $2 RETURNING *',
+    [positionId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'POSITION_ACTIVATED', 'hr_positions', String(positionId), JSON.stringify({ id: positionId, is_active: true }), actor?.name || 'HRD', propertyId]
+  );
+
+  return {
+    success: true,
+    message: 'Jabatan berhasil diaktifkan kembali.',
+    position: {
+      ...res.rows[0],
+      id: Number(res.rows[0].id),
+      property_id: Number(res.rows[0].property_id),
+      department_id: res.rows[0].department_id ? Number(res.rows[0].department_id) : null,
+      is_active: true
+    }
+  };
+}
+
+export async function hardDeletePosition(
   client: PoolClient,
   propertyId: number,
   positionId: number,
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<{ success: boolean; message: string }> {
+  const current = await client.query('SELECT * FROM hr_positions WHERE id = $1 AND property_id = $2', [positionId, propertyId]);
+  if (current.rows.length === 0) {
+    throw Object.assign(new Error('Jabatan tidak ditemukan.'), { statusCode: 404, code: 'POSITION_NOT_FOUND' });
+  }
+
   const empCheck = await client.query(
     'SELECT id FROM hr_employees WHERE position_id = $1 LIMIT 1',
     [positionId]
   );
   if (empCheck.rows.length > 0) {
     throw Object.assign(
-      new Error('Jabatan tidak dapat dihapus karena masih digunakan oleh data karyawan aktif. Silakan nonaktifkan jabatan alih-alih menghapusnya.'),
+      new Error('Jabatan tidak dapat dihapus permanen karena masih digunakan oleh data karyawan. Nonaktifkan jabatan alih-alih menghapusnya.'),
       { statusCode: 409, code: 'POSITION_HAS_EMPLOYEES' }
     );
   }
@@ -2674,10 +3019,20 @@ export async function deletePosition(
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    ['HRD', 'POSITION_DELETED', 'hr_positions', String(positionId), JSON.stringify({ id: positionId }), actor?.name || 'HRD', propertyId]
+    ['HRD', 'POSITION_HARD_DELETED', 'hr_positions', String(positionId), JSON.stringify({ id: positionId, name: current.rows[0].name }), actor?.name || 'Super Admin', propertyId]
   );
 
-  return { success: true, message: 'Jabatan berhasil dihapus.' };
+  return { success: true, message: 'Jabatan berhasil dihapus permanen.' };
+}
+
+export async function deletePosition(
+  client: PoolClient,
+  propertyId: number,
+  positionId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const result = await deactivatePosition(client, propertyId, positionId, actor);
+  return { success: true, message: result.message };
 }
 
 // ============================================================================
@@ -2874,7 +3229,87 @@ export async function updateDynamicRole(
   };
 }
 
-export async function deleteDynamicRole(
+export async function deactivateDynamicRole(
+  client: PoolClient,
+  roleId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; role: DynamicRole }> {
+  const currentRes = await client.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  if (Boolean(current.is_system_role) && current.property_id === null && String(current.name).trim().toLowerCase() === 'super admin') {
+    throw Object.assign(new Error('Role Super Admin platform tidak dapat dinonaktifkan.'), { statusCode: 403, code: 'CANNOT_DEACTIVATE_SUPER_ADMIN' });
+  }
+
+  const res = await client.query(
+    'UPDATE roles SET is_active = FALSE WHERE id = $1 RETURNING *',
+    [roleId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'ROLE_DEACTIVATED', 'roles', String(roleId), JSON.stringify({ id: roleId, is_active: false }), actor?.name || 'HRD', current.property_id || 1]
+  );
+
+  return {
+    success: true,
+    message: 'Role berhasil dinonaktifkan.',
+    role: {
+      id: Number(res.rows[0].id),
+      name: res.rows[0].name,
+      description: res.rows[0].description,
+      is_active: false,
+      is_system_role: Boolean(res.rows[0].is_system_role),
+      property_id: res.rows[0].property_id ? Number(res.rows[0].property_id) : null,
+      created_at: res.rows[0].created_at,
+      updated_at: res.rows[0].updated_at
+    }
+  };
+}
+
+export async function reactivateDynamicRole(
+  client: PoolClient,
+  roleId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string; role: DynamicRole }> {
+  const currentRes = await client.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+  if (currentRes.rows.length === 0) {
+    throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
+  }
+  const current = currentRes.rows[0];
+
+  const res = await client.query(
+    'UPDATE roles SET is_active = TRUE WHERE id = $1 RETURNING *',
+    [roleId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    ['HRD', 'ROLE_ACTIVATED', 'roles', String(roleId), JSON.stringify({ id: roleId, is_active: true }), actor?.name || 'HRD', current.property_id || 1]
+  );
+
+  return {
+    success: true,
+    message: 'Role berhasil diaktifkan kembali.',
+    role: {
+      id: Number(res.rows[0].id),
+      name: res.rows[0].name,
+      description: res.rows[0].description,
+      is_active: true,
+      is_system_role: Boolean(res.rows[0].is_system_role),
+      property_id: res.rows[0].property_id ? Number(res.rows[0].property_id) : null,
+      created_at: res.rows[0].created_at,
+      updated_at: res.rows[0].updated_at
+    }
+  };
+}
+
+export async function hardDeleteDynamicRole(
   client: PoolClient,
   roleId: number,
   actor?: { id?: number; name?: string; role?: string }
@@ -2885,24 +3320,44 @@ export async function deleteDynamicRole(
   }
   const current = currentRes.rows[0];
 
-  if (current.is_system_role || current.name === 'Super Admin') {
-    throw Object.assign(new Error('Role sistem bawaan tidak dapat dihapus.'), { statusCode: 403, code: 'CANNOT_DELETE_SYSTEM_ROLE' });
+  if (Boolean(current.is_system_role) && current.property_id === null && String(current.name).trim().toLowerCase() === 'super admin') {
+    throw Object.assign(new Error('Role Super Admin platform tidak dapat dihapus.'), { statusCode: 403, code: 'CANNOT_DELETE_SUPER_ADMIN' });
+  }
+
+  if (Boolean(current.is_system_role)) {
+    throw Object.assign(new Error('Role sistem bawaan tidak dapat dihapus permanen.'), { statusCode: 403, code: 'CANNOT_DELETE_SYSTEM_ROLE' });
   }
 
   const userCheck = await client.query('SELECT id FROM users WHERE role_id = $1 LIMIT 1', [roleId]);
   if (userCheck.rows.length > 0) {
-    throw Object.assign(new Error('Role masih digunakan oleh pengguna aktif. Silakan ganti role pengguna terkait sebelum menghapus.'), { statusCode: 409, code: 'ROLE_HAS_USERS' });
+    throw Object.assign(
+      new Error('Role masih digunakan oleh pengguna. Pindahkan pengguna ke role lain sebelum menghapus permanen.'),
+      { statusCode: 409, code: 'ROLE_HAS_USERS' }
+    );
   }
+
+  try {
+    await client.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId]);
+  } catch {}
 
   await client.query('DELETE FROM roles WHERE id = $1', [roleId]);
 
   await client.query(
     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    ['HRD', 'ROLE_DELETED', 'roles', String(roleId), JSON.stringify({ id: roleId, name: current.name }), actor?.name || 'HRD', current.property_id || 1]
+    ['HRD', 'ROLE_HARD_DELETED', 'roles', String(roleId), JSON.stringify({ id: roleId, name: current.name }), actor?.name || 'Super Admin', current.property_id || 1]
   );
 
-  return { success: true, message: 'Role berhasil dihapus.' };
+  return { success: true, message: 'Role berhasil dihapus permanen.' };
+}
+
+export async function deleteDynamicRole(
+  client: PoolClient,
+  roleId: number,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<{ success: boolean; message: string }> {
+  const result = await deactivateDynamicRole(client, roleId, actor);
+  return { success: true, message: result.message };
 }
 
 export async function getGranularPermissions(client: PoolClient): Promise<GranularPermission[]> {
