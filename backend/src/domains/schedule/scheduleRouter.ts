@@ -14,6 +14,7 @@ import {
   getWeeklyRoster,
   getMonthlyRoster,
   assignSchedule,
+  removeScheduleAssignments,
   bulkAssignSchedule,
   copyWeek,
   publishSchedule,
@@ -412,6 +413,35 @@ export function createScheduleRouter(pool: Pool): Router {
       const schedule = await assignSchedule(client, payload, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: schedule });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 7b. Remove future draft assignments without deleting schedule/audit history
+  router.delete('/assignments', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id, req);
+      const scheduleIds = req.body.schedule_ids;
+      if (!Array.isArray(scheduleIds) || scheduleIds.length === 0) {
+        throw Object.assign(new Error('schedule_ids wajib diisi dan harus berupa array.'), {
+          statusCode: 400,
+          code: 'MISSING_SCHEDULE_IDS',
+        });
+      }
+      const actor = {
+        id: (req as any).user?.id,
+        name: (req as any).user?.full_name || 'HRD Admin',
+      };
+      const result = await removeScheduleAssignments(client, propertyId, scheduleIds.map(Number), actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result, message: 'Penugasan jadwal berhasil dihapus.' });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;

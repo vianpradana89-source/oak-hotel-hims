@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import type { WeeklyRosterResponse, ColorKey, Department, HrEmployee, OperationalRosterResponse } from './scheduleTypes';
 import { COLOR_KEY_STYLES } from './scheduleTypes';
+import { getCellAssignments, mergeCandidatesWithAssignments } from './scheduleCellAssignments';
 
 const DAY_FULL_NAMES = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 const MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
@@ -15,7 +16,7 @@ interface ShiftDayModalProps {
   shiftType: string;
   templateId: number | null;
   date: string;
-  roster: WeeklyRosterResponse;
+  roster?: WeeklyRosterResponse | null;
   departments: Department[];
   groupId?: number;
   groupedRoster?: OperationalRosterResponse | null;
@@ -26,7 +27,8 @@ interface ShiftDayModalProps {
 export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
   propertyId, shiftType, templateId, date, roster, departments, groupId, groupedRoster, onClose, onSaved
 }) => {
-  const template = templateId ? roster.shift_templates.find(t => t.id === templateId) : null;
+  const shiftTemplates = roster?.shift_templates || groupedRoster?.shift_templates || [];
+  const template = templateId ? shiftTemplates.find(t => t.id === templateId) : null;
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState('');
@@ -83,6 +85,11 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
     return groupedRoster.groups.find(g => g.group_id === groupId)?.group_name || null;
   }, [groupId, groupedRoster]);
 
+  const existingAssignments = useMemo(
+    () => getCellAssignments(roster, groupedRoster, date, shiftType, templateId),
+    [roster, groupedRoster, date, shiftType, templateId],
+  );
+
   // Fetch employees
   useEffect(() => {
     const fetchEmployees = async () => {
@@ -111,34 +118,19 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
 
   // Pre-select employees already assigned to this shift/date
   useEffect(() => {
-    const ids = new Set<number>();
-    for (const emp of roster.employees) {
-      const sched = emp.schedules[date];
-      if (!sched) continue;
-      if (shiftType === 'shift' && sched.shift_template_id === templateId && sched.work_status === 'WORK') {
-        ids.add(emp.employee_id);
-      } else if (shiftType === 'off' && sched.work_status === 'OFF') {
-        ids.add(emp.employee_id);
-      } else if (shiftType === 'leave' && sched.work_status === 'LEAVE') {
-        ids.add(emp.employee_id);
-      } else if (shiftType === 'sick' && sched.work_status === 'SICK') {
-        ids.add(emp.employee_id);
-      } else if (shiftType === 'permission' && sched.work_status === 'PERMISSION') {
-        ids.add(emp.employee_id);
-      }
-    }
-    setSelectedIds(ids);
-  }, [roster, date, shiftType, templateId]);
+    setSelectedIds(new Set(existingAssignments.map(employee => employee.id)));
+  }, [existingAssignments]);
 
   const filteredEmployees = useMemo(() => {
-    if (!search) return employees;
+    const visibleEmployees = mergeCandidatesWithAssignments(employees, existingAssignments);
+    if (!search) return visibleEmployees;
     const q = search.toLowerCase();
-    return employees.filter(e =>
+    return visibleEmployees.filter(e =>
       e.full_name.toLowerCase().includes(q) ||
       (e.employee_code && e.employee_code.toLowerCase().includes(q)) ||
       (e.position_name && e.position_name.toLowerCase().includes(q))
     );
-  }, [employees, search]);
+  }, [employees, existingAssignments, search]);
 
   const toggleEmployee = (empId: number) => {
     setSelectedIds(prev => {
@@ -168,38 +160,26 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
     setSaving(true);
     setError('');
     try {
-      // Remove all employees from this shift/date first (those who were previously assigned but now deselected)
-      const previouslyAssigned = new Set<number>();
-      for (const emp of roster.employees) {
-        const sched = emp.schedules[date];
-        if (!sched) continue;
-        if (shiftType === 'shift' && sched.shift_template_id === templateId && sched.work_status === 'WORK') {
-          previouslyAssigned.add(emp.employee_id);
-        } else if (shiftType === 'off' && sched.work_status === 'OFF') {
-          previouslyAssigned.add(emp.employee_id);
-        } else if (shiftType === 'leave' && sched.work_status === 'LEAVE') {
-          previouslyAssigned.add(emp.employee_id);
-        } else if (shiftType === 'sick' && sched.work_status === 'SICK') {
-          previouslyAssigned.add(emp.employee_id);
-        } else if (shiftType === 'permission' && sched.work_status === 'PERMISSION') {
-          previouslyAssigned.add(emp.employee_id);
-        }
-      }
+      const previouslyAssigned = new Set(existingAssignments.map(employee => employee.id));
 
       // Employees to remove (were assigned, now deselected)
       const toRemove = [...previouslyAssigned].filter(id => !selectedIds.has(id));
       // Employees to add (newly selected, weren't previously assigned)
       const toAdd = [...selectedIds].filter(id => !previouslyAssigned.has(id));
 
-      // Remove deselected employees
-      for (const empId of toRemove) {
-        const body: any = { property_id: propertyId, employee_id: empId, work_date: date, work_status: 'OFF' };
-        if (shiftType !== 'off' && shiftType !== 'leave' && shiftType !== 'sick' && shiftType !== 'permission' && shiftType !== 'holiday') {
-          body.work_status = 'OFF';
-        }
-        await fetch('/api/schedule/assign', {
-          method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body),
+      // Soft-cancel deselected future draft assignments by their canonical schedule IDs.
+      if (toRemove.length > 0) {
+        const assignmentByEmployee = new Map(existingAssignments.map(assignment => [assignment.id, assignment]));
+        const scheduleIds = toRemove.map(employeeId => assignmentByEmployee.get(employeeId)!.schedule_id);
+        const removeResponse = await fetch('/api/schedule/assignments', {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ property_id: propertyId, schedule_ids: scheduleIds }),
         });
+        const removeData = await removeResponse.json().catch(() => null);
+        if (!removeResponse.ok) {
+          throw new Error(removeData?.message || 'Gagal menghapus penugasan jadwal.');
+        }
       }
 
       // Add newly selected employees
@@ -215,10 +195,16 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
           body.work_status = 'SICK';
         } else if (shiftType === 'permission') {
           body.work_status = 'PERMISSION';
+        } else if (shiftType === 'holiday') {
+          body.work_status = 'HOLIDAY';
         }
-        await fetch('/api/schedule/assign', {
+        const addResponse = await fetch('/api/schedule/assign', {
           method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body),
         });
+        const addData = await addResponse.json().catch(() => null);
+        if (!addResponse.ok) {
+          throw new Error(addData?.message || 'Gagal menambahkan penugasan jadwal.');
+        }
       }
 
       onSaved();

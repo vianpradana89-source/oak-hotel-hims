@@ -478,7 +478,7 @@ export async function hardDeleteShiftTemplate(
 
   // Check referential integrity on employee_work_schedules
   const scheduleCheck = await client.query(
-    'SELECT 1 FROM employee_work_schedules WHERE shift_template_id = $1 LIMIT 1',
+    'SELECT work_date::text AS work_date FROM employee_work_schedules WHERE shift_template_id = $1 LIMIT 1',
     [templateId]
   );
   if (scheduleCheck.rowCount && scheduleCheck.rowCount > 0) {
@@ -570,6 +570,95 @@ export async function getShiftTemplateTeam(
 
 // ─── Employee Schedule CRUD ───
 
+export async function removeScheduleAssignments(
+  client: PoolClient,
+  propertyId: number,
+  scheduleIds: number[],
+  actor: { id?: number; name: string }
+): Promise<{ removed_count: number }> {
+  const uniqueScheduleIds = [...new Set(scheduleIds.filter(id => Number.isInteger(id) && id > 0))];
+  if (uniqueScheduleIds.length !== scheduleIds.length || uniqueScheduleIds.length === 0) {
+    throw Object.assign(new Error('schedule_ids wajib berisi ID jadwal yang valid dan unik.'), {
+      statusCode: 400,
+      code: 'INVALID_SCHEDULE_IDS',
+    });
+  }
+
+  const scheduleRes = await client.query(
+    `SELECT s.id, s.employee_id, s.work_date::text AS work_date, s.shift_template_id,
+            s.schedule_status, s.work_status,
+            (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(p.timezone, 'Asia/Jakarta'))::date::text AS property_today
+     FROM employee_work_schedules s
+     JOIN properties p ON p.id = s.property_id
+     WHERE s.property_id = $1 AND s.id = ANY($2::int[])
+     FOR UPDATE`,
+    [propertyId, uniqueScheduleIds]
+  );
+
+  if (scheduleRes.rows.length !== uniqueScheduleIds.length) {
+    throw Object.assign(new Error('Salah satu penugasan jadwal tidak ditemukan pada properti ini.'), {
+      statusCode: 404,
+      code: 'SCHEDULE_ASSIGNMENT_NOT_FOUND',
+    });
+  }
+
+  const activeRows = scheduleRes.rows.filter(row => row.schedule_status !== 'CANCELLED');
+  const protectedRow = activeRows.find(row =>
+    row.schedule_status === 'PUBLISHED' || row.schedule_status === 'CHANGED'
+  );
+  if (protectedRow) {
+    throw Object.assign(
+      new Error('Penugasan tidak dapat dihapus karena jadwal sudah dipublikasikan. Ubah jadwal melalui alur koreksi yang tercatat.'),
+      { statusCode: 409, code: 'SCHEDULE_ASSIGNMENT_PUBLISHED' }
+    );
+  }
+
+  const historicalRow = activeRows.find(row => row.work_date <= row.property_today);
+  if (historicalRow) {
+    throw Object.assign(
+      new Error('Penugasan tidak dapat dihapus karena tanggal jadwal sudah berjalan atau telah lewat.'),
+      { statusCode: 409, code: 'SCHEDULE_ASSIGNMENT_HISTORICAL' }
+    );
+  }
+
+  if (activeRows.length === 0) return { removed_count: 0 };
+
+  const activeIds = activeRows.map(row => row.id);
+  const attendanceRes = await client.query(
+    'SELECT schedule_id FROM employee_attendance WHERE property_id = $1 AND schedule_id = ANY($2::int[]) LIMIT 1',
+    [propertyId, activeIds]
+  );
+  if ((attendanceRes.rowCount ?? 0) > 0) {
+    throw Object.assign(
+      new Error('Penugasan tidak dapat dihapus karena sudah memiliki catatan kehadiran.'),
+      { statusCode: 409, code: 'SCHEDULE_ASSIGNMENT_HAS_ATTENDANCE' }
+    );
+  }
+
+  const validUserId = await resolveValidUserId(client, actor.id);
+  await client.query(
+    `UPDATE employee_work_schedules
+     SET schedule_status = 'CANCELLED', shift_template_id = NULL, work_status = 'OFF',
+         scheduled_start_at = NULL, scheduled_end_at = NULL,
+         updated_by_user_id = $1, updated_at = NOW()
+     WHERE property_id = $2 AND id = ANY($3::int[])`,
+    [validUserId, propertyId, activeIds]
+  );
+
+  for (const row of activeRows) {
+    await client.query(
+      `INSERT INTO employee_work_schedule_audits
+        (schedule_id, property_id, employee_id, action, old_shift_template_id, new_shift_template_id,
+         old_work_status, new_work_status, reason, changed_by_user_id, changed_by_name)
+       VALUES ($1,$2,$3,'CANCELLED',$4,NULL,$5,'OFF',$6,$7,$8)`,
+      [row.id, propertyId, row.employee_id, row.shift_template_id, row.work_status,
+       'Penugasan jadwal dihapus dari kalender.', validUserId, actor.name]
+    );
+  }
+
+  return { removed_count: activeRows.length };
+}
+
 export async function getWeeklyRoster(
   client: PoolClient,
   query: WeeklyRosterQuery
@@ -617,7 +706,8 @@ export async function getWeeklyRoster(
             published_by_name, notes, created_by_user_id, updated_by_user_id,
             created_at, updated_at
      FROM employee_work_schedules
-     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
+     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3
+       AND schedule_status != 'CANCELLED'`,
      [query.property_id, monday, sunday]
   );
 
@@ -695,7 +785,8 @@ export async function getMonthlyRoster(
             published_by_name, notes, created_by_user_id, updated_by_user_id,
             created_at, updated_at
      FROM employee_work_schedules
-     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
+     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3
+       AND schedule_status != 'CANCELLED'`,
     [property_id, firstDay, lastDateStr]
   );
 
@@ -853,14 +944,16 @@ export async function assignSchedule(
   }
 
   if (existing) {
+    const restoredScheduleStatus = existing.schedule_status === 'CANCELLED' ? 'DRAFT' : existing.schedule_status;
     await client.query(
       `UPDATE employee_work_schedules
-       SET shift_template_id = $1, work_status = $2, scheduled_start_at = $3, scheduled_end_at = $4,
-           notes = COALESCE($5, notes), department_snapshot = $6, position_snapshot = $7,
-           updated_by_user_id = $8, updated_at = NOW()
-       WHERE id = $9`,
-      [resolvedShiftTemplateId, resolvedWorkStatus, scheduled_start_at, scheduled_end_at,
-       notes, emp.dept_name, emp.pos_name, validUserId, existing.id]
+       SET shift_template_id = $1, work_status = $2, schedule_status = $3,
+           scheduled_start_at = $4, scheduled_end_at = $5,
+           notes = COALESCE($6, notes), department_snapshot = $7, position_snapshot = $8,
+           updated_by_user_id = $9, updated_at = NOW()
+       WHERE id = $10`,
+      [resolvedShiftTemplateId, resolvedWorkStatus, restoredScheduleStatus,
+       scheduled_start_at, scheduled_end_at, notes, emp.dept_name, emp.pos_name, validUserId, existing.id]
     );
 
     await client.query(
@@ -1135,7 +1228,7 @@ export async function publishSchedule(
      SET schedule_status = 'PUBLISHED', published_at = NOW(),
          published_by_user_id = $1, published_by_name = $2, updated_at = NOW()
      WHERE property_id = $3 AND work_date >= $4 AND work_date <= $5
-       AND schedule_status != 'PUBLISHED'
+       AND schedule_status NOT IN ('PUBLISHED', 'CANCELLED')
      RETURNING id, employee_id`,
      [validUserId, actor.name, property_id, monday, sunday]
   );
@@ -1155,7 +1248,8 @@ export async function publishSchedule(
   // Count already published
   const alreadyRes = await client.query(
     `SELECT COUNT(*) as cnt FROM employee_work_schedules
-     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3 AND schedule_status = 'PUBLISHED'`,
+     WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3
+       AND schedule_status = 'PUBLISHED'`,
     [property_id, monday, sunday]
   );
   const alreadyPublishedCount = parseInt(alreadyRes.rows[0]?.cnt || '0', 10) - publishedCount;
@@ -2304,7 +2398,8 @@ export async function getGroupedRoster(
                 published_by_name, notes, created_by_user_id, updated_by_user_id,
                 created_at, updated_at
          FROM employee_work_schedules
-         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4`,
+         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4
+           AND schedule_status != 'CANCELLED'`,
         [property_id, empIds, monday, sunday]
       );
 
@@ -2386,7 +2481,8 @@ export async function getGroupedRoster(
                 published_by_name, notes, created_by_user_id, updated_by_user_id,
                 created_at, updated_at
          FROM employee_work_schedules
-         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4`,
+         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4
+           AND schedule_status != 'CANCELLED'`,
         [property_id, empIds, monday, sunday]
       );
 

@@ -548,7 +548,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
       </div>
 
       {/* Modals */}
-      {shiftDayModal && roster && (
+      {shiftDayModal && (roster || groupedRoster) && (
         <ShiftDayModal
           propertyId={propertyId}
           shiftType={shiftDayModal.shiftType}

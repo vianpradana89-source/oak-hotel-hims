@@ -81,7 +81,7 @@ const OperationalGroupTable: React.FC<{
     for (const emp of group.employees) {
       for (const date of dates) {
         const sched = emp.schedules[date];
-        if (!sched) continue;
+        if (!sched || sched.schedule_status === 'CANCELLED') continue;
         let rowKey = '';
         if (sched.work_status === 'OFF') rowKey = 'off';
         else if (sched.work_status === 'LEAVE') rowKey = 'leave';
@@ -191,7 +191,7 @@ const NonOpDeptTable: React.FC<{
     for (const emp of dept.employees) {
       for (const date of dates) {
         const sched = emp.schedules[date];
-        if (!sched) continue;
+        if (!sched || sched.schedule_status === 'CANCELLED') continue;
         let rowKey = '';
         if (sched.work_status === 'WORK') rowKey = 'work';
         else if (sched.work_status === 'OFF') rowKey = 'off';
