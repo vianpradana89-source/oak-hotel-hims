@@ -2,7 +2,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import type { WeeklyRosterResponse, ColorKey, Department, HrEmployee, OperationalRosterResponse } from './scheduleTypes';
 import { COLOR_KEY_STYLES } from './scheduleTypes';
 import {
+  getCellAssignmentPermissions,
   getCellAssignments,
+  getCorrectionTarget,
   mergeCandidatesWithAssignments,
   type CellAssignmentEmployee,
 } from './scheduleCellAssignments';
@@ -95,8 +97,8 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
   }, [groupId, groupedRoster]);
 
   const existingAssignments = useMemo(
-    () => getCellAssignments(roster, groupedRoster, date, shiftType, templateId),
-    [roster, groupedRoster, date, shiftType, templateId],
+    () => getCellAssignments(roster, groupedRoster, date, shiftType, templateId, groupId),
+    [roster, groupedRoster, date, shiftType, templateId, groupId],
   );
   const assignmentByEmployeeId = useMemo(
     () => new Map(existingAssignments.map(assignment => [assignment.id, assignment])),
@@ -146,7 +148,8 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
   }, [employees, existingAssignments, search]);
 
   const toggleEmployee = (empId: number) => {
-    if (assignmentByEmployeeId.get(empId)?.schedule_status === 'PUBLISHED') return;
+    const assignment = assignmentByEmployeeId.get(empId);
+    if (assignment && !getCellAssignmentPermissions(assignment).canToggle) return;
     setSelectedIds(prev => {
       const next = new Set(prev);
       if (next.has(empId)) next.delete(empId); else next.add(empId);
@@ -156,7 +159,10 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
 
   const toggleAll = () => {
     const visibleIds = filteredEmployees
-      .filter(employee => assignmentByEmployeeId.get(employee.id)?.schedule_status !== 'PUBLISHED')
+      .filter(employee => {
+        const assignment = assignmentByEmployeeId.get(employee.id);
+        return !assignment || getCellAssignmentPermissions(assignment).canToggle;
+      })
       .map(employee => employee.id);
     setSelectedIds(prev => {
       const allSelected = visibleIds.every(id => prev.has(id));
@@ -188,7 +194,9 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
   };
 
   const openCorrection = (assignment: CellAssignmentEmployee) => {
-    setCorrectionAssignment(assignment);
+    const target = getCorrectionTarget(assignment);
+    if (!target) return;
+    setCorrectionAssignment(target);
     setCorrectionTarget('SHIFT');
     setCorrectionShiftId('');
     setCorrectionReason('');
@@ -325,9 +333,6 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
           {deptContext && deptContext.length > 1 && !template?.department_id && !getGroupLabel() && (
             <span>Departemen: <span className="font-bold text-slate-700">{deptContext.length} departemen</span></span>
           )}
-          {existingAssignments.some(assignment => assignment.schedule_status === 'PUBLISHED') && (
-            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">PUBLISHED</span>
-          )}
         </div>
 
         {error && (
@@ -413,27 +418,35 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
                 <div className="px-3 py-2 text-[11px] text-slate-400 italic">Tidak ada karyawan</div>
               ) : filteredEmployees.map(emp => {
                 const assignment = assignmentByEmployeeId.get(emp.id);
-                const isPublished = assignment?.schedule_status === 'PUBLISHED';
+                const permissions = assignment ? getCellAssignmentPermissions(assignment) : null;
+                const canToggle = permissions?.canToggle ?? true;
                 return (
-                <label key={emp.id} className={`flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 transition ${isPublished ? '' : 'cursor-pointer'} ${selectedIds.has(emp.id) ? 'bg-emerald-50' : ''}`}>
-                  <input type="checkbox" checked={selectedIds.has(emp.id)} disabled={isPublished} onChange={() => toggleEmployee(emp.id)}
+                <div key={emp.id} className={`flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 transition ${selectedIds.has(emp.id) ? 'bg-emerald-50' : ''}`}>
+                  <input type="checkbox" checked={selectedIds.has(emp.id)} disabled={!canToggle} onChange={() => toggleEmployee(emp.id)}
+                    aria-label={`Pilih ${emp.full_name}`}
                     className="rounded border-slate-300 text-[#1b4332] focus:ring-[#1b4332]" />
                   <div className="flex-1 min-w-0">
                     <div className="text-[11px] font-bold text-slate-800 truncate">{emp.full_name}</div>
                     <div className="text-[9px] text-slate-500">{emp.position_name || '—'}{emp.department_name ? ` · ${emp.department_name}` : ''}</div>
+                    {permissions?.correctionBlockedReason && (
+                      <div className="text-[8px] text-amber-700 leading-tight mt-0.5">
+                        {permissions.correctionBlockedReason}
+                      </div>
+                    )}
                   </div>
                   {assignment && (
                     <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${
-                      isPublished ? 'bg-emerald-100 text-emerald-800' :
+                      assignment.schedule_status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-800' :
                       assignment.schedule_status === 'CHANGED' ? 'bg-amber-100 text-amber-800' :
                       'bg-slate-100 text-slate-600'
-                    }`}>
+                    }`} title={`Schedule ID ${assignment.schedule_id}`}>
                       {assignment.schedule_status}
                     </span>
                   )}
-                  {isPublished && assignment && (
+                  {permissions?.canCorrect && assignment && (
                     <button
                       type="button"
+                      aria-label={`Koreksi jadwal ${emp.full_name}`}
                       onClick={event => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -444,7 +457,7 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
                       Koreksi
                     </button>
                   )}
-                </label>
+                </div>
                 );
               })}
             </div>

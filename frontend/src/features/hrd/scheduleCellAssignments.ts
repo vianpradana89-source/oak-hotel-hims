@@ -12,6 +12,41 @@ export interface CellAssignmentEmployee extends HrEmployee {
   schedule: EmployeeWorkSchedule;
 }
 
+export interface CellAssignmentPermissions {
+  canToggle: boolean;
+  canCorrect: boolean;
+  correctionBlockedReason: string | null;
+}
+
+export function getCellAssignmentPermissions(
+  assignment: CellAssignmentEmployee,
+): CellAssignmentPermissions {
+  if (assignment.schedule_status === 'DRAFT') {
+    return { canToggle: true, canCorrect: false, correctionBlockedReason: null };
+  }
+  if (assignment.schedule_status === 'PUBLISHED') {
+    return { canToggle: false, canCorrect: true, correctionBlockedReason: null };
+  }
+  if (assignment.schedule_status === 'CHANGED') {
+    return {
+      canToggle: false,
+      canCorrect: false,
+      correctionBlockedReason: 'Publish ulang jadwal CHANGED sebelum melakukan koreksi berikutnya.',
+    };
+  }
+  return {
+    canToggle: false,
+    canCorrect: false,
+    correctionBlockedReason: 'Penugasan CANCELLED tidak dapat diubah dari sel aktif ini.',
+  };
+}
+
+export function getCorrectionTarget(
+  assignment: CellAssignmentEmployee,
+): CellAssignmentEmployee | null {
+  return getCellAssignmentPermissions(assignment).canCorrect ? assignment : null;
+}
+
 function matchesCell(
   schedule: EmployeeWorkSchedule | null | undefined,
   shiftType: string,
@@ -50,20 +85,14 @@ export function getCellAssignments(
   date: string,
   shiftType: string,
   templateId: number | null,
+  groupId?: number,
 ): CellAssignmentEmployee[] {
-  const employees = new Map<number, WeeklyRosterEmployee>();
-
-  for (const employee of roster?.employees || []) {
-    employees.set(employee.employee_id, employee);
-  }
-  for (const group of groupedRoster?.groups || []) {
-    for (const employee of group.employees) {
-      employees.set(employee.employee_id, employee);
-    }
-  }
+  const employees = groupId !== undefined
+    ? groupedRoster?.groups.find(group => group.group_id === groupId)?.employees || []
+    : roster?.employees || [];
 
   const assignments: CellAssignmentEmployee[] = [];
-  for (const employee of employees.values()) {
+  for (const employee of employees) {
     const schedule = employee.schedules[date];
     if (matchesCell(schedule, shiftType, templateId)) {
       assignments.push(toAssignment(employee, schedule));
