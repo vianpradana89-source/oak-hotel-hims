@@ -39,29 +39,64 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
     try {
       const res = await fetch(`/api/schedule/groups?property_id=${propertyId}&include_inactive=true`, { headers: getAuthHeaders() });
       const data = await res.json();
-      if (data.status === 'OK') setGroups(data.data || []);
-    } catch { /* ignore */ } finally { setLoading(false); }
+      if (data.status === 'OK' && Array.isArray(data.data)) {
+        setGroups(data.data);
+      } else {
+        setGroups([]);
+      }
+    } catch {
+      setGroups([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const fetchDepartments = async () => {
+  const fetchDepartments = async (): Promise<Department[]> => {
     try {
       const res = await fetch(`/api/hrd/departments?property_id=${propertyId}&include_inactive=false`, { headers: getAuthHeaders() });
       const data = await res.json();
-      if (data.status === 'OK') setDepartments(data.data || []);
+      if (data.status === 'OK' && Array.isArray(data.data)) {
+        setDepartments(data.data);
+        return data.data;
+      }
     } catch { /* ignore */ }
+    return [];
   };
 
-  const fetchDepartmentCategories = async () => {
+  const fetchDepartmentCategories = async (currentDepts?: Department[]) => {
     try {
       const res = await fetch(`/api/schedule/department-categories?property_id=${propertyId}`, { headers: getAuthHeaders() });
       const data = await res.json();
-      if (data.status === 'OK') {
-        const categories = data.data || [];
-        setDepartments(prev => prev.map(d => {
-          const cat = categories.find((c: any) => c.department_id === d.id);
-          return { ...d, schedule_category: cat?.category || null };
-        }));
+      const categoryMap = new Map<number, DepartmentCategory>();
+
+      if (data?.status === 'OK' && data?.data && typeof data.data === 'object') {
+        if (Array.isArray(data.data.operational)) {
+          data.data.operational.forEach((id: any) => {
+            const numId = typeof id === 'object' && id !== null ? (id.id || id.department_id) : Number(id);
+            if (!isNaN(numId)) categoryMap.set(numId, 'OPERATIONAL');
+          });
+        }
+        if (Array.isArray(data.data.non_operational)) {
+          data.data.non_operational.forEach((id: any) => {
+            const numId = typeof id === 'object' && id !== null ? (id.id || id.department_id) : Number(id);
+            if (!isNaN(numId)) categoryMap.set(numId, 'NON_OPERATIONAL');
+          });
+        }
+        if (Array.isArray(data.data.unclassified)) {
+          data.data.unclassified.forEach((id: any) => {
+            const numId = typeof id === 'object' && id !== null ? (id.id || id.department_id) : Number(id);
+            if (!isNaN(numId)) categoryMap.set(numId, null);
+          });
+        }
       }
+
+      setDepartments(prev => {
+        const source = currentDepts !== undefined ? currentDepts : (Array.isArray(prev) ? prev : []);
+        return source.map(d => ({
+          ...d,
+          schedule_category: categoryMap.get(d.id) ?? (d as any).schedule_category ?? null,
+        }));
+      });
     } catch { /* ignore */ }
   };
 
@@ -70,14 +105,24 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
       const res = await fetch(`/api/schedule/department-categories/${departmentId}`, {
         method: 'PATCH',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ property_id: propertyId, category }),
+        body: JSON.stringify({
+          property_id: propertyId,
+          category,
+        }),
       });
       if (!res.ok) throw new Error((await res.json()).message);
-      setDepartments(prev => prev.map(d => d.id === departmentId ? { ...d, schedule_category: category } : d));
+      setDepartments(prev => (Array.isArray(prev) ? prev : []).map(d => d.id === departmentId ? { ...d, schedule_category: category } : d));
     } catch (err: any) { alert(err.message); }
   };
 
-  useEffect(() => { fetchGroups(); fetchDepartments(); fetchDepartmentCategories(); }, [propertyId]);
+  useEffect(() => {
+    fetchGroups();
+    const loadDeptSequence = async () => {
+      const depts = await fetchDepartments();
+      await fetchDepartmentCategories(depts);
+    };
+    loadDeptSequence();
+  }, [propertyId]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -185,7 +230,7 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
               <div>
                 <label className="block text-[10px] font-bold text-slate-600 mb-1">Departemen (Operasional)</label>
                 <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-48 overflow-y-auto">
-                  {departments.filter(d => d.is_active).map(dept => (
+                  {(Array.isArray(departments) ? departments : []).filter(d => d.is_active).map(dept => (
                     <label key={dept.id} className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-slate-50 transition ${formData.department_ids.includes(dept.id) ? 'bg-emerald-50' : ''}`}>
                       <input type="checkbox" checked={formData.department_ids.includes(dept.id)} onChange={() => toggleDepartment(dept.id)}
                         className="rounded border-slate-300 text-[#1b4332] focus:ring-[#1b4332]" />
@@ -212,7 +257,7 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
             <div className="text-center py-8 text-slate-400 text-xs">Belum ada group operasional.</div>
           ) : (
             <div className="space-y-2">
-              {groups.map(group => (
+              {(Array.isArray(groups) ? groups : []).map(group => (
                 <div key={group.id} className={`border rounded-xl p-3 ${group.is_active ? 'border-slate-200 bg-white' : 'border-slate-100 bg-slate-50 opacity-60'}`}>
                   <div className="flex items-center justify-between">
                     <div>
@@ -255,13 +300,13 @@ export const KelolaGroupDrawer: React.FC<KelolaGroupDrawerProps> = ({ propertyId
                   Klasifikasi menentukan departemen mana yang muncul di tampilan Operasional (dengan shift) dan Non-Operasional (Kerja/OFF/Cuti/Sakit/Ijin/Libur).
                 </p>
                 <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-64 overflow-y-auto">
-                  {departments.filter(d => d.is_active).map(dept => (
+                  {(Array.isArray(departments) ? departments : []).filter(d => d.is_active).map(dept => (
                     <div key={dept.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 transition">
                       <span className="text-[11px] text-slate-800 flex-1">{dept.name}</span>
                       <div className="flex items-center gap-1">
                         <select
                           value={dept.schedule_category || ''}
-                          onChange={e => updateDepartmentCategory(dept.id, e.target.value as DepartmentCategory)}
+                          onChange={e => updateDepartmentCategory(dept.id, (e.target.value || null) as DepartmentCategory)}
                           className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-[#1b4332] cursor-pointer">
                           <option value="">Belum Diklasifikasi</option>
                           <option value="OPERATIONAL">Operasional</option>
