@@ -298,9 +298,33 @@ async function runTests() {
     assert(catsVerify.body.data.non_operational.includes(testDeptNonOpId), 'F6: nonop dept still classified NON_OPERATIONAL');
     pass('F6: Non-operational department classification preserved');
 
-    // Restore group to only ops dept
+    // ═══════════════════════════════════════════════════════════
+    // F6b: Update schedule group with multiple editable fields
+    // (Regression test for SQL parameter indexing mismatch)
+    // ═══════════════════════════════════════════════════════════
+    console.log('\n[F6b] Group update with multiple editable fields');
+
+    const groupUpdateRes = await request('PATCH', `/api/schedule/groups/${testGroupId}`, {
+      property_id: 1,
+      name: 'TEST_1F Front Office Updated',
+      code: 'TEST_1F_FO_UPD',
+      display_order: 5,
+      is_active: true,
+      department_ids: [testDeptOpsId]
+    }, token);
+    assert(groupUpdateRes.status === 200, `F6b: group update status ${groupUpdateRes.status} (${JSON.stringify(groupUpdateRes.body)})`);
+    assert(groupUpdateRes.body.data.name === 'TEST_1F Front Office Updated', 'F6b: updated name matches');
+    assert(groupUpdateRes.body.data.code === 'TEST_1F_FO_UPD', 'F6b: updated code matches');
+    assert(groupUpdateRes.body.data.display_order === 5, 'F6b: updated display_order matches');
+    pass('F6b: Schedule group updated with multiple editable fields without parameter mismatch');
+
+    // Restore group to only ops dept and original name/code
     await request('PATCH', `/api/schedule/groups/${testGroupId}`, {
-      property_id: 1, department_ids: [testDeptOpsId]
+      property_id: 1,
+      name: 'TEST_1F Front Office',
+      code: 'TEST_1F_FO',
+      display_order: 1,
+      department_ids: [testDeptOpsId]
     }, token);
 
     // ═══════════════════════════════════════════════════════════

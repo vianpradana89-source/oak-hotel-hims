@@ -1392,10 +1392,15 @@ export async function updateScheduleGroup(
 
   if (fields.length > 0) {
     fields.push(`updated_at = NOW()`, `updated_by = $${idx}`);
-    values.push(actor.name); idx++;
-    values.push(propertyId, groupId);
+    values.push(actor.name);
+    idx++;
+    const propIdx = idx;
+    values.push(propertyId);
+    idx++;
+    const groupIdx = idx;
+    values.push(groupId);
     await client.query(
-      `UPDATE schedule_groups SET ${fields.join(', ')} WHERE property_id = $${idx - 1} AND id = $${idx}`,
+      `UPDATE schedule_groups SET ${fields.join(', ')} WHERE property_id = $${propIdx} AND id = $${groupIdx}`,
       values
     );
   }
