@@ -13,16 +13,11 @@ import {
   type EffectiveAccessResponse,
   type OverrideChoice,
 } from '../auth/accessControl';
+import { OverrideStateControl } from '../hrd/hrdActionUi';
 
 interface UserAccessTabProps {
   propertyId: number;
 }
-
-const OVERRIDE_OPTIONS: { value: OverrideChoice; label: string }[] = [
-  { value: 'INHERIT', label: 'Ikuti Role' },
-  { value: 'ALLOW', label: 'Izinkan' },
-  { value: 'DENY', label: 'Tolak' },
-];
 
 export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
   const { authFetch, refreshEffectiveAccess } = useAuth();
@@ -166,18 +161,18 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
       )}
 
       <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between gap-3 flex-wrap">
+        <div className="px-3 py-2.5 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h3 className="font-serif font-bold text-slate-900 text-sm">Hak Akses Pengguna</h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Sesuaikan akses per pengguna di atas default role-nya.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <select
               value={selectedUserId}
               onChange={event => setSelectedUserId(Number(event.target.value))}
-              className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer"
+              className="px-2 py-1 rounded-lg border border-slate-200 bg-white text-[11px] font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer"
             >
               {users.map(user => (
                 <option key={user.user_id} value={user.user_id}>
@@ -189,7 +184,7 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
               type="button"
               onClick={handleReset}
               disabled={resetting || !detail || isSuperAdminTarget || (detail?.overrides.length || 0) === 0}
-              className="px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition font-bold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {resetting ? 'Mereset...' : 'Reset ke Default Role'}
             </button>
@@ -197,15 +192,15 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
               type="button"
               onClick={handleSave}
               disabled={saving || !isDirty || isSuperAdminTarget}
-              className="px-3 py-1.5 rounded-xl bg-[#1b4332] text-white hover:bg-[#143326] transition font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              className="px-2.5 py-1 rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] transition font-bold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
-              {saving ? 'Menyimpan...' : 'Simpan Hak Akses'}
+              {saving ? 'Menyimpan...' : 'Simpan'}
             </button>
           </div>
         </div>
 
         {selectedUser && (
-          <div className="px-4 py-2.5 border-b border-slate-100 flex items-center gap-4 flex-wrap text-[11px]">
+          <div className="px-3 py-2 border-b border-slate-100 flex items-center gap-4 flex-wrap text-[11px]">
             <span className="text-slate-500">Karyawan: <strong className="text-slate-800">{selectedUser.employee_name || '—'}</strong></span>
             <span className="text-slate-500">Akun Login: <strong className="text-slate-800">{selectedUser.username}</strong></span>
             <span className="text-slate-500">Role: <strong className="text-slate-800">{selectedUser.role_name || '—'}</strong></span>
@@ -218,7 +213,7 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
         )}
 
         {isSuperAdminTarget && (
-          <div className="mx-4 mt-3 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
+          <div className="mx-3 mt-2.5 p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
             Pengguna ini adalah Platform Super Admin. Hak aksesnya penuh dan tidak dapat dibatasi di sini.
           </div>
         )}
@@ -226,25 +221,25 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
         {loadingDetail ? (
           <div className="p-8 text-center text-xs text-slate-400">Memuat hak akses pengguna...</div>
         ) : (
-          <div className="p-4 space-y-4">
+          <div className="max-h-[min(32rem,62vh)] overflow-auto px-3 py-2.5 space-y-3">
             {groupedResources.map(group => (
               <div key={group.group}>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1.5">{group.group}</div>
-                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1">{group.group}</div>
+                <div className="border border-slate-200 rounded-lg">
                   <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50/80 text-slate-600 font-bold border-b border-slate-100">
-                        <th className="py-2 px-3">Menu</th>
+                    <thead className="sticky top-0 z-10">
+                      <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                        <th className="py-1.5 px-2.5">Menu</th>
                         {ACCESS_ACTIONS.map(action => (
-                          <th key={action} className="py-2 px-3 text-center w-40">{ACCESS_ACTION_LABELS[action]}</th>
+                          <th key={action} className="py-1.5 px-2 text-center w-[4.5rem]">{ACCESS_ACTION_LABELS[action]}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {group.resources.map(resource => (
                         <tr key={resource.key} className="hover:bg-slate-50/60 transition">
-                          <td className="py-2 px-3">
-                            <div className="font-bold text-slate-800 text-[11px]">{resource.label}</div>
+                          <td className="py-1.5 px-2.5">
+                            <div className="font-bold text-slate-800 text-[11px] leading-tight">{resource.label}</div>
                           </td>
                           {ACCESS_ACTIONS.map(action => {
                             const choice = draft[`${resource.key}::${action}`] || 'INHERIT';
@@ -255,28 +250,18 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
                               override: choice,
                             });
                             return (
-                              <td key={action} className="py-2 px-3 text-center">
-                                <select
+                              <td key={action} className="py-1.5 px-2 text-center">
+                                <OverrideStateControl
                                   value={choice}
                                   disabled={isSuperAdminTarget}
-                                  aria-label={`${resource.label} ${ACCESS_ACTION_LABELS[action]}`}
-                                  onChange={event => setDraft(prev => ({
+                                  ariaLabel={`${resource.label} ${ACCESS_ACTION_LABELS[action]}`}
+                                  roleAllowed={roleAllowed}
+                                  hint={`${cell.allowed ? 'AKTIF' : 'NONAKTIF'} · ${ACCESS_SOURCE_LABELS[cell.source]}`}
+                                  onChange={next => setDraft(prev => ({
                                     ...prev,
-                                    [`${resource.key}::${action}`]: event.target.value as OverrideChoice,
+                                    [`${resource.key}::${action}`]: next,
                                   }))}
-                                  className="w-full px-1.5 py-1 rounded-lg border border-slate-200 text-[10px] font-bold focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer disabled:cursor-not-allowed"
-                                >
-                                  {OVERRIDE_OPTIONS.map(option => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.value === 'INHERIT'
-                                        ? `${option.label} (${roleAllowed ? 'Izin' : 'Tolak'})`
-                                        : option.label}
-                                    </option>
-                                  ))}
-                                </select>
-                                <div className={`mt-0.5 text-[8px] font-bold ${cell.allowed ? 'text-emerald-700' : 'text-slate-400'}`}>
-                                  {cell.allowed ? 'AKTIF' : 'NONAKTIF'} · {ACCESS_SOURCE_LABELS[cell.source]}
-                                </div>
+                                />
                               </td>
                             );
                           })}

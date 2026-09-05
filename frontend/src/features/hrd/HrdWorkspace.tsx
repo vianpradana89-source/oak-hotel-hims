@@ -5,6 +5,7 @@ import { RolePermissionsTab } from './RolePermissionsTab';
 import { ScheduleTab } from './ScheduleTab';
 import { TestDataPurgeTab } from './TestDataPurgeTab';
 import type { Department, Position, DynamicRole } from './hrdTypes';
+import { HrdActionCluster, HrdActionIcons, HrdActionMenu, HrdIconAction } from './hrdActionUi';
 import {
   normalizeIndonesianPhoneNumber,
   buildWhatsAppCredentialMessage,
@@ -923,7 +924,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                       {employeeScopeTab === 'ARCHIVE' && (
                         <th className="py-3 px-4">Tanggal Diperbarui</th>
                       )}
-                      <th className="py-3 px-4 text-right">Aksi</th>
+                      <th className="py-3 px-1.5 text-center whitespace-nowrap w-px">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -971,100 +972,77 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                               {emp.updated_at ? new Date(emp.updated_at).toLocaleDateString('id-ID') : '—'}
                             </td>
                           )}
-                          <td className="py-3 px-4 text-right">
-                            <div className="flex items-center justify-end gap-1.5">
+                          <td className="py-3 px-1.5 text-center w-px whitespace-nowrap">
+                            <HrdActionCluster>
+                              <HrdIconAction
+                                label={employeeScopeTab === 'ACTIVE' ? 'Diagnosa Akun' : 'Lihat Diagnosa Akun'}
+                                icon={HrdActionIcons.eye}
+                                onClick={() => handleOpenDiagnosis(emp)}
+                              />
+                              <HrdIconAction
+                                label="Edit"
+                                icon={HrdActionIcons.pencil}
+                                onClick={() => handleOpenEdit(emp)}
+                              />
                               {employeeScopeTab === 'ACTIVE' ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenDiagnosis(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
-                                    title="Diagnosa dan Perbaiki Kredensial Akun"
-                                  >
-                                    Diagnosa Akun
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleExecuteResetPassword(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
-                                    title="Reset Password Karyawan"
-                                  >
-                                    Reset Password
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenEdit(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                                  >
-                                    Edit
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenDeactivateModal(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                    title="Nonaktifkan Karyawan dan Pindahkan ke Arsip"
-                                  >
-                                    Nonaktifkan
-                                  </button>
-                                  {isPlatformSuperAdmin && (
-                                    <button
-                                      type="button"
-                                      onClick={() => { setHardDeleteTarget(emp); setHardDeleteError(null); }}
-                                      className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                      title="Hapus Karyawan Permanen (Khusus Super Admin)"
-                                    >
-                                      Hapus
-                                    </button>
-                                  )}
-                                </>
+                                <HrdActionMenu
+                                  items={[
+                                    {
+                                      key: 'reset-password',
+                                      label: 'Reset Password',
+                                      icon: HrdActionIcons.key,
+                                      tone: 'warning',
+                                      disabled: !emp.user_id,
+                                      disabledReason: 'Tidak ada akun login',
+                                      onClick: () => handleExecuteResetPassword(emp),
+                                    },
+                                    {
+                                      key: 'deactivate',
+                                      label: 'Nonaktifkan',
+                                      icon: HrdActionIcons.userX,
+                                      tone: 'danger',
+                                      onClick: () => handleOpenDeactivateModal(emp),
+                                    },
+                                    {
+                                      key: 'hard-delete',
+                                      label: 'Hapus',
+                                      icon: HrdActionIcons.trash,
+                                      tone: 'danger',
+                                      hidden: !isPlatformSuperAdmin,
+                                      onClick: () => { setHardDeleteTarget(emp); setHardDeleteError(null); },
+                                    },
+                                  ]}
+                                />
                               ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenDiagnosis(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                                    title="Lihat Detail Diagnosis Akun"
-                                  >
-                                    Lihat
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenReactivateModal(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition cursor-pointer"
-                                    title="Aktifkan Kembali Karyawan"
-                                  >
-                                    Aktifkan Kembali
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenEdit(emp)}
-                                    className="px-2 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                                  >
-                                    Edit
-                                  </button>
-                                  {emp.user_id && isPlatformSuperAdmin && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleOpenDeleteAccountModal(emp)}
-                                      className="px-2 py-1 text-[11px] font-semibold text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition cursor-pointer"
-                                      title="Hapus Permanen Akun Login (Khusus Platform Super Admin)"
-                                    >
-                                      Hapus Akun Login
-                                    </button>
-                                  )}
-                                  {isPlatformSuperAdmin && (
-                                    <button
-                                      type="button"
-                                      onClick={() => { setHardDeleteTarget(emp); setHardDeleteError(null); }}
-                                      className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition cursor-pointer"
-                                      title="Hapus Karyawan Permanen (Khusus Super Admin)"
-                                    >
-                                      Hapus
-                                    </button>
-                                  )}
-                                </>
+                                <HrdActionMenu
+                                  items={[
+                                    {
+                                      key: 'reactivate',
+                                      label: 'Aktifkan Kembali',
+                                      icon: HrdActionIcons.userCheck,
+                                      tone: 'success',
+                                      onClick: () => handleOpenReactivateModal(emp),
+                                    },
+                                    {
+                                      key: 'delete-login',
+                                      label: 'Hapus Akun Login',
+                                      icon: HrdActionIcons.key,
+                                      tone: 'warning',
+                                      hidden: !(emp.user_id && isPlatformSuperAdmin),
+                                      onClick: () => handleOpenDeleteAccountModal(emp),
+                                    },
+                                    {
+                                      key: 'hard-delete',
+                                      label: 'Hapus',
+                                      icon: HrdActionIcons.trash,
+                                      tone: 'danger',
+                                      hidden: !isPlatformSuperAdmin,
+                                      onClick: () => { setHardDeleteTarget(emp); setHardDeleteError(null); },
+                                    },
+                                  ]}
+                                />
                               )}
-                            </div>
+                            </HrdActionCluster>
                           </td>
                         </tr>
                       );

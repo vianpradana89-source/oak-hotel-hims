@@ -124,18 +124,18 @@ export const RoleAccessTab: React.FC<RoleAccessTabProps> = ({ propertyId, onAcce
       )}
 
       <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between gap-3 flex-wrap">
+        <div className="px-3 py-2.5 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h3 className="font-serif font-bold text-slate-900 text-sm">Hak Akses Role</h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Tentukan akses View, Edit, dan Delete per menu untuk setiap role.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <select
               value={selectedRoleId}
               onChange={event => setSelectedRoleId(Number(event.target.value))}
-              className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer"
+              className="px-2 py-1 rounded-lg border border-slate-200 bg-white text-[11px] font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer"
             >
               {roles.map(role => (
                 <option key={role.id} value={role.id}>
@@ -147,38 +147,38 @@ export const RoleAccessTab: React.FC<RoleAccessTabProps> = ({ propertyId, onAcce
               type="button"
               onClick={handleSave}
               disabled={saving || !isDirty || !selectedRole || selectedRole.is_protected}
-              className="px-3 py-1.5 rounded-xl bg-[#1b4332] text-white hover:bg-[#143326] transition font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              className="px-2.5 py-1 rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] transition font-bold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
-              {saving ? 'Menyimpan...' : 'Simpan Hak Akses'}
+              {saving ? 'Menyimpan...' : 'Simpan'}
             </button>
           </div>
         </div>
 
         {selectedRole?.is_protected && (
-          <div className="mx-4 mt-3 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
+          <div className="mx-3 mt-2.5 p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
             Role Platform Super Admin memiliki akses penuh permanen dan tidak dapat diubah.
           </div>
         )}
 
-        <div className="p-4 space-y-4">
+        <div className="max-h-[min(32rem,62vh)] overflow-auto px-3 py-2.5 space-y-3">
           {groupedResources.map(group => (
             <div key={group.group}>
-              <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1.5">{group.group}</div>
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1">{group.group}</div>
+              <div className="border border-slate-200 rounded-lg">
                 <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50/80 text-slate-600 font-bold border-b border-slate-100">
-                      <th className="py-2 px-3">Menu</th>
+                  <thead className="sticky top-0 z-10">
+                    <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                      <th className="py-1.5 px-2.5">Menu</th>
                       {ACCESS_ACTIONS.map(action => (
-                        <th key={action} className="py-2 px-3 text-center w-24">{ACCESS_ACTION_LABELS[action]}</th>
+                        <th key={action} className="py-1.5 px-2 text-center w-16">{ACCESS_ACTION_LABELS[action]}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {group.resources.map(resource => (
                       <tr key={resource.key} className="hover:bg-slate-50/60 transition">
-                        <td className="py-2 px-3">
-                          <div className="font-bold text-slate-800 text-[11px]">{resource.label}</div>
+                        <td className="py-1.5 px-2.5">
+                          <div className="font-bold text-slate-800 text-[11px] leading-tight">{resource.label}</div>
                           <div className="text-[9px] text-slate-400 leading-tight">{resource.description}</div>
                         </td>
                         {ACCESS_ACTIONS.map(action => {
@@ -186,7 +186,7 @@ export const RoleAccessTab: React.FC<RoleAccessTabProps> = ({ propertyId, onAcce
                             ? true
                             : draft[resource.key]?.[action] === true;
                           return (
-                            <td key={action} className="py-2 px-3 text-center">
+                            <td key={action} className="py-1.5 px-2 text-center">
                               <input
                                 type="checkbox"
                                 checked={checked}
@@ -207,7 +207,7 @@ export const RoleAccessTab: React.FC<RoleAccessTabProps> = ({ propertyId, onAcce
           ))}
         </div>
 
-        <div className="px-4 pb-4">
+        <div className="px-3 pb-3">
           <p className="text-[10px] text-slate-400 leading-relaxed">
             Delete di sini adalah hak hapus operasional pada menu terkait. Hapus permanen tingkat platform tetap
             memerlukan verifikasi Platform Super Admin tersendiri.
