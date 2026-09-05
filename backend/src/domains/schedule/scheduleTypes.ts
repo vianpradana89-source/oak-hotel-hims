@@ -84,6 +84,21 @@ export interface AssignSchedulePayload {
   notes?: string;
 }
 
+export type ScheduleCorrectionTarget =
+  | 'SHIFT'
+  | 'OFF'
+  | 'HOLIDAY'
+  | 'LEAVE'
+  | 'SICK'
+  | 'PERMISSION'
+  | 'REMOVE';
+
+export interface CorrectSchedulePayload {
+  target_type: ScheduleCorrectionTarget;
+  shift_template_id?: number | null;
+  reason: string;
+}
+
 export interface BulkAssignSchedulePayload {
   property_id: number;
   employee_ids: number[];

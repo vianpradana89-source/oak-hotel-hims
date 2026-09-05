@@ -7,6 +7,7 @@ import type {
   WeeklyRosterResponse,
   WeeklyRosterEmployee,
   AssignSchedulePayload,
+  CorrectSchedulePayload,
   BulkAssignSchedulePayload,
   CopyWeekPayload,
   CopyWeekResult,
@@ -657,6 +658,201 @@ export async function removeScheduleAssignments(
   }
 
   return { removed_count: activeRows.length };
+}
+
+export async function correctPublishedSchedule(
+  client: PoolClient,
+  propertyId: number,
+  scheduleId: number,
+  payload: CorrectSchedulePayload,
+  actor: { id: number; name: string }
+): Promise<EmployeeWorkSchedule> {
+  const reason = typeof payload.reason === 'string' ? payload.reason.trim() : '';
+  if (!reason) {
+    throw Object.assign(new Error('Alasan koreksi wajib diisi.'), {
+      statusCode: 400,
+      code: 'CORRECTION_REASON_REQUIRED',
+    });
+  }
+
+  const validTargets = ['SHIFT', 'OFF', 'HOLIDAY', 'LEAVE', 'SICK', 'PERMISSION', 'REMOVE'];
+  if (!validTargets.includes(payload.target_type)) {
+    throw Object.assign(new Error('Tujuan koreksi tidak valid.'), {
+      statusCode: 422,
+      code: 'INVALID_CORRECTION_TARGET',
+    });
+  }
+
+  const existingRes = await client.query(
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
+     WHERE id = $1 AND property_id = $2
+     FOR UPDATE`,
+    [scheduleId, propertyId]
+  );
+  if (existingRes.rows.length === 0) {
+    throw Object.assign(new Error('Jadwal tidak ditemukan pada properti ini.'), {
+      statusCode: 404,
+      code: 'SCHEDULE_NOT_FOUND',
+    });
+  }
+
+  const existing = formatSchedule(existingRes.rows[0]);
+  if (existing.schedule_status !== 'PUBLISHED') {
+    throw Object.assign(new Error('Hanya jadwal berstatus PUBLISHED yang dapat dikoreksi.'), {
+      statusCode: 409,
+      code: 'SCHEDULE_NOT_PUBLISHED',
+    });
+  }
+
+  const employeeRes = await client.query(
+    'SELECT id, department_id FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [existing.employee_id, propertyId]
+  );
+  if (employeeRes.rows.length === 0) {
+    throw Object.assign(new Error('Karyawan jadwal tidak ditemukan pada properti ini.'), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND',
+    });
+  }
+
+  let newShiftTemplateId: number | null = null;
+  let newWorkStatus: EmployeeWorkSchedule['work_status'] | null = null;
+  let scheduledStartAt: string | null = null;
+  let scheduledEndAt: string | null = null;
+  const isRemoval = payload.target_type === 'REMOVE';
+
+  if (payload.target_type === 'SHIFT') {
+    const targetShiftId = Number(payload.shift_template_id);
+    if (!Number.isInteger(targetShiftId) || targetShiftId <= 0) {
+      throw Object.assign(new Error('Shift tujuan wajib dipilih.'), {
+        statusCode: 422,
+        code: 'CORRECTION_SHIFT_REQUIRED',
+      });
+    }
+    const templateRes = await client.query(
+      'SELECT * FROM work_shift_templates WHERE id = $1 AND property_id = $2',
+      [targetShiftId, propertyId]
+    );
+    if (templateRes.rows.length === 0) {
+      throw Object.assign(new Error('Shift tujuan tidak ditemukan.'), {
+        statusCode: 404,
+        code: 'SHIFT_TEMPLATE_NOT_FOUND',
+      });
+    }
+    const template = templateRes.rows[0];
+    if (!template.is_active) {
+      throw Object.assign(new Error('Shift tujuan sudah tidak aktif.'), {
+        statusCode: 422,
+        code: 'SHIFT_TEMPLATE_INACTIVE',
+      });
+    }
+    if (template.department_id != null && template.department_id !== employeeRes.rows[0].department_id) {
+      throw Object.assign(new Error('Shift tujuan tidak cocok dengan departemen karyawan.'), {
+        statusCode: 422,
+        code: 'SHIFT_TEMPLATE_DEPARTMENT_MISMATCH',
+      });
+    }
+    const propertyTimezone = await fetchPropertyTimezone(client, propertyId);
+    const timestamps = buildScheduledTimestamps(
+      existing.work_date,
+      template.start_time,
+      template.end_time,
+      template.crosses_midnight,
+      propertyTimezone
+    );
+    newShiftTemplateId = targetShiftId;
+    newWorkStatus = 'WORK';
+    scheduledStartAt = timestamps.scheduled_start_at;
+    scheduledEndAt = timestamps.scheduled_end_at;
+  } else if (!isRemoval) {
+    newWorkStatus = payload.target_type as EmployeeWorkSchedule['work_status'];
+  }
+
+  const isNoChange =
+    !isRemoval &&
+    existing.shift_template_id === newShiftTemplateId &&
+    existing.work_status === newWorkStatus;
+  if (isNoChange) {
+    throw Object.assign(new Error('Hasil koreksi sama dengan jadwal saat ini.'), {
+      statusCode: 422,
+      code: 'CORRECTION_NO_CHANGE',
+    });
+  }
+
+  const attendanceRes = await client.query(
+    `SELECT 1
+     FROM employee_attendance
+     WHERE property_id = $1
+       AND (schedule_id = $2 OR (employee_id = $3 AND work_date = $4))
+     UNION ALL
+     SELECT 1
+     FROM employee_attendance_records
+     WHERE property_id = $1 AND employee_id = $3 AND attendance_date = $4
+     LIMIT 1`,
+    [propertyId, scheduleId, existing.employee_id, existing.work_date]
+  );
+  if ((attendanceRes.rowCount ?? 0) > 0) {
+    throw Object.assign(
+      new Error('Jadwal tidak dapat dikoreksi karena sudah memiliki catatan kehadiran. Data kehadiran tidak diubah.'),
+      { statusCode: 409, code: 'SCHEDULE_CORRECTION_ATTENDANCE_CONFLICT' }
+    );
+  }
+
+  const resultingScheduleStatus = isRemoval ? 'CANCELLED' : 'CHANGED';
+  const persistedWorkStatus = isRemoval ? 'OFF' : newWorkStatus;
+  await client.query(
+    `UPDATE employee_work_schedules
+     SET shift_template_id = $1, work_status = $2, schedule_status = $3,
+         scheduled_start_at = $4, scheduled_end_at = $5,
+         updated_by_user_id = $6, updated_at = NOW()
+     WHERE id = $7 AND property_id = $8`,
+    [
+      newShiftTemplateId,
+      persistedWorkStatus,
+      resultingScheduleStatus,
+      scheduledStartAt,
+      scheduledEndAt,
+      actor.id,
+      scheduleId,
+      propertyId,
+    ]
+  );
+
+  await client.query(
+    `INSERT INTO employee_work_schedule_audits
+      (schedule_id, property_id, employee_id, action, old_shift_template_id, new_shift_template_id,
+       old_work_status, new_work_status, reason, changed_by_user_id, changed_by_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      scheduleId,
+      propertyId,
+      existing.employee_id,
+      isRemoval ? 'CORRECTION_REMOVED' : 'CORRECTED',
+      existing.shift_template_id,
+      newShiftTemplateId,
+      existing.work_status,
+      isRemoval ? null : newWorkStatus,
+      reason,
+      actor.id,
+      actor.name,
+    ]
+  );
+
+  const updatedRes = await client.query(
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules WHERE id = $1 AND property_id = $2`,
+    [scheduleId, propertyId]
+  );
+  return formatSchedule(updatedRes.rows[0]);
 }
 
 export async function getWeeklyRoster(

@@ -217,7 +217,14 @@ export interface WorkScheduleAudit {
   schedule_id: number;
   property_id: number;
   employee_id: number;
-  action: 'CREATED' | 'PUBLISHED' | 'SHIFT_CHANGED' | 'STATUS_CHANGED' | 'CANCELLED';
+  action:
+    | 'CREATED'
+    | 'PUBLISHED'
+    | 'SHIFT_CHANGED'
+    | 'STATUS_CHANGED'
+    | 'CANCELLED'
+    | 'CORRECTED'
+    | 'CORRECTION_REMOVED';
   old_shift_template_id?: number | null;
   new_shift_template_id?: number | null;
   old_work_status?: WorkStatusType | null;

@@ -9,6 +9,7 @@ import type {
 export interface CellAssignmentEmployee extends HrEmployee {
   schedule_id: number;
   schedule_status: EmployeeWorkSchedule['schedule_status'];
+  schedule: EmployeeWorkSchedule;
 }
 
 function matchesCell(
@@ -39,6 +40,7 @@ function toAssignment(
     is_active: true,
     schedule_id: schedule.id,
     schedule_status: schedule.schedule_status,
+    schedule,
   };
 }
 

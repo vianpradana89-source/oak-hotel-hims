@@ -236,13 +236,19 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
 
   // Compute publish status
   const publishStatus = useMemo(() => {
-    const source = scheduleMode === 'grouped' ? null : roster;
-    if (!source) return null;
+    const dates = scheduleMode === 'grouped' ? groupedRoster?.dates : roster?.dates;
+    const employees = scheduleMode === 'grouped'
+      ? [
+          ...(groupedRoster?.groups.flatMap(group => group.employees) || []),
+          ...(groupedRoster?.non_operational_groups.flatMap(group => group.employees) || []),
+        ]
+      : roster?.employees;
+    if (!dates || !employees) return null;
     let hasDraft = false, hasChanged = false, hasPublished = false;
-    for (const emp of source.employees) {
-      for (const date of source.dates) {
+    for (const emp of employees) {
+      for (const date of dates) {
         const sched = emp.schedules[date];
-        if (!sched) continue;
+        if (!sched || sched.schedule_status === 'CANCELLED') continue;
         if (sched.schedule_status === 'DRAFT') hasDraft = true;
         if (sched.schedule_status === 'CHANGED') hasChanged = true;
         if (sched.schedule_status === 'PUBLISHED') hasPublished = true;
@@ -253,7 +259,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
     if (hasDraft) return 'DRAFT';
     if (hasPublished) return 'PUBLISHED';
     return null;
-  }, [roster, scheduleMode]);
+  }, [roster, groupedRoster, scheduleMode]);
 
   const publishStatusLabel = publishStatus === 'DRAFT' ? 'Draft' :
     publishStatus === 'CHANGED' ? 'Ada Perubahan' :

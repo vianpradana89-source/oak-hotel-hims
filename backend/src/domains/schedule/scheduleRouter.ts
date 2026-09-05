@@ -15,6 +15,7 @@ import {
   getMonthlyRoster,
   assignSchedule,
   removeScheduleAssignments,
+  correctPublishedSchedule,
   bulkAssignSchedule,
   copyWeek,
   publishSchedule,
@@ -46,6 +47,7 @@ import type {
   CreateShiftTemplatePayload,
   UpdateShiftTemplatePayload,
   AssignSchedulePayload,
+  CorrectSchedulePayload,
   BulkAssignSchedulePayload,
   CopyWeekPayload,
   PublishSchedulePayload,
@@ -442,6 +444,81 @@ export function createScheduleRouter(pool: Pool): Router {
       const result = await removeScheduleAssignments(client, propertyId, scheduleIds.map(Number), actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: result, message: 'Penugasan jadwal berhasil dihapus.' });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 7c. Auditable correction for an already-published schedule
+  router.post('/assignments/:scheduleId/correct', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const tokenUser = (req as any).user;
+      const tokenUserId = Number(tokenUser?.id);
+      if (!Number.isInteger(tokenUserId) || tokenUserId <= 0) {
+        throw Object.assign(new Error('Autentikasi diperlukan untuk melakukan koreksi jadwal.'), {
+          statusCode: 401,
+          code: 'AUTH_REQUIRED',
+        });
+      }
+
+      const actorRes = await client.query(
+        `SELECT id, property_id, full_name, username, is_active, account_status
+         FROM users WHERE id = $1`,
+        [tokenUserId]
+      );
+      if (actorRes.rows.length === 0) {
+        throw Object.assign(new Error('Akun pengguna tidak ditemukan.'), {
+          statusCode: 401,
+          code: 'AUTH_USER_NOT_FOUND',
+        });
+      }
+      const actorUser = actorRes.rows[0];
+      if (actorUser.is_active === false || actorUser.account_status === 'DISABLED' || actorUser.account_status === 'SUSPENDED') {
+        throw Object.assign(new Error('Akun pengguna tidak aktif.'), {
+          statusCode: 403,
+          code: 'ACCOUNT_DISABLED',
+        });
+      }
+
+      const propertyId = Number(actorUser.property_id);
+      if (req.body.property_id !== undefined && Number(req.body.property_id) !== propertyId) {
+        throw Object.assign(new Error('Koreksi jadwal tidak boleh melintasi properti akun.'), {
+          statusCode: 403,
+          code: 'PROPERTY_SCOPE_MISMATCH',
+        });
+      }
+
+      const scheduleId = Number(req.params.scheduleId);
+      if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+        throw Object.assign(new Error('ID jadwal tidak valid.'), {
+          statusCode: 400,
+          code: 'INVALID_SCHEDULE_ID',
+        });
+      }
+
+      const payload: CorrectSchedulePayload = {
+        target_type: req.body.target_type,
+        shift_template_id: req.body.shift_template_id,
+        reason: req.body.reason,
+      };
+      const corrected = await correctPublishedSchedule(
+        client,
+        propertyId,
+        scheduleId,
+        payload,
+        {
+          id: actorUser.id,
+          name: actorUser.full_name || actorUser.username,
+        }
+      );
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: corrected, message: 'Koreksi jadwal berhasil disimpan.' });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
