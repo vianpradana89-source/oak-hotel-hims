@@ -1139,3 +1139,1190 @@ export async function getScheduleAuditHistory(
   );
   return res.rows;
 }
+
+// ─── HR-SCHEDULE-1F: Operational/Non-Operational Schedule Groups ───
+
+import type {
+  ScheduleGroup,
+  ScheduleGroupDepartmentInfo,
+  CreateScheduleGroupPayload,
+  UpdateScheduleGroupPayload,
+  DepartmentWorkPattern,
+  CreateDepartmentWorkPatternPayload,
+  UpdateDepartmentWorkPatternPayload,
+  PropertyHoliday,
+  CreatePropertyHolidayPayload,
+  UpdatePropertyHolidayPayload,
+  NonOpBulkPatternPayload,
+  NonOpBulkPatternPreview,
+  NonOpBulkPatternResult,
+  OperationalRosterResponse,
+  OperationalGroupRoster,
+  NonOperationalGroupRoster,
+  NonOpRosterEmployee,
+  UpdateDepartmentCategoryPayload,
+  GroupedRosterQuery,
+  ScheduleCategory,
+} from './scheduleTypes';
+
+// ─── Department Schedule Category ───
+
+export async function updateDepartmentCategory(
+  client: PoolClient,
+  propertyId: number,
+  departmentId: number,
+  payload: UpdateDepartmentCategoryPayload,
+  actor: { id?: number; name: string }
+): Promise<void> {
+  const deptCheck = await client.query(
+    'SELECT id, property_id FROM hr_departments WHERE id = $1 AND property_id = $2',
+    [departmentId, propertyId]
+  );
+  if (deptCheck.rowCount === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
+  if (payload.schedule_category !== null && payload.schedule_category !== 'OPERATIONAL' && payload.schedule_category !== 'NON_OPERATIONAL') {
+    throw Object.assign(new Error('Kategori jadwal tidak valid. Pilihan: OPERATIONAL, NON_OPERATIONAL, atau null.'), { statusCode: 422, code: 'INVALID_CATEGORY' });
+  }
+
+  await client.query(
+    `UPDATE hr_departments SET schedule_category = $1, updated_at = NOW(), updated_by = $2
+     WHERE id = $3 AND property_id = $4`,
+    [payload.schedule_category, actor.name, departmentId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'DEPARTMENT_CATEGORY_UPDATED', 'hr_departments', $1, $2, $3)`,
+    [departmentId, JSON.stringify({ schedule_category: payload.schedule_category }), propertyId]
+  );
+}
+
+export async function getDepartmentCategories(
+  client: PoolClient,
+  propertyId: number
+): Promise<{ operational: number[]; non_operational: number[]; unclassified: number[] }> {
+  const res = await client.query(
+    'SELECT id, schedule_category FROM hr_departments WHERE property_id = $1 AND is_active = TRUE',
+    [propertyId]
+  );
+  const result = { operational: [] as number[], non_operational: [] as number[], unclassified: [] as number[] };
+  for (const row of res.rows) {
+    if (row.schedule_category === 'OPERATIONAL') result.operational.push(row.id);
+    else if (row.schedule_category === 'NON_OPERATIONAL') result.non_operational.push(row.id);
+    else result.unclassified.push(row.id);
+  }
+  return result;
+}
+
+// ─── Schedule Groups (Operational) ───
+
+export async function getScheduleGroups(
+  client: PoolClient,
+  propertyId: number,
+  includeInactive = false
+): Promise<ScheduleGroup[]> {
+  const conditions = ['sg.property_id = $1'];
+  const params: any[] = [propertyId];
+  if (!includeInactive) conditions.push('sg.is_active = TRUE');
+
+  const res = await client.query(
+    `SELECT sg.* FROM schedule_groups sg
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY sg.display_order ASC, sg.name ASC`,
+    params
+  );
+
+  const groups: ScheduleGroup[] = [];
+  for (const row of res.rows) {
+    const deptRes = await client.query(
+      `SELECT sgd.department_id, d.name as department_name, d.code as department_code
+       FROM schedule_group_departments sgd
+       JOIN hr_departments d ON d.id = sgd.department_id
+       WHERE sgd.group_id = $1`,
+      [row.id]
+    );
+    groups.push({
+      id: row.id,
+      property_id: row.property_id,
+      name: row.name,
+      code: row.code,
+      is_active: row.is_active,
+      display_order: row.display_order,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      created_by: row.created_by,
+      updated_by: row.updated_by,
+      departments: deptRes.rows.map((d: any) => ({
+        department_id: d.department_id,
+        department_name: d.department_name,
+        department_code: d.department_code,
+      })),
+    });
+  }
+  return groups;
+}
+
+export async function getScheduleGroupById(
+  client: PoolClient,
+  propertyId: number,
+  groupId: number
+): Promise<ScheduleGroup | null> {
+  const res = await client.query(
+    'SELECT * FROM schedule_groups WHERE id = $1 AND property_id = $2',
+    [groupId, propertyId]
+  );
+  if (res.rows.length === 0) return null;
+
+  const row = res.rows[0];
+  const deptRes = await client.query(
+    `SELECT sgd.department_id, d.name as department_name, d.code as department_code
+     FROM schedule_group_departments sgd
+     JOIN hr_departments d ON d.id = sgd.department_id
+     WHERE sgd.group_id = $1`,
+    [row.id]
+  );
+  return {
+    id: row.id,
+    property_id: row.property_id,
+    name: row.name,
+    code: row.code,
+    is_active: row.is_active,
+    display_order: row.display_order,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    created_by: row.created_by,
+    updated_by: row.updated_by,
+    departments: deptRes.rows.map((d: any) => ({
+      department_id: d.department_id,
+      department_name: d.department_name,
+      department_code: d.department_code,
+    })),
+  };
+}
+
+export async function createScheduleGroup(
+  client: PoolClient,
+  payload: CreateScheduleGroupPayload,
+  actor: { id?: number; name: string }
+): Promise<ScheduleGroup> {
+  const code = payload.code.trim().toUpperCase();
+  const name = payload.name.trim();
+  if (!code || !name) {
+    throw Object.assign(new Error('Kode dan nama group wajib diisi.'), { statusCode: 400, code: 'INVALID_INPUT' });
+  }
+
+  const codeCheck = await client.query(
+    'SELECT id FROM schedule_groups WHERE property_id = $1 AND UPPER(code) = $2',
+    [payload.property_id, code]
+  );
+  if (codeCheck.rows.length > 0) {
+    throw Object.assign(new Error(`Kode group '${code}' sudah digunakan.`), { statusCode: 409, code: 'GROUP_CODE_EXISTS' });
+  }
+
+  // Validate all departments belong to same property
+  if (payload.department_ids && payload.department_ids.length > 0) {
+    const deptCheck = await client.query(
+      'SELECT id FROM hr_departments WHERE id = ANY($1) AND property_id = $2',
+      [payload.department_ids, payload.property_id]
+    );
+    if (deptCheck.rowCount !== payload.department_ids.length) {
+      throw Object.assign(new Error('Salah satu departemen tidak ditemukan atau bukan milik properti ini.'), { statusCode: 422, code: 'DEPARTMENT_PROPERTY_MISMATCH' });
+    }
+  }
+
+  const res = await client.query(
+    `INSERT INTO schedule_groups (property_id, name, code, is_active, display_order, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [payload.property_id, name, code, payload.is_active !== false, payload.display_order || 0, actor.name]
+  );
+
+  const group = res.rows[0];
+
+  // Map departments
+  if (payload.department_ids && payload.department_ids.length > 0) {
+    for (const deptId of payload.department_ids) {
+      await client.query(
+        'INSERT INTO schedule_group_departments (group_id, department_id) VALUES ($1, $2)',
+        [group.id, deptId]
+      );
+    }
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SCHEDULE_GROUP_CREATED', 'schedule_groups', $1, $2, $3)`,
+    [group.id, JSON.stringify({ name, code, department_ids: payload.department_ids || [] }), payload.property_id]
+  );
+
+  return (await getScheduleGroupById(client, payload.property_id, group.id))!;
+}
+
+export async function updateScheduleGroup(
+  client: PoolClient,
+  propertyId: number,
+  groupId: number,
+  payload: UpdateScheduleGroupPayload,
+  actor: { id?: number; name: string }
+): Promise<ScheduleGroup> {
+  const existing = await getScheduleGroupById(client, propertyId, groupId);
+  if (!existing) {
+    throw Object.assign(new Error('Group tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  const fields: string[] = [];
+  const values: any[] = [];
+  let idx = 1;
+
+  if (payload.name !== undefined) { fields.push(`name = $${idx}`); values.push(payload.name.trim()); idx++; }
+  if (payload.code !== undefined) {
+    const code = payload.code.trim().toUpperCase();
+    const codeCheck = await client.query(
+      'SELECT id FROM schedule_groups WHERE property_id = $1 AND UPPER(code) = $2 AND id != $3',
+      [propertyId, code, groupId]
+    );
+    if (codeCheck.rows.length > 0) {
+      throw Object.assign(new Error(`Kode group '${code}' sudah digunakan.`), { statusCode: 409, code: 'GROUP_CODE_EXISTS' });
+    }
+    fields.push(`code = $${idx}`); values.push(code); idx++;
+  }
+  if (payload.is_active !== undefined) { fields.push(`is_active = $${idx}`); values.push(payload.is_active); idx++; }
+  if (payload.display_order !== undefined) { fields.push(`display_order = $${idx}`); values.push(payload.display_order); idx++; }
+
+  if (fields.length > 0) {
+    fields.push(`updated_at = NOW()`, `updated_by = $${idx}`);
+    values.push(actor.name); idx++;
+    values.push(propertyId, groupId);
+    await client.query(
+      `UPDATE schedule_groups SET ${fields.join(', ')} WHERE property_id = $${idx - 1} AND id = $${idx}`,
+      values
+    );
+  }
+
+  // Update department mapping if provided
+  if (payload.department_ids !== undefined) {
+    await client.query('DELETE FROM schedule_group_departments WHERE group_id = $1', [groupId]);
+    if (payload.department_ids.length > 0) {
+      // Validate departments
+      const deptCheck = await client.query(
+        'SELECT id FROM hr_departments WHERE id = ANY($1) AND property_id = $2',
+        [payload.department_ids, propertyId]
+      );
+      if (deptCheck.rowCount !== payload.department_ids.length) {
+        throw Object.assign(new Error('Salah satu departemen tidak ditemukan atau bukan milik properti ini.'), { statusCode: 422, code: 'DEPARTMENT_PROPERTY_MISMATCH' });
+      }
+      for (const deptId of payload.department_ids) {
+        await client.query(
+          'INSERT INTO schedule_group_departments (group_id, department_id) VALUES ($1, $2)',
+          [groupId, deptId]
+        );
+      }
+    }
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SCHEDULE_GROUP_UPDATED', 'schedule_groups', $1, $2, $3)`,
+    [groupId, JSON.stringify(payload), propertyId]
+  );
+
+  return (await getScheduleGroupById(client, propertyId, groupId))!;
+}
+
+export async function deactivateScheduleGroup(
+  client: PoolClient,
+  propertyId: number,
+  groupId: number,
+  actor: { id?: number; name: string }
+): Promise<void> {
+  const existing = await getScheduleGroupById(client, propertyId, groupId);
+  if (!existing) {
+    throw Object.assign(new Error('Group tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  await client.query(
+    'UPDATE schedule_groups SET is_active = FALSE, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND property_id = $3',
+    [actor.name, groupId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SCHEDULE_GROUP_DEACTIVATED', 'schedule_groups', $1, $2, $3)`,
+    [groupId, JSON.stringify(existing), propertyId]
+  );
+}
+
+// ─── Department Work Patterns (Non-Operational Office Hours) ───
+
+export async function getDepartmentWorkPatterns(
+  client: PoolClient,
+  propertyId: number,
+  includeInactive = false
+): Promise<DepartmentWorkPattern[]> {
+  const conditions = ['dwp.property_id = $1'];
+  const params: any[] = [propertyId];
+  if (!includeInactive) conditions.push('dwp.is_active = TRUE');
+
+  const res = await client.query(
+    `SELECT dwp.*, d.name as department_name
+     FROM department_work_patterns dwp
+     JOIN hr_departments d ON d.id = dwp.department_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY d.name ASC`,
+    params
+  );
+
+  return res.rows.map(r => ({
+    id: r.id,
+    property_id: r.property_id,
+    department_id: r.department_id,
+    department_name: r.department_name,
+    default_start_time: r.default_start_time,
+    default_end_time: r.default_end_time,
+    crosses_midnight: r.crosses_midnight,
+    is_active: r.is_active,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  }));
+}
+
+export async function getDepartmentWorkPatternByDept(
+  client: PoolClient,
+  departmentId: number
+): Promise<DepartmentWorkPattern | null> {
+  const res = await client.query(
+    `SELECT dwp.*, d.name as department_name
+     FROM department_work_patterns dwp
+     JOIN hr_departments d ON d.id = dwp.department_id
+     WHERE dwp.department_id = $1 AND dwp.is_active = TRUE`,
+    [departmentId]
+  );
+  return res.rows.length > 0 ? {
+    id: res.rows[0].id,
+    property_id: res.rows[0].property_id,
+    department_id: res.rows[0].department_id,
+    department_name: res.rows[0].department_name,
+    default_start_time: res.rows[0].default_start_time,
+    default_end_time: res.rows[0].default_end_time,
+    crosses_midnight: res.rows[0].crosses_midnight,
+    is_active: res.rows[0].is_active,
+    created_at: res.rows[0].created_at,
+    updated_at: res.rows[0].updated_at,
+  } : null;
+}
+
+export async function upsertDepartmentWorkPattern(
+  client: PoolClient,
+  payload: CreateDepartmentWorkPatternPayload,
+  actor: { id?: number; name: string }
+): Promise<DepartmentWorkPattern> {
+  const deptCheck = await client.query(
+    'SELECT id, property_id, name FROM hr_departments WHERE id = $1 AND property_id = $2',
+    [payload.department_id, payload.property_id]
+  );
+  if (deptCheck.rowCount === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
+  const existing = await client.query(
+    'SELECT id FROM department_work_patterns WHERE department_id = $1',
+    [payload.department_id]
+  );
+
+  const startTime = payload.default_start_time || '08:00';
+  const endTime = payload.default_end_time || '16:00';
+  const crossesMidnight = payload.crosses_midnight || (parseTimeToMinutes(endTime) <= parseTimeToMinutes(startTime));
+
+  let resultId: number;
+  if (existing.rows.length > 0) {
+    await client.query(
+      `UPDATE department_work_patterns
+       SET default_start_time = $1, default_end_time = $2, crosses_midnight = $3,
+           is_active = $4, updated_at = NOW()
+       WHERE id = $5`,
+      [startTime, endTime, crossesMidnight, payload.is_active !== false, existing.rows[0].id]
+    );
+    resultId = existing.rows[0].id;
+  } else {
+    const res = await client.query(
+      `INSERT INTO department_work_patterns (property_id, department_id, default_start_time, default_end_time, crosses_midnight, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [payload.property_id, payload.department_id, startTime, endTime, crossesMidnight, payload.is_active !== false]
+    );
+    resultId = res.rows[0].id;
+  }
+
+  return (await getDepartmentWorkPatternByDept(client, payload.department_id))!;
+}
+
+// ─── Property Holidays ───
+
+export async function getPropertyHolidays(
+  client: PoolClient,
+  propertyId: number,
+  options?: { include_inactive?: boolean; year?: number; month?: number }
+): Promise<PropertyHoliday[]> {
+  const conditions: string[] = ['ph.property_id = $1'];
+  const params: any[] = [propertyId];
+  let idx = 2;
+
+  if (!options?.include_inactive) { conditions.push('ph.is_active = TRUE'); }
+  if (options?.year && options?.month) {
+    const firstDay = `${options.year}-${String(options.month).padStart(2, '0')}-01`;
+    const lastDay = new Date(options.year, options.month, 0);
+    const lastDate = `${options.year}-${String(options.month).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+    conditions.push(`ph.holiday_date >= $${idx} AND ph.holiday_date <= $${idx + 1}`);
+    params.push(firstDay, lastDate);
+    idx += 2;
+  } else if (options?.year) {
+    conditions.push(`ph.holiday_date >= $${idx} AND ph.holiday_date <= $${idx + 1}`);
+    params.push(`${options.year}-01-01`, `${options.year}-12-31`);
+    idx += 2;
+  }
+
+  const res = await client.query(
+    `SELECT * FROM property_holidays ph
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY ph.holiday_date ASC`,
+    params
+  );
+
+  return res.rows.map(r => ({
+    id: r.id,
+    property_id: r.property_id,
+    holiday_date: typeof r.holiday_date === 'string' ? r.holiday_date.split('T')[0] : new Date(r.holiday_date).toISOString().split('T')[0],
+    name: r.name,
+    holiday_type: r.holiday_type,
+    is_active: r.is_active,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    created_by: r.created_by,
+    updated_by: r.updated_by,
+  }));
+}
+
+export async function createPropertyHoliday(
+  client: PoolClient,
+  payload: CreatePropertyHolidayPayload,
+  actor: { id?: number; name: string }
+): Promise<PropertyHoliday> {
+  const name = payload.name.trim();
+  const holidayDate = payload.holiday_date;
+  const holidayType = payload.holiday_type || 'NATIONAL';
+
+  if (!name || !holidayDate) {
+    throw Object.assign(new Error('Nama dan tanggal libur wajib diisi.'), { statusCode: 400, code: 'INVALID_INPUT' });
+  }
+
+  const dateCheck = await client.query(
+    'SELECT id FROM property_holidays WHERE property_id = $1 AND holiday_date = $2',
+    [payload.property_id, holidayDate]
+  );
+  if (dateCheck.rows.length > 0) {
+    throw Object.assign(new Error('Tanggal libur ini sudah ada.'), { statusCode: 409, code: 'HOLIDAY_DATE_EXISTS' });
+  }
+
+  const res = await client.query(
+    `INSERT INTO property_holidays (property_id, holiday_date, name, holiday_type, is_active, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [payload.property_id, holidayDate, name, holidayType, payload.is_active !== false, actor.name]
+  );
+
+  const holiday = res.rows[0];
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'HOLIDAY_CREATED', 'property_holidays', $1, $2, $3)`,
+    [holiday.id, JSON.stringify({ holiday_date: holidayDate, name, holiday_type: holidayType }), payload.property_id]
+  );
+
+  return {
+    id: holiday.id,
+    property_id: holiday.property_id,
+    holiday_date: typeof holiday.holiday_date === 'string' ? holiday.holiday_date.split('T')[0] : new Date(holiday.holiday_date).toISOString().split('T')[0],
+    name: holiday.name,
+    holiday_type: holiday.holiday_type,
+    is_active: holiday.is_active,
+    created_at: holiday.created_at,
+    updated_at: holiday.updated_at,
+    created_by: holiday.created_by,
+    updated_by: holiday.updated_by,
+  };
+}
+
+export async function updatePropertyHoliday(
+  client: PoolClient,
+  propertyId: number,
+  holidayId: number,
+  payload: UpdatePropertyHolidayPayload,
+  actor: { id?: number; name: string }
+): Promise<PropertyHoliday> {
+  const existing = await client.query(
+    'SELECT * FROM property_holidays WHERE id = $1 AND property_id = $2',
+    [holidayId, propertyId]
+  );
+  if (existing.rows.length === 0) {
+    throw Object.assign(new Error('Hari libur tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  const fields: string[] = [];
+  const values: any[] = [];
+  let idx = 1;
+
+  if (payload.holiday_date !== undefined) {
+    const dateCheck = await client.query(
+      'SELECT id FROM property_holidays WHERE property_id = $1 AND holiday_date = $2 AND id != $3',
+      [propertyId, payload.holiday_date, holidayId]
+    );
+    if (dateCheck.rows.length > 0) {
+      throw Object.assign(new Error('Tanggal libur ini sudah ada.'), { statusCode: 409, code: 'HOLIDAY_DATE_EXISTS' });
+    }
+    fields.push(`holiday_date = $${idx}`); values.push(payload.holiday_date); idx++;
+  }
+  if (payload.name !== undefined) { fields.push(`name = $${idx}`); values.push(payload.name.trim()); idx++; }
+  if (payload.holiday_type !== undefined) { fields.push(`holiday_type = $${idx}`); values.push(payload.holiday_type); idx++; }
+  if (payload.is_active !== undefined) { fields.push(`is_active = $${idx}`); values.push(payload.is_active); idx++; }
+
+  if (fields.length > 0) {
+    fields.push(`updated_at = NOW()`, `updated_by = $${idx}`);
+    values.push(actor.name); idx++;
+    values.push(propertyId);
+    const propParamIdx = idx; idx++;
+    values.push(holidayId);
+    const holParamIdx = idx; idx++;
+    await client.query(
+      `UPDATE property_holidays SET ${fields.join(', ')} WHERE property_id = $${propParamIdx} AND id = $${holParamIdx}`,
+      values
+    );
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'HOLIDAY_UPDATED', 'property_holidays', $1, $2, $3)`,
+    [holidayId, JSON.stringify(payload), propertyId]
+  );
+
+  const updated = await client.query(
+    'SELECT * FROM property_holidays WHERE id = $1 AND property_id = $2',
+    [holidayId, propertyId]
+  );
+  const r = updated.rows[0];
+  return {
+    id: r.id,
+    property_id: r.property_id,
+    holiday_date: typeof r.holiday_date === 'string' ? r.holiday_date.split('T')[0] : new Date(r.holiday_date).toISOString().split('T')[0],
+    name: r.name,
+    holiday_type: r.holiday_type,
+    is_active: r.is_active,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    created_by: r.created_by,
+    updated_by: r.updated_by,
+  };
+}
+
+// ─── Non-Operational Multi-Month Bulk Pattern ───
+
+export async function previewNonOpBulkPattern(
+  client: PoolClient,
+  propertyId: number,
+  employeeIds: number[],
+  startDate: string,
+  endDate: string,
+  workingDays: number[],
+  startTime?: string,
+  endTime?: string
+): Promise<NonOpBulkPatternPreview> {
+  // Generate all dates in range
+  const allDates: string[] = [];
+  let current = startDate;
+  while (current <= endDate) {
+    allDates.push(current);
+    current = addDays(current, 1);
+  }
+
+  // Filter to working days only
+  const workingDates = allDates.filter(date => {
+    const { year, month, day } = parseDateParts(date);
+    const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    return workingDays.includes(dow);
+  });
+
+  // Fetch existing schedules
+  const existingRes = await client.query(
+    `SELECT employee_id, work_date::text AS work_date, work_status, schedule_status
+     FROM employee_work_schedules
+     WHERE property_id = $1 AND employee_id = ANY($2)
+       AND work_date >= $3 AND work_date <= $4`,
+    [propertyId, employeeIds, startDate, endDate]
+  );
+
+  const existingMap = new Map<string, { work_status: string; schedule_status: string }>();
+  for (const row of existingRes.rows) {
+    const wd = typeof row.work_date === 'string' ? row.work_date.split('T')[0] : new Date(row.work_date).toISOString().split('T')[0];
+    existingMap.set(`${row.employee_id}_${wd}`, { work_status: row.work_status, schedule_status: row.schedule_status });
+  }
+
+  // Fetch holidays
+  const holidayRes = await client.query(
+    'SELECT holiday_date::text AS holiday_date FROM property_holidays WHERE property_id = $1 AND is_active = TRUE AND holiday_date >= $2 AND holiday_date <= $3',
+    [propertyId, startDate, endDate]
+  );
+  const holidayDates = new Set<string>();
+  for (const row of holidayRes.rows) {
+    const hd = typeof row.holiday_date === 'string' ? row.holiday_date.split('T')[0] : new Date(row.holiday_date).toISOString().split('T')[0];
+    holidayDates.add(hd);
+  }
+
+  let newSchedules = 0;
+  let existingSchedules = 0;
+  let skippedProtected = 0;
+  const conflicts: NonOpBulkPatternPreview['conflicts'] = [];
+
+  for (const empId of employeeIds) {
+    for (const date of workingDates) {
+      const key = `${empId}_${date}`;
+      const existing = existingMap.get(key);
+
+      if (existing) {
+        existingSchedules++;
+        // Protected statuses
+        if (existing.schedule_status === 'PUBLISHED' || existing.schedule_status === 'CHANGED' ||
+            existing.work_status === 'LEAVE' || existing.work_status === 'SICK' || existing.work_status === 'PERMISSION') {
+          skippedProtected++;
+          const empRes = await client.query('SELECT full_name FROM hr_employees WHERE id = $1', [empId]);
+          conflicts.push({
+            employee_id: empId,
+            employee_name: empRes.rows[0]?.full_name || 'Unknown',
+            work_date: date,
+            current_status: existing.work_status,
+            current_schedule_status: existing.schedule_status,
+          });
+        } else {
+          newSchedules++;
+        }
+      } else {
+        newSchedules++;
+      }
+    }
+  }
+
+  return {
+    total_dates: workingDates.length * employeeIds.length,
+    new_schedules: newSchedules,
+    existing_schedules: existingSchedules,
+    skipped_protected: skippedProtected,
+    conflicts,
+  };
+}
+
+export async function applyNonOpBulkPattern(
+  client: PoolClient,
+  payload: NonOpBulkPatternPayload,
+  actor: { id?: number; name: string }
+): Promise<NonOpBulkPatternResult> {
+  const {
+    property_id, department_id, employee_ids, start_date, end_date,
+    working_days, default_start_time = '08:00', default_end_time = '16:00',
+    crosses_midnight: forceCrossesMidnight, notes,
+  } = payload;
+
+  // Validate department
+  const deptCheck = await client.query(
+    'SELECT id, name FROM hr_departments WHERE id = $1 AND property_id = $2',
+    [department_id, property_id]
+  );
+  if (deptCheck.rowCount === 0) {
+    throw Object.assign(new Error('Departemen tidak ditemukan.'), { statusCode: 404, code: 'DEPARTMENT_NOT_FOUND' });
+  }
+
+  // Validate employees
+  const empRes = await client.query(
+    'SELECT id, full_name FROM hr_employees WHERE id = ANY($1) AND property_id = $2 AND is_active = TRUE',
+    [employee_ids, property_id]
+  );
+  if (empRes.rowCount !== employee_ids.length) {
+    throw Object.assign(new Error('Salah satu karyawan tidak ditemukan.'), { statusCode: 404, code: 'EMPLOYEE_NOT_FOUND' });
+  }
+
+  const propertyTimezone = await fetchPropertyTimezone(client, property_id);
+
+  // Get department work pattern or use provided times
+  const patternRes = await client.query(
+    'SELECT * FROM department_work_patterns WHERE department_id = $1 AND is_active = TRUE',
+    [department_id]
+  );
+
+  let startTime = default_start_time;
+  let endTime = default_end_time;
+  let crossesMidnight = forceCrossesMidnight !== undefined ? forceCrossesMidnight : false;
+
+  if (patternRes.rows.length > 0) {
+    const p = patternRes.rows[0];
+    startTime = p.default_start_time;
+    endTime = p.default_end_time;
+    crossesMidnight = p.crosses_midnight;
+  }
+
+  // Generate working dates
+  const allDates: string[] = [];
+  let current = start_date;
+  while (current <= end_date) {
+    allDates.push(current);
+    current = addDays(current, 1);
+  }
+
+  const workingDates = allDates.filter(date => {
+    const { year, month, day } = parseDateParts(date);
+    const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    return working_days.includes(dow);
+  });
+
+  if (workingDates.length === 0) {
+    throw Object.assign(new Error('Tidak ada tanggal yang valid untuk diterapkan.'), { statusCode: 400, code: 'NO_VALID_DATES' });
+  }
+
+  // Fetch holidays
+  const holidayRes = await client.query(
+    'SELECT holiday_date::text AS holiday_date FROM property_holidays WHERE property_id = $1 AND is_active = TRUE AND holiday_date >= $2 AND holiday_date <= $3',
+    [property_id, start_date, end_date]
+  );
+  const holidayDates = new Set<string>();
+  for (const row of holidayRes.rows) {
+    const hd = typeof row.holiday_date === 'string' ? row.holiday_date.split('T')[0] : new Date(row.holiday_date).toISOString().split('T')[0];
+    holidayDates.add(hd);
+  }
+
+  // Fetch existing schedules
+  const existingRes = await client.query(
+    `SELECT employee_id, work_date::text AS work_date, work_status, schedule_status
+     FROM employee_work_schedules
+     WHERE property_id = $1 AND employee_id = ANY($2)
+       AND work_date >= $3 AND work_date <= $4`,
+    [property_id, employee_ids, start_date, end_date]
+  );
+  const existingMap = new Map<string, { work_status: string; schedule_status: string }>();
+  for (const row of existingRes.rows) {
+    const wd = typeof row.work_date === 'string' ? row.work_date.split('T')[0] : new Date(row.work_date).toISOString().split('T')[0];
+    existingMap.set(`${row.employee_id}_${wd}`, { work_status: row.work_status, schedule_status: row.schedule_status });
+  }
+
+  const validUserId = await resolveValidUserId(client, actor.id);
+  let createdCount = 0;
+  let skippedCount = 0;
+  let skippedProtected = 0;
+  let skippedHoliday = 0;
+
+  for (const empId of employee_ids) {
+    for (const date of workingDates) {
+      const key = `${empId}_${date}`;
+      const existing = existingMap.get(key);
+
+      // Skip protected
+      if (existing && (
+        existing.schedule_status === 'PUBLISHED' ||
+        existing.schedule_status === 'CHANGED' ||
+        existing.work_status === 'LEAVE' ||
+        existing.work_status === 'SICK' ||
+        existing.work_status === 'PERMISSION'
+      )) {
+        skippedProtected++;
+        continue;
+      }
+
+      if (existing) {
+        skippedCount++;
+        continue;
+      }
+
+      // Check holiday
+      if (holidayDates.has(date)) {
+        // Create HOLIDAY schedule
+        await client.query(
+          `INSERT INTO employee_work_schedules
+            (property_id, employee_id, work_date, shift_template_id, schedule_status, work_status,
+             scheduled_start_at, scheduled_end_at, department_snapshot, notes, created_by_user_id, updated_by_user_id)
+           VALUES ($1,$2,$3,NULL,'DRAFT','HOLIDAY',NULL,NULL,$4,$5,$6,$7)`,
+          [property_id, empId, date, deptCheck.rows[0].name, notes || null, validUserId, validUserId]
+        );
+        skippedHoliday++;
+        createdCount++;
+        continue;
+      }
+
+      // Create WORK schedule
+      const ts = buildScheduledTimestamps(date, startTime, endTime, crossesMidnight, propertyTimezone);
+      await client.query(
+        `INSERT INTO employee_work_schedules
+          (property_id, employee_id, work_date, shift_template_id, schedule_status, work_status,
+           scheduled_start_at, scheduled_end_at, department_snapshot, notes, created_by_user_id, updated_by_user_id)
+         VALUES ($1,$2,$3,NULL,'DRAFT','WORK',$4,$5,$6,$7,$8,$9)`,
+        [property_id, empId, date, ts.scheduled_start_at, ts.scheduled_end_at, deptCheck.rows[0].name, notes || null, validUserId, validUserId]
+      );
+      createdCount++;
+    }
+  }
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'NON_OP_BULK_PATTERN_APPLIED', 'employee_work_schedules', 'bulk', $1, $2)`,
+    [JSON.stringify({
+      department_id,
+      employee_count: employee_ids.length,
+      date_range: `${start_date} to ${end_date}`,
+      created_count: createdCount,
+      skipped_protected: skippedProtected,
+      skipped_holiday: skippedHoliday,
+    }), property_id]
+  );
+
+  return {
+    created_count: createdCount,
+    skipped_count: skippedCount,
+    skipped_protected: skippedProtected,
+    skipped_holiday: skippedHoliday,
+  };
+}
+
+// ─── Grouped Roster (Operational + Non-Operational) ───
+
+export async function getGroupedRoster(
+  client: PoolClient,
+  query: GroupedRosterQuery
+): Promise<OperationalRosterResponse> {
+  const { property_id, start_date, end_date, view_mode = 'all', group_id, department_id } = query;
+
+  const monday = getMonday(start_date);
+  const sunday = getSunday(start_date);
+  const dates: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    dates.push(addDays(monday, i));
+  }
+
+  const groups: OperationalGroupRoster[] = [];
+  const nonOperationalGroups: NonOperationalGroupRoster[] = [];
+
+  // Fetch operational groups
+  if (view_mode === 'operational' || view_mode === 'all') {
+    let groupQuery = 'SELECT * FROM schedule_groups WHERE property_id = $1 AND is_active = TRUE';
+    const groupParams: any[] = [property_id];
+    let gIdx = 2;
+    if (group_id) {
+      groupQuery += ` AND id = $${gIdx}`;
+      groupParams.push(group_id);
+      gIdx++;
+    }
+    groupQuery += ' ORDER BY display_order ASC, name ASC';
+
+    const groupRes = await client.query(groupQuery, groupParams);
+
+    for (const group of groupRes.rows) {
+      // Get departments for this group
+      const deptRes = await client.query(
+        'SELECT department_id FROM schedule_group_departments WHERE group_id = $1',
+        [group.id]
+      );
+      const deptIds = deptRes.rows.map((r: any) => r.department_id);
+
+      if (deptIds.length === 0) continue;
+
+      // Get employees in these departments
+      let empQuery = `
+        SELECT e.id as employee_id, e.full_name as employee_name, e.employee_code,
+               e.department_id, d.name as department_name, p.name as position_name
+        FROM hr_employees e
+        LEFT JOIN hr_departments d ON d.id = e.department_id
+        LEFT JOIN hr_positions p ON p.id = e.position_id
+        WHERE e.property_id = $1 AND e.is_active = TRUE AND e.department_id = ANY($2)
+      `;
+      const empParams: any[] = [property_id, deptIds];
+
+      const empRes = await client.query(empQuery, empParams);
+
+      // Get schedules for these employees
+      const empIds = empRes.rows.map((e: any) => e.employee_id);
+      if (empIds.length === 0) {
+        groups.push({
+          group_id: group.id,
+          group_name: group.name,
+          group_code: group.code,
+          department_ids: deptIds,
+          employees: [],
+        });
+        continue;
+      }
+
+      const schedRes = await client.query(
+        `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+                schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+                department_snapshot, position_snapshot, published_at, published_by_user_id,
+                published_by_name, notes, created_by_user_id, updated_by_user_id,
+                created_at, updated_at
+         FROM employee_work_schedules
+         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4`,
+        [property_id, empIds, monday, sunday]
+      );
+
+      const scheduleMap = new Map<string, EmployeeWorkSchedule>();
+      for (const row of schedRes.rows) {
+        const sched = formatSchedule(row);
+        scheduleMap.set(`${sched.employee_id}_${sched.work_date}`, sched);
+      }
+
+      const employees: WeeklyRosterEmployee[] = empRes.rows.map((emp: any) => {
+        const schedules: Record<string, EmployeeWorkSchedule | null> = {};
+        for (const date of dates) {
+          schedules[date] = scheduleMap.get(`${emp.employee_id}_${date}`) || null;
+        }
+        return {
+          employee_id: emp.employee_id,
+          employee_name: emp.employee_name,
+          employee_code: emp.employee_code,
+          department_id: emp.department_id,
+          department_name: emp.department_name,
+          position_name: emp.position_name,
+          schedules,
+        };
+      });
+
+      groups.push({
+        group_id: group.id,
+        group_name: group.name,
+        group_code: group.code,
+        department_ids: deptIds,
+        employees,
+      });
+    }
+  }
+
+  // Fetch non-operational departments
+  if (view_mode === 'non_operational' || view_mode === 'all') {
+    let nonOpDeptQuery = `
+      SELECT id, name FROM hr_departments
+      WHERE property_id = $1 AND is_active = TRUE AND schedule_category = 'NON_OPERATIONAL'
+    `;
+    const nonOpDeptParams: any[] = [property_id];
+    let nIdx = 2;
+    if (department_id) {
+      nonOpDeptQuery += ` AND id = $${nIdx}`;
+      nonOpDeptParams.push(department_id);
+      nIdx++;
+    }
+    nonOpDeptQuery += ' ORDER BY sort_order ASC, name ASC';
+
+    const nonOpDeptRes = await client.query(nonOpDeptQuery, nonOpDeptParams);
+
+    for (const dept of nonOpDeptRes.rows) {
+      const empRes = await client.query(
+        `SELECT e.id as employee_id, e.full_name as employee_name, e.employee_code,
+                e.department_id, d.name as department_name, p.name as position_name
+         FROM hr_employees e
+         LEFT JOIN hr_departments d ON d.id = e.department_id
+         LEFT JOIN hr_positions p ON p.id = e.position_id
+         WHERE e.property_id = $1 AND e.is_active = TRUE AND e.department_id = $2
+         ORDER BY e.full_name ASC`,
+        [property_id, dept.id]
+      );
+
+      const empIds = empRes.rows.map((e: any) => e.employee_id);
+      if (empIds.length === 0) {
+        nonOperationalGroups.push({
+          department_id: dept.id,
+          department_name: dept.name,
+          employees: [],
+        });
+        continue;
+      }
+
+      const schedRes = await client.query(
+        `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+                schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+                department_snapshot, position_snapshot, published_at, published_by_user_id,
+                published_by_name, notes, created_by_user_id, updated_by_user_id,
+                created_at, updated_at
+         FROM employee_work_schedules
+         WHERE property_id = $1 AND employee_id = ANY($2) AND work_date >= $3 AND work_date <= $4`,
+        [property_id, empIds, monday, sunday]
+      );
+
+      const scheduleMap = new Map<string, EmployeeWorkSchedule>();
+      for (const row of schedRes.rows) {
+        const sched = formatSchedule(row);
+        scheduleMap.set(`${sched.employee_id}_${sched.work_date}`, sched);
+      }
+
+      const employees: NonOpRosterEmployee[] = empRes.rows.map((emp: any) => {
+        const schedules: Record<string, EmployeeWorkSchedule | null> = {};
+        for (const date of dates) {
+          schedules[date] = scheduleMap.get(`${emp.employee_id}_${date}`) || null;
+        }
+        return {
+          employee_id: emp.employee_id,
+          employee_name: emp.employee_name,
+          employee_code: emp.employee_code,
+          position_name: emp.position_name,
+          schedules,
+        };
+      });
+
+      nonOperationalGroups.push({
+        department_id: dept.id,
+        department_name: dept.name,
+        employees,
+      });
+    }
+  }
+
+  const shift_templates = await getShiftTemplates(client, property_id);
+
+  return { groups, non_operational_groups: nonOperationalGroups, dates, shift_templates };
+}
+
+// ─── Non-Operational Cell Editing ───
+
+export interface NonOpAssignPayload {
+  property_id: number;
+  employee_id: number;
+  work_date: string;
+  work_status: 'WORK' | 'OFF' | 'LEAVE' | 'SICK' | 'PERMISSION' | 'HOLIDAY';
+}
+
+export async function nonOpAssignSchedule(
+  client: PoolClient,
+  payload: NonOpAssignPayload,
+  actor: { id?: number; name: string }
+): Promise<EmployeeWorkSchedule> {
+  const { property_id, employee_id, work_date, work_status } = payload;
+
+  const validUserId = await resolveValidUserId(client, actor.id);
+  const propertyTimezone = await fetchPropertyTimezone(client, property_id);
+
+  // Validate employee belongs to property and is active
+  const empRes = await client.query(
+    `SELECT e.id, e.full_name, e.department_id, d.name as dept_name, p.name as pos_name
+     FROM hr_employees e
+     LEFT JOIN hr_departments d ON d.id = e.department_id
+     LEFT JOIN hr_positions p ON p.id = e.position_id
+     WHERE e.id = $1 AND e.property_id = $2 AND e.is_active = TRUE`,
+    [employee_id, property_id]
+  );
+  if (empRes.rows.length === 0) {
+    throw Object.assign(new Error('Karyawan tidak ditemukan atau tidak aktif.'), { statusCode: 404, code: 'EMPLOYEE_NOT_FOUND' });
+  }
+  const emp = empRes.rows[0];
+
+  // Validate department is NON_OPERATIONAL
+  const deptCheck = await client.query(
+    "SELECT schedule_category FROM hr_departments WHERE id = $1 AND property_id = $2",
+    [emp.department_id, property_id]
+  );
+  if (deptCheck.rows.length > 0 && deptCheck.rows[0].schedule_category !== 'NON_OPERATIONAL') {
+    throw Object.assign(
+      new Error('Endpoint ini hanya untuk departemen non-operasional.'),
+      { statusCode: 422, code: 'NOT_NON_OPERATIONAL_DEPT' }
+    );
+  }
+
+  // Check for existing schedule
+  const existingRes = await client.query(
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
+     WHERE property_id = $1 AND employee_id = $2 AND work_date = $3`,
+    [property_id, employee_id, work_date]
+  );
+  const existing = existingRes.rows.length > 0 ? formatSchedule(existingRes.rows[0]) : null;
+
+  let resolvedWorkStatus = work_status;
+  let resolvedShiftTemplateId: number | null = null;
+  let scheduled_start_at: string | null = null;
+  let scheduled_end_at: string | null = null;
+
+  if (work_status === 'WORK') {
+    // For non-op WORK: use department work pattern times
+    const patternRes = await client.query(
+      'SELECT * FROM department_work_patterns WHERE department_id = $1 AND is_active = TRUE',
+      [emp.department_id]
+    );
+
+    if (patternRes.rows.length > 0) {
+      const p = patternRes.rows[0];
+      const ts = buildScheduledTimestamps(work_date, p.default_start_time, p.default_end_time, p.crosses_midnight, propertyTimezone);
+      scheduled_start_at = ts.scheduled_start_at;
+      scheduled_end_at = ts.scheduled_end_at;
+    }
+    // If no pattern, timestamps remain null (acceptable for non-op)
+  } else {
+    // OFF/LEAVE/SICK/PERMISSION/HOLIDAY: clear shift and timestamps
+    resolvedShiftTemplateId = null;
+    scheduled_start_at = null;
+    scheduled_end_at = null;
+  }
+
+  if (existing) {
+    // Update existing schedule
+    const newStatus = existing.schedule_status === 'PUBLISHED' ? 'CHANGED' : existing.schedule_status;
+
+    await client.query(
+      `UPDATE employee_work_schedules
+       SET shift_template_id = $1, work_status = $2, schedule_status = $3,
+           scheduled_start_at = $4, scheduled_end_at = $5,
+           notes = COALESCE($6, notes),
+           updated_by_user_id = $7, updated_at = NOW()
+       WHERE id = $8`,
+      [resolvedShiftTemplateId, resolvedWorkStatus, newStatus,
+       scheduled_start_at, scheduled_end_at, null, validUserId, existing.id]
+    );
+
+    await client.query(
+      `INSERT INTO employee_work_schedule_audits
+        (schedule_id, property_id, employee_id, action, old_shift_template_id, new_shift_template_id,
+         old_work_status, new_work_status, reason, changed_by_user_id, changed_by_name)
+       VALUES ($1,$2,$3,'NON_OP_STATUS_CHANGED',$4,$5,$6,$7,$8,$9,$10)`,
+      [existing.id, property_id, employee_id, existing.shift_template_id, resolvedShiftTemplateId,
+       existing.work_status, resolvedWorkStatus, null, validUserId, actor.name]
+    );
+
+    const updatedRes = await client.query(
+      `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+              schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+              department_snapshot, position_snapshot, published_at, published_by_user_id,
+              published_by_name, notes, created_by_user_id, updated_by_user_id,
+              created_at, updated_at
+       FROM employee_work_schedules WHERE id = $1`,
+      [existing.id]
+    );
+    return formatSchedule(updatedRes.rows[0]);
+  }
+
+  // Insert new schedule
+  const insertRes = await client.query(
+    `INSERT INTO employee_work_schedules
+      (property_id, employee_id, work_date, shift_template_id, schedule_status, work_status,
+       scheduled_start_at, scheduled_end_at, department_snapshot, position_snapshot, notes,
+       created_by_user_id, updated_by_user_id)
+     VALUES ($1,$2,$3,$4,'DRAFT',$5,$6,$7,$8,$9,$10,$11,$12)
+     RETURNING id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+               schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+               department_snapshot, position_snapshot, published_at, published_by_user_id,
+               published_by_name, notes, created_by_user_id, updated_by_user_id,
+               created_at, updated_at`,
+    [property_id, employee_id, work_date, resolvedShiftTemplateId, resolvedWorkStatus,
+     scheduled_start_at, scheduled_end_at, emp.dept_name, emp.pos_name, null, validUserId, validUserId]
+  );
+
+  const schedule = formatSchedule(insertRes.rows[0]);
+
+  await client.query(
+    `INSERT INTO employee_work_schedule_audits
+      (schedule_id, property_id, employee_id, action, old_shift_template_id, new_shift_template_id,
+       old_work_status, new_work_status, reason, changed_by_user_id, changed_by_name)
+     VALUES ($1,$2,$3,'NON_OP_STATUS_CREATED',NULL,$4,NULL,$5,$6,$7,$8)`,
+    [schedule.id, property_id, employee_id, resolvedShiftTemplateId, resolvedWorkStatus, null, validUserId, actor.name]
+  );
+
+  return schedule;
+}

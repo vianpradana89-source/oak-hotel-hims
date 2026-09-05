@@ -158,3 +158,177 @@ export interface MonthlyRosterResponse {
   employees: MonthlyRosterEmployee[];
   shift_templates: WorkShiftTemplate[];
 }
+
+// ─── HR-SCHEDULE-1F: Operational/Non-Operational Schedule Groups ───
+
+export type ScheduleCategory = 'OPERATIONAL' | 'NON_OPERATIONAL';
+
+export interface ScheduleGroup {
+  id: number;
+  property_id: number;
+  name: string;
+  code: string;
+  is_active: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  updated_by: string | null;
+  departments?: ScheduleGroupDepartmentInfo[];
+}
+
+export interface ScheduleGroupDepartmentInfo {
+  department_id: number;
+  department_name: string;
+  department_code: string;
+}
+
+export interface CreateScheduleGroupPayload {
+  property_id: number;
+  name: string;
+  code: string;
+  is_active?: boolean;
+  display_order?: number;
+  department_ids?: number[];
+}
+
+export interface UpdateScheduleGroupPayload {
+  name?: string;
+  code?: string;
+  is_active?: boolean;
+  display_order?: number;
+  department_ids?: number[];
+}
+
+export interface DepartmentWorkPattern {
+  id: number;
+  property_id: number;
+  department_id: number;
+  department_name?: string;
+  default_start_time: string;
+  default_end_time: string;
+  crosses_midnight: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDepartmentWorkPatternPayload {
+  property_id: number;
+  department_id: number;
+  default_start_time: string;
+  default_end_time: string;
+  crosses_midnight?: boolean;
+  is_active?: boolean;
+}
+
+export interface UpdateDepartmentWorkPatternPayload {
+  default_start_time?: string;
+  default_end_time?: string;
+  crosses_midnight?: boolean;
+  is_active?: boolean;
+}
+
+export interface PropertyHoliday {
+  id: number;
+  property_id: number;
+  holiday_date: string;
+  name: string;
+  holiday_type: 'NATIONAL' | 'LOCAL' | 'PROPERTY';
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  updated_by: string | null;
+}
+
+export interface CreatePropertyHolidayPayload {
+  property_id: number;
+  holiday_date: string;
+  name: string;
+  holiday_type?: 'NATIONAL' | 'LOCAL' | 'PROPERTY';
+  is_active?: boolean;
+}
+
+export interface UpdatePropertyHolidayPayload {
+  holiday_date?: string;
+  name?: string;
+  holiday_type?: 'NATIONAL' | 'LOCAL' | 'PROPERTY';
+  is_active?: boolean;
+}
+
+export interface NonOpBulkPatternPayload {
+  property_id: number;
+  department_id: number;
+  employee_ids: number[];
+  start_date: string;
+  end_date: string;
+  working_days: number[]; // 0=Sun, 1=Mon, ..., 6=Sat
+  default_start_time?: string;
+  default_end_time?: string;
+  crosses_midnight?: boolean;
+  notes?: string;
+}
+
+export interface NonOpBulkPatternPreview {
+  total_dates: number;
+  new_schedules: number;
+  existing_schedules: number;
+  skipped_protected: number;
+  conflicts: Array<{
+    employee_id: number;
+    employee_name: string;
+    work_date: string;
+    current_status: string;
+    current_schedule_status: string;
+  }>;
+}
+
+export interface NonOpBulkPatternResult {
+  created_count: number;
+  skipped_count: number;
+  skipped_protected: number;
+  skipped_holiday: number;
+}
+
+export interface OperationalRosterResponse {
+  groups: OperationalGroupRoster[];
+  non_operational_groups: NonOperationalGroupRoster[];
+  dates: string[];
+  shift_templates: WorkShiftTemplate[];
+}
+
+export interface OperationalGroupRoster {
+  group_id: number;
+  group_name: string;
+  group_code: string;
+  department_ids: number[];
+  employees: WeeklyRosterEmployee[];
+}
+
+export interface NonOperationalGroupRoster {
+  department_id: number;
+  department_name: string;
+  employees: NonOpRosterEmployee[];
+}
+
+export interface NonOpRosterEmployee {
+  employee_id: number;
+  employee_name: string;
+  employee_code: string | null;
+  position_name: string | null;
+  schedules: Record<string, EmployeeWorkSchedule | null>;
+}
+
+export interface UpdateDepartmentCategoryPayload {
+  schedule_category: ScheduleCategory | null;
+}
+
+export interface GroupedRosterQuery {
+  property_id: number;
+  start_date: string;
+  end_date: string;
+  view_mode?: 'operational' | 'non_operational' | 'all';
+  group_id?: number;
+  department_id?: number;
+}

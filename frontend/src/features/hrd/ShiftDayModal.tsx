@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import type { WeeklyRosterResponse, ColorKey, Department, HrEmployee } from './scheduleTypes';
+import type { WeeklyRosterResponse, ColorKey, Department, HrEmployee, OperationalRosterResponse } from './scheduleTypes';
 import { COLOR_KEY_STYLES } from './scheduleTypes';
 
 const DAY_FULL_NAMES = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
@@ -17,12 +17,14 @@ interface ShiftDayModalProps {
   date: string;
   roster: WeeklyRosterResponse;
   departments: Department[];
+  groupId?: number;
+  groupedRoster?: OperationalRosterResponse | null;
   onClose: () => void;
   onSaved: () => void;
 }
 
 export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
-  propertyId, shiftType, templateId, date, roster, departments, onClose, onSaved
+  propertyId, shiftType, templateId, date, roster, departments, groupId, groupedRoster, onClose, onSaved
 }) => {
   const template = templateId ? roster.shift_templates.find(t => t.id === templateId) : null;
   const [employees, setEmployees] = useState<HrEmployee[]>([]);
@@ -47,6 +49,11 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
     return shiftType;
   };
 
+  const getGroupLabel = () => {
+    if (groupName) return groupName;
+    return null;
+  };
+
   const getRowColor = () => {
     if (shiftType === 'shift' && template) {
       return COLOR_KEY_STYLES[(template.color_key as ColorKey) || 'soft_slate'];
@@ -60,9 +67,21 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
 
   // Determine which department to filter employees by
   const deptContext = useMemo(() => {
-    if (template?.department_id) return template.department_id;
+    // If groupId is provided, get departments from the grouped roster
+    if (groupId && groupedRoster) {
+      const group = groupedRoster.groups.find(g => g.group_id === groupId);
+      if (group?.department_ids?.length) return group.department_ids;
+    }
+    // Fallback to template's department
+    if (template?.department_id) return [template.department_id];
     return null;
-  }, [template]);
+  }, [template, groupId, groupedRoster]);
+
+  // Group name for display
+  const groupName = useMemo(() => {
+    if (!groupId || !groupedRoster) return null;
+    return groupedRoster.groups.find(g => g.group_id === groupId)?.group_name || null;
+  }, [groupId, groupedRoster]);
 
   // Fetch employees
   useEffect(() => {
@@ -70,10 +89,21 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
       setLoading(true);
       try {
         const params = new URLSearchParams({ property_id: String(propertyId), scope: 'active' });
-        if (deptContext) params.set('department_id', String(deptContext));
+        // Filter by group's departments (array) or template's single department
+        if (deptContext && deptContext.length === 1) {
+          params.set('department_id', String(deptContext[0]));
+        }
         const res = await fetch(`/api/hrd/employees?${params}`, { headers: getAuthHeaders() });
         const data = await res.json();
-        if (data.status === 'OK') setEmployees(data.data || []);
+        if (data.status === 'OK') {
+          let empList = data.data || [];
+          // If multiple department IDs (group context), filter client-side
+          if (deptContext && deptContext.length > 1) {
+            const deptIdSet = new Set(deptContext);
+            empList = empList.filter((e: any) => deptIdSet.has(e.department_id));
+          }
+          setEmployees(empList);
+        }
       } catch { /* ignore */ } finally { setLoading(false); }
     };
     fetchEmployees();
@@ -221,11 +251,17 @@ export const ShiftDayModal: React.FC<ShiftDayModalProps> = ({
           {template && (
             <span>Jam: <span className="font-bold text-slate-700">{template.start_time.substring(0, 5)}–{template.end_time.substring(0, 5)}</span></span>
           )}
-          {template?.department_id && (
+          {getGroupLabel() && (
+            <span>Group: <span className="font-bold text-[#1b4332]">{getGroupLabel()}</span></span>
+          )}
+          {template?.department_id && !getGroupLabel() && (
             <span>Departemen: <span className="font-bold text-slate-700">{departments.find(d => d.id === template.department_id)?.name || '—'}</span></span>
           )}
-          {!template?.department_id && shiftType === 'shift' && (
+          {!template?.department_id && shiftType === 'shift' && !getGroupLabel() && (
             <span>Departemen: <span className="font-bold text-slate-700">Global</span></span>
+          )}
+          {deptContext && deptContext.length > 1 && !template?.department_id && !getGroupLabel() && (
+            <span>Departemen: <span className="font-bold text-slate-700">{deptContext.length} departemen</span></span>
           )}
         </div>
 

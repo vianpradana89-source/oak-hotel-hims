@@ -4420,6 +4420,81 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // HR-SCHEDULE-1F: Operational/Non-Operational schedule groups, department classification,
+    // department work patterns, and property holiday calendar
+    const schedule1fMigRes = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'hr_schedule1f_operational_groups_v1'`
+    );
+    if (schedule1fMigRes.rows.length === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Department schedule classification
+        ALTER TABLE hr_departments
+        ADD COLUMN IF NOT EXISTS schedule_category VARCHAR(20) DEFAULT NULL;
+        -- Allowed values: 'OPERATIONAL', 'NON_OPERATIONAL', NULL (unclassified)
+
+        -- 2. Operational Schedule Groups
+        CREATE TABLE IF NOT EXISTS schedule_groups (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          name VARCHAR(100) NOT NULL,
+          code VARCHAR(30) NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          display_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          created_by VARCHAR(255),
+          updated_by VARCHAR(255),
+          CONSTRAINT uq_schedule_groups_prop_code UNIQUE (property_id, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_groups_prop ON schedule_groups (property_id);
+
+        -- 3. Group <-> Department mapping
+        CREATE TABLE IF NOT EXISTS schedule_group_departments (
+          group_id INTEGER NOT NULL REFERENCES schedule_groups(id) ON DELETE CASCADE,
+          department_id INTEGER NOT NULL REFERENCES hr_departments(id) ON DELETE CASCADE,
+          PRIMARY KEY (group_id, department_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_group_depts_group ON schedule_group_departments (group_id);
+        CREATE INDEX IF NOT EXISTS idx_schedule_group_depts_dept ON schedule_group_departments (department_id);
+
+        -- 4. Non-operational department work patterns (office hours)
+        CREATE TABLE IF NOT EXISTS department_work_patterns (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          department_id INTEGER NOT NULL REFERENCES hr_departments(id) ON DELETE RESTRICT,
+          default_start_time TIME NOT NULL DEFAULT '08:00',
+          default_end_time TIME NOT NULL DEFAULT '16:00',
+          crosses_midnight BOOLEAN NOT NULL DEFAULT FALSE,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_dept_work_patterns_dept UNIQUE (department_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dept_work_patterns_prop ON department_work_patterns (property_id);
+
+        -- 5. Property holiday calendar
+        CREATE TABLE IF NOT EXISTS property_holidays (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          holiday_date DATE NOT NULL,
+          name VARCHAR(200) NOT NULL,
+          holiday_type VARCHAR(30) NOT NULL DEFAULT 'NATIONAL',
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          created_by VARCHAR(255),
+          updated_by VARCHAR(255),
+          CONSTRAINT uq_property_holidays_prop_date UNIQUE (property_id, holiday_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_property_holidays_prop ON property_holidays (property_id);
+        CREATE INDEX IF NOT EXISTS idx_property_holidays_date ON property_holidays (holiday_date);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('hr_schedule1f_operational_groups_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

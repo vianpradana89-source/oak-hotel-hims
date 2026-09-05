@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { WeeklyRosterResponse, MonthlyRosterResponse, Department, WorkShiftTemplate, EmployeeWorkSchedule } from './scheduleTypes';
+import type { WeeklyRosterResponse, MonthlyRosterResponse, Department, WorkShiftTemplate, EmployeeWorkSchedule, OperationalRosterResponse } from './scheduleTypes';
 import { COLOR_KEY_STYLES } from './scheduleTypes';
 import { ShiftRosterView } from './ShiftRosterView';
 import { EmployeeRosterView } from './EmployeeRosterView';
 import { ShiftDayModal } from './ShiftDayModal';
+import { GroupedRosterView } from './GroupedRosterView';
 import { KelolaShiftDrawer } from './KelolaShiftDrawer';
+import { KelolaGroupDrawer } from './KelolaGroupDrawer';
+import { HolidayCalendarDrawer } from './HolidayCalendarDrawer';
+import { NonOpBulkPatternDrawer } from './NonOpBulkPatternDrawer';
+import { NonOpDayModal } from './NonOpDayModal';
 
 interface ScheduleTabProps {
   propertyId: number;
@@ -39,25 +44,36 @@ function formatDisplayDate(dateStr: string): string {
   return `${d.getDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'][d.getMonth()]}`;
 }
 
-type ScheduleMode = 'shift' | 'employee';
+type ScheduleMode = 'shift' | 'employee' | 'grouped';
 type SchedulePeriod = 'weekly' | 'monthly';
 
 export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
   const [loading, setLoading] = useState(true);
   const [roster, setRoster] = useState<WeeklyRosterResponse | null>(null);
+  const [groupedRoster, setGroupedRoster] = useState<OperationalRosterResponse | null>(null);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [selectedDeptId, setSelectedDeptId] = useState<number | ''>('');
   const [weekOffset, setWeekOffset] = useState(0);
-  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('shift');
+  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('grouped');
   const [viewPeriod, setViewPeriod] = useState<SchedulePeriod>('weekly');
   const [monthOffset, setMonthOffset] = useState(0);
   const [monthlyRoster, setMonthlyRoster] = useState<MonthlyRosterResponse | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [viewMode, setViewMode] = useState<'all' | 'operational' | 'non_operational'>('all');
 
-  // Modal states
   const [showKelolaShift, setShowKelolaShift] = useState(false);
-  const [shiftDayModal, setShiftDayModal] = useState<{ shiftType: string; templateId: number | null; date: string } | null>(null);
+  const [showKelolaGroup, setShowKelolaGroup] = useState(false);
+  const [showHolidayCalendar, setShowHolidayCalendar] = useState(false);
+  const [showNonOpBulk, setShowNonOpBulk] = useState(false);
+  const [shiftDayModal, setShiftDayModal] = useState<{ shiftType: string; templateId: number | null; date: string; groupId?: number } | null>(null);
   const [employeeDayModal, setEmployeeDayModal] = useState<{ employeeId: number; date: string } | null>(null);
+  const [nonOpDayModal, setNonOpDayModal] = useState<{
+    departmentId: number;
+    departmentName: string;
+    date: string;
+    employees: { employee_id: number; employee_name: string; employee_code: string | null; position_name: string | null }[];
+    currentStatuses: Record<number, string>;
+  } | null>(null);
   const [copyConfirm, setCopyConfirm] = useState<{ sourceMonday: string; targetMonday: string } | null>(null);
   const [publishConfirm, setPublishConfirm] = useState<{ monday: string; sunday: string } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
@@ -92,6 +108,22 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
     } catch { /* ignore */ } finally { setLoading(false); }
   }, [propertyId, currentMonday, selectedDeptId]);
 
+  const fetchGroupedRoster = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        property_id: String(propertyId),
+        start_date: currentMonday,
+        end_date: currentSunday,
+        view_mode: viewMode,
+      });
+      if (selectedDeptId) params.set('department_id', String(selectedDeptId));
+      const res = await fetch(`/api/schedule/grouped-roster?${params}`, { headers: getAuthHeaders() });
+      const data = await res.json();
+      if (data.status === 'OK') setGroupedRoster(data.data);
+    } catch { /* ignore */ } finally { setLoading(false); }
+  }, [propertyId, currentMonday, currentSunday, viewMode, selectedDeptId]);
+
   const fetchMonthlyRoster = useCallback(async () => {
     setLoading(true);
     try {
@@ -117,9 +149,16 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
 
   useEffect(() => { fetchDepartments(); }, [fetchDepartments]);
   useEffect(() => {
-    if (viewPeriod === 'weekly') fetchRoster();
+    if (scheduleMode === 'grouped' && viewPeriod === 'weekly') fetchGroupedRoster();
+    else if (viewPeriod === 'weekly') fetchRoster();
     else fetchMonthlyRoster();
-  }, [viewPeriod, fetchRoster, fetchMonthlyRoster]);
+  }, [scheduleMode, viewPeriod, fetchRoster, fetchGroupedRoster, fetchMonthlyRoster]);
+
+  const refreshCurrentView = useCallback(() => {
+    if (scheduleMode === 'grouped' && viewPeriod === 'weekly') fetchGroupedRoster();
+    else if (viewPeriod === 'weekly') fetchRoster();
+    else fetchMonthlyRoster();
+  }, [scheduleMode, viewPeriod, fetchRoster, fetchGroupedRoster, fetchMonthlyRoster]);
 
   const handleCopyWeek = async () => {
     if (!copyConfirm) return;
@@ -136,7 +175,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
       setCopyConfirm(null);
-      await fetchRoster();
+      refreshCurrentView();
       alert(`Berhasil menyalin ${data.data?.copied_count || 0} jadwal. ${data.data?.skipped_conflicts || 0} konflik dilewati.`);
     } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
   };
@@ -156,17 +195,27 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
       setPublishConfirm(null);
-      await fetchRoster();
+      refreshCurrentView();
       alert(`Berhasil publish ${data.data?.published_count || 0} jadwal.`);
     } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
   };
 
-  const handleShiftCellClick = (shiftType: string, templateId: number | null, date: string) => {
-    setShiftDayModal({ shiftType, templateId, date });
+  const handleShiftCellClick = (shiftType: string, templateId: number | null, date: string, groupId?: number) => {
+    setShiftDayModal({ shiftType, templateId, date, groupId });
   };
 
   const handleEmployeeCellClick = (employeeId: number, date: string) => {
     setEmployeeDayModal({ employeeId, date });
+  };
+
+  const handleNonOpCellClick = (info: {
+    departmentId: number;
+    departmentName: string;
+    date: string;
+    employees: { employee_id: number; employee_name: string; employee_code: string | null; position_name: string | null }[];
+    currentStatuses: Record<number, string>;
+  }) => {
+    setNonOpDayModal(info);
   };
 
   const handleEmployeeDaySave = async (employeeId: number, date: string, shiftTemplateId: number | null, workStatus: string) => {
@@ -181,18 +230,17 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Gagal mengubah jadwal');
       setEmployeeDayModal(null);
-      await fetchRoster();
+      refreshCurrentView();
     } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
   };
 
-  // Compute publish status for the current week
+  // Compute publish status
   const publishStatus = useMemo(() => {
-    if (!roster) return null;
-    let hasDraft = false;
-    let hasChanged = false;
-    let hasPublished = false;
-    for (const emp of roster.employees) {
-      for (const date of roster.dates) {
+    const source = scheduleMode === 'grouped' ? null : roster;
+    if (!source) return null;
+    let hasDraft = false, hasChanged = false, hasPublished = false;
+    for (const emp of source.employees) {
+      for (const date of source.dates) {
         const sched = emp.schedules[date];
         if (!sched) continue;
         if (sched.schedule_status === 'DRAFT') hasDraft = true;
@@ -205,7 +253,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
     if (hasDraft) return 'DRAFT';
     if (hasPublished) return 'PUBLISHED';
     return null;
-  }, [roster]);
+  }, [roster, scheduleMode]);
 
   const publishStatusLabel = publishStatus === 'DRAFT' ? 'Draft' :
     publishStatus === 'CHANGED' ? 'Ada Perubahan' :
@@ -227,28 +275,22 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
     const tmpl = templates.find(t => t.id === sched.shift_template_id);
     if (tmpl) {
       const sc = COLOR_KEY_STYLES[tmpl.color_key as keyof typeof COLOR_KEY_STYLES] || COLOR_KEY_STYLES.soft_slate;
-      return {
-        label: tmpl.name, subLabel: `${tmpl.start_time.substring(0, 5)}–${tmpl.end_time.substring(0, 5)}`,
-        colorClass: sc.text, bgClass: sc.bg,
-      };
+      return { label: tmpl.name, subLabel: `${tmpl.start_time.substring(0, 5)}–${tmpl.end_time.substring(0, 5)}`, colorClass: sc.text, bgClass: sc.bg };
     }
     return { label: sched.work_status, subLabel: '', colorClass: 'text-amber-700', bgClass: 'bg-amber-50' };
   };
 
-  // Filtered employees for monthly view
   const filteredMonthlyEmployees = useMemo(() => {
     if (!monthlyRoster) return [];
     if (!statusFilter) return monthlyRoster.employees;
-    return monthlyRoster.employees.filter(emp => {
-      return Object.values(emp.schedules).some(s => {
-        if (!s) return false;
-        if (statusFilter === 'DRAFT') return s.schedule_status === 'DRAFT';
-        if (statusFilter === 'PUBLISHED') return s.schedule_status === 'PUBLISHED';
-        if (statusFilter === 'CHANGED') return s.schedule_status === 'CHANGED';
-        if (statusFilter === 'OFF') return s.work_status === 'OFF';
-        return true;
-      });
-    });
+    return monthlyRoster.employees.filter(emp => Object.values(emp.schedules).some(s => {
+      if (!s) return false;
+      if (statusFilter === 'DRAFT') return s.schedule_status === 'DRAFT';
+      if (statusFilter === 'PUBLISHED') return s.schedule_status === 'PUBLISHED';
+      if (statusFilter === 'CHANGED') return s.schedule_status === 'CHANGED';
+      if (statusFilter === 'OFF') return s.work_status === 'OFF';
+      return true;
+    }));
   }, [monthlyRoster, statusFilter]);
 
   const today = new Date();
@@ -256,13 +298,16 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
 
   return (
     <div className="space-y-3">
-      {/* ─── Top Action Bar ─── */}
+      {/* Top Action Bar */}
       <div className="bg-white border border-slate-200/90 rounded-2xl p-3 shadow-xs">
-        {/* Row 1: Mode + Period + Navigation */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             {/* Schedule Mode Toggle */}
             <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
+              <button onClick={() => setScheduleMode('grouped')}
+                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${scheduleMode === 'grouped' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                Grouped
+              </button>
               <button onClick={() => setScheduleMode('shift')}
                 className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${scheduleMode === 'shift' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
                 Per Shift
@@ -297,37 +342,27 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                 <button onClick={() => setWeekOffset(w => w + 1)} className="p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer" title="Minggu Berikutnya">
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
                 </button>
-                <button onClick={() => setWeekOffset(0)} className="px-2 py-1 text-[10px] font-bold rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition cursor-pointer">
-                  Hari Ini
-                </button>
+                <button onClick={() => setWeekOffset(0)} className="px-2 py-1 text-[10px] font-bold rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition cursor-pointer">Hari Ini</button>
               </>
             ) : (
               <>
                 <button onClick={() => setMonthOffset(m => m - 1)} className="p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer" title="Bulan Sebelumnya">
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" /></svg>
                 </button>
-                <span className="text-xs font-bold text-slate-800 min-w-[140px] text-center">
-                  {MONTHS_ID[currentMonth.month - 1]} {currentMonth.year}
-                </span>
+                <span className="text-xs font-bold text-slate-800 min-w-[140px] text-center">{MONTHS_ID[currentMonth.month - 1]} {currentMonth.year}</span>
                 <button onClick={() => setMonthOffset(m => m + 1)} className="p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer" title="Bulan Berikutnya">
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
                 </button>
-                <button onClick={() => setMonthOffset(0)} className="px-2 py-1 text-[10px] font-bold rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition cursor-pointer">
-                  Bulan Ini
-                </button>
+                <button onClick={() => setMonthOffset(0)} className="px-2 py-1 text-[10px] font-bold rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition cursor-pointer">Bulan Ini</button>
               </>
             )}
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Publish Status Badge */}
             {publishStatusLabel && (
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${publishStatusClass}`}>
-                {publishStatusLabel}
-              </span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${publishStatusClass}`}>{publishStatusLabel}</span>
             )}
 
-            {/* Department Filter */}
             <select value={selectedDeptId} onChange={e => setSelectedDeptId(e.target.value ? Number(e.target.value) : '')}
               className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
               <option value="">Semua Departemen</option>
@@ -336,7 +371,17 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
               ))}
             </select>
 
-            {/* Status Filter (monthly only) */}
+            {scheduleMode === 'grouped' && (
+              <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
+                <button onClick={() => setViewMode('all')}
+                  className={`px-2 py-1.5 text-[10px] font-bold transition cursor-pointer ${viewMode === 'all' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>Semua</button>
+                <button onClick={() => setViewMode('operational')}
+                  className={`px-2 py-1.5 text-[10px] font-bold transition cursor-pointer ${viewMode === 'operational' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>Operasional</button>
+                <button onClick={() => setViewMode('non_operational')}
+                  className={`px-2 py-1.5 text-[10px] font-bold transition cursor-pointer ${viewMode === 'non_operational' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>Non-Operasional</button>
+              </div>
+            )}
+
             {viewPeriod === 'monthly' && (
               <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
                 className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
@@ -352,10 +397,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
 
         {/* Row 2: Actions */}
         <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-100">
-          <button onClick={() => {
-            const prevMonday = addDays(currentMonday, -7);
-            setCopyConfirm({ sourceMonday: prevMonday, targetMonday: currentMonday });
-          }}
+          <button onClick={() => { const prevMonday = addDays(currentMonday, -7); setCopyConfirm({ sourceMonday: prevMonday, targetMonday: currentMonday }); }}
             className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
             Salin Minggu Lalu
           </button>
@@ -364,6 +406,18 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
             className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
             Kelola Shift
           </button>
+          <button onClick={() => setShowKelolaGroup(true)}
+            className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+            Kelola Group Operasional
+          </button>
+          <button onClick={() => setShowHolidayCalendar(true)}
+            className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+            Kalender Hari Libur
+          </button>
+          <button onClick={() => setShowNonOpBulk(true)}
+            className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+            Atur Pola Non-Operasional
+          </button>
           <button onClick={() => setPublishConfirm({ monday: currentMonday, sunday: currentSunday })}
             className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] transition cursor-pointer">
             Publish Jadwal
@@ -371,28 +425,26 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         </div>
       </div>
 
-      {/* ─── Roster Content ─── */}
+      {/* Roster Content */}
       <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-        {viewPeriod === 'weekly' ? (
+        {scheduleMode === 'grouped' && viewPeriod === 'weekly' ? (
+          <GroupedRosterView
+            groupedRoster={groupedRoster}
+            loading={loading}
+            onShiftCellClick={handleShiftCellClick}
+            onNonOpCellClick={handleNonOpCellClick}
+            todayStr={todayStr}
+          />
+        ) : viewPeriod === 'weekly' ? (
           scheduleMode === 'shift' ? (
-            <ShiftRosterView
-              roster={roster}
-              loading={loading}
-              onCellClick={handleShiftCellClick}
-            />
+            <ShiftRosterView roster={roster} loading={loading} onCellClick={handleShiftCellClick} />
           ) : (
-            <EmployeeRosterView
-              roster={roster}
-              loading={loading}
-              onCellClick={handleEmployeeCellClick}
-            />
+            <EmployeeRosterView roster={roster} loading={loading} onCellClick={handleEmployeeCellClick} />
           )
         ) : (
           /* Monthly View */
           !monthlyRoster || filteredMonthlyEmployees.length === 0 ? (
-            <div className="p-12 text-center text-slate-400 text-xs">
-              Tidak ada data jadwal kerja untuk bulan ini.
-            </div>
+            <div className="p-12 text-center text-slate-400 text-xs">Tidak ada data jadwal kerja untuk bulan ini.</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-[10px] border-collapse min-w-[800px]">
@@ -408,8 +460,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                       const isWeekend = dow === 0 || dow === 6;
                       const isToday = date === todayStr;
                       return (
-                        <th key={date}
-                          className={`py-1 px-0.5 text-center font-bold min-w-[28px] ${isWeekend ? 'bg-slate-100' : ''} ${isToday ? 'bg-[#1b4332]/5' : ''}`}>
+                        <th key={date} className={`py-1 px-0.5 text-center font-bold min-w-[28px] ${isWeekend ? 'bg-slate-100' : ''} ${isToday ? 'bg-[#1b4332]/5' : ''}`}>
                           <div className="text-[8px] text-slate-400">{DAY_NAMES[dow]}</div>
                           <div className={`text-[9px] ${isToday ? 'text-[#1b4332] font-extrabold' : 'text-slate-700'}`}>{dayNum}</div>
                         </th>
@@ -419,7 +470,6 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {scheduleMode === 'employee' ? (
-                    /* Monthly Employee View */
                     filteredMonthlyEmployees.map(emp => (
                       <tr key={emp.employee_id} className="hover:bg-slate-50/60 transition group">
                         <td className="py-1.5 px-2 sticky left-0 bg-white group-hover:bg-slate-50/60 z-10">
@@ -433,14 +483,11 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                           const isWeekend = d.getDay() === 0 || d.getDay() === 6;
                           const isToday = date === todayStr;
                           return (
-                            <td key={date}
-                              onClick={() => handleEmployeeCellClick(emp.employee_id, date)}
+                            <td key={date} onClick={() => handleEmployeeCellClick(emp.employee_id, date)}
                               className={`py-0.5 px-0.5 text-center cursor-pointer ${isWeekend ? 'bg-slate-50/50' : ''} ${isToday ? 'bg-[#1b4332]/[0.02]' : ''}`}>
                               <div className={`inline-block px-1 py-0.5 rounded border text-[8px] font-bold min-w-[24px] ${display.bgClass}`}>
                                 <div className={`leading-tight ${display.colorClass}`}>{display.label}</div>
-                                {display.subLabel && (
-                                  <div className="text-[7px] font-normal text-slate-400 leading-tight">{display.subLabel}</div>
-                                )}
+                                {display.subLabel && <div className="text-[7px] font-normal text-slate-400 leading-tight">{display.subLabel}</div>}
                               </div>
                             </td>
                           );
@@ -448,7 +495,6 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                       </tr>
                     ))
                   ) : (
-                    /* Monthly Shift View — simplified shift-centric for month */
                     (() => {
                       const shiftRows = monthlyRoster.shift_templates.filter(t => t.is_active);
                       return shiftRows.map(tmpl => {
@@ -468,29 +514,22 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                               const employeesOnShift: string[] = [];
                               for (const emp of monthlyRoster.employees) {
                                 const sched = emp.schedules[date];
-                                if (sched && sched.shift_template_id === tmpl.id && sched.work_status === 'WORK') {
-                                  employeesOnShift.push(emp.employee_name);
-                                }
+                                if (sched && sched.shift_template_id === tmpl.id && sched.work_status === 'WORK') employeesOnShift.push(emp.employee_name);
                               }
                               const d = new Date(date + 'T00:00:00');
                               const isWeekend = d.getDay() === 0 || d.getDay() === 6;
                               const isToday = date === todayStr;
                               return (
-                                <td key={date}
-                                  onClick={() => handleShiftCellClick('shift', tmpl.id, date)}
+                                <td key={date} onClick={() => handleShiftCellClick('shift', tmpl.id, date)}
                                   className={`py-0.5 px-0.5 text-center cursor-pointer ${isWeekend ? 'bg-slate-50/50' : ''} ${isToday ? 'bg-[#1b4332]/[0.02]' : ''}`}>
                                   {employeesOnShift.length === 0 ? (
                                     <span className="text-slate-300 text-[8px]">—</span>
                                   ) : (
                                     <div className="flex flex-col items-start gap-px">
                                       {employeesOnShift.slice(0, 2).map(name => (
-                                        <span key={name} className={`inline-block px-0.5 py-px rounded text-[7px] font-semibold leading-tight ${sc.bg} ${sc.text} w-full text-left truncate`}>
-                                          {name}
-                                        </span>
+                                        <span key={name} className={`inline-block px-0.5 py-px rounded text-[7px] font-semibold leading-tight ${sc.bg} ${sc.text} w-full text-left truncate`}>{name}</span>
                                       ))}
-                                      {employeesOnShift.length > 2 && (
-                                        <span className="text-[6px] text-slate-400 font-bold px-0.5">+{employeesOnShift.length - 2}</span>
-                                      )}
+                                      {employeesOnShift.length > 2 && <span className="text-[6px] text-slate-400 font-bold px-0.5">+{employeesOnShift.length - 2}</span>}
                                     </div>
                                   )}
                                 </td>
@@ -508,25 +547,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         )}
       </div>
 
-      {/* ─── Legend ─── */}
-      <div className="flex items-center gap-3 text-[10px] text-slate-500 flex-wrap">
-        <span className="font-bold uppercase tracking-wider">Legenda:</span>
-        {roster?.shift_templates.filter(t => t.is_active).map(t => {
-          const sc = COLOR_KEY_STYLES[t.color_key as keyof typeof COLOR_KEY_STYLES] || COLOR_KEY_STYLES.soft_slate;
-          return (
-            <span key={t.id} className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${sc.bg} ${sc.text} ${sc.border}`}>
-              {t.name}
-            </span>
-          );
-        })}
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-slate-50 text-slate-500 border-slate-200">OFF</span>
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-cyan-50 text-cyan-600 border-cyan-200">Libur</span>
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-purple-50 text-purple-600 border-purple-200">Cuti</span>
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-rose-50 text-rose-600 border-rose-200">Sakit</span>
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-amber-50 text-amber-600 border-amber-200">Ijin</span>
-      </div>
-
-      {/* ─── Shift Day Modal ─── */}
+      {/* Modals */}
       {shiftDayModal && roster && (
         <ShiftDayModal
           propertyId={propertyId}
@@ -535,12 +556,13 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
           date={shiftDayModal.date}
           roster={roster}
           departments={departments}
+          groupId={shiftDayModal.groupId}
+          groupedRoster={groupedRoster}
           onClose={() => setShiftDayModal(null)}
-          onSaved={() => { fetchRoster(); }}
+          onSaved={() => refreshCurrentView()}
         />
       )}
 
-      {/* ─── Employee Day Quick Edit Modal ─── */}
       {employeeDayModal && roster && (
         <EmployeeDayQuickEdit
           employeeId={employeeDayModal.employeeId}
@@ -551,60 +573,56 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         />
       )}
 
-      {/* ─── Copy Week Confirm ─── */}
+      {nonOpDayModal && (
+        <NonOpDayModal
+          propertyId={propertyId}
+          departmentId={nonOpDayModal.departmentId}
+          departmentName={nonOpDayModal.departmentName}
+          date={nonOpDayModal.date}
+          employees={nonOpDayModal.employees}
+          currentStatuses={nonOpDayModal.currentStatuses}
+          onClose={() => setNonOpDayModal(null)}
+          onSaved={() => refreshCurrentView()}
+        />
+      )}
+
       {copyConfirm && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-3">
             <h3 className="font-bold text-sm text-slate-900">Salin Minggu Sebelumnya?</h3>
-            <p className="text-xs text-slate-600">
-              Salin jadwal dari minggu <strong>{formatDisplayDate(copyConfirm.sourceMonday)}</strong> ke minggu <strong>{formatDisplayDate(copyConfirm.targetMonday)}</strong>?
-            </p>
+            <p className="text-xs text-slate-600">Salin jadwal dari minggu <strong>{formatDisplayDate(copyConfirm.sourceMonday)}</strong> ke minggu <strong>{formatDisplayDate(copyConfirm.targetMonday)}</strong>?</p>
             <p className="text-[10px] text-slate-400">Jadwal yang sudah ada di minggu target tidak akan ditimpa (dilewati).</p>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setCopyConfirm(null)} className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">Batal</button>
-              <button onClick={handleCopyWeek} disabled={actionLoading}
-                className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] disabled:opacity-50 cursor-pointer">
-                {actionLoading ? 'Menyalin...' : 'Salin'}
-              </button>
+              <button onClick={handleCopyWeek} disabled={actionLoading} className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] disabled:opacity-50 cursor-pointer">{actionLoading ? 'Menyalin...' : 'Salin'}</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ─── Publish Confirm ─── */}
       {publishConfirm && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-3">
             <h3 className="font-bold text-sm text-slate-900">Publish Jadwal Kerja?</h3>
-            <p className="text-xs text-slate-600">
-              Publish jadwal minggu <strong>{formatDisplayDate(publishConfirm.monday)}</strong> — <strong>{formatDisplayDate(publishConfirm.sunday)}</strong>?
-            </p>
+            <p className="text-xs text-slate-600">Publish jadwal minggu <strong>{formatDisplayDate(publishConfirm.monday)}</strong> — <strong>{formatDisplayDate(publishConfirm.sunday)}</strong>?</p>
             <p className="text-[10px] text-slate-400">Setelah dipublish, perubahan akan tercatat di audit trail.</p>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setPublishConfirm(null)} className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">Batal</button>
-              <button onClick={handlePublish} disabled={actionLoading}
-                className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] disabled:opacity-50 cursor-pointer">
-                {actionLoading ? 'Publishing...' : 'Publish'}
-              </button>
+              <button onClick={handlePublish} disabled={actionLoading} className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] disabled:opacity-50 cursor-pointer">{actionLoading ? 'Publishing...' : 'Publish'}</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ─── Kelola Shift Drawer ─── */}
-      {showKelolaShift && (
-        <KelolaShiftDrawer
-          propertyId={propertyId}
-          onClose={() => setShowKelolaShift(false)}
-          onTemplatesUpdated={() => { fetchRoster(); }}
-        />
-      )}
+      {showKelolaShift && <KelolaShiftDrawer propertyId={propertyId} onClose={() => setShowKelolaShift(false)} onTemplatesUpdated={() => refreshCurrentView()} />}
+      {showKelolaGroup && <KelolaGroupDrawer propertyId={propertyId} onClose={() => setShowKelolaGroup(false)} onGroupsUpdated={() => refreshCurrentView()} />}
+      {showHolidayCalendar && <HolidayCalendarDrawer propertyId={propertyId} onClose={() => setShowHolidayCalendar(false)} onHolidaysUpdated={() => refreshCurrentView()} />}
+      {showNonOpBulk && <NonOpBulkPatternDrawer propertyId={propertyId} departments={departments} onClose={() => setShowNonOpBulk(false)} onPatternApplied={() => refreshCurrentView()} />}
     </div>
   );
 };
 
-// ─── Employee Day Quick Edit Modal (for Per Karyawan cell click) ───
-
+// Employee Day Quick Edit Modal
 interface EmployeeDayQuickEditProps {
   employeeId: number;
   date: string;
@@ -618,7 +636,6 @@ const EmployeeDayQuickEdit: React.FC<EmployeeDayQuickEditProps> = ({ employeeId,
   const sched = emp?.schedules[date] || null;
   const [selectedShiftId, setSelectedShiftId] = useState<number | ''>(sched?.shift_template_id || '');
   const [selectedStatus, setSelectedStatus] = useState<string>(sched?.work_status || 'WORK');
-
   const DAY_FULL = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
   const MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
   const d = new Date(date + 'T00:00:00');
@@ -662,14 +679,9 @@ const EmployeeDayQuickEdit: React.FC<EmployeeDayQuickEditProps> = ({ employeeId,
             </div>
           )}
           <div className="flex gap-2 pt-1">
-            <button onClick={onClose}
-              className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">
-              Batal
-            </button>
+            <button onClick={onClose} className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">Batal</button>
             <button onClick={() => onSaved(selectedStatus === 'WORK' ? (selectedShiftId as number) : null, selectedStatus)}
-              className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] cursor-pointer">
-              Simpan
-            </button>
+              className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] cursor-pointer">Simpan</button>
           </div>
         </div>
       </div>
