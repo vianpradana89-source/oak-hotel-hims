@@ -102,8 +102,8 @@ async function runTests() {
     const nonSaRole = nonSaRoleRes.rows[0];
 
     const hrdUserRes = await pool.query(`
-      INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active)
-      VALUES (1, 'test_hrd_actor_01', 'hash', 'Test HRD Admin', 'test_hrd_01@oakhotel.com', $1, TRUE)
+      INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active, is_test_data)
+      VALUES (1, 'test_hrd_actor_01', 'hash', 'Test HRD Admin', 'test_hrd_01@oakhotel.com', $1, TRUE, TRUE)
       RETURNING id, username, full_name, role_id
     `, [nonSaRole.id]);
     const testHrdUserId = hrdUserRes.rows[0].id;
@@ -126,8 +126,8 @@ async function runTests() {
     // TEST 1: Department CRUD
     console.log('\n--- TEST 1: Department CRUD ---');
     const deptRes = await pool.query(
-      `INSERT INTO hr_departments (property_id, code, name, is_active)
-       VALUES (1, 'TEST_DEPT_01', 'Test Department Alpha', TRUE) RETURNING id`
+      `INSERT INTO hr_departments (property_id, code, name, is_active, is_test_data)
+       VALUES (1, 'TEST_DEPT_01', 'Test Department Alpha', TRUE, TRUE) RETURNING id`
     );
     const testDeptId = deptRes.rows[0].id;
     createdFixtureIds.departments.push(testDeptId);
@@ -149,8 +149,8 @@ async function runTests() {
     console.log('  ✓ 1c. Non-Super Admin hard delete department blocked with 403');
 
     const empWithDept = await pool.query(
-      `INSERT INTO hr_employees (property_id, employee_code, full_name, department_id, is_active)
-       VALUES (1, 'TEST_EMP_D1', 'Dept Test Employee', $1, TRUE) RETURNING id`,
+      `INSERT INTO hr_employees (property_id, employee_code, full_name, department_id, is_active, is_test_data)
+       VALUES (1, 'TEST_EMP_D1', 'Dept Test Employee', $1, TRUE, TRUE) RETURNING id`,
       [testDeptId]
     );
     createdFixtureIds.employees.push(empWithDept.rows[0].id);
@@ -170,8 +170,8 @@ async function runTests() {
     // TEST 2: Position CRUD
     console.log('\n--- TEST 2: Position CRUD ---');
     const posRes = await pool.query(
-      `INSERT INTO hr_positions (property_id, name, is_active)
-       VALUES (1, 'Test Senior Specialist', TRUE) RETURNING id`
+      `INSERT INTO hr_positions (property_id, name, is_active, is_test_data)
+       VALUES (1, 'Test Senior Specialist', TRUE, TRUE) RETURNING id`
     );
     const testPosId = posRes.rows[0].id;
     createdFixtureIds.positions.push(testPosId);
@@ -193,8 +193,8 @@ async function runTests() {
     console.log('  ✓ 2c. Non-Super Admin hard delete position blocked with 403');
 
     const empWithPos = await pool.query(
-      `INSERT INTO hr_employees (property_id, employee_code, full_name, position_id, is_active)
-       VALUES (1, 'TEST_EMP_P1', 'Position Test Employee', $1, TRUE) RETURNING id`,
+      `INSERT INTO hr_employees (property_id, employee_code, full_name, position_id, is_active, is_test_data)
+       VALUES (1, 'TEST_EMP_P1', 'Position Test Employee', $1, TRUE, TRUE) RETURNING id`,
       [testPosId]
     );
     createdFixtureIds.employees.push(empWithPos.rows[0].id);
@@ -225,8 +225,8 @@ async function runTests() {
     console.log('  ✓ 3b. Hard-deleting Platform Super Admin role blocked with 403');
 
     const customRoleRes = await pool.query(
-      `INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-       VALUES (1, 'Test Operational Role', 'Test Role Description', TRUE, FALSE) RETURNING id`
+      `INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+       VALUES (1, 'Test Operational Role', 'Test Role Description', TRUE, FALSE, TRUE) RETURNING id`
     );
     const testRoleId = customRoleRes.rows[0].id;
     createdFixtureIds.roles.push(testRoleId);
@@ -248,8 +248,8 @@ async function runTests() {
     console.log('  ✓ 3e. Non-Super Admin hard delete role blocked with 403');
 
     const userWithRole = await pool.query(
-      `INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active)
-       VALUES (1, 'test_user_role1', 'hash', 'Role Test User', 'role_test@example.com', $1, TRUE) RETURNING id`,
+      `INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active, is_test_data)
+       VALUES (1, 'test_user_role1', 'hash', 'Role Test User', 'role_test@example.com', $1, TRUE, TRUE) RETURNING id`,
       [testRoleId]
     );
     createdFixtureIds.users.push(userWithRole.rows[0].id);
@@ -269,8 +269,8 @@ async function runTests() {
     // TEST 4: Schedule Group CRUD
     console.log('\n--- TEST 4: Schedule Group CRUD ---');
     const groupRes = await pool.query(
-      `INSERT INTO schedule_groups (property_id, name, code, is_active)
-       VALUES (1, 'Test Operations Group Alpha', 'GRP_ALPHA_01', TRUE) RETURNING id`
+      `INSERT INTO schedule_groups (property_id, name, code, is_active, is_test_data)
+       VALUES (1, 'Test Operations Group Alpha', 'GRP_ALPHA_01', TRUE, TRUE) RETURNING id`
     );
     const testGroupId = groupRes.rows[0].id;
     createdFixtureIds.groups.push(testGroupId);
@@ -300,8 +300,8 @@ async function runTests() {
     // TEST 5: Property Holiday CRUD
     console.log('\n--- TEST 5: Property Holiday CRUD ---');
     const holRes = await pool.query(
-      `INSERT INTO property_holidays (property_id, holiday_date, name, holiday_type, is_active)
-       VALUES (1, '2099-01-01', 'Test New Year Holiday', 'NATIONAL', TRUE) RETURNING id`
+      `INSERT INTO property_holidays (property_id, holiday_date, name, holiday_type, is_active, is_test_data)
+       VALUES (1, '2099-01-01', 'Test New Year Holiday', 'NATIONAL', TRUE, TRUE) RETURNING id`
     );
     const testHolId = holRes.rows[0].id;
     createdFixtureIds.holidays.push(testHolId);
@@ -331,8 +331,8 @@ async function runTests() {
     // TEST 6: Department Schedule Classification
     console.log('\n--- TEST 6: Department Schedule Classification ---');
     const classDeptRes = await pool.query(
-      `INSERT INTO hr_departments (property_id, code, name, is_active)
-       VALUES (1, 'TEST_DEPT_CLS', 'Classification Test Dept', TRUE) RETURNING id`
+      `INSERT INTO hr_departments (property_id, code, name, is_active, is_test_data)
+       VALUES (1, 'TEST_DEPT_CLS', 'Classification Test Dept', TRUE, TRUE) RETURNING id`
     );
     const classDeptId = classDeptRes.rows[0].id;
     createdFixtureIds.departments.push(classDeptId);
@@ -367,8 +367,8 @@ async function runTests() {
     // TEST 7: Employee Hard Delete
     console.log('\n--- TEST 7: Employee Hard Delete ---');
     const cleanEmpRes = await pool.query(
-      `INSERT INTO hr_employees (property_id, employee_code, full_name, is_active)
-       VALUES (1, 'TEST_EMP_CLN', 'Clean Test Employee', TRUE) RETURNING id`
+      `INSERT INTO hr_employees (property_id, employee_code, full_name, is_active, is_test_data)
+       VALUES (1, 'TEST_EMP_CLN', 'Clean Test Employee', TRUE, TRUE) RETURNING id`
     );
     const cleanEmpId = cleanEmpRes.rows[0].id;
     createdFixtureIds.employees.push(cleanEmpId);
@@ -378,8 +378,8 @@ async function runTests() {
     console.log('  ✓ 7a. Non-Super Admin hard delete employee blocked with 403');
 
     const schedRes = await pool.query(
-      `INSERT INTO employee_work_schedules (property_id, employee_id, work_date, schedule_status, work_status)
-       VALUES (1, $1, '2099-02-01', 'PUBLISHED', 'SHIFT') RETURNING id`,
+      `INSERT INTO employee_work_schedules (property_id, employee_id, work_date, schedule_status, work_status, is_test_data)
+       VALUES (1, $1, '2099-02-01', 'PUBLISHED', 'SHIFT', TRUE) RETURNING id`,
       [cleanEmpId]
     );
     createdFixtureIds.schedules.push(schedRes.rows[0].id);
@@ -391,8 +391,8 @@ async function runTests() {
     await pool.query('DELETE FROM employee_work_schedules WHERE id = $1', [schedRes.rows[0].id]);
 
     const linkedUserRes = await pool.query(
-      `INSERT INTO users (property_id, employee_id, username, password_hash, full_name, email, role_id, is_active)
-       VALUES (1, $1, 'test_linked_user', 'hash', 'Linked User', 'linked_user@example.com', 1, TRUE) RETURNING id`,
+      `INSERT INTO users (property_id, employee_id, username, password_hash, full_name, email, role_id, is_active, is_test_data)
+       VALUES (1, $1, 'test_linked_user', 'hash', 'Linked User', 'linked_user@example.com', 1, TRUE, TRUE) RETURNING id`,
       [cleanEmpId]
     );
     const linkedUserId = linkedUserRes.rows[0].id;

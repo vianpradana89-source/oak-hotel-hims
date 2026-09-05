@@ -4495,6 +4495,51 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // Migration: test_data_marker_v1
+    // Add is_test_data marker to HR/schedule entities for safe purge.
+    // ------------------------------------------------------------------
+    const testDataMigrationCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'test_data_marker_v1'"
+    );
+
+    if ((testDataMigrationCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE hr_employees ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE employee_work_schedules ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE employee_work_schedule_audits ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE employee_face_enrollments ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE employee_attendance ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE hr_departments ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE hr_positions ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE schedule_groups ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE property_holidays ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE work_shift_templates ADD COLUMN IF NOT EXISTS is_test_data BOOLEAN NOT NULL DEFAULT FALSE;
+
+        CREATE INDEX IF NOT EXISTS idx_hr_employees_test_data ON hr_employees(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_users_test_data ON users(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_employee_work_schedules_test_data ON employee_work_schedules(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_employee_face_enrollments_test_data ON employee_face_enrollments(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_employee_attendance_test_data ON employee_attendance(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_employee_attendance_records_test_data ON employee_attendance_records(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_payroll_records_test_data ON payroll_records(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_hr_departments_test_data ON hr_departments(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_hr_positions_test_data ON hr_positions(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_roles_test_data ON roles(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_schedule_groups_test_data ON schedule_groups(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_property_holidays_test_data ON property_holidays(is_test_data) WHERE is_test_data = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_work_shift_templates_test_data ON work_shift_templates(is_test_data) WHERE is_test_data = TRUE;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('test_data_marker_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

@@ -39,7 +39,10 @@ import {
   getGranularPermissions,
   getRoleGranularPermissions,
   getGranularPermissionsMatrix,
-  updateRoleGranularPermissions
+  updateRoleGranularPermissions,
+  listTestDataEntities,
+  purgeTestDataEmployee,
+  purgeTestDataBulk
 } from './hrdService';
 import { auditWhatsAppCredentialOpened } from './hrdWhatsapp';
 import type {
@@ -1210,6 +1213,114 @@ export function createHrdRouter(pool: Pool): Router {
       const updatedKeys = await updateRoleGranularPermissions(client, roleId, keys, actor);
       await client.query('COMMIT');
       res.json({ status: 'OK', data: updatedKeys });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==========================================================================
+  // TEST DATA MANAGEMENT (Platform Super Admin only)
+  // ==========================================================================
+
+  // List all test data entities
+  router.get('/test-data', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+      await assertPlatformSuperAdmin(client, actorUser?.id);
+
+      const propertyId = parsePropertyId(
+        (req as any).user?.property_id || req.query.property_id || req.query.propertyId
+      );
+      const data = await listTestDataEntities(client, propertyId);
+      res.json({ status: 'OK', data });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // Purge single test employee
+  router.delete('/test-data/employees/:id/purge', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const propertyId = parsePropertyId(
+        (req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id
+      );
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const result = await purgeTestDataEmployee(client, propertyId, employeeId, {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin'
+      });
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: result.message, data: { deleted: result.deleted } });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // Bulk purge test data
+  router.post('/test-data/purge', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      let actorUser = (req as any).user;
+      if (!actorUser && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          actorUser = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = actorUser;
+        } catch {}
+      }
+      const actorUserId = actorUser?.id;
+      await assertPlatformSuperAdmin(client, actorUserId);
+
+      const propertyId = parsePropertyId(
+        (req as any).user?.property_id || req.query.property_id || req.query.propertyId || req.body.property_id
+      );
+      const targets = req.body.targets;
+      if (!Array.isArray(targets) || targets.length === 0) {
+        throw Object.assign(new Error('targets wajib berupa array tidak kosong.'), { statusCode: 400, code: 'INVALID_TARGETS' });
+      }
+
+      const result = await purgeTestDataBulk(client, propertyId, targets, {
+        id: actorUserId,
+        name: actorUser?.full_name || 'Super Admin'
+      });
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;

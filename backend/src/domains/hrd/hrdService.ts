@@ -3465,3 +3465,373 @@ export async function updateRoleGranularPermissions(
 
   return getRoleGranularPermissions(client, roleId);
 }
+
+// ==========================================================================
+// TEST DATA PURGE
+// ==========================================================================
+
+export interface TestEntitySummary {
+  id: number;
+  name: string;
+  code?: string;
+  dependency_count: number;
+  dependencies: string[];
+}
+
+export interface TestDataListResult {
+  employees: TestEntitySummary[];
+  departments: TestEntitySummary[];
+  positions: TestEntitySummary[];
+  roles: TestEntitySummary[];
+  schedule_groups: TestEntitySummary[];
+  holidays: TestEntitySummary[];
+  shift_templates: TestEntitySummary[];
+}
+
+export async function listTestDataEntities(
+  client: PoolClient,
+  propertyId: number
+): Promise<TestDataListResult> {
+  const empRes = await client.query(
+    `SELECT e.id, e.employee_code, e.full_name,
+       (SELECT COUNT(*) FROM users u WHERE u.employee_id = e.id) +
+       (SELECT COUNT(*) FROM employee_work_schedules ws WHERE ws.employee_id = e.id) +
+       (SELECT COUNT(*) FROM employee_work_schedule_audits wa WHERE wa.employee_id = e.id) +
+       (SELECT COUNT(*) FROM employee_face_enrollments fe WHERE fe.employee_id = e.id) +
+       (SELECT COUNT(*) FROM employee_attendance att WHERE att.employee_id = e.id) +
+       (SELECT COUNT(*) FROM employee_attendance_records ar WHERE ar.employee_id = e.id) +
+       (SELECT COUNT(*) FROM payroll_records pr WHERE pr.employee_id = e.id) AS dependency_count,
+       ARRAY(
+         SELECT DISTINCT dep.t FROM (
+           SELECT 'users' AS t WHERE EXISTS (SELECT 1 FROM users u WHERE u.employee_id = e.id)
+           UNION ALL SELECT 'employee_work_schedules' WHERE EXISTS (SELECT 1 FROM employee_work_schedules ws WHERE ws.employee_id = e.id)
+           UNION ALL SELECT 'employee_work_schedule_audits' WHERE EXISTS (SELECT 1 FROM employee_work_schedule_audits wa WHERE wa.employee_id = e.id)
+           UNION ALL SELECT 'employee_face_enrollments' WHERE EXISTS (SELECT 1 FROM employee_face_enrollments fe WHERE fe.employee_id = e.id)
+           UNION ALL SELECT 'employee_attendance' WHERE EXISTS (SELECT 1 FROM employee_attendance att WHERE att.employee_id = e.id)
+           UNION ALL SELECT 'employee_attendance_records' WHERE EXISTS (SELECT 1 FROM employee_attendance_records ar WHERE ar.employee_id = e.id)
+           UNION ALL SELECT 'payroll_records' WHERE EXISTS (SELECT 1 FROM payroll_records pr WHERE pr.employee_id = e.id)
+         ) dep
+       ) AS dependencies
+     FROM hr_employees e
+     WHERE e.is_test_data = TRUE AND e.property_id = $1
+     ORDER BY e.id`,
+    [propertyId]
+  );
+
+  const deptRes = await client.query(
+    `SELECT d.id, d.name, d.code,
+       (SELECT COUNT(*) FROM hr_employees emp WHERE emp.department_id = d.id) AS dependency_count,
+       ARRAY(
+         SELECT DISTINCT dep.t FROM (
+           SELECT 'hr_employees' AS t WHERE EXISTS (SELECT 1 FROM hr_employees emp WHERE emp.department_id = d.id)
+         ) dep
+       ) AS dependencies
+     FROM hr_departments d
+     WHERE d.is_test_data = TRUE AND d.property_id = $1
+     ORDER BY d.id`,
+    [propertyId]
+  );
+
+  const posRes = await client.query(
+    `SELECT p.id, p.name, p.code,
+       (SELECT COUNT(*) FROM hr_employees emp WHERE emp.position_id = p.id) AS dependency_count,
+       ARRAY(
+         SELECT DISTINCT dep.t FROM (
+           SELECT 'hr_employees' AS t WHERE EXISTS (SELECT 1 FROM hr_employees emp WHERE emp.position_id = p.id)
+         ) dep
+       ) AS dependencies
+     FROM hr_positions p
+     WHERE p.is_test_data = TRUE AND p.property_id = $1
+     ORDER BY p.id`,
+    [propertyId]
+  );
+
+  const roleRes = await client.query(
+    `SELECT r.id, r.name, r.description AS code,
+       (SELECT COUNT(*) FROM users u WHERE u.role_id = r.id) AS dependency_count,
+       ARRAY(
+         SELECT DISTINCT dep.t FROM (
+           SELECT 'users' AS t WHERE EXISTS (SELECT 1 FROM users u WHERE u.role_id = r.id)
+         ) dep
+       ) AS dependencies
+     FROM roles r
+     WHERE r.is_test_data = TRUE AND r.property_id = $1
+     ORDER BY r.id`,
+    [propertyId]
+  );
+
+  const groupRes = await client.query(
+    `SELECT g.id, g.name, g.code, 0 AS dependency_count, ARRAY[]::text[] AS dependencies
+     FROM schedule_groups g
+     WHERE g.is_test_data = TRUE AND g.property_id = $1
+     ORDER BY g.id`,
+    [propertyId]
+  );
+
+  const holidayRes = await client.query(
+    `SELECT h.id, h.name, h.holiday_date::text AS code, 0 AS dependency_count, ARRAY[]::text[] AS dependencies
+     FROM property_holidays h
+     WHERE h.is_test_data = TRUE AND h.property_id = $1
+     ORDER BY h.id`,
+    [propertyId]
+  );
+
+  const shiftRes = await client.query(
+    `SELECT s.id, s.name, s.code,
+       (SELECT COUNT(*) FROM employee_work_schedules ws WHERE ws.shift_template_id = s.id) AS dependency_count,
+       ARRAY(
+         SELECT DISTINCT dep.t FROM (
+           SELECT 'employee_work_schedules' AS t WHERE EXISTS (SELECT 1 FROM employee_work_schedules ws WHERE ws.shift_template_id = s.id)
+         ) dep
+       ) AS dependencies
+     FROM work_shift_templates s
+     WHERE s.is_test_data = TRUE AND s.property_id = $1
+     ORDER BY s.id`,
+    [propertyId]
+  );
+
+  return {
+    employees: empRes.rows.map((r: any) => ({
+      id: r.id, name: r.full_name, code: r.employee_code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    departments: deptRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    positions: posRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    roles: roleRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    schedule_groups: groupRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    holidays: holidayRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    })),
+    shift_templates: shiftRes.rows.map((r: any) => ({
+      id: r.id, name: r.name, code: r.code,
+      dependency_count: Number(r.dependency_count), dependencies: r.dependencies || []
+    }))
+  };
+}
+
+export async function purgeTestDataEmployee(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  actor?: { id?: number; name?: string }
+): Promise<{ success: boolean; message: string; deleted: Record<string, number> }> {
+  const empRes = await client.query(
+    'SELECT * FROM hr_employees WHERE id = $1 AND property_id = $2',
+    [employeeId, propertyId]
+  );
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan.`), {
+      statusCode: 404, code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+  const emp = empRes.rows[0];
+
+  if (!emp.is_test_data) {
+    throw Object.assign(
+      new Error('Karyawan ini bukan data test dan tidak dapat di-purge. Gunakan hard delete biasa.'),
+      { statusCode: 409, code: 'NOT_TEST_DATA' }
+    );
+  }
+
+  // Detect which optional tables exist (safe before any DML inside this transaction)
+  const tableCheckRes = await client.query(`
+    SELECT
+      to_regclass('public.employee_face_enrollments') IS NOT NULL AS has_face,
+      to_regclass('public.employee_attendance') IS NOT NULL AS has_attendance,
+      to_regclass('public.employee_attendance_records') IS NOT NULL AS has_attendance_records,
+      to_regclass('public.payroll_records') IS NOT NULL AS has_payroll,
+      to_regclass('public.user_permission_overrides') IS NOT NULL AS has_perm_overrides
+  `);
+  const tables = tableCheckRes.rows[0];
+
+  // Verify ALL dependencies are also test data (REQUIRED tables — errors propagate)
+  const violations: string[] = [];
+
+  const nonTestUsers = await client.query(
+    'SELECT COUNT(*) FROM users WHERE employee_id = $1 AND is_test_data = FALSE',
+    [employeeId]
+  );
+  if (Number(nonTestUsers.rows[0].count) > 0) violations.push('users');
+
+  const nonTestSchedules = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedules WHERE employee_id = $1 AND is_test_data = FALSE',
+    [employeeId]
+  );
+  if (Number(nonTestSchedules.rows[0].count) > 0) violations.push('employee_work_schedules');
+
+  const nonTestAudits = await client.query(
+    'SELECT COUNT(*) FROM employee_work_schedule_audits WHERE employee_id = $1 AND is_test_data = FALSE',
+    [employeeId]
+  );
+  if (Number(nonTestAudits.rows[0].count) > 0) violations.push('employee_work_schedule_audits');
+
+  // Optional table dependency checks — only query if table exists
+  if (tables.has_face) {
+    const nonTestFace = await client.query(
+      'SELECT COUNT(*) FROM employee_face_enrollments WHERE employee_id = $1 AND is_test_data = FALSE',
+      [employeeId]
+    );
+    if (Number(nonTestFace.rows[0].count) > 0) violations.push('employee_face_enrollments');
+  }
+
+  if (tables.has_attendance) {
+    const nonTestAtt = await client.query(
+      'SELECT COUNT(*) FROM employee_attendance WHERE employee_id = $1 AND is_test_data = FALSE',
+      [employeeId]
+    );
+    if (Number(nonTestAtt.rows[0].count) > 0) violations.push('employee_attendance');
+  }
+
+  if (tables.has_attendance_records) {
+    const nonTestAttRec = await client.query(
+      'SELECT COUNT(*) FROM employee_attendance_records WHERE employee_id = $1 AND is_test_data = FALSE',
+      [employeeId]
+    );
+    if (Number(nonTestAttRec.rows[0].count) > 0) violations.push('employee_attendance_records');
+  }
+
+  if (tables.has_payroll) {
+    const nonTestPayroll = await client.query(
+      'SELECT COUNT(*) FROM payroll_records WHERE employee_id = $1 AND is_test_data = FALSE',
+      [employeeId]
+    );
+    if (Number(nonTestPayroll.rows[0].count) > 0) violations.push('payroll_records');
+  }
+
+  if (violations.length > 0) {
+    throw Object.assign(
+      new Error(`Data test tidak dapat dibersihkan karena memiliki referensi yang tidak teridentifikasi sebagai data test: ${violations.join(', ')}.`),
+      { statusCode: 409, code: 'NON_TEST_DEPENDENCY', details: { violations } }
+    );
+  }
+
+  // Safe to purge — delete in FK-safe order
+  // All queries below are on REQUIRED/verified-exist tables. Errors propagate (no try/catch).
+  const deleted: Record<string, number> = {};
+
+  // 1. Schedule audit rows (FK → employee_work_schedules, employee)
+  {
+    const r = await client.query('DELETE FROM employee_work_schedule_audits WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['employee_work_schedule_audits'] = r.rowCount;
+  }
+
+  // 2. Attendance records (optional — only if table exists)
+  if (tables.has_attendance_records) {
+    const r = await client.query('DELETE FROM employee_attendance_records WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['employee_attendance_records'] = r.rowCount;
+  }
+
+  // 3. Attendance (optional — only if table exists)
+  if (tables.has_attendance) {
+    const r = await client.query('DELETE FROM employee_attendance WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['employee_attendance'] = r.rowCount;
+  }
+
+  // 4. Face enrollments (optional — only if table exists)
+  if (tables.has_face) {
+    const r = await client.query('DELETE FROM employee_face_enrollments WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['employee_face_enrollments'] = r.rowCount;
+  }
+
+  // 5. Work schedules (required)
+  {
+    const r = await client.query('DELETE FROM employee_work_schedules WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['employee_work_schedules'] = r.rowCount;
+  }
+
+  // 6. Payroll (optional — only if table exists)
+  if (tables.has_payroll) {
+    const r = await client.query('DELETE FROM payroll_records WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['payroll_records'] = r.rowCount;
+  }
+
+  // 7. Linked user — delete permission overrides first, then user
+  const linkedUsers = await client.query(
+    'SELECT id FROM users WHERE employee_id = $1',
+    [employeeId]
+  );
+  for (const u of linkedUsers.rows) {
+    if (tables.has_perm_overrides) {
+      await client.query('DELETE FROM user_permission_overrides WHERE user_id = $1', [u.id]);
+    }
+  }
+  {
+    const r = await client.query('DELETE FROM users WHERE employee_id = $1', [employeeId]);
+    if (r.rowCount) deleted['users'] = r.rowCount;
+  }
+
+  // 8. Employee (required)
+  await client.query('DELETE FROM hr_employees WHERE id = $1 AND property_id = $2', [employeeId, propertyId]);
+  deleted['hr_employees'] = 1;
+
+  // 9. Audit log
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'TEST_DATA_PURGED',
+      'hr_employees',
+      String(employeeId),
+      JSON.stringify({
+        id: employeeId,
+        employee_code: emp.employee_code,
+        full_name: emp.full_name,
+        is_test_data: true,
+        deleted,
+        timestamp: new Date().toISOString()
+      }),
+      actor?.name || 'Super Admin',
+      propertyId
+    ]
+  );
+
+  return {
+    success: true,
+    message: `Data test karyawan "${emp.full_name}" berhasil dihapus permanen beserta ${Object.keys(deleted).length} tabel dependency.`,
+    deleted
+  };
+}
+
+export async function purgeTestDataBulk(
+  client: PoolClient,
+  propertyId: number,
+  targets: Array<{ type: string; id: number }>,
+  actor?: { id?: number; name?: string }
+): Promise<{ success: boolean; results: Array<{ type: string; id: number; success: boolean; message: string; deleted?: Record<string, number> }> }> {
+  const results: Array<{ type: string; id: number; success: boolean; message: string; deleted?: Record<string, number> }> = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    const spName = `purge_target_${i}`;
+    try {
+      await client.query(`SAVEPOINT ${spName}`);
+      if (target.type === 'employee') {
+        const r = await purgeTestDataEmployee(client, propertyId, target.id, actor);
+        results.push({ type: target.type, id: target.id, success: true, message: r.message, deleted: r.deleted });
+      } else {
+        results.push({ type: target.type, id: target.id, success: false, message: `Tipe "${target.type}" belum didukung untuk bulk purge.` });
+      }
+      await client.query(`RELEASE SAVEPOINT ${spName}`);
+    } catch (err: any) {
+      await client.query(`ROLLBACK TO SAVEPOINT ${spName}`).catch(() => {});
+      results.push({ type: target.type, id: target.id, success: false, message: err.message });
+    }
+  }
+
+  const allSuccess = results.every(r => r.success);
+  return { success: allSuccess, results };
+}

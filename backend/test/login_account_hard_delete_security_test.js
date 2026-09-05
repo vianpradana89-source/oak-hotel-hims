@@ -36,6 +36,8 @@ function makeRequest(method, urlPath, body = null, token = null) {
 async function runTests() {
   console.log('=== LOGIN ACCOUNT HARD DELETE — PLATFORM SUPER ADMIN SECURITY TEST ===\n');
 
+  const runId = `${Date.now()}_${process.pid}`;
+
   let server;
   const cleanupUserIds = [];
   const cleanupEmployeeIds = [];
@@ -69,89 +71,85 @@ async function runTests() {
     console.log(`[SETUP] Super Admin: id=${superAdminUser.id}`);
 
     // ─── SETUP: Create test roles for privilege escalation tests ───
-    // a) General Manager role (property-scoped)
+    // All role names use LASEC_${runId} prefix to avoid uq_roles_property_scoped_name collisions
     const gmRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'General Manager', 'Test GM', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test GM', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_GM_${runId}`]);
     const gmRoleId = gmRoleRes.rows[0].id;
     cleanupRoleIds.push(gmRoleId);
 
-    // b) Admin role (property-scoped)
     const adminRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'Admin', 'Test Admin', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test Admin', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_ADMIN_${runId}`]);
     const adminRoleId = adminRoleRes.rows[0].id;
     cleanupRoleIds.push(adminRoleId);
 
-    // c) Owner role (property-scoped)
     const ownerRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'Owner', 'Test Owner', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test Owner', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_OWNER_${runId}`]);
     const ownerRoleId = ownerRoleRes.rows[0].id;
     cleanupRoleIds.push(ownerRoleId);
 
-    // d) HRD Admin role (property-scoped)
     const hrdAdminRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'HRD Admin', 'Test HRD Admin', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test HRD Admin', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_HRD_${runId}`]);
     const hrdAdminRoleId = hrdAdminRoleRes.rows[0].id;
     cleanupRoleIds.push(hrdAdminRoleId);
 
-    // e) Manager role (property-scoped)
     const managerRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'Manager', 'Test Manager', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test Manager', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_MGR_${runId}`]);
     const managerRoleId = managerRoleRes.rows[0].id;
     cleanupRoleIds.push(managerRoleId);
 
-    // f) Staff role (property-scoped)
     const staffRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'Staff', 'Test Staff', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Test Staff', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_STF_${runId}`]);
     const staffRoleId = staffRoleRes.rows[0].id;
     cleanupRoleIds.push(staffRoleId);
 
-    // g) Property-scoped fake "Super Admin" role (should NOT pass canonical check)
+    // Fake property-scoped "Super Admin" — name not matched by assertPlatformSuperAdmin
+    // because property_id=1 and is_system_role=FALSE
     const fakeSaRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (1, 'Super Admin', 'Fake Property Super Admin', TRUE, FALSE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (1, $1, 'Fake Property Super Admin', TRUE, FALSE, TRUE) RETURNING id, name
+    `, [`LASEC_FAKE_SA_${runId}`]);
     const fakeSaRoleId = fakeSaRoleRes.rows[0].id;
     cleanupRoleIds.push(fakeSaRoleId);
 
-    // h) Inactive Super Admin role for testing
+    // Inactive Super Admin role for testing
     const inactiveSaRoleRes = await pool.query(`
-      INSERT INTO roles (property_id, name, description, is_active, is_system_role)
-      VALUES (NULL, 'Inactive SA Test', 'Test', FALSE, TRUE) RETURNING id, name
-    `);
+      INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+      VALUES (NULL, $1, 'Test', FALSE, TRUE, TRUE) RETURNING id, name
+    `, [`LASEC_INACTIVE_SA_${runId}`]);
     const inactiveSaRoleId = inactiveSaRoleRes.rows[0].id;
     cleanupRoleIds.push(inactiveSaRoleId);
 
     // ─── SETUP: Create test users with each role ───
     const roleUsers = {
-      gm: { role_id: gmRoleId, role: 'General Manager' },
-      admin: { role_id: adminRoleId, role: 'Admin' },
-      owner: { role_id: ownerRoleId, role: 'Owner' },
-      hrdAdmin: { role_id: hrdAdminRoleId, role: 'HRD Admin' },
-      manager: { role_id: managerRoleId, role: 'Manager' },
-      staff: { role_id: staffRoleId, role: 'Staff' },
-      fakeSa: { role_id: fakeSaRoleId, role: 'Super Admin' },
-      inactiveSa: { role_id: inactiveSaRoleId, role: 'Inactive SA Test' }
+      gm: { role_id: gmRoleId, role: `LASEC_GM_${runId}` },
+      admin: { role_id: adminRoleId, role: `LASEC_ADMIN_${runId}` },
+      owner: { role_id: ownerRoleId, role: `LASEC_OWNER_${runId}` },
+      hrdAdmin: { role_id: hrdAdminRoleId, role: `LASEC_HRD_${runId}` },
+      manager: { role_id: managerRoleId, role: `LASEC_MGR_${runId}` },
+      staff: { role_id: staffRoleId, role: `LASEC_STF_${runId}` },
+      fakeSa: { role_id: fakeSaRoleId, role: `LASEC_FAKE_SA_${runId}` },
+      inactiveSa: { role_id: inactiveSaRoleId, role: `LASEC_INACTIVE_SA_${runId}` }
     };
 
     const tokens = {};
     for (const [key, info] of Object.entries(roleUsers)) {
       const isActive = key !== 'inactiveSa';
       const userRes = await pool.query(`
-        INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active)
-        VALUES (1, $1, 'hash', $2, $3, $4, $5) RETURNING id, username, full_name
-      `, [`test_login_del_${key}`, `Test ${info.role}`, `test_${key}@oaktest.com`, info.role_id, isActive]);
+        INSERT INTO users (property_id, username, password_hash, full_name, email, role_id, is_active, is_test_data)
+        VALUES (1, $1, 'hash', $2, $3, $4, $5, TRUE) RETURNING id, username, full_name
+      `, [`lasec_${key}_${runId}`, `Test ${key}`, `lasec_${key}_${runId}@test.local`, info.role_id, isActive]);
       const user = userRes.rows[0];
       cleanupUserIds.push(user.id);
       tokens[key] = generateToken({
@@ -168,16 +166,16 @@ async function runTests() {
     // ─── SETUP: Create test employee with login account ───
     const createTestEmployee = async (label) => {
       const empRes = await pool.query(`
-        INSERT INTO hr_employees (property_id, employee_code, full_name, is_active, status)
-        VALUES (1, $1, $2, TRUE, 'ACTIVE') RETURNING id
-      `, [`TEST_LGN_${label}_${Date.now()}`, `Login Delete Test ${label}`]);
+        INSERT INTO hr_employees (property_id, employee_code, full_name, is_active, status, is_test_data)
+        VALUES (1, $1, $2, TRUE, 'ACTIVE', TRUE) RETURNING id
+      `, [`LASEC_${label}_${runId}`, `Login Delete Test ${label}`]);
       const empId = empRes.rows[0].id;
       cleanupEmployeeIds.push(empId);
 
       const userRes = await pool.query(`
-        INSERT INTO users (property_id, employee_id, username, password_hash, full_name, email, role_id, is_active)
-        VALUES (1, $1, $2, 'hash', 'Test Login User', $3, 1, TRUE) RETURNING id
-      `, [empId, `test_login_target_${label}_${Date.now()}`, `test_login_${label}@oaktest.com`]);
+        INSERT INTO users (property_id, employee_id, username, password_hash, full_name, email, role_id, is_active, is_test_data)
+        VALUES (1, $1, $2, 'hash', 'Test Login User', $3, 1, TRUE, TRUE) RETURNING id
+      `, [empId, `lasec_login_${label}_${runId}`, `lasec_login_${label}_${runId}@test.local`]);
       const userId = userRes.rows[0].id;
       cleanupUserIds.push(userId);
       return { empId, userId };
@@ -202,14 +200,14 @@ async function runTests() {
       pass('Platform Super Admin login account hard delete succeeds (200)');
     }
 
-    // A2. General Manager returns 403
+    // A2. Non-Super Admin (GM class) returns 403
     {
       const { empId } = await createTestEmployee('A2');
       const res = await makeRequest('DELETE', `/api/hrd/employees/${empId}/login-account?property_id=1`, {}, tokens.gm);
       if (res.status !== 403) fail(`Expected 403, got ${res.status}`);
       const check = await pool.query('SELECT id FROM users WHERE employee_id = $1', [empId]);
       if (check.rows.length === 0) fail('User should NOT be deleted');
-      pass('General Manager login account hard delete returns 403');
+      pass('Non-Super Admin (GM class) login account hard delete returns 403');
     }
 
     // A3. Admin returns 403
@@ -274,7 +272,7 @@ async function runTests() {
       pass('confirm_identity is NOT required — Super Admin succeeds without it');
     }
 
-    // A10. Request body actor_role='Super Admin' cannot elevate non-Super-Admin
+    // A10. Request body actor_role cannot elevate non-Super-Admin
     {
       const { empId } = await createTestEmployee('A10');
       const res = await makeRequest('DELETE', `/api/hrd/employees/${empId}/login-account?property_id=1`, {
@@ -312,9 +310,9 @@ async function runTests() {
     // B13. Employee hard delete still follows Platform Super Admin-only rules
     {
       const empRes = await pool.query(`
-        INSERT INTO hr_employees (property_id, employee_code, full_name, is_active)
-        VALUES (1, 'TEST_EMP_B13', 'Regression Test Employee', TRUE) RETURNING id
-      `);
+        INSERT INTO hr_employees (property_id, employee_code, full_name, is_active, is_test_data)
+        VALUES (1, $1, 'Regression Test Employee', TRUE, TRUE) RETURNING id
+      `, [`LASEC_B13_${runId}`]);
       const empId = empRes.rows[0].id;
       cleanupEmployeeIds.push(empId);
 

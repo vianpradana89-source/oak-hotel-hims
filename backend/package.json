@@ -63,6 +63,8 @@
     "test:hr-schedule-1f": "npm run build && node test/hr_schedule1f_groups_test.js",
     "test:hr-schedule-1g": "npm run build && node test/hr_schedule1g_shift_status_hard_delete_test.js",
     "test:login-account-security": "npm run build && node test/login_account_hard_delete_security_test.js",
+    "test:hr-crud-hard-delete": "npm run build && node test/hr_crud_consistency_hard_delete_test.js",
+    "test:test-data-purge": "npm run build && node test/test_data_purge_security_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],
