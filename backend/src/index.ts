@@ -86,10 +86,12 @@ import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
-import { requireAuth, requireRole, onboardingSecurityGuard } from './domains/auth/authMiddleware';
+import { requireAuth, onboardingSecurityGuard } from './domains/auth/authMiddleware';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
+import { createAccessControlRouter } from './domains/settings/accessControlRouter';
+import { createOperationalAccessGuard } from './domains/settings/operationalAccessGuard';
 
 const app: any = express();
 app.use(cors());
@@ -336,6 +338,8 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'secretpassword',
   database: process.env.DB_NAME || 'oak_hotel_db',
 });
+
+app.use(createOperationalAccessGuard(pool));
 
 // Simple SSE clients registry
 const sseClients: Array<import('express').Response> = [];
@@ -3134,7 +3138,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
 });
 
 // GET /api/reservations/:id/edit-availability - server-authoritative selector projection
-app.get('/api/reservations/:id/edit-availability', requireAuth, requireRole(['Front Office']), async (req: any, res: any) => {
+app.get('/api/reservations/:id/edit-availability', requireAuth, async (req: any, res: any) => {
   try {
     const reservationId = Number(req.params.id);
     const propertyId = Number(req.query.property_id);
@@ -3195,11 +3199,11 @@ const handleReservationEdit = async (req: any, res: any) => {
   }
 };
 
-app.post('/api/reservations/:id/edit', requireAuth, requireRole(['Front Office']), handleReservationEdit);
-app.put('/api/reservations/:id/edit', requireAuth, requireRole(['Front Office']), handleReservationEdit);
+app.post('/api/reservations/:id/edit', requireAuth, handleReservationEdit);
+app.put('/api/reservations/:id/edit', requireAuth, handleReservationEdit);
 
 // POST /api/reservations/:id/edit-with-payment — atomic edit + difference payment
-app.post('/api/reservations/:id/edit-with-payment', requireAuth, requireRole(['Front Office']), handlePaymentUpload, async (req: any, res: any) => {
+app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUpload, async (req: any, res: any) => {
   try {
     const reservationId = Number(req.params.id);
     if (!Number.isFinite(reservationId) || reservationId <= 0) {
@@ -6769,6 +6773,7 @@ app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
+app.use('/api/access-control', createAccessControlRouter(pool));
 
 
 

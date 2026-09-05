@@ -1,36 +1,32 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { RolePermissionsMatrixTab as LegacyMenuMatrixTab } from '../settings/RolePermissionsMatrixTab';
-import type { DynamicRole, GranularPermission, GranularMatrixResponse } from './hrdTypes';
+import { RoleAccessTab } from '../settings/RoleAccessTab';
+import { UserAccessTab } from '../settings/UserAccessTab';
+import type { DynamicRole } from './hrdTypes';
 
 interface RolePermissionsTabProps {
   propertyId: number;
+  // Retained for the legacy navigation map contract used by HrdWorkspace.
+  // Role access changes now propagate through the effective-permission API.
   onPermissionsUpdated?: (newMap: Record<string, string[]>) => void;
 }
 
 export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
-  propertyId,
-  onPermissionsUpdated
+  propertyId
 }) => {
   const { user, authFetch } = useAuth();
   const isPlatformSuperAdmin = user?.role === 'Super Admin';
 
-  const [subTab, setSubTab] = useState<'ROLES' | 'GRANULAR_MATRIX' | 'LEGACY_MENUS'>('ROLES');
+  const [subTab, setSubTab] = useState<'ROLE_ACCESS' | 'USER_ACCESS'>('ROLE_ACCESS');
 
   const [roles, setRoles] = useState<DynamicRole[]>([]);
-  const [permissions, setPermissions] = useState<GranularPermission[]>([]);
-  const [matrix, setMatrix] = useState<Record<number, Record<string, boolean>>>({});
   const [loading, setLoading] = useState<boolean>(true);
-  const [savingMatrix, setSavingMatrix] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Hard Delete State (Platform Super Admin Only)
   const [hardDeleteRoleTarget, setHardDeleteRoleTarget] = useState<DynamicRole | null>(null);
   const [deletingRoleHard, setDeletingRoleHard] = useState(false);
   const [hardDeleteRoleError, setHardDeleteRoleError] = useState<string | null>(null);
-
-  // Selected role for Granular Matrix inspection / editing
-  const [selectedRoleId, setSelectedRoleId] = useState<number>(0);
 
   // Role CRUD Modals
   const [showRoleModal, setShowRoleModal] = useState<boolean>(false);
@@ -46,33 +42,17 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [rolesRes, matrixRes] = await Promise.all([
-        authFetch(`/api/hrd/dynamic-roles?property_id=${propertyId}&include_inactive=true`),
-        authFetch(`/api/hrd/permissions/matrix?property_id=${propertyId}`)
-      ]);
-
-      const [rolesData, matrixData] = await Promise.all([rolesRes.json(), matrixRes.json()]);
-
+      const rolesRes = await authFetch(`/api/hrd/dynamic-roles?property_id=${propertyId}&include_inactive=true`);
+      const rolesData = await rolesRes.json();
       if (rolesRes.ok && Array.isArray(rolesData.data)) {
         setRoles(rolesData.data);
-        if (selectedRoleId === 0 && rolesData.data.length > 0) {
-          // Default select the first non-super admin role or first role
-          const defaultRole = rolesData.data.find((r: DynamicRole) => r.name !== 'Super Admin') || rolesData.data[0];
-          setSelectedRoleId(defaultRole.id);
-        }
-      }
-
-      if (matrixRes.ok && matrixData.data) {
-        const payload: GranularMatrixResponse = matrixData.data;
-        setPermissions(payload.permissions || []);
-        setMatrix(payload.matrix || {});
       }
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message || 'Gagal memuat data peran dan izin' });
     } finally {
       setLoading(false);
     }
-  }, [authFetch, propertyId, selectedRoleId]);
+  }, [authFetch, propertyId]);
 
   useEffect(() => {
     fetchData();
@@ -185,93 +165,6 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
     }
   };
 
-  // Granular Matrix Toggles
-  const handleTogglePermission = (roleId: number, permKey: string) => {
-    const selectedRole = roles.find(r => r.id === roleId);
-    if (selectedRole?.name === 'Super Admin') return; // Immutable
-
-    setMatrix(prev => {
-      const rolePerms = { ...(prev[roleId] || {}) };
-      rolePerms[permKey] = !rolePerms[permKey];
-      return {
-        ...prev,
-        [roleId]: rolePerms
-      };
-    });
-  };
-
-  const handleSelectAllForResource = (roleId: number, resourceName: string) => {
-    const selectedRole = roles.find(r => r.id === roleId);
-    if (selectedRole?.name === 'Super Admin') return;
-
-    setMatrix(prev => {
-      const rolePerms = { ...(prev[roleId] || {}) };
-      const resourcePerms = permissions.filter(p => p.resource === resourceName);
-      for (const p of resourcePerms) {
-        rolePerms[p.key] = true;
-      }
-      return {
-        ...prev,
-        [roleId]: rolePerms
-      };
-    });
-  };
-
-  const handleClearAllForResource = (roleId: number, resourceName: string) => {
-    const selectedRole = roles.find(r => r.id === roleId);
-    if (selectedRole?.name === 'Super Admin') return;
-
-    setMatrix(prev => {
-      const rolePerms = { ...(prev[roleId] || {}) };
-      const resourcePerms = permissions.filter(p => p.resource === resourceName);
-      for (const p of resourcePerms) {
-        rolePerms[p.key] = false;
-      }
-      return {
-        ...prev,
-        [roleId]: rolePerms
-      };
-    });
-  };
-
-  const handleSaveGranularPermissions = async () => {
-    if (!selectedRoleId) return;
-    const currentRole = roles.find(r => r.id === selectedRoleId);
-    if (currentRole?.name === 'Super Admin') return;
-
-    setSavingMatrix(true);
-    setFeedback(null);
-    try {
-      const rolePerms = matrix[selectedRoleId] || {};
-      const activeKeys = Object.keys(rolePerms).filter(k => rolePerms[k]);
-
-      const res = await authFetch(`/api/hrd/roles/${selectedRoleId}/permissions`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ permission_keys: activeKeys })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal menyimpan hak akses granular');
-
-      setFeedback({
-        type: 'success',
-        message: `Hak akses granular untuk "${currentRole?.name}" berhasil disimpan (${activeKeys.length} izin aktif).`
-      });
-      await fetchData();
-    } catch (err: any) {
-      setFeedback({ type: 'error', message: err.message });
-    } finally {
-      setSavingMatrix(false);
-    }
-  };
-
-  // Group permissions by resource
-  const uniqueResources = Array.from(new Set(permissions.map(p => p.resource)));
-  const actionsList = ['view', 'create', 'edit', 'delete', 'approve'];
-
-  const selectedRoleObj = roles.find(r => r.id === selectedRoleId);
-  const isSuperAdminSelected = selectedRoleObj?.name === 'Super Admin';
-
   return (
     <div className="space-y-6">
       {feedback && (
@@ -297,9 +190,9 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
       <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
         <button
           type="button"
-          onClick={() => setSubTab('ROLES')}
+          onClick={() => setSubTab('ROLE_ACCESS')}
           className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            subTab === 'ROLES'
+            subTab === 'ROLE_ACCESS'
               ? 'bg-[#1b4332] text-white shadow-xs'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
@@ -307,44 +200,29 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
           </svg>
-          Daftar Peran / Role ({roles.length})
+          Hak Akses Role ({roles.length})
         </button>
 
         <button
           type="button"
-          onClick={() => setSubTab('GRANULAR_MATRIX')}
+          onClick={() => setSubTab('USER_ACCESS')}
           className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            subTab === 'GRANULAR_MATRIX'
+            subTab === 'USER_ACCESS'
               ? 'bg-[#1b4332] text-white shadow-xs'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
           </svg>
-          Matrix Granular Permission (13 Modul x 5 Aksi)
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSubTab('LEGACY_MENUS')}
-          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-            subTab === 'LEGACY_MENUS'
-              ? 'bg-[#1b4332] text-white shadow-xs'
-              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
-          }`}
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-          </svg>
-          Menu Navigasi SOP (Legacy)
+          Hak Akses Pengguna
         </button>
       </div>
 
       {/* ===================================================================== */}
-      {/* SUB-TAB 1: DAFTAR DYNAMIC ROLES */}
+      {/* TAB 1: HAK AKSES ROLE — role catalog + View/Edit/Delete access grid */}
       {/* ===================================================================== */}
-      {subTab === 'ROLES' && (
+      {subTab === 'ROLE_ACCESS' && (
         <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
           <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50">
             <div>
@@ -429,16 +307,6 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedRoleId(r.id);
-                            setSubTab('GRANULAR_MATRIX');
-                          }}
-                          className="px-2 py-1 text-[11px] font-semibold text-[#1b4332] bg-[#1b4332]/10 hover:bg-[#1b4332]/20 rounded-lg transition"
-                        >
-                          Atur Izin
-                        </button>
                         {r.name !== 'Super Admin' && (
                           <>
                             {r.is_active ? (
@@ -510,136 +378,14 @@ export const RolePermissionsTab: React.FC<RolePermissionsTabProps> = ({
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* SUB-TAB 2: GRANULAR PERMISSION MATRIX */}
-      {/* ===================================================================== */}
-      {subTab === 'GRANULAR_MATRIX' && (
-        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden space-y-4">
-          <div className="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-slate-50/50">
-            <div>
-              <h2 className="font-serif font-bold text-slate-900 text-sm flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#1b4332]" />
-                Matriks Granular Permission ({uniqueResources.length} Modul × {actionsList.length} Aksi)
-              </h2>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                Konfigurasi izin teknis backend (view, create, edit, delete, approve) per sumber daya hotel.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <label className="text-xs font-bold text-slate-700 flex items-center gap-2">
-                Pilih Peran:
-                <select
-                  value={selectedRoleId}
-                  onChange={e => setSelectedRoleId(Number(e.target.value))}
-                  className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white font-bold text-slate-800 text-xs focus:ring-2 focus:ring-[#1b4332]"
-                >
-                  {roles.map(r => (
-                    <option key={r.id} value={r.id}>
-                      {r.name} {r.is_system_role ? '(Sistem)' : '(Kustom)'}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {!isSuperAdminSelected && (
-                <button
-                  type="button"
-                  onClick={handleSaveGranularPermissions}
-                  disabled={savingMatrix}
-                  className="px-4 py-1.5 rounded-xl bg-[#1b4332] text-white hover:bg-[#143326] transition font-bold text-xs shadow-xs cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  {savingMatrix ? 'Menyimpan...' : 'Simpan Hak Akses'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {isSuperAdminSelected && (
-            <div className="mx-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
-              <span className="font-bold">🔒 Hak Akses Penuh:</span>
-              <span>Super Admin memiliki otorisasi penuh di seluruh modul sistem dan terkunci secara permanen.</span>
-            </div>
-          )}
-
-          <div className="overflow-x-auto px-4 pb-4">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-slate-700 font-bold">
-                  <th className="py-2.5 px-3">Modul / Resource</th>
-                  {actionsList.map(action => (
-                    <th key={action} className="py-2.5 px-3 text-center uppercase tracking-wider text-[11px]">
-                      {action}
-                    </th>
-                  ))}
-                  <th className="py-2.5 px-3 text-right">Aksi Cepat</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {uniqueResources.map(resName => {
-                  const currentRolePerms = matrix[selectedRoleId] || {};
-
-                  return (
-                    <tr key={resName} className="hover:bg-slate-50/50 transition">
-                      <td className="py-2.5 px-3 font-semibold text-slate-900 font-mono">
-                        {resName}
-                      </td>
-
-                      {actionsList.map(action => {
-                        const permKey = `${resName}.${action}`;
-                        const isGranted = Boolean(currentRolePerms[permKey]) || isSuperAdminSelected;
-
-                        return (
-                          <td key={action} className="py-2.5 px-3 text-center">
-                            <input
-                              type="checkbox"
-                              checked={isGranted}
-                              disabled={isSuperAdminSelected}
-                              onChange={() => handleTogglePermission(selectedRoleId, permKey)}
-                              className="w-4 h-4 rounded text-[#1b4332] focus:ring-[#1b4332] cursor-pointer disabled:opacity-75"
-                            />
-                          </td>
-                        );
-                      })}
-
-                      <td className="py-2.5 px-3 text-right space-x-1">
-                        {!isSuperAdminSelected && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectAllForResource(selectedRoleId, resName)}
-                              className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded"
-                            >
-                              Semua
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleClearAllForResource(selectedRoleId, resName)}
-                              className="px-2 py-0.5 text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded"
-                            >
-                              Hapus
-                            </button>
-                          </>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {subTab === 'ROLE_ACCESS' && (
+        <RoleAccessTab propertyId={propertyId} onAccessUpdated={fetchData} />
       )}
 
       {/* ===================================================================== */}
-      {/* SUB-TAB 3: LEGACY SOP MENUS */}
+      {/* TAB 2: HAK AKSES PENGGUNA — per-user overrides on top of role default */}
       {/* ===================================================================== */}
-      {subTab === 'LEGACY_MENUS' && (
-        <LegacyMenuMatrixTab
-          propertyId={propertyId}
-          onPermissionsUpdated={onPermissionsUpdated}
-        />
-      )}
+      {subTab === 'USER_ACCESS' && <UserAccessTab propertyId={propertyId} />}
 
       {/* ===================================================================== */}
       {/* MODAL: ADD / EDIT ROLE */}

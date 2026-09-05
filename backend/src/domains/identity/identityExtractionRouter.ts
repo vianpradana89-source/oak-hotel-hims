@@ -7,8 +7,7 @@ import {
   extractIdentityFromDocument,
   confirmVerifiedIdentity
 } from './identityExtractionService';
-import { verifyToken, type AuthUserPayload } from '../auth/authService';
-import { normalizeRoleName } from '../auth/authMiddleware';
+import { isPlatformSuperAdmin, verifyToken, type AuthUserPayload } from '../auth/authService';
 
 export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): Router {
   const router = Router();
@@ -254,8 +253,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
     }
 
     // 3. Fail-Closed Document Ownership & Property Isolation
-    const userRole = normalizeRoleName(user.role);
-    const isSuperAdmin = userRole === 'Super Admin' || userRole === 'SUPER_ADMIN';
+    const isSuperAdmin = await isPlatformSuperAdmin(pool, user.id);
 
     let docPropId: number | null = null;
     try {

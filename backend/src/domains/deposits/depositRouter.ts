@@ -1,7 +1,8 @@
 import { Router, type Response } from 'express';
 import multer from 'multer';
 import type { Pool } from 'pg';
-import { requireAuth, requireRole, normalizeRoleName, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { requireAuth, normalizeRoleName, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { isPlatformSuperAdmin } from '../auth/authService';
 import { applyDeposit, getDepositsByReservation, receiveDeposit, refundDeposit, reverseDeposit } from './depositService';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -14,10 +15,9 @@ function positiveInt(value: unknown, field: string): number {
   return parsed;
 }
 
-function propertyIdFor(req: AuthenticatedRequest): number {
+async function propertyIdFor(req: AuthenticatedRequest, pool: Pool): Promise<number> {
   const requested = positiveInt(req.body?.property_id ?? req.query?.property_id, 'property_id');
-  const role = normalizeRoleName(req.user?.role);
-  if (role !== 'Super Admin' && requested !== Number(req.user?.property_id)) {
+  if (requested !== Number(req.user?.property_id) && !(await isPlatformSuperAdmin(pool, req.user?.id))) {
     throw Object.assign(new Error('Cross-property access is not allowed'), { statusCode: 403, code: 'CROSS_PROPERTY_ACCESS' });
   }
   return requested;
@@ -47,11 +47,11 @@ function sendError(res: Response, error: any): Response {
 
 export function createDepositRouter(pool: Pool): Router {
   const router = Router();
-  const allowed = [requireAuth, requireRole(['Front Office'])];
+  const allowed = [requireAuth];
 
   router.post('/deposits', ...allowed, upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const propertyId = propertyIdFor(req);
+      const propertyId = await propertyIdFor(req, pool);
       const reservationId = positiveInt(req.body?.reservation_id, 'reservation_id');
       const result = await receiveDeposit(pool, {
         propertyId,
@@ -74,7 +74,7 @@ export function createDepositRouter(pool: Pool): Router {
     try {
       const result = await applyDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
-        propertyId: propertyIdFor(req),
+        propertyId: await propertyIdFor(req, pool),
         reservationId: positiveInt(req.body?.reservation_id, 'reservation_id'),
         amount: Number(req.body?.amount),
         idempotencyKey: idempotencyKey(req),
@@ -91,7 +91,7 @@ export function createDepositRouter(pool: Pool): Router {
     try {
       const result = await refundDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
-        propertyId: propertyIdFor(req),
+        propertyId: await propertyIdFor(req, pool),
         reservationId: positiveInt(req.body?.reservation_id, 'reservation_id'),
         amount: Number(req.body?.amount),
         paymentMethod: req.body?.payment_method,
@@ -111,7 +111,7 @@ export function createDepositRouter(pool: Pool): Router {
     try {
       const result = await reverseDeposit(pool, {
         depositId: positiveInt(req.params.id, 'deposit_id'),
-        propertyId: propertyIdFor(req),
+        propertyId: await propertyIdFor(req, pool),
         reservationId: positiveInt(req.body?.reservation_id, 'reservation_id'),
         idempotencyKey: idempotencyKey(req),
         actor: actorFor(req),
@@ -125,7 +125,7 @@ export function createDepositRouter(pool: Pool): Router {
 
   router.get('/reservations/:id/deposits', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const propertyId = propertyIdFor(req);
+      const propertyId = await propertyIdFor(req, pool);
       const reservationId = positiveInt(req.params.id, 'reservation_id');
       const deposits = await getDepositsByReservation(pool, propertyId, reservationId);
       return res.json({ status: 'SUCCESS', data: deposits });

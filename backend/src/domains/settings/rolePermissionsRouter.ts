@@ -1,6 +1,6 @@
 ﻿import { Router, Response } from 'express';
 import type { Pool } from 'pg';
-import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
 import {
   getRolePermissionsMatrix,
   updateRolePermissionsMatrix,
@@ -44,7 +44,6 @@ export function createRolePermissionsRouter(pool: Pool): Router {
   router.put(
     '/',
     requireAuth,
-    requireRole(['Super Admin', 'General Manager']),
     async (req: AuthenticatedRequest, res: Response) => {
       const client = await pool.connect();
       try {
@@ -84,7 +83,6 @@ export function createRolePermissionsRouter(pool: Pool): Router {
   router.post(
     '/reset',
     requireAuth,
-    requireRole(['Super Admin', 'General Manager']),
     async (req: AuthenticatedRequest, res: Response) => {
       const client = await pool.connect();
       try {

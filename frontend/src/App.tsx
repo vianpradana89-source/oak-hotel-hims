@@ -52,7 +52,7 @@ import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProtectedRoute } from './features/auth/ProtectedRoute';
-import { isMenuAllowedForRole, getDefaultMenuForRole } from './features/auth/permissions';
+import { getDefaultNavKey, isNavAllowed } from './features/auth/accessControl';
 import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
@@ -122,7 +122,7 @@ function localDateISO(value: Date | string | undefined) {
 }
 
 function AppContent() {
-  const { user, logout, authFetch } = useAuth();
+  const { user, logout, authFetch, effectiveAccess } = useAuth();
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
@@ -238,7 +238,6 @@ function AppContent() {
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<MainNavKey>('Kalender');
-  const [customPermissionsMap, setCustomPermissionsMap] = useState<Record<string, string[]> | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem('oak_sidebar_collapsed') === 'true';
@@ -259,31 +258,16 @@ function AppContent() {
     });
   };
 
-  const fetchRolePermissions = useCallback(async (propId: number) => {
-    try {
-      const res = await fetch(`/api/settings/role-permissions?property_id=${propId}`);
-      const json = await res.json();
-      if (res.ok && json.data && Array.isArray(json.data.roles)) {
-        const pMap: Record<string, string[]> = {};
-        for (const r of json.data.roles) {
-          pMap[r.role] = r.permissions || [];
-        }
-        setCustomPermissionsMap(pMap);
-      }
-    } catch (e) {
-      console.warn('Failed to fetch dynamic role permissions matrix:', e);
-    }
-  }, []);
-
-  // Guard active menu automatically based on user role and dynamic permissions matrix
+  // Guard active menu from the same effective-permission grid the API enforces.
   useEffect(() => {
-    if (user && !isMenuAllowedForRole(selectedMenu, user.role, customPermissionsMap)) {
-      setSelectedMenu(getDefaultMenuForRole(user.role, customPermissionsMap));
+    if (!user || !effectiveAccess) return;
+    if (!isNavAllowed(effectiveAccess.effective, selectedMenu)) {
+      setSelectedMenu(getDefaultNavKey(effectiveAccess.effective));
     }
-  }, [user, selectedMenu, customPermissionsMap]);
+  }, [user, selectedMenu, effectiveAccess]);
 
   const handleSelectMenu = (menu: MainNavKey) => {
-    if (user && !isMenuAllowedForRole(menu, user.role, customPermissionsMap)) {
+    if (!isNavAllowed(effectiveAccess?.effective, menu)) {
       return;
     }
     setSelectedMenu(menu);
@@ -320,12 +304,6 @@ function AppContent() {
       isMounted = false;
     };
   }, [propertyId, properties]);
-
-  useEffect(() => {
-    if (propertyId) {
-      void fetchRolePermissions(propertyId);
-    }
-  }, [propertyId, fetchRolePermissions]);
 
   const activeBranding = useMemo(() => {
     if (!propertyId) return undefined;
@@ -3292,7 +3270,6 @@ function AppContent() {
           activeProperty={properties.find((p: any) => p.id === propertyId) || null}
           propertyBranding={activeBranding}
           featureFlags={propertyFeatures}
-          customPermissionsMap={customPermissionsMap}
         />
 
         <main className="hotel-main">
@@ -3921,7 +3898,6 @@ function AppContent() {
           <HrdWorkspace
             propertyId={propertyId}
             propertyName={properties.find((p: any) => p.id === propertyId)?.name}
-            onPermissionsUpdated={(newMap) => setCustomPermissionsMap(newMap)}
           />
         )}
 
@@ -3982,7 +3958,6 @@ function AppContent() {
             initialCategory={initialSettingsCategory}
             onSelectProperty={(id) => setPropertyId(id)}
             onRefreshProperties={fetchProperties}
-            onPermissionsUpdated={(newMap) => setCustomPermissionsMap(newMap)}
           />
         )}
         </main>

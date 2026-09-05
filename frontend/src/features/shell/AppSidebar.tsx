@@ -4,7 +4,7 @@ import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandin
 import { OakLogo } from '../../design-system/OakLogo';
 import { Tooltip } from '../../design-system/Tooltip';
 import { useAuth } from '../auth/AuthContext';
-import { isMenuAllowedForRole } from '../auth/permissions';
+import { isNavAllowed } from '../auth/accessControl';
 
 export interface AppSidebarProps {
   selectedMenu: MainNavKey;
@@ -16,7 +16,6 @@ export interface AppSidebarProps {
   activeProperty: ShellPropertyItem | null;
   propertyBranding?: PropertyBrandingConfig | null;
   featureFlags?: Record<string, boolean>;
-  customPermissionsMap?: Record<string, string[]> | null;
 }
 
 export const AppSidebar: React.FC<AppSidebarProps> = ({
@@ -29,9 +28,8 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   activeProperty,
   propertyBranding,
   featureFlags,
-  customPermissionsMap,
 }) => {
-  const { user } = useAuth();
+  const { effectiveAccess } = useAuth();
   const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
 
   // OAK HIMS Grouped Navigation
@@ -171,7 +169,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   const filteredGroups: NavGroupDef[] = navGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => isMenuAllowedForRole(item.key as MainNavKey, user?.role, customPermissionsMap))
+      items: group.items.filter((item) => isNavAllowed(effectiveAccess?.effective, item.key as MainNavKey))
     }))
     .filter((group) => group.items.length > 0);
 

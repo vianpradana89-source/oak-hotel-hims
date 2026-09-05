@@ -1,6 +1,7 @@
 import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
-import { normalizeRoleName, requireAuth, requireRole, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { normalizeRoleName, requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { isPlatformSuperAdmin } from '../auth/authService';
 import { getIdentityCustodyByReservation, holdIdentity, returnIdentity } from './identityCustodyService';
 
 function positiveInt(value: unknown, field: string): number {
@@ -9,9 +10,9 @@ function positiveInt(value: unknown, field: string): number {
   return parsed;
 }
 
-function propertyIdFor(req: AuthenticatedRequest): number {
+async function propertyIdFor(req: AuthenticatedRequest, pool: Pool): Promise<number> {
   const requested = positiveInt(req.body?.property_id ?? req.query?.property_id, 'property_id');
-  if (normalizeRoleName(req.user?.role) !== 'Super Admin' && requested !== Number(req.user?.property_id)) {
+  if (requested !== Number(req.user?.property_id) && !(await isPlatformSuperAdmin(pool, req.user?.id))) {
     throw Object.assign(new Error('Cross-property access is not allowed'), { statusCode: 403, code: 'CROSS_PROPERTY_ACCESS' });
   }
   return requested;
@@ -27,12 +28,12 @@ function sendError(res: Response, error: any): Response {
 
 export function createIdentityCustodyRouter(pool: Pool): Router {
   const router = Router();
-  const allowed = [requireAuth, requireRole(['Front Office'])];
+  const allowed = [requireAuth];
 
   router.post('/identity-custody', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await holdIdentity(pool, {
-        propertyId: propertyIdFor(req),
+        propertyId: await propertyIdFor(req, pool),
         reservationId: positiveInt(req.body?.reservation_id, 'reservation_id'),
         documentType: req.body?.document_type,
         documentHolderName: req.body?.document_holder_name,
@@ -50,7 +51,7 @@ export function createIdentityCustodyRouter(pool: Pool): Router {
   router.patch('/identity-custody/:id/return', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await returnIdentity(pool, {
-        propertyId: propertyIdFor(req),
+        propertyId: await propertyIdFor(req, pool),
         custodyId: positiveInt(req.params.id, 'identity_custody_id'),
         actor: actorFor(req)
       });
@@ -62,7 +63,7 @@ export function createIdentityCustodyRouter(pool: Pool): Router {
 
   router.get('/reservations/:id/identity-custody', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await getIdentityCustodyByReservation(pool, propertyIdFor(req), positiveInt(req.params.id, 'reservation_id'));
+      const result = await getIdentityCustodyByReservation(pool, await propertyIdFor(req, pool), positiveInt(req.params.id, 'reservation_id'));
       return res.json({ status: 'SUCCESS', data: result });
     } catch (error) {
       return sendError(res, error);

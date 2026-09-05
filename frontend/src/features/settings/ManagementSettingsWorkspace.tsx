@@ -6,7 +6,7 @@ import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
-import { RolePermissionsMatrixTab } from './RolePermissionsMatrixTab';
+import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 
 export type SettingsCategoryKey =
@@ -62,7 +62,6 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   apiBaseUrl = '/api',
   onSelectProperty,
   onRefreshProperties,
-  onPermissionsUpdated
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -330,7 +329,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     {
       key: 'users_permissions',
       label: 'Pengguna & Hak Akses',
-      description: 'Role-based access control (RBAC), matriks perizinan role, dan user audit log.',
+      description: 'Hak Akses Role dan Hak Akses Pengguna dengan View, Edit, dan Delete per menu.',
       status: 'ACTIVE',
       badgeLabel: 'Aktif',
       isImplemented: true,
@@ -756,12 +755,8 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
           )}
 
-          {/* Active Category: Users & Role Permissions Matrix */}
           {activeCategory === 'users_permissions' && (
-            <RolePermissionsMatrixTab
-              propertyId={propertyId}
-              onPermissionsUpdated={onPermissionsUpdated}
-            />
+            <RolePermissionsTab propertyId={propertyId} />
           )}
 
           {/* Other Categories: Roadmap / Configured Placeholders */}

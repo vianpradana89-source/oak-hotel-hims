@@ -4540,6 +4540,100 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // Migration: auth_hr3b_access_control_v1
+    // Canonical per-user permission overrides plus the two canonical
+    // permission resources (guests, employee_mobile) that the navigation
+    // exposes but the original permission seed did not cover.
+    // Purely additive: no existing role grant is modified or removed.
+    // ------------------------------------------------------------------
+    const accessControlMigrationCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'auth_hr3b_access_control_v1'"
+    );
+
+    if ((accessControlMigrationCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS user_permission_overrides (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          resource VARCHAR(100) NOT NULL,
+          action VARCHAR(20) NOT NULL,
+          effect VARCHAR(10) NOT NULL,
+          reason TEXT,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_by_user_id INTEGER,
+          created_by_name VARCHAR(255),
+          updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_by_user_id INTEGER,
+          updated_by_name VARCHAR(255),
+          CONSTRAINT chk_user_permission_override_action CHECK (action IN ('view', 'edit', 'delete')),
+          CONSTRAINT chk_user_permission_override_effect CHECK (effect IN ('ALLOW', 'DENY')),
+          CONSTRAINT uq_user_permission_override UNIQUE (property_id, user_id, resource, action)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_permission_overrides_user
+          ON user_permission_overrides (property_id, user_id);
+      `);
+
+      // Canonical permission rows for navigation resources missing from the
+      // original seed. Same {resource}.{action} contract as every other row.
+      const accessControlResources = ['guests', 'employee_mobile'];
+      const accessControlActions = ['view', 'create', 'edit', 'delete', 'approve'];
+      for (const resource of accessControlResources) {
+        for (const action of accessControlActions) {
+          await auditMigrationClient.query(
+            `INSERT INTO permissions (resource, action, key, description, is_system)
+             VALUES ($1, $2, $3, $4, TRUE)
+             ON CONFLICT (key) DO NOTHING`,
+            [resource, action, `${resource}.${action}`, `Hak akses ${action.toUpperCase()} pada modul ${resource}`]
+          );
+        }
+      }
+
+      // Grant the new resources to system roles so the existing SOP navigation
+      // defaults keep resolving exactly as they did before this migration.
+      const accessControlRoleGrants: Record<string, string[]> = {
+        'Super Admin': [
+          'guests.view', 'guests.create', 'guests.edit', 'guests.delete', 'guests.approve',
+          'employee_mobile.view', 'employee_mobile.create', 'employee_mobile.edit',
+          'employee_mobile.delete', 'employee_mobile.approve',
+        ],
+        'General Manager': [
+          'guests.view', 'guests.create', 'guests.edit', 'guests.approve',
+          'employee_mobile.view',
+        ],
+        'Front Office': [
+          'guests.view', 'guests.create', 'guests.edit',
+          'employee_mobile.view',
+        ],
+        'Housekeeping': ['employee_mobile.view'],
+        'POS / Resto': ['guests.view'],
+        'Accounting': ['guests.view'],
+        'HRD Admin': ['employee_mobile.view'],
+      };
+
+      for (const [roleName, permissionKeys] of Object.entries(accessControlRoleGrants)) {
+        for (const permissionKey of permissionKeys) {
+          await auditMigrationClient.query(
+            `INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+             SELECT r.id, p.id, TRUE, 'AUTH_HR3B_INIT'
+             FROM roles r
+             JOIN permissions p ON p.key = $2
+             WHERE r.name = $1 AND r.is_system_role = TRUE AND r.property_id IS NULL
+             ON CONFLICT (role_id, permission_id) DO NOTHING`,
+            [roleName, permissionKey]
+          );
+        }
+      }
+
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr3b_access_control_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

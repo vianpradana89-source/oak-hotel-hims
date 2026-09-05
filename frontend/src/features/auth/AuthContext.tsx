@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import type { EffectiveAccessResponse } from './accessControl';
 
 export interface AuthUser {
   id: number;
@@ -23,6 +24,8 @@ interface AuthContextType {
   logout: () => void;
   authFetch: (url: string, init?: RequestInit) => Promise<Response>;
   updateSessionToken: (newToken: string, updatedUserPartial?: Partial<AuthUser>) => void;
+  effectiveAccess: EffectiveAccessResponse | null;
+  refreshEffectiveAccess: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -33,6 +36,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [effectiveAccess, setEffectiveAccess] = useState<EffectiveAccessResponse | null>(null);
 
   // Authenticated fetch helper that injects Authorization header
   const authFetch = useCallback(
@@ -49,6 +53,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     },
     [token]
   );
+
+  const refreshEffectiveAccess = useCallback(async () => {
+    const currentToken = token || localStorage.getItem(TOKEN_KEY);
+    if (!currentToken) {
+      setEffectiveAccess(null);
+      return;
+    }
+    try {
+      const res = await fetch('/api/access-control/me', {
+        headers: { Authorization: `Bearer ${currentToken}` },
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.status === 'OK' && data.data) {
+        setEffectiveAccess(data.data);
+        return;
+      }
+      setEffectiveAccess(null);
+    } catch {
+      setEffectiveAccess(null);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (!user || !token) {
+      setEffectiveAccess(null);
+      return;
+    }
+    void refreshEffectiveAccess();
+  }, [user, token, refreshEffectiveAccess]);
 
   // Validate session on mount or token change
   useEffect(() => {
@@ -148,6 +181,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setUser(null);
+    setEffectiveAccess(null);
   };
 
   const updateSessionToken = (newToken: string, updatedUserPartial?: Partial<AuthUser>) => {
@@ -169,6 +203,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         authFetch,
         updateSessionToken,
+        effectiveAccess,
+        refreshEffectiveAccess,
       }}
     >
       {children}

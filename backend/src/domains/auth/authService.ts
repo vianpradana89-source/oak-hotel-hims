@@ -593,3 +593,21 @@ export async function assertPlatformSuperAdmin(
     role_id: Number(row.role_id),
   };
 }
+
+/**
+ * Non-throwing form of assertPlatformSuperAdmin for authorization branches that
+ * need a boolean rather than an error. Shares the exact same canonical rule, so
+ * Platform Super Admin authority is never inferred from a JWT role string,
+ * role_id = 1, or a legacy alias such as OWNER/ADMIN.
+ */
+export async function isPlatformSuperAdmin(
+  clientOrPool: Pool | PoolClient,
+  userId: number | string | null | undefined
+): Promise<boolean> {
+  try {
+    await assertPlatformSuperAdmin(clientOrPool, userId);
+    return true;
+  } catch {
+    return false;
+  }
+}

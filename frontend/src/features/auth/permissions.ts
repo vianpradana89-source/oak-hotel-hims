@@ -19,10 +19,18 @@ export const STANDARD_ROLE_LIST: StandardRole[] = [
   'Crew'
 ];
 
+/**
+ * Display/compatibility normalization for legacy role spellings.
+ *
+ * OWNER and ADMIN normalize to 'General Manager', never to 'Super Admin'.
+ * They are property-level executive roles, and Platform Super Admin authority
+ * is decided only by the backend canonical database rule.
+ */
 export function normalizeRole(roleName?: string | null): StandardRole {
   if (!roleName) return 'Crew';
   const r = roleName.trim().toUpperCase().replace(/[\s/_-]+/g, '');
-  if (r === 'SUPERADMIN' || r === 'OWNER' || r === 'ADMIN') return 'Super Admin';
+  if (r === 'SUPERADMIN') return 'Super Admin';
+  if (r === 'OWNER' || r === 'ADMIN') return 'General Manager';
   if (r === 'GM' || r === 'GENERALMANAGER' || r === 'MANAGER') return 'General Manager';
   if (r === 'FRONTOFFICE' || r === 'FO' || r === 'RECEPTIONIST') return 'Front Office';
   if (r === 'HOUSEKEEPING' || r === 'HK') return 'Housekeeping';

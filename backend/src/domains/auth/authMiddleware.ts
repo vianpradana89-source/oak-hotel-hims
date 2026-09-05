@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { verifyToken, type AuthUserPayload } from './authService';
+import { verifyToken, isPlatformSuperAdmin, type AuthUserPayload } from './authService';
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthUserPayload;
@@ -82,10 +82,19 @@ export function onboardingSecurityGuard(req: Request, res: Response, next: NextF
   next();
 }
 
+/**
+ * Display/compatibility normalization for legacy role spellings.
+ *
+ * OWNER and ADMIN deliberately normalize to 'General Manager', never to
+ * 'Super Admin': they are property-level executive roles and must not inherit
+ * Platform Super Admin authority. Platform Super Admin is decided exclusively
+ * by the canonical database rule in assertPlatformSuperAdmin.
+ */
 export function normalizeRoleName(roleName?: string | null): string {
   if (!roleName) return 'Crew';
   const r = roleName.trim().toUpperCase().replace(/[\s_-]+/g, '');
-  if (r === 'SUPERADMIN' || r === 'OWNER' || r === 'ADMIN') return 'Super Admin';
+  if (r === 'SUPERADMIN') return 'Super Admin';
+  if (r === 'OWNER' || r === 'ADMIN') return 'General Manager';
   if (r === 'GM' || r === 'GENERALMANAGER' || r === 'MANAGER') return 'General Manager';
   if (r === 'FRONTOFFICE' || r === 'FO' || r === 'RECEPTIONIST') return 'Front Office';
   if (r === 'HOUSEKEEPING' || r === 'HK') return 'Housekeeping';
@@ -95,9 +104,32 @@ export function normalizeRoleName(roleName?: string | null): string {
   return roleName;
 }
 
+function resolvePool(): any {
+  try {
+    return require('../../index').pool;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verifies a Super Admin claim against the canonical database rule.
+ *
+ * The DB round-trip only happens for tokens actually claiming Super Admin, so
+ * ordinary roles keep their previous zero-query cost while a forged or
+ * property-scoped "Super Admin" role cannot buy a bypass.
+ */
+async function claimsVerifiedPlatformSuperAdmin(user: AuthUserPayload | undefined): Promise<boolean> {
+  if (!user) return false;
+  if (normalizeRoleName(user.role) !== 'Super Admin') return false;
+  const db = resolvePool();
+  if (!db) return false;
+  return isPlatformSuperAdmin(db, user.id);
+}
+
 export function requireRole(allowedRoles: string[]) {
   const normalizedAllowed = allowedRoles.map(normalizeRoleName);
-  return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     if (!req.user) {
       res.status(401).json({
         status: 'ERROR',
@@ -109,8 +141,8 @@ export function requireRole(allowedRoles: string[]) {
 
     const userRole = normalizeRoleName(req.user.role);
 
-    // Super Admin always has full bypass
-    if (userRole === 'Super Admin') {
+    // Canonical Platform Super Admin always has full bypass
+    if (await claimsVerifiedPlatformSuperAdmin(req.user)) {
       next();
       return;
     }
@@ -138,7 +170,7 @@ export function requireRole(allowedRoles: string[]) {
   };
 }
 
-export function requirePmsAccess(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+export async function requirePmsAccess(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   if (!req.user) {
     res.status(401).json({
       status: 'ERROR',
@@ -148,7 +180,7 @@ export function requirePmsAccess(req: AuthenticatedRequest, res: Response, next:
     return;
   }
 
-  if (normalizeRoleName(req.user.role) === 'Super Admin') {
+  if (await claimsVerifiedPlatformSuperAdmin(req.user)) {
     next();
     return;
   }
@@ -184,12 +216,14 @@ export async function hasPermission(
   clientOrPool?: any
 ): Promise<boolean> {
   if (!user) return false;
-  const roleName = normalizeRoleName(user.role);
-  if (roleName === 'Super Admin') return true;
 
   // Dynamically resolve pool to avoid circular dependencies
-  const db = clientOrPool || require('../../index').pool;
+  const db = clientOrPool || resolvePool();
   if (!db) return false;
+
+  if (normalizeRoleName(user.role) === 'Super Admin' && await isPlatformSuperAdmin(db, user.id)) {
+    return true;
+  }
 
   if (user.role_id) {
     const res = await db.query(
@@ -228,7 +262,7 @@ export function requirePermission(permissionKey: string) {
       return;
     }
 
-    if (normalizeRoleName(req.user.role) === 'Super Admin') {
+    if (await claimsVerifiedPlatformSuperAdmin(req.user)) {
       next();
       return;
     }

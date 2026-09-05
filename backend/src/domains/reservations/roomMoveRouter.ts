@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import type { Pool } from 'pg';
-import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
 import { executeRoomMove, getRoomMoveAvailability, getRoomMoveHistory, previewRoomMove } from './roomMoveService';
 
 export function createRoomMoveRouter(pool: Pool) {
   const router = Router();
-  const allowed = [requireAuth, requireRole(['Front Office'])];
+  const allowed = [requireAuth];
 
   router.get('/reservations/:id/room-move-availability', ...allowed, async (req: AuthenticatedRequest, res) => {
     try {

@@ -3099,6 +3099,14 @@ export async function createDynamicRole(
     throw Object.assign(new Error("Role 'Crew' bukan peran otorisasi sistem yang valid."), { statusCode: 400, code: 'INVALID_AUTH_ROLE' });
   }
 
+  const compactName = name.toLowerCase().replace(/[\s_-]+/g, '');
+  if (compactName === 'superadmin') {
+    throw Object.assign(
+      new Error('Role Platform Super Admin tidak dapat dibuat dari manajemen properti.'),
+      { statusCode: 403, code: 'CANNOT_CREATE_SUPER_ADMIN' }
+    );
+  }
+
   const targetPropId = payload.property_id ? Number(payload.property_id) : 1;
 
   // Custom role uniqueness: within target property OR conflicts with global system role
@@ -3169,9 +3177,13 @@ export async function updateDynamicRole(
     throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
   }
   const current = currentRes.rows[0];
+  const isCanonicalPlatformSuperAdmin =
+    Boolean(current.is_system_role) &&
+    current.property_id === null &&
+    String(current.name || '').trim().toLowerCase() === 'super admin';
 
-  if (current.name === 'Super Admin') {
-    if (payload.name !== undefined && payload.name.trim() !== 'Super Admin') {
+  if (isCanonicalPlatformSuperAdmin) {
+    if (payload.name !== undefined && payload.name.trim().toLowerCase() !== 'super admin') {
       throw Object.assign(new Error('Role sistem Super Admin tidak dapat diubah namanya.'), { statusCode: 403, code: 'CANNOT_RENAME_SUPER_ADMIN' });
     }
     if (payload.is_active === false) {
@@ -3183,6 +3195,13 @@ export async function updateDynamicRole(
   if (name !== current.name) {
     if (name.toLowerCase() === 'crew') {
       throw Object.assign(new Error("Role 'Crew' bukan peran otorisasi sistem yang valid."), { statusCode: 400, code: 'INVALID_AUTH_ROLE' });
+    }
+    const compactName = name.toLowerCase().replace(/[\s_-]+/g, '');
+    if (compactName === 'superadmin' && !isCanonicalPlatformSuperAdmin) {
+      throw Object.assign(
+        new Error('Role properti tidak dapat diganti menjadi Platform Super Admin.'),
+        { statusCode: 403, code: 'CANNOT_PROMOTE_TO_SUPER_ADMIN' }
+      );
     }
     const targetPropId = current.property_id ? Number(current.property_id) : null;
     const dupCheck = await client.query(
@@ -3423,14 +3442,21 @@ export async function updateRoleGranularPermissions(
   permissionKeys: string[],
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<string[]> {
-  const roleRes = await client.query('SELECT id, name FROM roles WHERE id = $1', [roleId]);
+  const roleRes = await client.query(
+    'SELECT id, name, is_system_role, property_id FROM roles WHERE id = $1',
+    [roleId]
+  );
   if (roleRes.rows.length === 0) {
     throw Object.assign(new Error('Role tidak ditemukan.'), { statusCode: 404, code: 'ROLE_NOT_FOUND' });
   }
   const role = roleRes.rows[0];
 
-  // Super Admin check: cannot strip critical platform permissions
-  if (role.name === 'Super Admin') {
+  const isCanonicalPlatformSuperAdmin =
+    Boolean(role.is_system_role) &&
+    role.property_id === null &&
+    String(role.name || '').trim().toLowerCase() === 'super admin';
+
+  if (isCanonicalPlatformSuperAdmin) {
     const allPerms = await client.query('SELECT count(*) FROM permissions');
     const totalPerms = Number(allPerms.rows[0].count);
     if (permissionKeys.length < totalPerms) {
