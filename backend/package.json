@@ -61,6 +61,7 @@
     "test:vendor-supplier": "npm run build && node test/vendor_supplier_canonical_master_test.js",
     "test:hr-schedule-roster": "npm run build && node test/hr_schedule1_roster_test.js",
     "test:hr-schedule-1f": "npm run build && node test/hr_schedule1f_groups_test.js",
+    "test:hr-schedule-1g": "npm run build && node test/hr_schedule1g_shift_status_hard_delete_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

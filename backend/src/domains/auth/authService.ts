@@ -62,7 +62,7 @@ export async function loginUser(
     `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.password_hash,
             u.full_name, u.is_active, u.employee_id, u.account_status,
             u.must_change_password, u.temp_password_expires_at, u.access_type,
-            r.name AS role_name
+            r.name AS role_name, r.is_active AS role_is_active, r.is_system_role, r.property_id AS role_property_id
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
      WHERE LOWER(u.email) = $1 OR LOWER(u.username) = $1
@@ -121,7 +121,31 @@ export async function loginUser(
     throw err;
   }
 
-  // 5. Check temporary password expiry (applies ONLY to temporary password)
+  // 5. Fail-closed role validation
+  const roleId = Number(userRow.role_id);
+  if (
+    !userRow.role_id ||
+    isNaN(roleId) ||
+    roleId <= 0 ||
+    !userRow.role_name ||
+    userRow.role_is_active === false
+  ) {
+    const err: any = new Error('Konfigurasi role akun tidak valid. Hubungi Administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_ROLE_INVALID';
+    throw err;
+  }
+
+  // 6. Fail-closed property validation
+  const propertyId = Number(userRow.property_id);
+  if (!userRow.property_id || isNaN(propertyId) || propertyId <= 0) {
+    const err: any = new Error('Konfigurasi properti akun tidak valid. Hubungi Administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_PROPERTY_INVALID';
+    throw err;
+  }
+
+  // 7. Check temporary password expiry (applies ONLY to temporary password)
   if (userRow.must_change_password && userRow.temp_password_expires_at) {
     const expiresAt = new Date(userRow.temp_password_expires_at);
     if (expiresAt.getTime() < Date.now()) {
@@ -132,7 +156,7 @@ export async function loginUser(
     }
   }
 
-  // 6. Determine scope & next_step
+  // 8. Determine scope & next_step
   let scope: 'FULL' | 'ONBOARDING' = 'FULL';
   let nextStep: 'CHANGE_PASSWORD' | 'ENROLL_FACE' | 'COMPLETE' = 'COMPLETE';
   let effectiveAccountStatus = userRow.account_status || 'READY';
@@ -156,9 +180,9 @@ export async function loginUser(
     email: userRow.email,
     username: userRow.username,
     full_name: userRow.full_name,
-    role: userRow.role_name || 'Super Admin',
-    role_id: userRow.role_id ? Number(userRow.role_id) : 1,
-    property_id: userRow.property_id ? Number(userRow.property_id) : 1,
+    role: userRow.role_name,
+    role_id: roleId,
+    property_id: propertyId,
     scope,
     account_status: effectiveAccountStatus,
     must_change_password: Boolean(userRow.must_change_password),
@@ -222,7 +246,8 @@ export async function completeInitialPassword(
 
   const userRes = await pool.query(
     `SELECT u.id, u.property_id, u.role_id, u.username, u.email, u.full_name,
-            u.password_hash, u.is_active, u.account_status, u.access_type, r.name AS role_name
+            u.password_hash, u.is_active, u.account_status, u.access_type,
+            r.name AS role_name, r.is_active AS role_is_active
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
      WHERE u.id = $1`,
@@ -237,6 +262,22 @@ export async function completeInitialPassword(
   }
 
   const user = userRes.rows[0];
+
+  const roleId = Number(user.role_id);
+  if (!user.role_id || isNaN(roleId) || roleId <= 0 || !user.role_name || user.role_is_active === false) {
+    const err: any = new Error('Konfigurasi role akun tidak valid. Hubungi Administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_ROLE_INVALID';
+    throw err;
+  }
+
+  const propertyId = Number(user.property_id);
+  if (!user.property_id || isNaN(propertyId) || propertyId <= 0) {
+    const err: any = new Error('Konfigurasi properti akun tidak valid. Hubungi Administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_PROPERTY_INVALID';
+    throw err;
+  }
 
   const isSame = await comparePassword(new_password, user.password_hash);
   if (isSame) {
@@ -278,7 +319,7 @@ export async function completeInitialPassword(
         timestamp: new Date().toISOString()
       }),
       user.username || 'ONBOARDING',
-      user.property_id || 1
+      propertyId
     ]
   );
 
@@ -288,9 +329,9 @@ export async function completeInitialPassword(
     email: user.email,
     username: user.username,
     full_name: user.full_name,
-    role: user.role_name || 'Crew',
-    role_id: user.role_id ? Number(user.role_id) : 1,
-    property_id: user.property_id ? Number(user.property_id) : 1,
+    role: user.role_name,
+    role_id: roleId,
+    property_id: propertyId,
     scope: 'ONBOARDING',
     account_status: 'FACE_ENROLLMENT_REQUIRED',
     must_change_password: false,
@@ -468,4 +509,87 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
   } catch (err: any) {
     console.warn(`[AUTH SEED] Note on seeding users & roles:`, err.message);
   }
+}
+
+/**
+ * Canonical Platform Super Admin verification against live database state.
+ *
+ * Verifies that the user:
+ * 1. Exists and has users.id = authenticated user id
+ * 2. users.is_active = TRUE
+ * 3. users.role_id references roles.id
+ * 4. roles.is_active = TRUE
+ * 5. normalized exact role name is 'Super Admin' (case-insensitive)
+ * 6. roles.is_system_role = TRUE
+ * 7. roles.property_id IS NULL (global platform role, not property-scoped)
+ *
+ * Does NOT hardcode role_id = 1.
+ * Does NOT treat Owner, Admin, General Manager, HRD Admin, Manager as Platform Super Admin.
+ */
+export async function assertPlatformSuperAdmin(
+  clientOrPool: Pool | PoolClient,
+  userId: number | string | null | undefined
+): Promise<{ id: number; name: string; email: string; role_id: number }> {
+  const numericId = Number(userId);
+  if (!userId || isNaN(numericId) || numericId <= 0) {
+    const err: any = new Error('Akses ditolak: Autentikasi diperlukan.');
+    err.statusCode = 401;
+    err.code = 'UNAUTHORIZED';
+    throw err;
+  }
+
+  const res = await clientOrPool.query(
+    `SELECT u.id, u.username, u.full_name, u.email, u.is_active AS user_is_active,
+            r.id AS role_id, r.name AS role_name, r.is_active AS role_is_active,
+            r.is_system_role, r.property_id AS role_property_id
+     FROM users u
+     JOIN roles r ON r.id = u.role_id
+     WHERE u.id = $1`,
+    [numericId]
+  );
+
+  if (res.rows.length === 0) {
+    const err: any = new Error('Akses ditolak: Hanya Platform Super Admin yang diizinkan.');
+    err.statusCode = 403;
+    err.code = 'FORBIDDEN';
+    throw err;
+  }
+
+  const row = res.rows[0];
+
+  if (row.user_is_active !== true) {
+    const err: any = new Error('Akses ditolak: Akun pengguna tidak aktif.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_DISABLED';
+    throw err;
+  }
+
+  if (row.role_is_active !== true) {
+    const err: any = new Error('Akses ditolak: Role pengguna tidak aktif.');
+    err.statusCode = 403;
+    err.code = 'ROLE_DISABLED';
+    throw err;
+  }
+
+  if (row.is_system_role !== true || row.role_property_id !== null) {
+    const err: any = new Error('Akses ditolak: Hanya Platform Super Admin yang diizinkan.');
+    err.statusCode = 403;
+    err.code = 'FORBIDDEN';
+    throw err;
+  }
+
+  const normalizedRoleName = String(row.role_name || '').trim().toLowerCase();
+  if (normalizedRoleName !== 'super admin') {
+    const err: any = new Error('Akses ditolak: Hanya Platform Super Admin yang diizinkan.');
+    err.statusCode = 403;
+    err.code = 'FORBIDDEN';
+    throw err;
+  }
+
+  return {
+    id: Number(row.id),
+    name: row.full_name || row.username || 'Super Admin',
+    email: row.email,
+    role_id: Number(row.role_id),
+  };
 }

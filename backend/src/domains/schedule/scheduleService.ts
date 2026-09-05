@@ -437,6 +437,90 @@ export async function deactivateShiftTemplate(
   );
 }
 
+export async function reactivateShiftTemplate(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  actor: { id?: number; name: string }
+): Promise<WorkShiftTemplate> {
+  const existing = await getShiftTemplateById(client, propertyId, templateId);
+  if (!existing) {
+    throw Object.assign(new Error('Shift template tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  await client.query(
+    `UPDATE work_shift_templates SET is_active = TRUE, updated_at = NOW()
+     WHERE id = $1 AND property_id = $2`,
+    [templateId, propertyId]
+  );
+
+  const updated = (await getShiftTemplateById(client, propertyId, templateId))!;
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SHIFT_TEMPLATE_ACTIVATED', 'work_shift_templates', $1, $2, $3)`,
+    [templateId, JSON.stringify(updated), propertyId]
+  );
+
+  return updated;
+}
+
+export async function hardDeleteShiftTemplate(
+  client: PoolClient,
+  propertyId: number,
+  templateId: number,
+  actor: { id?: number; name: string }
+): Promise<void> {
+  const existing = await getShiftTemplateById(client, propertyId, templateId);
+  if (!existing) {
+    throw Object.assign(new Error('Shift template tidak ditemukan.'), { statusCode: 404, code: 'NOT_FOUND' });
+  }
+
+  // Check referential integrity on employee_work_schedules
+  const scheduleCheck = await client.query(
+    'SELECT 1 FROM employee_work_schedules WHERE shift_template_id = $1 LIMIT 1',
+    [templateId]
+  );
+  if (scheduleCheck.rowCount && scheduleCheck.rowCount > 0) {
+    throw Object.assign(
+      new Error('Shift tidak dapat dihapus karena masih digunakan pada jadwal karyawan. Nonaktifkan shift jika tidak ingin digunakan lagi.'),
+      { statusCode: 409, code: 'SHIFT_IN_USE' }
+    );
+  }
+
+  // Check referential integrity on employee_work_schedule_audits
+  const auditCheck = await client.query(
+    'SELECT 1 FROM employee_work_schedule_audits WHERE old_shift_template_id = $1 OR new_shift_template_id = $1 LIMIT 1',
+    [templateId]
+  );
+  if (auditCheck.rowCount && auditCheck.rowCount > 0) {
+    throw Object.assign(
+      new Error('Shift tidak dapat dihapus karena masih digunakan pada jadwal karyawan. Nonaktifkan shift jika tidak ingin digunakan lagi.'),
+      { statusCode: 409, code: 'SHIFT_IN_USE' }
+    );
+  }
+
+  await client.query(
+    'DELETE FROM work_shift_templates WHERE id = $1 AND property_id = $2',
+    [templateId, propertyId]
+  );
+
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, property_id)
+     VALUES ('HR_SCHEDULE', 'SHIFT_TEMPLATE_HARD_DELETED', 'work_shift_templates', $1, $2, $3)`,
+    [templateId, JSON.stringify({
+      id: existing.id,
+      name: existing.name,
+      code: existing.code,
+      start_time: existing.start_time,
+      end_time: existing.end_time,
+      department_id: existing.department_id,
+      deleted_by: actor.name,
+      deleted_at: new Date().toISOString()
+    }), propertyId]
+  );
+}
+
 // ─── Shift Template Team (employees assigned to a template in a period) ───
 
 export async function getShiftTemplateTeam(

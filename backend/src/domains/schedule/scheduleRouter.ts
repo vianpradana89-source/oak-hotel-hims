@@ -1,13 +1,15 @@
 // backend/src/domains/schedule/scheduleRouter.ts
 import { Router, Request, Response } from 'express';
 import type { Pool } from 'pg';
-import { verifyToken } from '../auth/authService';
+import { verifyToken, assertPlatformSuperAdmin } from '../auth/authService';
 import {
   getShiftTemplates,
   getShiftTemplateById,
   createShiftTemplate,
   updateShiftTemplate,
   deactivateShiftTemplate,
+  reactivateShiftTemplate,
+  hardDeleteShiftTemplate,
   getShiftTemplateTeam,
   getWeeklyRoster,
   getMonthlyRoster,
@@ -208,7 +210,7 @@ export function createScheduleRouter(pool: Pool): Router {
     }
   });
 
-  // 5. Deactivate shift template
+  // 5. Deactivate shift template (soft deactivation ONLY)
   router.delete('/shift-templates/:id', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
@@ -218,6 +220,7 @@ export function createScheduleRouter(pool: Pool): Router {
       if (isNaN(templateId) || templateId <= 0) {
         throw Object.assign(new Error('ID template tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
       }
+
       const actor = {
         id: (req as any).user?.id,
         name: (req as any).user?.full_name || 'HRD Admin',
@@ -233,6 +236,72 @@ export function createScheduleRouter(pool: Pool): Router {
       client.release();
     }
   });
+
+  // 5a. Reactivate shift template
+  const reactivateHandler = async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body.property_id || req.query.property_id, req);
+      const templateId = Number(req.params.id);
+      if (isNaN(templateId) || templateId <= 0) {
+        throw Object.assign(new Error('ID template tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const actor = {
+        id: (req as any).user?.id,
+        name: (req as any).user?.full_name || 'HRD Admin',
+      };
+      const template = await reactivateShiftTemplate(client, propertyId, templateId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: template, message: 'Shift template berhasil diaktifkan kembali.' });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+  router.post('/shift-templates/:id/reactivate', reactivateHandler);
+  router.patch('/shift-templates/:id/reactivate', reactivateHandler);
+
+  // 5b. Permanent / Hard Delete shift template (Canonical Platform Super Admin only)
+  const hardDeleteHandler = async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      let user = (req as any).user;
+      if (!user && req.headers.authorization?.startsWith('Bearer ')) {
+        try {
+          user = verifyToken(req.headers.authorization.split(' ')[1]);
+          (req as any).user = user;
+        } catch {}
+      }
+
+      // Canonical database-backed Platform Super Admin check
+      const superAdmin = await assertPlatformSuperAdmin(client, user?.id);
+
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId(req.body?.property_id || req.query.property_id, req);
+      const templateId = Number(req.params.id);
+      if (isNaN(templateId) || templateId <= 0) {
+        throw Object.assign(new Error('ID template tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+      const actor = {
+        id: superAdmin.id,
+        name: superAdmin.name,
+      };
+      await hardDeleteShiftTemplate(client, propertyId, templateId, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', message: 'Shift template berhasil dihapus permanen.' });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+  router.delete('/shift-templates/:id/hard-delete', hardDeleteHandler);
 
   // 5b. Get shift template team (employees assigned for a period)
   router.get('/shift-templates/:id/team', async (req: Request, res: Response) => {

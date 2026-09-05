@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAuth } from '../auth/AuthContext';
 import type { WorkShiftTemplate, Department, ShiftTemplateTeamMember, ColorKey, HrEmployee } from './scheduleTypes';
 import { VALID_COLOR_KEYS, COLOR_KEY_STYLES } from './scheduleTypes';
 
@@ -16,6 +17,20 @@ const COLOR_LABELS: Record<ColorKey, string> = {
 const WEEKDAY_LABELS = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
 
 export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ propertyId, onTemplatesUpdated, onRosterRefresh }) => {
+  const { user } = useAuth();
+  const isSuperAdmin = Boolean(
+    user?.role && String(user.role).trim().toUpperCase().replace(/[\s_-]+/g, '') === 'SUPERADMIN'
+  );
+  const [deleteTarget, setDeleteTarget] = useState<WorkShiftTemplate | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!notification) return;
+    const timer = setTimeout(() => setNotification(null), 4000);
+    return () => clearTimeout(timer);
+  }, [notification]);
+
   const [templates, setTemplates] = useState<WorkShiftTemplate[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,11 +188,62 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
     if (!confirm('Nonaktifkan shift template ini?')) return;
     try {
       const res = await fetch(`/api/schedule/shift-templates/${id}`, {
-        method: 'DELETE', headers: getAuthHeaders(), body: JSON.stringify({ property_id: propertyId }),
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ property_id: propertyId }),
       });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.message); }
-      await fetchTemplates(); onTemplatesUpdated?.();
-    } catch (err: any) { alert(err.message); }
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.message || 'Gagal menonaktifkan shift template.');
+      setNotification({ type: 'success', message: 'Shift template berhasil dinonaktifkan.' });
+      await fetchTemplates();
+      onTemplatesUpdated?.();
+      onRosterRefresh?.();
+    } catch (err: any) {
+      setNotification({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleReactivate = async (id: number) => {
+    try {
+      const res = await fetch(`/api/schedule/shift-templates/${id}/reactivate`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ property_id: propertyId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mengaktifkan shift template.');
+      setNotification({ type: 'success', message: 'Shift template berhasil diaktifkan kembali.' });
+      await fetchTemplates();
+      onTemplatesUpdated?.();
+      onRosterRefresh?.();
+    } catch (err: any) {
+      setNotification({ type: 'error', message: err.message });
+    }
+  };
+
+  const handleHardDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/schedule/shift-templates/${deleteTarget.id}/hard-delete`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ property_id: propertyId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Gagal menghapus shift template.');
+      }
+      setDeleteTarget(null);
+      setNotification({ type: 'success', message: 'Shift template berhasil dihapus permanen.' });
+      await fetchTemplates();
+      onTemplatesUpdated?.();
+      onRosterRefresh?.();
+    } catch (err: any) {
+      setNotification({ type: 'error', message: err.message });
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const resetForm = () => {
@@ -314,6 +380,23 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
         </button>
       </div>
 
+      {notification && (
+        <div className={`p-2.5 rounded-xl border flex items-center justify-between text-xs font-semibold ${
+          notification.type === 'success'
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            : 'bg-rose-50 border-rose-200 text-rose-800'
+        }`}>
+          <span>{notification.message}</span>
+          <button
+            type="button"
+            onClick={() => setNotification(null)}
+            className="text-slate-400 hover:text-slate-600 cursor-pointer ml-2 text-sm"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {showForm && (
         <form onSubmit={handleSubmit} className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
           {error && <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-semibold">{error}</div>}
@@ -422,7 +505,7 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
               const extraCount = team.length - 3;
 
               return (
-                <div key={t.id} className={`bg-white border ${sc.border} rounded-xl p-3 transition`}>
+                <div key={t.id} className={`bg-white border ${sc.border} rounded-xl p-3 transition ${!t.is_active ? 'opacity-75 bg-slate-50/70' : ''}`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -431,7 +514,6 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
                         {t.crosses_midnight && <span className="text-[9px] text-amber-600 font-bold"> Lewat Malam</span>}
                         {dept && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-blue-700">{dept.name}</span>}
                         {!dept && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-500">Global</span>}
-                        {!t.is_active && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-400">Nonaktif</span>}
                       </div>
                       <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
                         {team.length === 0 ? (
@@ -451,13 +533,69 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
                         )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {t.is_active && (
-                        <button onClick={() => openAssignModal(t)} className="px-2 py-0.5 text-[10px] font-semibold text-[#1b4332] bg-emerald-50 hover:bg-emerald-100 rounded transition cursor-pointer">+ Tambah</button>
-                      )}
-                      <button onClick={() => handleEdit(t)} className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition cursor-pointer">Edit</button>
-                      {t.is_active && (
-                        <button onClick={() => handleDeactivate(t.id)} className="px-2 py-0.5 text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded transition cursor-pointer">Nonaktif</button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {t.is_active ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openAssignModal(t)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-[#1b4332] bg-emerald-50 hover:bg-emerald-100 rounded transition cursor-pointer"
+                          >
+                            + Tambah
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleEdit(t)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeactivate(t.id)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded transition cursor-pointer"
+                          >
+                            Nonaktifkan
+                          </button>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setDeleteTarget(t)}
+                              className="px-2 py-0.5 text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded transition cursor-pointer"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-slate-100 text-slate-500 border border-slate-200 select-none">
+                            NONAKTIF
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleEdit(t)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleReactivate(t.id)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded transition cursor-pointer"
+                          >
+                            Aktifkan
+                          </button>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setDeleteTarget(t)}
+                              className="px-2 py-0.5 text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded transition cursor-pointer"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -589,6 +727,58 @@ export const ShiftTemplateManager: React.FC<ShiftTemplateManagerProps> = ({ prop
                   {assignSubmitting ? 'Menerapkan...' : 'Terapkan Jadwal'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Super Admin Hard Delete Confirmation Modal ─── */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => !deleting && setDeleteTarget(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-5 space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-800">Hapus Shift</h3>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer text-sm"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              Yakin ingin menghapus shift ini? Data akan dihapus permanen.
+            </p>
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[11px] text-slate-700 font-semibold flex items-center justify-between">
+              <span>{deleteTarget.name} ({deleteTarget.code})</span>
+              <span className="font-mono text-slate-500">
+                {formatTimeDisplay(deleteTarget.start_time)}–{formatTimeDisplay(deleteTarget.end_time)}
+              </span>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={handleHardDelete}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+              >
+                {deleting ? 'Menghapus...' : 'Hapus'}
+              </button>
             </div>
           </div>
         </div>
