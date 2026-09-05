@@ -91,12 +91,7 @@ function buildScheduledTimestamps(
   const scheduled_start_at = `${workDate}T${startHHMM}:00.000${offset}`;
   let endDate = workDate;
   if (crossesMidnight) {
-    const d = new Date(workDate + 'T00:00:00');
-    d.setDate(d.getDate() + 1);
-    const y = d.getFullYear();
-    const mo = String(d.getMonth() + 1).padStart(2, '0');
-    const da = String(d.getDate()).padStart(2, '0');
-    endDate = `${y}-${mo}-${da}`;
+    endDate = addDays(workDate, 1);
   }
   const scheduled_end_at = `${endDate}T${endHHMM}:00.000${offset}`;
   return { scheduled_start_at, scheduled_end_at };
@@ -145,11 +140,34 @@ function formatShiftTemplate(row: any): WorkShiftTemplate {
 }
 
 function formatSchedule(row: any): EmployeeWorkSchedule {
+  // work_date is a PostgreSQL DATE — it is a business calendar date, NOT a timestamp.
+  // All canonical queries MUST return work_date::text AS work_date (YYYY-MM-DD string).
+  // We must NEVER timezone-convert, shift, or guess from a Date object.
+  const raw = row.work_date;
+
+  if (raw instanceof Date) {
+    // A Date object means the query did not use work_date::text.
+    // This is a programming integrity error — not a data error.
+    throw new Error(
+      'SCHEDULE_WORK_DATE_FORMAT_ERROR: work_date must be returned as YYYY-MM-DD text via work_date::text AS work_date. ' +
+      'Received a Date object instead. Check that all employee_work_schedules SELECT queries use work_date::text.'
+    );
+  }
+
+  if (typeof raw !== 'string') {
+    throw new Error(
+      `SCHEDULE_WORK_DATE_FORMAT_ERROR: work_date must be a string, got ${typeof raw}`
+    );
+  }
+
+  // work_date is a string: preserve YYYY-MM-DD, or extract date part from ISO timestamp.
+  const workDate = raw.includes('T') ? raw.split('T')[0] : raw;
+
   return {
     id: row.id,
     property_id: row.property_id,
     employee_id: row.employee_id,
-    work_date: typeof row.work_date === 'string' ? row.work_date.split('T')[0] : row.work_date,
+    work_date: workDate,
     shift_template_id: row.shift_template_id,
     schedule_status: row.schedule_status,
     work_status: row.work_status,
@@ -168,24 +186,36 @@ function formatSchedule(row: any): EmployeeWorkSchedule {
   };
 }
 
+function parseDateParts(dateStr: string): { year: number; month: number; day: number } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return { year: y, month: m, day: d };
+}
+
+function toDateString(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** UTC-based calendar day number (days since epoch). Used for pure date arithmetic. */
+function calendarDayNumber(dateStr: string): number {
+  const { year, month, day } = parseDateParts(dateStr);
+  return Math.floor(Date.UTC(year, month - 1, day) / (1000 * 60 * 60 * 24));
+}
+
 function addDays(dateStr: string, days: number): string {
-  const d = new Date(dateStr + 'T00:00:00');
-  d.setDate(d.getDate() + days);
-  const y = d.getFullYear();
-  const mo = String(d.getMonth() + 1).padStart(2, '0');
-  const da = String(d.getDate()).padStart(2, '0');
-  return `${y}-${mo}-${da}`;
+  const { year, month, day } = parseDateParts(dateStr);
+  const utcMs = Date.UTC(year, month - 1, day + days);
+  const d = new Date(utcMs);
+  return toDateString(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
 }
 
 function getMonday(dateStr: string): string {
-  const d = new Date(dateStr + 'T00:00:00');
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  const y = d.getFullYear();
-  const mo = String(d.getMonth() + 1).padStart(2, '0');
-  const da = String(d.getDate()).padStart(2, '0');
-  return `${y}-${mo}-${da}`;
+  const { year, month, day } = parseDateParts(dateStr);
+  const utcMs = Date.UTC(year, month - 1, day);
+  const dow = new Date(utcMs).getUTCDay(); // 0=Sun, 1=Mon, ...
+  const diff = dow === 0 ? -6 : 1 - dow;
+  const monMs = Date.UTC(year, month - 1, day + diff);
+  const mon = new Date(monMs);
+  return toDateString(mon.getUTCFullYear(), mon.getUTCMonth() + 1, mon.getUTCDate());
 }
 
 function getSunday(dateStr: string): string {
@@ -497,9 +527,14 @@ export async function getWeeklyRoster(
 
   // Fetch schedules for the date range
   const schedRes = await client.query(
-    `SELECT * FROM employee_work_schedules
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
      WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
-    [query.property_id, monday, sunday]
+     [query.property_id, monday, sunday]
   );
 
   const scheduleMap = new Map<string, EmployeeWorkSchedule>();
@@ -570,7 +605,12 @@ export async function getMonthlyRoster(
 
   // Fetch schedules for the month
   const schedRes = await client.query(
-    `SELECT * FROM employee_work_schedules
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
      WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
     [property_id, firstDay, lastDateStr]
   );
@@ -615,7 +655,7 @@ export async function assignSchedule(
   const propertyTimezone = await fetchPropertyTimezone(client, property_id);
 
   const existingRes = await client.query(
-    'SELECT * FROM employee_work_schedules WHERE property_id = $1 AND employee_id = $2 AND work_date = $3',
+    'SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id, schedule_status, work_status, scheduled_start_at, scheduled_end_at, department_snapshot, position_snapshot, published_at, published_by_user_id, published_by_name, notes, created_by_user_id, updated_by_user_id, created_at, updated_at FROM employee_work_schedules WHERE property_id = $1 AND employee_id = $2 AND work_date = $3',
     [property_id, employee_id, work_date]
   );
   const existing = existingRes.rows.length > 0 ? formatSchedule(existingRes.rows[0]) : null;
@@ -678,7 +718,7 @@ export async function assignSchedule(
        existing.work_status, newWorkStatus, notes || null, validUserId, actor.name]
     );
 
-    const updatedRes = await client.query( 'SELECT * FROM employee_work_schedules WHERE id = $1', [existing.id]);
+    const updatedRes = await client.query( 'SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id, schedule_status, work_status, scheduled_start_at, scheduled_end_at, department_snapshot, position_snapshot, published_at, published_by_user_id, published_by_name, notes, created_by_user_id, updated_by_user_id, created_at, updated_at FROM employee_work_schedules WHERE id = $1', [existing.id]);
     return formatSchedule(updatedRes.rows[0]);
   }
 
@@ -748,7 +788,7 @@ export async function assignSchedule(
        existing.work_status, resolvedWorkStatus, notes || null, validUserId, actor.name]
     );
 
-    const updatedRes = await client.query( 'SELECT * FROM employee_work_schedules WHERE id = $1', [existing.id]);
+    const updatedRes = await client.query( 'SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id, schedule_status, work_status, scheduled_start_at, scheduled_end_at, department_snapshot, position_snapshot, published_at, published_by_user_id, published_by_name, notes, created_by_user_id, updated_by_user_id, created_at, updated_at FROM employee_work_schedules WHERE id = $1', [existing.id]);
     return formatSchedule(updatedRes.rows[0]);
   }
 
@@ -758,7 +798,11 @@ export async function assignSchedule(
        scheduled_start_at, scheduled_end_at, department_snapshot, position_snapshot, notes,
        created_by_user_id, updated_by_user_id)
      VALUES ($1,$2,$3,$4,'DRAFT',$5,$6,$7,$8,$9,$10,$11,$12)
-     RETURNING *`,
+     RETURNING id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+               schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+               department_snapshot, position_snapshot, published_at, published_by_user_id,
+               published_by_name, notes, created_by_user_id, updated_by_user_id,
+               created_at, updated_at`,
     [property_id, employee_id, work_date, resolvedShiftTemplateId, resolvedWorkStatus,
      scheduled_start_at, scheduled_end_at, emp.dept_name, emp.pos_name, notes, validUserId, validUserId]
   );
@@ -823,8 +867,9 @@ export async function bulkAssignSchedule(
     if (!days_of_week || days_of_week.length === 0) {
       allDates.push(current);
     } else {
-      const d = new Date(current + 'T00:00:00');
-      if (days_of_week.includes(d.getDay())) {
+      const { year, month, day } = parseDateParts(current);
+      const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+      if (days_of_week.includes(dow)) {
         allDates.push(current);
       }
     }
@@ -876,7 +921,12 @@ export async function copyWeek(
 
   // Fetch source schedules
   const sourceRes = await client.query(
-    `SELECT * FROM employee_work_schedules
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
      WHERE property_id = $1 AND work_date >= $2 AND work_date <= $3`,
     [property_id, sourceMonday, sourceSunday]
   );
@@ -900,9 +950,7 @@ export async function copyWeek(
 
   for (const sourceRow of sourceRes.rows) {
     const sourceDate = toDateStr(sourceRow.work_date);
-    const srcD = new Date(sourceDate + 'T00:00:00');
-    const srcMonday = new Date(sourceMonday + 'T00:00:00');
-    const dayOffset = Math.round((srcD.getTime() - srcMonday.getTime()) / (1000 * 60 * 60 * 24));
+    const dayOffset = calendarDayNumber(sourceDate) - calendarDayNumber(sourceMonday);
     const targetDate = addDays(targetMonday, dayOffset);
 
     const existingRes = await client.query(
@@ -1044,7 +1092,12 @@ export async function getScheduleForAttendance(
   const { property_id, employee_id, work_date } = query;
 
   const schedRes = await client.query(
-    `SELECT * FROM employee_work_schedules
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
      WHERE property_id = $1 AND employee_id = $2 AND work_date = $3
        AND schedule_status = 'PUBLISHED'`,
     [property_id, employee_id, work_date]

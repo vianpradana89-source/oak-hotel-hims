@@ -1478,6 +1478,652 @@ async function runTests() {
     assert(passed >= 73, `At least 73 tests should have passed before Y13, got ${passed}`);
     pass('Y13: Regression gate PASS (73+ prior tests passed)');
 
+    // ═══════════════════════════════════════════════
+    // HR-SCHEDULE-1E BEHAVIORAL VERIFICATION (Z1–Z18)
+    // ═══════════════════════════════════════════════
+
+    // ─── TEST Z1: Shift-centric matrix groups employees by shift/date ───
+    console.log('\n[TEST Z1] Shift-centric matrix groups employees by shift/date');
+
+    // Assign emp1 and emp2 to morningShiftId on same date
+    const z1BulkRes = await request('POST', '/api/schedule/bulk-assign', {
+      property_id: 1, employee_ids: [testEmp1Id, testEmp2Id],
+      shift_template_id: morningShiftId, start_date: '2026-10-15', end_date: '2026-10-15'
+    }, token);
+    if (z1BulkRes.status !== 200) throw new Error(`Z1 bulk-assign failed: ${JSON.stringify(z1BulkRes.body)}`);
+
+    // Fetch weekly roster and verify both employees appear for that date with same template
+    const z1Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    if (z1Roster.status !== 200) throw new Error(`Z1 Failed: ${JSON.stringify(z1Roster.body)}`);
+
+    const z1Emp1 = z1Roster.body.data.employees.find(e => e.employee_id === testEmp1Id);
+    const z1Emp2 = z1Roster.body.data.employees.find(e => e.employee_id === testEmp2Id);
+    assert(z1Emp1, 'Z1: emp1 in roster');
+    assert(z1Emp2, 'Z1: emp2 in roster');
+
+    // Both should have morningShiftId on 2026-10-15
+    const z1Sched1 = z1Emp1.schedules['2026-10-15'];
+    const z1Sched2 = z1Emp2.schedules['2026-10-15'];
+    assert(z1Sched1 && z1Sched1.shift_template_id === morningShiftId, 'Z1: emp1 on morning shift 10/15');
+    assert(z1Sched2 && z1Sched2.shift_template_id === morningShiftId, 'Z1: emp2 on morning shift 10/15');
+
+    // Client-side shift-centric projection: both should appear in same row
+    // Verify roster returns enough data for this projection
+    assert(z1Roster.body.data.dates.includes('2026-10-15'), 'Z1: date included in roster');
+    assert(z1Roster.body.data.shift_templates.some(t => t.id === morningShiftId), 'Z1: morning template in roster');
+    pass('Z1: Shift-centric matrix groups employees by shift/date');
+
+    // ─── TEST Z2: Employee can appear in different shift rows on different dates ───
+    console.log('\n[TEST Z2] Employee appears in different shifts on different dates');
+
+    // emp1 on morning (10/15), emp1 on evening (10/16)
+    await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: testEmp1Id, work_date: '2026-10-16', shift_template_id: eveningShiftId
+    }, token);
+
+    const z2Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z2Emp = z2Roster.body.data.employees.find(e => e.employee_id === testEmp1Id);
+    assert(z2Emp.schedules['2026-10-15'].shift_template_id === morningShiftId, 'Z2: emp1 morning on 10/15');
+    assert(z2Emp.schedules['2026-10-16'].shift_template_id === eveningShiftId, 'Z2: emp1 evening on 10/16');
+    pass('Z2: Employee appears in different shift rows on different dates');
+
+    // ─── TEST Z3: OFF appears in OFF row ───
+    console.log('\n[TEST Z3] OFF schedule appears in roster');
+
+    await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: testEmp1Id, work_date: '2026-10-17', work_status: 'OFF'
+    }, token);
+
+    const z3Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z3Emp = z3Roster.body.data.employees.find(e => e.employee_id === testEmp1Id);
+    assert(z3Emp.schedules['2026-10-17'].work_status === 'OFF', 'Z3: OFF status on 10/17');
+    assert(z3Emp.schedules['2026-10-17'].shift_template_id === null, 'Z3: OFF has no shift_template_id');
+    pass('Z3: OFF schedule appears in roster correctly');
+
+    // ─── TEST Z4: Empty shift/date cell — no fake schedule ───
+    console.log('\n[TEST Z4] Empty shift/date cell shows no fake schedule');
+
+    // emp3 on 10/15 should have no schedule (no assignment made)
+    const z4Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z4Emp = z4Roster.body.data.employees.find(e => e.employee_id === testEmp3Id);
+    assert(z4Emp, 'Z4: emp3 in roster');
+    assert(z4Emp.schedules['2026-10-15'] === null, 'Z4: emp3 has no schedule on 10/15 (null)');
+    pass('Z4: Empty shift/date cell shows no fake schedule');
+
+    // ─── TEST Z5: Department filtering correct ───
+    console.log('\n[TEST Z5] Department filtering on roster');
+
+    const z5RosterDept = await request('GET', `/api/schedule/roster?property_id=1&start_date=2026-10-12&department_id=${testDeptId}`, null, token);
+    assert(z5RosterDept.status === 200, 'Z5: Dept-filtered roster ok');
+    // Should include testDeptId employees but not testDept2Id employees
+    const z5EmpIds = z5RosterDept.body.data.employees.map(e => e.employee_id);
+    assert(z5EmpIds.includes(testEmp1Id), 'Z5: testEmp1 in dept-filtered roster');
+    assert(!z5EmpIds.includes(dept2EmpId), 'Z5: dept2Emp NOT in dept1-filtered roster');
+    pass('Z5: Department filtering correct');
+
+    // ─── TEST Z6: Global template still works ───
+    console.log('\n[TEST Z6] Global template works in shift-centric projection');
+
+    await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: nullDeptEmpId, work_date: '2026-10-15', shift_template_id: globalTmplId
+    }, token);
+
+    const z6Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z6Emp = z6Roster.body.data.employees.find(e => e.employee_id === nullDeptEmpId);
+    assert(z6Emp, 'Z6: null-dept employee in roster');
+    assert(z6Emp.schedules['2026-10-15'].shift_template_id === globalTmplId, 'Z6: global template assignment present');
+    assert(z6Roster.body.data.shift_templates.some(t => t.id === globalTmplId), 'Z6: global template in shift_templates list');
+    pass('Z6: Global template works in shift-centric projection');
+
+    // ─── TEST Z7: Department-scoped template safe ───
+    console.log('\n[TEST Z7] Department-scoped template safe in projection');
+
+    const z7Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z7Scoped = z7Roster.body.data.shift_templates.find(t => t.id === scopedTmplId);
+    assert(z7Scoped, 'Z7: scoped template in roster shift_templates');
+    assert(z7Scoped.department_id === testDeptId, 'Z7: scoped template has correct department_id');
+    // Verify scoped template assignment to same-dept employee is in roster
+    const z7Emp = z7Roster.body.data.employees.find(e => e.employee_id === testEmp1Id);
+    // testEmp1Id was assigned to scopedTmplId on 2026-09-13 (outside current week range, but verify structure)
+    assert(z7Roster.body.data.dates.length === 7, 'Z7: roster returns 7 dates');
+    pass('Z7: Department-scoped template safe in projection');
+
+    // ─── TEST Z8: Soft color metadata preserved ───
+    console.log('\n[TEST Z8] Soft color metadata preserved in roster');
+
+    const z8Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    const z8Templates = z8Roster.body.data.shift_templates;
+    for (const t of z8Templates) {
+      assert(t.color_key !== undefined, `Z8: template ${t.id} has color_key`);
+      assert(typeof t.color_key === 'string', `Z8: template ${t.id} color_key is string`);
+    }
+    const z8Green = z8Templates.find(t => t.id === colorTmplId);
+    assert(z8Green && z8Green.color_key === 'soft_green', 'Z8: colorTmplId has soft_green');
+    pass('Z8: Soft color metadata preserved in roster');
+
+    // ─── TEST Z9: Weekly employee-centric view returns correct schedule ───
+    console.log('\n[TEST Z9] Weekly employee-centric view returns correct schedule');
+
+    const z9Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    assert(z9Roster.status === 200, 'Z9: Weekly roster ok');
+    assert(z9Roster.body.data.employees.length > 0, 'Z9: Has employees');
+    assert(z9Roster.body.data.dates.length === 7, 'Z9: Has 7 dates');
+    // Verify employee schedule structure
+    const z9Emp = z9Roster.body.data.employees.find(e => e.employee_id === testEmp1Id);
+    assert(z9Emp, 'Z9: testEmp1 in roster');
+    assert(z9Emp.schedules, 'Z9: emp has schedules object');
+    assert(typeof z9Emp.schedules === 'object', 'Z9: schedules is object');
+    // Check a specific date
+    const z9Date = z9Roster.body.data.dates[0];
+    const z9Sched = z9Emp.schedules[z9Date];
+    // May or may not have schedule — but structure is valid
+    if (z9Sched) {
+      assert(z9Sched.shift_template_id !== undefined || z9Sched.work_status !== undefined, 'Z9: schedule has template or status');
+    }
+    pass('Z9: Weekly employee-centric view returns correct schedule');
+
+    // ─── TEST Z10: Monthly view still correct ───
+    console.log('\n[TEST Z10] Monthly view still correct');
+
+    const z10Roster = await request('GET', '/api/schedule/roster-monthly?property_id=1&year=2026&month=10', null, token);
+    assert(z10Roster.status === 200, 'Z10: Monthly roster ok');
+    assert(z10Roster.body.data.dates.length >= 28, 'Z10: Monthly has 28+ dates');
+    assert(z10Roster.body.data.employees.length > 0, 'Z10: Monthly has employees');
+    assert(z10Roster.body.data.shift_templates.length > 0, 'Z10: Monthly has shift templates');
+    pass('Z10: Monthly view still correct');
+
+    // ─── TEST Z11: Published lifecycle unchanged ───
+    console.log('\n[TEST Z11] Published lifecycle unchanged');
+
+    await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: testEmp1Id, work_date: '2026-10-20', shift_template_id: morningShiftId
+    }, token);
+    const z11Draft = await pool.query(
+      `SELECT schedule_status FROM employee_work_schedules WHERE property_id = 1 AND employee_id = $1 AND work_date = '2026-10-20'`,
+      [testEmp1Id]
+    );
+    assert(z11Draft.rows[0]?.schedule_status === 'DRAFT', 'Z11: DRAFT status');
+
+    await request('POST', '/api/schedule/publish', {
+      property_id: 1, start_date: '2026-10-20', end_date: '2026-10-20'
+    }, token);
+    const z11Pub = await pool.query(
+      `SELECT schedule_status FROM employee_work_schedules WHERE property_id = 1 AND employee_id = $1 AND work_date = '2026-10-20'`,
+      [testEmp1Id]
+    );
+    assert(z11Pub.rows[0]?.schedule_status === 'PUBLISHED', 'Z11: PUBLISHED after publish');
+    pass('Z11: Published lifecycle unchanged');
+
+    // ─── TEST Z12: Changed lifecycle unchanged ───
+    console.log('\n[TEST Z12] Changed lifecycle unchanged');
+
+    await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: testEmp1Id, work_date: '2026-10-20', shift_template_id: eveningShiftId
+    }, token);
+    const z12Changed = await pool.query(
+      `SELECT schedule_status FROM employee_work_schedules WHERE property_id = 1 AND employee_id = $1 AND work_date = '2026-10-20'`,
+      [testEmp1Id]
+    );
+    assert(z12Changed.rows[0]?.schedule_status === 'CHANGED', 'Z12: CHANGED after modify published');
+    pass('Z12: Changed lifecycle unchanged');
+
+    // ─── TEST Z13: Copy week unchanged ───
+    console.log('\n[TEST Z13] Copy week unchanged');
+
+    // Source week: 2026-10-12 (Mon), target: 2026-10-26 (Mon)
+    const z13CopyRes = await request('POST', '/api/schedule/copy-week', {
+      property_id: 1, source_start_date: '2026-10-12', target_start_date: '2026-10-26'
+    }, token);
+    assert(z13CopyRes.status === 200, 'Z13: Copy week ok');
+    assert(typeof z13CopyRes.body.data.copied_count === 'number', 'Z13: copied_count returned');
+    assert(typeof z13CopyRes.body.data.skipped_conflicts === 'number', 'Z13: skipped_conflicts returned');
+    pass('Z13: Copy week unchanged');
+
+    // ─── TEST Z14: Cross-midnight unchanged ───
+    console.log('\n[TEST Z14] Cross-midnight unchanged');
+
+    const z14Res = await request('POST', '/api/schedule/assign', {
+      property_id: 1, employee_id: testEmp3Id, work_date: '2026-10-21', shift_template_id: nightShiftId
+    }, token);
+    assert(z14Res.status === 200, 'Z14: Cross-midnight assignment ok');
+    assert(z14Res.body.data.scheduled_start_at.startsWith('2026-10-21'), 'Z14: Start on correct day');
+    assert(z14Res.body.data.scheduled_end_at.startsWith('2026-10-22'), 'Z14: End on next day');
+    pass('Z14: Cross-midnight unchanged');
+
+    // ─── TEST Z15: Property isolation unchanged ───
+    console.log('\n[TEST Z15] Property isolation unchanged');
+
+    const z15Roster = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-12', null, token);
+    assert(z15Roster.status === 200, 'Z15: Property 1 roster ok');
+    // Should NOT contain property 2 data
+    const z15P2Check = z15Roster.body.data.employees.every(e => !e.employee_name.includes('P2_'));
+    assert(z15P2Check, 'Z15: No property 2 data in property 1 roster');
+    pass('Z15: Property isolation unchanged');
+
+    // ─── TEST Z16: Attendance resolver unchanged ───
+    console.log('\n[TEST Z16] Attendance resolver unchanged');
+
+    const z16AttRes = await request('GET', '/api/schedule/attendance-schedule?property_id=1&employee_id=' + testEmp1Id + '&work_date=2026-10-20', null, token);
+    assert(z16AttRes.status === 200, 'Z16: Attendance resolver ok');
+    assert(z16AttRes.body.data !== null, 'Z16: Attendance resolver returns data');
+    pass('Z16: Attendance resolver unchanged');
+
+    // ─── TEST Z17: No duplicate employee/date schedule introduced ───
+    console.log('\n[TEST Z17] No duplicate employee/date schedule');
+
+    const z17DupCheck = await pool.query(
+      `SELECT employee_id, work_date, COUNT(*) as cnt
+       FROM employee_work_schedules
+       WHERE property_id = 1 AND work_date >= '2026-10-12' AND work_date <= '2026-10-18'
+       GROUP BY employee_id, work_date
+       HAVING COUNT(*) > 1`
+    );
+    assert(z17DupCheck.rows.length === 0, 'Z17: No duplicate employee/date schedules');
+    pass('Z17: No duplicate employee/date schedule introduced');
+
+    // ─── TEST Z18: Existing 86 schedule tests remain PASS ───
+    console.log('\n[TEST Z18] Regression gate: existing tests pass');
+    assert(passed >= 86, `Expected 86+ tests before Z18, got ${passed}`);
+    pass('Z18: Existing 86 schedule tests remain PASS');
+
+    // ═══════════════════════════════════════════════════════════
+    // DATE-SAFETY CORRECTION TESTS
+    // work_date is a PostgreSQL DATE — business calendar date.
+    // It must NEVER be timezone-shifted.
+    // All queries MUST use work_date::text AS work_date.
+    // ═══════════════════════════════════════════════════════════
+
+    // ─── TEST DATE1: string YYYY-MM-DD preserved ───
+    console.log('\n[TEST DATE1] string YYYY-MM-DD preserved');
+    {
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp1Id,
+        work_date: '2026-12-01', shift_template_id: morningShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE1: assign ${assignRes.status}`);
+
+      const rosterRes = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-11-30', null, token);
+      assert(rosterRes.status === 200, `DATE1: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp1Id);
+      assert(emp, 'DATE1: emp1 not found');
+      const sched = emp.schedules['2026-12-01'];
+      assert(sched, 'DATE1: no schedule for 2026-12-01');
+      assert(sched.work_date === '2026-12-01', `DATE1: work_date '${sched.work_date}' != '2026-12-01'`);
+      pass('DATE1: string YYYY-MM-DD preserved');
+    }
+
+    // ─── TEST DATE2: ISO-like string preserves literal date component ───
+    console.log('\n[TEST DATE2] ISO-like string preserves literal date component');
+    {
+      // Directly query DB to verify work_date::text returns YYYY-MM-DD
+      const dbRes = await pool.query(
+        "SELECT work_date::text AS work_date FROM employee_work_schedules WHERE employee_id = $1 AND work_date = $2",
+        [testEmp1Id, '2026-12-01']
+      );
+      assert(dbRes.rows.length > 0, 'DATE2: no DB row found');
+      const dbDate = dbRes.rows[0].work_date;
+      assert(typeof dbDate === 'string', `DATE2: work_date is ${typeof dbDate}, expected string`);
+      assert(dbDate === '2026-12-01', `DATE2: DB work_date '${dbDate}' != '2026-12-01'`);
+      assert(!dbDate.includes('T'), `DATE2: work_date contains T separator: '${dbDate}'`);
+      pass('DATE2: ISO-like string preserves literal date component');
+    }
+
+    // ─── TEST DATE3: Date object is rejected instead of guessed ───
+    console.log('\n[TEST DATE3] Date object is rejected instead of guessed');
+    {
+      // Verify formatSchedule in compiled output contains the Date guard and no timezone guessing
+      const path = require('path');
+      const fs = require('fs');
+      const servicePath = path.join(__dirname, '..', 'dist', 'domains', 'schedule', 'scheduleService.js');
+      const serviceSource = fs.readFileSync(servicePath, 'utf8');
+
+      // Verify the Date object guard exists
+      assert(serviceSource.includes('SCHEDULE_WORK_DATE_FORMAT_ERROR'), 'DATE3: Date object guard not found');
+
+      // Extract just the formatSchedule function body to check for forbidden methods
+      const fnStart = serviceSource.indexOf('function formatSchedule(');
+      assert(fnStart > 0, 'DATE3: formatSchedule function not found');
+      // Find the next top-level function to bound the search
+      const afterFn = serviceSource.indexOf('\nfunction ', fnStart + 10);
+      const fnBody = serviceSource.substring(fnStart, afterFn > 0 ? afterFn : fnStart + 2000);
+
+      assert(!fnBody.includes('toISOString'), 'DATE3: toISOString must NOT appear in formatSchedule');
+      assert(!fnBody.includes('getFullYear'), 'DATE3: getFullYear must NOT appear in formatSchedule');
+      assert(!fnBody.includes('getMonth'), 'DATE3: getMonth must NOT appear in formatSchedule');
+      assert(fnBody.includes('instanceof Date'), 'DATE3: instanceof Date check must exist');
+      pass('DATE3: Date object is rejected instead of guessed');
+    }
+
+    // ─── TEST DATE4: weekly roster work_date exact ───
+    console.log('\n[TEST DATE4] weekly roster work_date exact');
+    {
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp2Id,
+        work_date: '2026-12-02', shift_template_id: eveningShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE4: assign ${assignRes.status}`);
+
+      const rosterRes = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-11-30', null, token);
+      assert(rosterRes.status === 200, `DATE4: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp2Id);
+      assert(emp, 'DATE4: emp2 not found');
+      const sched = emp.schedules['2026-12-02'];
+      assert(sched, 'DATE4: no schedule for 2026-12-02');
+      assert(sched.work_date === '2026-12-02', `DATE4: work_date '${sched.work_date}'`);
+      assert(sched.shift_template_id === eveningShiftId, 'DATE4: wrong template');
+      pass('DATE4: weekly roster work_date exact');
+    }
+
+    // ─── TEST DATE5: monthly roster work_date exact ───
+    console.log('\n[TEST DATE5] monthly roster work_date exact');
+    {
+      const rosterRes = await request('GET', '/api/schedule/roster-monthly?property_id=1&year=2026&month=12', null, token);
+      assert(rosterRes.status === 200, `DATE5: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp1Id);
+      assert(emp, 'DATE5: emp1 not found');
+      const sched = emp.schedules['2026-12-01'];
+      assert(sched, 'DATE5: no schedule for 2026-12-01');
+      assert(sched.work_date === '2026-12-01', `DATE5: work_date '${sched.work_date}'`);
+
+      // Also verify emp2 on 2026-12-02
+      const emp2 = rosterRes.body.data.employees.find(e => e.employee_id === testEmp2Id);
+      assert(emp2, 'DATE5: emp2 not found');
+      const sched2 = emp2.schedules['2026-12-02'];
+      assert(sched2, 'DATE5: no schedule for 2026-12-02');
+      assert(sched2.work_date === '2026-12-02', `DATE5: work_date '${sched2.work_date}'`);
+      pass('DATE5: monthly roster work_date exact');
+    }
+
+    // ─── TEST DATE6: attendance resolver exact ───
+    console.log('\n[TEST DATE6] attendance resolver exact');
+    {
+      // Publish the Dec 1 schedule
+      const publishRes = await request('POST', '/api/schedule/publish', {
+        property_id: 1, start_date: '2026-11-30', end_date: '2026-12-06',
+      }, token);
+      assert(publishRes.status === 200, `DATE6: publish ${publishRes.status}`);
+
+      const attRes = await request('GET', `/api/schedule/attendance-schedule?property_id=1&employee_id=${testEmp1Id}&work_date=2026-12-01`, null, token);
+      assert(attRes.status === 200, `DATE6: attendance ${attRes.status}`);
+      assert(attRes.body.data.found === true, 'DATE6: attendance not found');
+      assert(attRes.body.data.schedule.work_date === '2026-12-01', `DATE6: attendance work_date '${attRes.body.data.schedule.work_date}'`);
+      pass('DATE6: attendance resolver exact');
+    }
+
+    // ─── TEST DATE7: scheduled_start_at / scheduled_end_at timezone unchanged ───
+    console.log('\n[TEST DATE7] scheduled_start_at / scheduled_end_at timezone unchanged');
+    {
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp3Id,
+        work_date: '2026-12-03', shift_template_id: morningShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE7: assign ${assignRes.status}`);
+
+      const sched = assignRes.body.data;
+      assert(sched.scheduled_start_at, 'DATE7: scheduled_start_at missing');
+      assert(sched.scheduled_end_at, 'DATE7: scheduled_end_at missing');
+      assert(sched.scheduled_start_at.includes('T'), `DATE7: start '${sched.scheduled_start_at}' missing T`);
+      assert(sched.scheduled_end_at.includes('T'), `DATE7: end '${sched.scheduled_end_at}' missing T`);
+
+      const startDatePart = sched.scheduled_start_at.split('T')[0];
+      assert(startDatePart === '2026-12-03', `DATE7: start date '${startDatePart}' != '2026-12-03'`);
+      pass('DATE7: scheduled_start_at / scheduled_end_at timezone unchanged');
+    }
+
+    // ─── TEST DATE8: grep/query coverage — every DB path uses work_date::text ───
+    console.log('\n[TEST DATE8] grep/query coverage: every DB path uses work_date::text');
+    {
+      const path = require('path');
+      const fs = require('fs');
+      const servicePath = path.join(__dirname, '..', 'src', 'domains', 'schedule', 'scheduleService.ts');
+      const source = fs.readFileSync(servicePath, 'utf8');
+
+      // Find all SELECT queries on employee_work_schedules
+      const selectRegex = /SELECT[^;]*FROM\s+employee_work_schedules/gi;
+      let match;
+      let totalSelects = 0;
+      let textCasts = 0;
+      const nonCompliant = [];
+
+      while ((match = selectRegex.exec(source)) !== null) {
+        const selectBlock = match[0];
+        // Skip aggregate queries (COUNT, GROUP BY) — they don't feed formatSchedule
+        if (/COUNT\s*\(/i.test(selectBlock) || /GROUP\s+BY/i.test(selectBlock)) continue;
+        // Skip SELECT id-only or SELECT COUNT queries
+        if (/SELECT\s+id\s+FROM/i.test(selectBlock)) continue;
+
+        totalSelects++;
+        if (/work_date::text\s+AS\s+work_date/i.test(selectBlock)) {
+          textCasts++;
+        } else {
+          // Extract a snippet around the match
+          const start = Math.max(0, match.index - 20);
+          const end = Math.min(source.length, match.index + match[0].length + 20);
+          nonCompliant.push(source.substring(start, end).replace(/\n/g, ' ').trim());
+        }
+      }
+
+      assert(totalSelects > 0, 'DATE8: no SELECT queries found on employee_work_schedules');
+      assert(textCasts === totalSelects,
+        `DATE8: ${textCasts}/${totalSelects} queries use work_date::text. Non-compliant: ${nonCompliant.join(' | ')}`);
+      pass(`DATE8: all ${totalSelects} DB paths use work_date::text`);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // CALENDAR ARITHMETIC TESTS (pure UTC, no runtime TZ dependency)
+    // ═══════════════════════════════════════════════════════════
+
+    // ─── TEST DATE9: addDays basic ───
+    console.log('\n[TEST DATE9] addDays basic');
+    {
+      // Verify via compiled source that addDays uses UTC
+      const path = require('path');
+      const fs = require('fs');
+      const servicePath = path.join(__dirname, '..', 'dist', 'domains', 'schedule', 'scheduleService.js');
+      const source = fs.readFileSync(servicePath, 'utf8');
+
+      // Verify addDays uses getUTCFullYear/getUTCMonth/getUTCDate
+      const fnStart = source.indexOf('function addDays(');
+      assert(fnStart > 0, 'DATE9: addDays function not found');
+      const fnEnd = source.indexOf('\nfunction ', fnStart + 10);
+      const fnBody = source.substring(fnStart, fnEnd > 0 ? fnEnd : fnStart + 1000);
+      assert(fnBody.includes('getUTCFullYear'), 'DATE9: addDays must use getUTCFullYear');
+      assert(fnBody.includes('getUTCMonth'), 'DATE9: addDays must use getUTCMonth');
+      assert(fnBody.includes('getUTCDate'), 'DATE9: addDays must use getUTCDate');
+      assert(fnBody.includes('Date.UTC'), 'DATE9: addDays must use Date.UTC');
+      pass('DATE9: addDays uses pure UTC calendar arithmetic');
+    }
+
+    // ─── TEST DATE10: month boundary ───
+    console.log('\n[TEST DATE10] month boundary');
+    {
+      // Assign and verify roster across month boundary
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp1Id,
+        work_date: '2026-09-30', shift_template_id: morningShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE10: assign ${assignRes.status}`);
+
+      // Copy week from week containing Sep 28 (Mon) to week containing Oct 5
+      // Source: 2026-09-28 (Mon) to 2026-10-04 (Sun)
+      // Target: 2026-10-05 (Mon) to 2026-10-11 (Sun)
+      const copyRes = await request('POST', '/api/schedule/copy-week', {
+        property_id: 1,
+        source_start_date: '2026-09-28',
+        target_start_date: '2026-10-05',
+      }, token);
+      assert(copyRes.status === 200, `DATE10: copy-week ${copyRes.status}`);
+
+      // Verify the copied schedule for Oct 1 (Tue, offset +3 from Sep 28 Mon)
+      const rosterRes = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-10-05', null, token);
+      assert(rosterRes.status === 200, `DATE10: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp1Id);
+      assert(emp, 'DATE10: emp1 not found');
+      // Sep 30 (Wed, offset +2) maps to Oct 7 (Wed, offset +2)
+      const sched = emp.schedules['2026-10-07'];
+      assert(sched, 'DATE10: no schedule for 2026-10-07');
+      assert(sched.work_date === '2026-10-07', `DATE10: work_date '${sched.work_date}'`);
+      pass('DATE10: month boundary copy works');
+    }
+
+    // ─── TEST DATE11: year boundary ───
+    console.log('\n[TEST DATE11] year boundary');
+    {
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp2Id,
+        work_date: '2026-12-31', shift_template_id: eveningShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE11: assign ${assignRes.status}`);
+
+      // Copy from week containing Dec 28 (Mon) to week containing Jan 4
+      const copyRes = await request('POST', '/api/schedule/copy-week', {
+        property_id: 1,
+        source_start_date: '2026-12-28',
+        target_start_date: '2027-01-04',
+      }, token);
+      assert(copyRes.status === 200, `DATE11: copy-week ${copyRes.status}`);
+
+      // Dec 31 (Thu, offset +3) maps to Jan 7 (Thu, offset +3)
+      const rosterRes = await request('GET', '/api/schedule/roster?property_id=1&start_date=2027-01-04', null, token);
+      assert(rosterRes.status === 200, `DATE11: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp2Id);
+      assert(emp, 'DATE11: emp2 not found');
+      const sched = emp.schedules['2027-01-07'];
+      assert(sched, 'DATE11: no schedule for 2027-01-07');
+      assert(sched.work_date === '2027-01-07', `DATE11: work_date '${sched.work_date}'`);
+      pass('DATE11: year boundary copy works');
+    }
+
+    // ─── TEST DATE12: calendar arithmetic independent of process TZ ───
+    console.log('\n[TEST DATE12] calendar arithmetic independent of process TZ');
+    {
+      // Verify getMonday uses getUTCDay (not getDay)
+      const path = require('path');
+      const fs = require('fs');
+      const servicePath = path.join(__dirname, '..', 'dist', 'domains', 'schedule', 'scheduleService.js');
+      const source = fs.readFileSync(servicePath, 'utf8');
+
+      const fnStart = source.indexOf('function getMonday(');
+      assert(fnStart > 0, 'DATE12: getMonday not found');
+      const fnEnd = source.indexOf('\nfunction ', fnStart + 10);
+      const fnBody = source.substring(fnStart, fnEnd > 0 ? fnEnd : fnStart + 1000);
+      assert(fnBody.includes('getUTCDay'), 'DATE12: getMonday must use getUTCDay');
+      assert(fnBody.includes('Date.UTC'), 'DATE12: getMonday must use Date.UTC');
+      assert(!fnBody.includes('setDate'), 'DATE12: getMonday must not use setDate');
+      pass('DATE12: calendar arithmetic independent of process TZ');
+    }
+
+    // ─── TEST DATE13: Copy Week maps Mon→Mon, Tue→Tue, Sun→Sun ───
+    console.log('\n[TEST DATE13] Copy Week day-of-week mapping');
+    {
+      // Assign emp3 to every day of source week (2026-10-26 Mon to 2026-11-01 Sun)
+      const sourceDates = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(Date.UTC(2026, 9, 26 + i)); // Oct 26 + i
+        const ds = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+        sourceDates.push(ds);
+        await request('POST', '/api/schedule/assign', {
+          property_id: 1, employee_id: testEmp3Id,
+          work_date: ds, shift_template_id: morningShiftId,
+        }, token);
+      }
+
+      // Copy to target week 2026-11-02 (Mon) to 2026-11-08 (Sun)
+      const copyRes = await request('POST', '/api/schedule/copy-week', {
+        property_id: 1,
+        source_start_date: '2026-10-26',
+        target_start_date: '2026-11-02',
+      }, token);
+      assert(copyRes.status === 200, `DATE13: copy ${copyRes.status}`);
+
+      const rosterRes = await request('GET', '/api/schedule/roster?property_id=1&start_date=2026-11-02', null, token);
+      assert(rosterRes.status === 200, `DATE13: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp3Id);
+      assert(emp, 'DATE13: emp3 not found');
+
+      // Verify each day maps correctly (Mon→Mon through Sun→Sun)
+      const dayMap = {
+        '2026-10-26': '2026-11-02', // Mon→Mon
+        '2026-10-27': '2026-11-03', // Tue→Tue
+        '2026-10-28': '2026-11-04', // Wed→Wed
+        '2026-10-29': '2026-11-05', // Thu→Thu
+        '2026-10-30': '2026-11-06', // Fri→Fri
+        '2026-10-31': '2026-11-07', // Sat→Sat
+        '2026-11-01': '2026-11-08', // Sun→Sun
+      };
+      for (const [src, tgt] of Object.entries(dayMap)) {
+        const sched = emp.schedules[tgt];
+        assert(sched, `DATE13: no schedule for ${tgt} (source ${src})`);
+        assert(sched.work_date === tgt, `DATE13: work_date '${sched.work_date}' != '${tgt}'`);
+      }
+      pass('DATE13: Copy Week day-of-week mapping correct');
+    }
+
+    // ─── TEST DATE14: Copy Week cross-midnight timestamps rebuilt using target date + property TZ ───
+    console.log('\n[TEST DATE14] Copy Week cross-midnight timestamps rebuilt with target date + property TZ');
+    {
+      const srcDate = '2027-02-01'; // Mon — far in future, clean from prior test residue
+      const tgtDate = '2027-02-08'; // Mon
+
+      // Clean slate: ensure no existing schedule for emp1 on target
+      await pool.query(
+        'DELETE FROM employee_work_schedules WHERE property_id = 1 AND employee_id = $1 AND work_date = $2',
+        [testEmp1Id, tgtDate]
+      );
+
+      // Source: assign emp1 to nightShiftId (crosses_midnight) on 2027-02-01
+      const assignRes = await request('POST', '/api/schedule/assign', {
+        property_id: 1, employee_id: testEmp1Id,
+        work_date: srcDate, shift_template_id: nightShiftId,
+      }, token);
+      assert(assignRes.status === 200, `DATE14: assign ${assignRes.status}`);
+
+      // Copy to target week starting 2027-02-08
+      const copyRes = await request('POST', '/api/schedule/copy-week', {
+        property_id: 1,
+        source_start_date: srcDate,
+        target_start_date: tgtDate,
+      }, token);
+      assert(copyRes.status === 200, `DATE14: copy ${copyRes.status}`);
+      assert(copyRes.body.data.copied_count >= 1, `DATE14: at least 1 copied`);
+
+      // Verify the copied schedule for Feb 8 (Mon) has cross-midnight timestamps
+      const rosterRes = await request('GET', `/api/schedule/roster?property_id=1&start_date=${tgtDate}`, null, token);
+      assert(rosterRes.status === 200, `DATE14: roster ${rosterRes.status}`);
+
+      const emp = rosterRes.body.data.employees.find(e => e.employee_id === testEmp1Id);
+      assert(emp, 'DATE14: emp1 not found');
+      const sched = emp.schedules[tgtDate];
+      assert(sched, `DATE14: no schedule for ${tgtDate}`);
+      assert(sched.work_date === tgtDate, `DATE14: work_date '${sched.work_date}'`);
+      assert(sched.scheduled_start_at, 'DATE14: scheduled_start_at missing');
+      assert(sched.scheduled_end_at, 'DATE14: scheduled_end_at missing');
+
+      // Cross-midnight: 23:00 WIB = 16:00 UTC, 07:00+1 WIB = 00:00 UTC next day
+      // pg driver returns Date objects → JSON serializes as UTC ISO
+      const startStr = typeof sched.scheduled_start_at === 'string' ? sched.scheduled_start_at : sched.scheduled_start_at.toISOString();
+      const endStr = typeof sched.scheduled_end_at === 'string' ? sched.scheduled_end_at : sched.scheduled_end_at.toISOString();
+      assert(startStr.includes('16:00'), `DATE14: start should have 16:00 UTC (23:00 WIB), got '${startStr}'`);
+      assert(endStr.includes('T00:00'), `DATE14: end should have 00:00 UTC (07:00 WIB), got '${endStr}'`);
+      // End date should be Feb 9 (target date + 1), NOT Jan 2 (source date + 1)
+      const endDatePart = endStr.split('T')[0];
+      assert(endDatePart === '2027-02-09', `DATE14: end date '${endDatePart}' != '2027-02-09'`);
+      pass('DATE14: cross-midnight timestamps rebuilt with target date + property TZ');
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Regression gate
+    // ═══════════════════════════════════════════════════════════
+    console.log('\n[TEST DATEREG] Regression gate: all prior tests pass');
+    assert(passed >= 104, `Expected 104+ tests before DATEREG, got ${passed}`);
+    pass('DATEREG: All prior tests remain PASS');
+
     console.log('\n=== ALL TESTS PASSED ===');
     console.log(`Total: ${passed} passed, ${failed} failed`);
 

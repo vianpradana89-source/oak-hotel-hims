@@ -1,14 +1,17 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { WorkShiftTemplate, EmployeeWorkSchedule, WeeklyRosterResponse, MonthlyRosterResponse, Department, ViewMode, ColorKey } from './scheduleTypes';
+import type { WeeklyRosterResponse, MonthlyRosterResponse, Department, WorkShiftTemplate, EmployeeWorkSchedule } from './scheduleTypes';
 import { COLOR_KEY_STYLES } from './scheduleTypes';
-import { ShiftTemplateManager } from './ShiftTemplateManager';
+import { ShiftRosterView } from './ShiftRosterView';
+import { EmployeeRosterView } from './EmployeeRosterView';
+import { ShiftDayModal } from './ShiftDayModal';
+import { KelolaShiftDrawer } from './KelolaShiftDrawer';
 
 interface ScheduleTabProps {
   propertyId: number;
 }
 
 const DAY_NAMES = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
-const DAY_FULL_NAMES = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+const MONTHS_ID = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 
 function getMonday(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00');
@@ -36,18 +39,8 @@ function formatDisplayDate(dateStr: string): string {
   return `${d.getDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'][d.getMonth()]}`;
 }
 
-function getDayOfWeek(dateStr: string): number {
-  return new Date(dateStr + 'T00:00:00').getDay();
-}
-
-const DEFAULT_COLOR_STYLE = COLOR_KEY_STYLES.soft_slate;
-
-function getShiftColorByColorKey(colorKey: string | undefined) {
-  if (colorKey && colorKey in COLOR_KEY_STYLES) {
-    return COLOR_KEY_STYLES[colorKey as ColorKey];
-  }
-  return DEFAULT_COLOR_STYLE;
-}
+type ScheduleMode = 'shift' | 'employee';
+type SchedulePeriod = 'weekly' | 'monthly';
 
 export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
   const [loading, setLoading] = useState(true);
@@ -55,19 +48,19 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [selectedDeptId, setSelectedDeptId] = useState<number | ''>('');
   const [weekOffset, setWeekOffset] = useState(0);
-  const [showTemplates, setShowTemplates] = useState(false);
-  const [cellMenu, setCellMenu] = useState<{ employeeId: number; date: string; x: number; y: number } | null>(null);
-  const [detailDrawer, setDetailDrawer] = useState<{ employeeId: number; date: string } | null>(null);
-  const [bulkMode, setBulkMode] = useState(false);
-  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
-  const [bulkShiftId, setBulkShiftId] = useState<number | ''>('');
+  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('shift');
+  const [viewPeriod, setViewPeriod] = useState<SchedulePeriod>('weekly');
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [monthlyRoster, setMonthlyRoster] = useState<MonthlyRosterResponse | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>('');
+
+  // Modal states
+  const [showKelolaShift, setShowKelolaShift] = useState(false);
+  const [shiftDayModal, setShiftDayModal] = useState<{ shiftType: string; templateId: number | null; date: string } | null>(null);
+  const [employeeDayModal, setEmployeeDayModal] = useState<{ employeeId: number; date: string } | null>(null);
   const [copyConfirm, setCopyConfirm] = useState<{ sourceMonday: string; targetMonday: string } | null>(null);
   const [publishConfirm, setPublishConfirm] = useState<{ monday: string; sunday: string } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string>('');
-  const [viewMode, setViewMode] = useState<ViewMode>('weekly');
-  const [monthlyRoster, setMonthlyRoster] = useState<MonthlyRosterResponse | null>(null);
-  const [monthOffset, setMonthOffset] = useState(0);
 
   const currentMonday = useMemo(() => {
     const today = new Date();
@@ -76,6 +69,12 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
   }, [weekOffset]);
 
   const currentSunday = addDays(currentMonday, 6);
+
+  const currentMonth = useMemo(() => {
+    const now = new Date();
+    now.setMonth(now.getMonth() + monthOffset);
+    return { year: now.getFullYear(), month: now.getMonth() + 1 };
+  }, [monthOffset]);
 
   const getAuthHeaders = (): HeadersInit => {
     const token = localStorage.getItem('oak_hims_auth_token');
@@ -92,12 +91,6 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
       if (data.status === 'OK') setRoster(data.data);
     } catch { /* ignore */ } finally { setLoading(false); }
   }, [propertyId, currentMonday, selectedDeptId]);
-
-  const currentMonth = useMemo(() => {
-    const now = new Date();
-    now.setMonth(now.getMonth() + monthOffset);
-    return { year: now.getFullYear(), month: now.getMonth() + 1 };
-  }, [monthOffset]);
 
   const fetchMonthlyRoster = useCallback(async () => {
     setLoading(true);
@@ -124,77 +117,9 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
 
   useEffect(() => { fetchDepartments(); }, [fetchDepartments]);
   useEffect(() => {
-    if (viewMode === 'weekly') fetchRoster();
+    if (viewPeriod === 'weekly') fetchRoster();
     else fetchMonthlyRoster();
-  }, [viewMode, fetchRoster, fetchMonthlyRoster]);
-
-  const handleCellClick = (employeeId: number, date: string, e: React.MouseEvent) => {
-    if (bulkMode) {
-      const key = `${employeeId}_${date}`;
-      setSelectedCells(prev => {
-        const next = new Set(prev);
-        if (next.has(key)) next.delete(key); else next.add(key);
-        return next;
-      });
-      return;
-    }
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    setCellMenu({ employeeId, date, x: rect.left, y: rect.bottom + 4 });
-  };
-
-  const handleAssignShift = async (employeeId: number, date: string, shiftTemplateId: number | null, workStatus?: string) => {
-    setCellMenu(null);
-    setActionLoading(true);
-    try {
-      const body: any = { property_id: propertyId, employee_id: employeeId, work_date: date };
-      if (shiftTemplateId) body.shift_template_id = shiftTemplateId;
-      if (workStatus) body.work_status = workStatus;
-      const res = await fetch('/api/schedule/assign', {
-        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Gagal mengubah jadwal');
-      await fetchRoster();
-    } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
-  };
-
-  const handleBulkAssign = async () => {
-    if (selectedCells.size === 0 || !bulkShiftId) return;
-    setActionLoading(true);
-    try {
-      const cellArray = Array.from(selectedCells).map(s => {
-        const [empId, date] = s.split('_');
-        return { employee_id: Number(empId), work_date: date };
-      });
-      // Group by employee, collect all dates
-      const byEmployee = new Map<number, string[]>();
-      for (const c of cellArray) {
-        const dates = byEmployee.get(c.employee_id) || [];
-        dates.push(c.work_date);
-        byEmployee.set(c.employee_id, dates);
-      }
-      let totalAssigned = 0;
-      for (const [empId, dates] of byEmployee) {
-        const sortedDates = dates.sort();
-        const res = await fetch('/api/schedule/bulk-assign', {
-          method: 'POST', headers: getAuthHeaders(),
-          body: JSON.stringify({
-            property_id: propertyId,
-            employee_ids: [empId],
-            shift_template_id: Number(bulkShiftId),
-            start_date: sortedDates[0],
-            end_date: sortedDates[sortedDates.length - 1],
-          }),
-        });
-        const data = await res.json();
-        if (data.status === 'OK') totalAssigned += data.data?.assigned_count || 0;
-      }
-      setSelectedCells(new Set());
-      setBulkMode(false);
-      setBulkShiftId('');
-      await fetchRoster();
-    } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
-  };
+  }, [viewPeriod, fetchRoster, fetchMonthlyRoster]);
 
   const handleCopyWeek = async () => {
     if (!copyConfirm) return;
@@ -236,79 +161,132 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
     } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
   };
 
-  // Close cell menu on outside click
-  useEffect(() => {
-    if (!cellMenu) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-cell-menu]')) setCellMenu(null);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [cellMenu]);
-
-  const getScheduleDisplay = (sched: EmployeeWorkSchedule | null, templates: WorkShiftTemplate[]) => {
-    if (!sched) return { label: '-', subLabel: '', colorClass: 'bg-white text-slate-300 border-slate-200', tooltip: '' };
-    if (sched.work_status === 'OFF') return { label: 'OFF', subLabel: '', colorClass: 'bg-slate-100 text-slate-500 border-slate-200', tooltip: 'OFF' };
-    if (sched.work_status === 'LEAVE') return { label: 'CUTI', subLabel: '', colorClass: 'bg-purple-100 text-purple-700 border-purple-200', tooltip: 'Cuti' };
-    if (sched.work_status === 'SICK') return { label: 'SAKIT', subLabel: '', colorClass: 'bg-red-100 text-red-700 border-red-200', tooltip: 'Sakit' };
-    if (sched.work_status === 'PERMISSION') return { label: 'IJIN', subLabel: '', colorClass: 'bg-orange-100 text-orange-700 border-orange-200', tooltip: 'Ijin' };
-    if (sched.work_status === 'HOLIDAY') return { label: 'LIBUR', subLabel: '', colorClass: 'bg-cyan-100 text-cyan-700 border-cyan-200', tooltip: 'Holiday' };
-
-    const tmpl = templates.find(t => t.id === sched.shift_template_id);
-    if (tmpl) {
-      const sc = getShiftColorByColorKey(tmpl.color_key);
-      const startTime = tmpl.start_time.substring(0, 5);
-      const endTime = tmpl.end_time.substring(0, 5);
-      const statusIcon = sched.schedule_status === 'PUBLISHED' ? '' : sched.schedule_status === 'CHANGED' ? ' *' : '';
-      const shiftName = tmpl.name;
-      return {
-        label: `${shiftName}${statusIcon}`,
-        subLabel: `${startTime}–${endTime}`,
-        colorClass: `${sc.bg} ${sc.text} ${sc.border}`,
-        tooltip: `${tmpl.name} (${startTime}–${endTime})${sched.schedule_status !== 'DRAFT' ? ` [${sched.schedule_status}]` : ''}`,
-      };
-    }
-    return { label: sched.work_status, subLabel: '', colorClass: 'bg-amber-100 text-amber-800 border-amber-300', tooltip: sched.work_status };
+  const handleShiftCellClick = (shiftType: string, templateId: number | null, date: string) => {
+    setShiftDayModal({ shiftType, templateId, date });
   };
 
-  const filteredEmployees = useMemo(() => {
-    if (!roster) return [];
-    let emps = roster.employees;
-    if (statusFilter) {
-      emps = emps.filter(emp => {
-        return Object.values(emp.schedules).some(s => {
-          if (!s) return false;
-          if (statusFilter === 'DRAFT') return s.schedule_status === 'DRAFT';
-          if (statusFilter === 'PUBLISHED') return s.schedule_status === 'PUBLISHED';
-          if (statusFilter === 'CHANGED') return s.schedule_status === 'CHANGED';
-          if (statusFilter === 'OFF') return s.work_status === 'OFF';
-          return true;
-        });
+  const handleEmployeeCellClick = (employeeId: number, date: string) => {
+    setEmployeeDayModal({ employeeId, date });
+  };
+
+  const handleEmployeeDaySave = async (employeeId: number, date: string, shiftTemplateId: number | null, workStatus: string) => {
+    setActionLoading(true);
+    try {
+      const body: any = { property_id: propertyId, employee_id: employeeId, work_date: date };
+      if (shiftTemplateId) body.shift_template_id = shiftTemplateId;
+      if (workStatus) body.work_status = workStatus;
+      const res = await fetch('/api/schedule/assign', {
+        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mengubah jadwal');
+      setEmployeeDayModal(null);
+      await fetchRoster();
+    } catch (err: any) { alert(err.message); } finally { setActionLoading(false); }
+  };
+
+  // Compute publish status for the current week
+  const publishStatus = useMemo(() => {
+    if (!roster) return null;
+    let hasDraft = false;
+    let hasChanged = false;
+    let hasPublished = false;
+    for (const emp of roster.employees) {
+      for (const date of roster.dates) {
+        const sched = emp.schedules[date];
+        if (!sched) continue;
+        if (sched.schedule_status === 'DRAFT') hasDraft = true;
+        if (sched.schedule_status === 'CHANGED') hasChanged = true;
+        if (sched.schedule_status === 'PUBLISHED') hasPublished = true;
+      }
     }
-    return emps;
-  }, [roster, statusFilter]);
+    if (hasChanged) return 'CHANGED';
+    if (hasDraft && hasPublished) return 'MIXED';
+    if (hasDraft) return 'DRAFT';
+    if (hasPublished) return 'PUBLISHED';
+    return null;
+  }, [roster]);
+
+  const publishStatusLabel = publishStatus === 'DRAFT' ? 'Draft' :
+    publishStatus === 'CHANGED' ? 'Ada Perubahan' :
+    publishStatus === 'PUBLISHED' ? 'Terbit' :
+    publishStatus === 'MIXED' ? 'Campuran' : null;
+
+  const publishStatusClass = publishStatus === 'DRAFT' ? 'bg-slate-100 text-slate-600' :
+    publishStatus === 'CHANGED' ? 'bg-amber-100 text-amber-800' :
+    publishStatus === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-800' :
+    publishStatus === 'MIXED' ? 'bg-blue-100 text-blue-800' : '';
+
+  const getScheduleDisplay = (sched: EmployeeWorkSchedule | null, templates: WorkShiftTemplate[]) => {
+    if (!sched) return { label: '-', subLabel: '', colorClass: 'text-slate-300', bgClass: '' };
+    if (sched.work_status === 'OFF') return { label: 'OFF', subLabel: '', colorClass: 'text-slate-500', bgClass: 'bg-slate-50' };
+    if (sched.work_status === 'LEAVE') return { label: 'Cuti', subLabel: '', colorClass: 'text-purple-600', bgClass: 'bg-purple-50' };
+    if (sched.work_status === 'SICK') return { label: 'Sakit', subLabel: '', colorClass: 'text-rose-600', bgClass: 'bg-rose-50' };
+    if (sched.work_status === 'PERMISSION') return { label: 'Ijin', subLabel: '', colorClass: 'text-amber-600', bgClass: 'bg-amber-50' };
+    if (sched.work_status === 'HOLIDAY') return { label: 'Libur', subLabel: '', colorClass: 'text-cyan-600', bgClass: 'bg-cyan-50' };
+    const tmpl = templates.find(t => t.id === sched.shift_template_id);
+    if (tmpl) {
+      const sc = COLOR_KEY_STYLES[tmpl.color_key as keyof typeof COLOR_KEY_STYLES] || COLOR_KEY_STYLES.soft_slate;
+      return {
+        label: tmpl.name, subLabel: `${tmpl.start_time.substring(0, 5)}–${tmpl.end_time.substring(0, 5)}`,
+        colorClass: sc.text, bgClass: sc.bg,
+      };
+    }
+    return { label: sched.work_status, subLabel: '', colorClass: 'text-amber-700', bgClass: 'bg-amber-50' };
+  };
+
+  // Filtered employees for monthly view
+  const filteredMonthlyEmployees = useMemo(() => {
+    if (!monthlyRoster) return [];
+    if (!statusFilter) return monthlyRoster.employees;
+    return monthlyRoster.employees.filter(emp => {
+      return Object.values(emp.schedules).some(s => {
+        if (!s) return false;
+        if (statusFilter === 'DRAFT') return s.schedule_status === 'DRAFT';
+        if (statusFilter === 'PUBLISHED') return s.schedule_status === 'PUBLISHED';
+        if (statusFilter === 'CHANGED') return s.schedule_status === 'CHANGED';
+        if (statusFilter === 'OFF') return s.work_status === 'OFF';
+        return true;
+      });
+    });
+  }, [monthlyRoster, statusFilter]);
+
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
   return (
     <div className="space-y-3">
-      {/* Toolbar */}
+      {/* ─── Top Action Bar ─── */}
       <div className="bg-white border border-slate-200/90 rounded-2xl p-3 shadow-xs">
+        {/* Row 1: Mode + Period + Navigation */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
-            {/* View Mode Toggle */}
+            {/* Schedule Mode Toggle */}
             <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
-              <button onClick={() => setViewMode('weekly')}
-                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${viewMode === 'weekly' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+              <button onClick={() => setScheduleMode('shift')}
+                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${scheduleMode === 'shift' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                Per Shift
+              </button>
+              <button onClick={() => setScheduleMode('employee')}
+                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${scheduleMode === 'employee' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                Per Karyawan
+              </button>
+            </div>
+
+            {/* Period Toggle */}
+            <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
+              <button onClick={() => setViewPeriod('weekly')}
+                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${viewPeriod === 'weekly' ? 'bg-[#1b4332]/10 text-[#1b4332]' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
                 Mingguan
               </button>
-              <button onClick={() => setViewMode('monthly')}
-                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${viewMode === 'monthly' ? 'bg-[#1b4332] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+              <button onClick={() => setViewPeriod('monthly')}
+                className={`px-3 py-1.5 text-[11px] font-bold transition cursor-pointer ${viewPeriod === 'monthly' ? 'bg-[#1b4332]/10 text-[#1b4332]' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
                 Bulanan
               </button>
             </div>
 
-            {viewMode === 'weekly' ? (
+            {/* Navigation */}
+            {viewPeriod === 'weekly' ? (
               <>
                 <button onClick={() => setWeekOffset(w => w - 1)} className="p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer" title="Minggu Sebelumnya">
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" /></svg>
@@ -329,7 +307,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" /></svg>
                 </button>
                 <span className="text-xs font-bold text-slate-800 min-w-[140px] text-center">
-                  {['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'][currentMonth.month - 1]} {currentMonth.year}
+                  {MONTHS_ID[currentMonth.month - 1]} {currentMonth.year}
                 </span>
                 <button onClick={() => setMonthOffset(m => m + 1)} className="p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer" title="Bulan Berikutnya">
                   <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
@@ -339,10 +317,17 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                 </button>
               </>
             )}
-
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Publish Status Badge */}
+            {publishStatusLabel && (
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${publishStatusClass}`}>
+                {publishStatusLabel}
+              </span>
+            )}
+
+            {/* Department Filter */}
             <select value={selectedDeptId} onChange={e => setSelectedDeptId(e.target.value ? Number(e.target.value) : '')}
               className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
               <option value="">Semua Departemen</option>
@@ -351,49 +336,34 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
               ))}
             </select>
 
-            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-              className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
-              <option value="">Semua Status</option>
-              <option value="DRAFT">Draft</option>
-              <option value="PUBLISHED">Published</option>
-              <option value="CHANGED">Changed</option>
-              <option value="OFF">OFF</option>
-            </select>
+            {/* Status Filter (monthly only) */}
+            {viewPeriod === 'monthly' && (
+              <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
+                className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
+                <option value="">Semua Status</option>
+                <option value="DRAFT">Draft</option>
+                <option value="CHANGED">Ada Perubahan</option>
+                <option value="PUBLISHED">Terbit</option>
+                <option value="OFF">OFF</option>
+              </select>
+            )}
           </div>
         </div>
 
+        {/* Row 2: Actions */}
         <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-100">
-          <button onClick={() => setShowTemplates(!showTemplates)}
-            className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
-            {showTemplates ? 'Sembunyikan Template' : 'Kelola Template'}
-          </button>
           <button onClick={() => {
             const prevMonday = addDays(currentMonday, -7);
             setCopyConfirm({ sourceMonday: prevMonday, targetMonday: currentMonday });
           }}
             className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
-            Copy Minggu Lalu
+            Salin Minggu Lalu
           </button>
           <div className="flex-1" />
-          <button onClick={() => setBulkMode(!bulkMode)}
-            className={`px-3 py-1.5 text-[11px] font-bold rounded-lg transition cursor-pointer ${bulkMode ? 'bg-[#c5a880] text-white' : 'border border-[#c5a880] text-[#8b7355] hover:bg-[#fbf7ee]'}`}>
-            {bulkMode ? `Batal Bulk (${selectedCells.size})` : 'Terapkan Shift'}
+          <button onClick={() => setShowKelolaShift(true)}
+            className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+            Kelola Shift
           </button>
-          {bulkMode && selectedCells.size > 0 && (
-            <select value={bulkShiftId} onChange={e => setBulkShiftId(e.target.value ? Number(e.target.value) : '')}
-              className="px-2 py-1.5 text-[11px] font-bold rounded-lg border border-[#c5a880] bg-white text-slate-700 focus:outline-none cursor-pointer">
-              <option value="">Pilih Shift...</option>
-              {roster?.shift_templates.filter(t => t.is_active).map(t => (
-                <option key={t.id} value={t.id}>{t.code} - {t.name}</option>
-              ))}
-            </select>
-          )}
-          {bulkMode && selectedCells.size > 0 && bulkShiftId && (
-            <button onClick={handleBulkAssign} disabled={actionLoading}
-              className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#c5a880] text-white hover:bg-[#b3956d] disabled:opacity-50 cursor-pointer">
-              {actionLoading ? '...' : `Apply (${selectedCells.size})`}
-            </button>
-          )}
           <button onClick={() => setPublishConfirm({ monday: currentMonday, sunday: currentSunday })}
             className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] transition cursor-pointer">
             Publish Jadwal
@@ -401,87 +371,25 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         </div>
       </div>
 
-      {/* Shift Template Manager */}
-      {showTemplates && (
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs">
-          <ShiftTemplateManager propertyId={propertyId} onTemplatesUpdated={fetchRoster} />
-        </div>
-      )}
-
-      {/* Roster Grid */}
+      {/* ─── Roster Content ─── */}
       <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-        {loading ? (
-          <div className="p-12 text-center text-xs text-slate-500">
-            <div className="w-8 h-8 rounded-full border-2 border-[#1b4332] border-t-transparent animate-spin mx-auto mb-2" />
-            Memuat jadwal kerja...
-          </div>
-        ) : viewMode === 'weekly' ? (
-          /* Weekly Roster */
-          filteredEmployees.length === 0 ? (
-            <div className="p-12 text-center text-slate-400 text-xs">
-              Tidak ada data jadwal kerja untuk periode ini.
-            </div>
+        {viewPeriod === 'weekly' ? (
+          scheduleMode === 'shift' ? (
+            <ShiftRosterView
+              roster={roster}
+              loading={loading}
+              onCellClick={handleShiftCellClick}
+            />
           ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-[11px] border-collapse min-w-[900px]">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200/80">
-                  <th className="py-2.5 px-3 font-bold text-slate-600 uppercase tracking-wider sticky left-0 bg-slate-50 z-10 min-w-[180px]">
-                    Nama
-                  </th>
-                  {roster?.dates.map((date) => {
-                    const dow = getDayOfWeek(date);
-                    const isToday = date === formatDate(new Date());
-                    return (
-                      <th key={date} className={`py-2.5 px-2 font-bold text-center uppercase tracking-wider min-w-[90px] ${isToday ? 'bg-[#1b4332]/5' : ''}`}>
-                        <div className="text-[10px] text-slate-500">{DAY_NAMES[dow]}</div>
-                        <div className={`text-[11px] ${isToday ? 'text-[#1b4332] font-extrabold' : 'text-slate-800'}`}>{date.split('-')[2]}</div>
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredEmployees.map(emp => (
-                  <tr key={emp.employee_id} className="hover:bg-slate-50/60 transition group">
-                    <td className="py-2 px-3 sticky left-0 bg-white group-hover:bg-slate-50/60 z-10">
-                      <div className="font-bold text-slate-900 text-[11px] leading-tight">{emp.employee_name}</div>
-                      <div className="text-[10px] text-slate-400 leading-tight">
-                        {emp.department_name || ''} {emp.position_name ? `• ${emp.position_name}` : ''}
-                      </div>
-                    </td>
-                    {roster?.dates.map(date => {
-                      const sched = emp.schedules[date];
-                      const display = getScheduleDisplay(sched, roster.shift_templates);
-                      const cellKey = `${emp.employee_id}_${date}`;
-                      const isSelected = selectedCells.has(cellKey);
-                      return (
-                        <td key={date}
-                          onClick={(e) => handleCellClick(emp.employee_id, date, e)}
-                          className={`py-1.5 px-1.5 text-center cursor-pointer transition ${
-                            isSelected ? 'ring-2 ring-[#c5a880] ring-inset bg-[#fbf7ee]' : 'hover:bg-slate-50'
-                          }`}>
-                          <div
-                            className={`inline-block px-2 py-1 rounded-lg border text-[10px] font-bold min-w-[52px] ${display.colorClass}`}
-                            title={display.tooltip}
-                          >
-                            <div className="leading-tight">{display.label}</div>
-                            {display.subLabel && (
-                              <div className="text-[8px] font-normal opacity-75 leading-tight">{display.subLabel}</div>
-                            )}
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+            <EmployeeRosterView
+              roster={roster}
+              loading={loading}
+              onCellClick={handleEmployeeCellClick}
+            />
           )
         ) : (
-          /* Monthly Roster */
-          !monthlyRoster || monthlyRoster.employees.length === 0 ? (
+          /* Monthly View */
+          !monthlyRoster || filteredMonthlyEmployees.length === 0 ? (
             <div className="p-12 text-center text-slate-400 text-xs">
               Tidak ada data jadwal kerja untuk bulan ini.
             </div>
@@ -491,54 +399,108 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200/80">
                     <th className="py-2 px-2 font-bold text-slate-600 uppercase tracking-wider sticky left-0 bg-slate-50 z-10 min-w-[140px]">
-                      Karyawan
+                      {scheduleMode === 'shift' ? 'Keterangan Shift' : 'Karyawan'}
                     </th>
                     {monthlyRoster.dates.map(date => {
                       const d = new Date(date + 'T00:00:00');
                       const dayNum = d.getDate();
                       const dow = d.getDay();
                       const isWeekend = dow === 0 || dow === 6;
+                      const isToday = date === todayStr;
                       return (
                         <th key={date}
-                          className={`py-1 px-0.5 text-center font-bold min-w-[28px] ${isWeekend ? 'bg-slate-100' : ''}`}>
+                          className={`py-1 px-0.5 text-center font-bold min-w-[28px] ${isWeekend ? 'bg-slate-100' : ''} ${isToday ? 'bg-[#1b4332]/5' : ''}`}>
                           <div className="text-[8px] text-slate-400">{DAY_NAMES[dow]}</div>
-                          <div className="text-[9px] text-slate-700">{dayNum}</div>
+                          <div className={`text-[9px] ${isToday ? 'text-[#1b4332] font-extrabold' : 'text-slate-700'}`}>{dayNum}</div>
                         </th>
                       );
                     })}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {monthlyRoster.employees.map(emp => (
-                    <tr key={emp.employee_id} className="hover:bg-slate-50/60 transition group">
-                      <td className="py-1.5 px-2 sticky left-0 bg-white group-hover:bg-slate-50/60 z-10">
-                        <div className="font-bold text-slate-900 text-[10px] leading-tight">{emp.employee_name}</div>
-                        <div className="text-[8px] text-slate-400 leading-tight">
-                          {emp.department_name || ''}
-                        </div>
-                      </td>
-                      {monthlyRoster.dates.map(date => {
-                        const sched = emp.schedules[date];
-                        const display = getScheduleDisplay(sched, monthlyRoster.shift_templates);
-                        const d = new Date(date + 'T00:00:00');
-                        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                  {scheduleMode === 'employee' ? (
+                    /* Monthly Employee View */
+                    filteredMonthlyEmployees.map(emp => (
+                      <tr key={emp.employee_id} className="hover:bg-slate-50/60 transition group">
+                        <td className="py-1.5 px-2 sticky left-0 bg-white group-hover:bg-slate-50/60 z-10">
+                          <div className="font-bold text-slate-900 text-[10px] leading-tight">{emp.employee_name}</div>
+                          <div className="text-[8px] text-slate-400 leading-tight">{emp.department_name || ''}</div>
+                        </td>
+                        {monthlyRoster.dates.map(date => {
+                          const sched = emp.schedules[date];
+                          const display = getScheduleDisplay(sched, monthlyRoster.shift_templates);
+                          const d = new Date(date + 'T00:00:00');
+                          const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                          const isToday = date === todayStr;
+                          return (
+                            <td key={date}
+                              onClick={() => handleEmployeeCellClick(emp.employee_id, date)}
+                              className={`py-0.5 px-0.5 text-center cursor-pointer ${isWeekend ? 'bg-slate-50/50' : ''} ${isToday ? 'bg-[#1b4332]/[0.02]' : ''}`}>
+                              <div className={`inline-block px-1 py-0.5 rounded border text-[8px] font-bold min-w-[24px] ${display.bgClass}`}>
+                                <div className={`leading-tight ${display.colorClass}`}>{display.label}</div>
+                                {display.subLabel && (
+                                  <div className="text-[7px] font-normal text-slate-400 leading-tight">{display.subLabel}</div>
+                                )}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))
+                  ) : (
+                    /* Monthly Shift View — simplified shift-centric for month */
+                    (() => {
+                      const shiftRows = monthlyRoster.shift_templates.filter(t => t.is_active);
+                      return shiftRows.map(tmpl => {
+                        const sc = COLOR_KEY_STYLES[tmpl.color_key as keyof typeof COLOR_KEY_STYLES] || COLOR_KEY_STYLES.soft_slate;
                         return (
-                          <td key={date}
-                            className={`py-0.5 px-0.5 text-center ${isWeekend ? 'bg-slate-50/50' : ''}`}>
-                            <div
-                              className={`inline-block px-1 py-0.5 rounded border text-[8px] font-bold min-w-[24px] ${display.colorClass}`}
-                              title={display.tooltip}
-                            >
-                              <div className="leading-tight">{display.label}</div>
-                              {display.subLabel && (
-                                <div className="text-[7px] font-normal opacity-70 leading-tight">{display.subLabel}</div>
-                              )}
-                            </div>
-                          </td>
+                          <tr key={tmpl.id} className="hover:bg-white/80 transition group">
+                            <td className="py-1.5 px-2 sticky left-0 bg-white group-hover:bg-white/80 z-10">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`w-2 h-2 rounded-full ${sc.swatch} shrink-0`} />
+                                <div>
+                                  <div className={`font-bold text-[10px] leading-tight ${sc.text}`}>{tmpl.name}</div>
+                                  <div className="text-[7px] text-slate-400 font-mono leading-tight">{tmpl.start_time.substring(0, 5)}–{tmpl.end_time.substring(0, 5)}</div>
+                                </div>
+                              </div>
+                            </td>
+                            {monthlyRoster.dates.map(date => {
+                              const employeesOnShift: string[] = [];
+                              for (const emp of monthlyRoster.employees) {
+                                const sched = emp.schedules[date];
+                                if (sched && sched.shift_template_id === tmpl.id && sched.work_status === 'WORK') {
+                                  employeesOnShift.push(emp.employee_name);
+                                }
+                              }
+                              const d = new Date(date + 'T00:00:00');
+                              const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                              const isToday = date === todayStr;
+                              return (
+                                <td key={date}
+                                  onClick={() => handleShiftCellClick('shift', tmpl.id, date)}
+                                  className={`py-0.5 px-0.5 text-center cursor-pointer ${isWeekend ? 'bg-slate-50/50' : ''} ${isToday ? 'bg-[#1b4332]/[0.02]' : ''}`}>
+                                  {employeesOnShift.length === 0 ? (
+                                    <span className="text-slate-300 text-[8px]">—</span>
+                                  ) : (
+                                    <div className="flex flex-col items-start gap-px">
+                                      {employeesOnShift.slice(0, 2).map(name => (
+                                        <span key={name} className={`inline-block px-0.5 py-px rounded text-[7px] font-semibold leading-tight ${sc.bg} ${sc.text} w-full text-left truncate`}>
+                                          {name}
+                                        </span>
+                                      ))}
+                                      {employeesOnShift.length > 2 && (
+                                        <span className="text-[6px] text-slate-400 font-bold px-0.5">+{employeesOnShift.length - 2}</span>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
                         );
-                      })}
-                    </tr>
-                  ))}
+                      });
+                    })()
+                  )}
                 </tbody>
               </table>
             </div>
@@ -546,70 +508,54 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         )}
       </div>
 
-      {/* Legend */}
+      {/* ─── Legend ─── */}
       <div className="flex items-center gap-3 text-[10px] text-slate-500 flex-wrap">
         <span className="font-bold uppercase tracking-wider">Legenda:</span>
         {roster?.shift_templates.filter(t => t.is_active).map(t => {
-          const sc = getShiftColorByColorKey(t.color_key);
+          const sc = COLOR_KEY_STYLES[t.color_key as keyof typeof COLOR_KEY_STYLES] || COLOR_KEY_STYLES.soft_slate;
           return (
             <span key={t.id} className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${sc.bg} ${sc.text} ${sc.border}`}>
-              {t.code} = {t.name}
+              {t.name}
             </span>
           );
         })}
-        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-slate-100 text-slate-500 border-slate-200">OFF</span>
-        <span className="text-[10px] text-slate-400 italic">* = Changed after publish</span>
+        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-slate-50 text-slate-500 border-slate-200">OFF</span>
+        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-cyan-50 text-cyan-600 border-cyan-200">Libur</span>
+        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-purple-50 text-purple-600 border-purple-200">Cuti</span>
+        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-rose-50 text-rose-600 border-rose-200">Sakit</span>
+        <span className="px-1.5 py-0.5 rounded border text-[10px] font-bold bg-amber-50 text-amber-600 border-amber-200">Ijin</span>
       </div>
 
-      {/* Cell Context Menu */}
-      {cellMenu && (
-        <div data-cell-menu
-          className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl py-1 min-w-[160px]"
-          style={{ left: cellMenu.x, top: cellMenu.y }}>
-          <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase border-b border-slate-100">
-            {cellMenu.date} {DAY_FULL_NAMES[getDayOfWeek(cellMenu.date)]}
-          </div>
-          {roster?.shift_templates.filter(t => t.is_active).map(t => (
-            <button key={t.id}
-              onClick={() => handleAssignShift(cellMenu.employeeId, cellMenu.date, t.id)}
-              className="w-full text-left px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50 transition cursor-pointer flex items-center gap-2">
-              <span className={`w-5 h-5 rounded flex items-center justify-center text-[9px] font-extrabold ${getShiftColorByColorKey(t.color_key).bg} ${getShiftColorByColorKey(t.color_key).text}`}>
-                {t.code.charAt(0)}
-              </span>
-              {t.name} ({t.start_time.substring(0, 5)}-{t.end_time.substring(0, 5)})
-            </button>
-          ))}
-          <div className="border-t border-slate-100 my-0.5" />
-          <button onClick={() => handleAssignShift(cellMenu.employeeId, cellMenu.date, null, 'OFF')}
-            className="w-full text-left px-3 py-1.5 text-[11px] font-bold text-slate-500 hover:bg-slate-50 transition cursor-pointer flex items-center gap-2">
-            <span className="w-5 h-5 rounded flex items-center justify-center text-[9px] font-extrabold bg-slate-100 text-slate-500">-</span>
-            OFF
-          </button>
-          <div className="border-t border-slate-100 my-0.5" />
-          <button onClick={() => { setDetailDrawer(cellMenu); setCellMenu(null); }}
-            className="w-full text-left px-3 py-1.5 text-[11px] font-bold text-[#1b4332] hover:bg-[#1b4332]/5 transition cursor-pointer">
-            Detail & Edit...
-          </button>
-        </div>
-      )}
-
-      {/* Detail Drawer */}
-      {detailDrawer && (
-        <ScheduleDetailDrawer
+      {/* ─── Shift Day Modal ─── */}
+      {shiftDayModal && roster && (
+        <ShiftDayModal
           propertyId={propertyId}
-          employeeId={detailDrawer.employeeId}
-          date={detailDrawer.date}
+          shiftType={shiftDayModal.shiftType}
+          templateId={shiftDayModal.templateId}
+          date={shiftDayModal.date}
           roster={roster}
-          onClose={() => setDetailDrawer(null)}
-          onUpdated={fetchRoster}
+          departments={departments}
+          onClose={() => setShiftDayModal(null)}
+          onSaved={() => { fetchRoster(); }}
         />
       )}
 
-      {/* Copy Week Confirm */}
+      {/* ─── Employee Day Quick Edit Modal ─── */}
+      {employeeDayModal && roster && (
+        <EmployeeDayQuickEdit
+          employeeId={employeeDayModal.employeeId}
+          date={employeeDayModal.date}
+          roster={roster}
+          onClose={() => setEmployeeDayModal(null)}
+          onSaved={(shiftTemplateId, workStatus) => handleEmployeeDaySave(employeeDayModal.employeeId, employeeDayModal.date, shiftTemplateId, workStatus)}
+        />
+      )}
+
+      {/* ─── Copy Week Confirm ─── */}
       {copyConfirm && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-3">
-            <h3 className="font-serif font-bold text-sm text-slate-900">Copy Minggu Sebelumnya?</h3>
+            <h3 className="font-bold text-sm text-slate-900">Salin Minggu Sebelumnya?</h3>
             <p className="text-xs text-slate-600">
               Salin jadwal dari minggu <strong>{formatDisplayDate(copyConfirm.sourceMonday)}</strong> ke minggu <strong>{formatDisplayDate(copyConfirm.targetMonday)}</strong>?
             </p>
@@ -625,11 +571,11 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
         </div>
       )}
 
-      {/* Publish Confirm */}
+      {/* ─── Publish Confirm ─── */}
       {publishConfirm && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-3">
-            <h3 className="font-serif font-bold text-sm text-slate-900">Publish Jadwal Kerja?</h3>
+            <h3 className="font-bold text-sm text-slate-900">Publish Jadwal Kerja?</h3>
             <p className="text-xs text-slate-600">
               Publish jadwal minggu <strong>{formatDisplayDate(publishConfirm.monday)}</strong> — <strong>{formatDisplayDate(publishConfirm.sunday)}</strong>?
             </p>
@@ -644,172 +590,87 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({ propertyId }) => {
           </div>
         </div>
       )}
+
+      {/* ─── Kelola Shift Drawer ─── */}
+      {showKelolaShift && (
+        <KelolaShiftDrawer
+          propertyId={propertyId}
+          onClose={() => setShowKelolaShift(false)}
+          onTemplatesUpdated={() => { fetchRoster(); }}
+        />
+      )}
     </div>
   );
 };
 
-// ─── Schedule Detail Drawer ───
+// ─── Employee Day Quick Edit Modal (for Per Karyawan cell click) ───
 
-interface ScheduleDetailDrawerProps {
-  propertyId: number;
+interface EmployeeDayQuickEditProps {
   employeeId: number;
   date: string;
-  roster: WeeklyRosterResponse | null;
+  roster: WeeklyRosterResponse;
   onClose: () => void;
-  onUpdated: () => void;
+  onSaved: (shiftTemplateId: number | null, workStatus: string) => void;
 }
 
-const ScheduleDetailDrawer: React.FC<ScheduleDetailDrawerProps> = ({ propertyId, employeeId, date, roster, onClose, onUpdated }) => {
-  const emp = roster?.employees.find(e => e.employee_id === employeeId);
+const EmployeeDayQuickEdit: React.FC<EmployeeDayQuickEditProps> = ({ employeeId, date, roster, onClose, onSaved }) => {
+  const emp = roster.employees.find(e => e.employee_id === employeeId);
   const sched = emp?.schedules[date] || null;
-  const [editMode, setEditMode] = useState(false);
   const [selectedShiftId, setSelectedShiftId] = useState<number | ''>(sched?.shift_template_id || '');
-  const [selectedStatus, setSelectedStatus] = useState(sched?.work_status || 'WORK');
-  const [notes, setNotes] = useState(sched?.notes || '');
-  const [saving, setSaving] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState<string>(sched?.work_status || 'WORK');
 
-  const getAuthHeaders = (): HeadersInit => {
-    const token = localStorage.getItem('oak_hims_auth_token');
-    return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const body: any = {
-        property_id: propertyId,
-        employee_id: employeeId,
-        work_date: date,
-        work_status: selectedStatus,
-        notes: notes || undefined,
-      };
-      if (selectedStatus === 'WORK' && selectedShiftId) {
-        body.shift_template_id = Number(selectedShiftId);
-      }
-      const res = await fetch('/api/schedule/assign', {
-        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message);
-      setEditMode(false);
-      onUpdated();
-    } catch (err: any) { alert(err.message); } finally { setSaving(false); }
-  };
-
-  const tmpl = sched?.shift_template_id ? roster?.shift_templates.find(t => t.id === sched.shift_template_id) : null;
+  const DAY_FULL = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  const MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+  const d = new Date(date + 'T00:00:00');
+  const dateLabel = `${DAY_FULL[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex justify-end">
-      <div className="w-[340px] bg-white h-full shadow-xl overflow-y-auto">
-        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-          <h3 className="font-serif font-bold text-sm text-slate-900">Detail Jadwal</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 cursor-pointer">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-bold text-slate-900">{emp?.employee_name || 'Karyawan'}</div>
+            <div className="text-[10px] text-slate-400">{dateLabel}</div>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-slate-100 cursor-pointer">
+            <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
         </div>
-
         <div className="p-4 space-y-3">
-          {/* Employee Info */}
-          <div className="bg-slate-50 rounded-xl p-3">
-            <div className="text-xs font-bold text-slate-900">{emp?.employee_name || 'Unknown'}</div>
-            <div className="text-[10px] text-slate-500">{emp?.department_name || ''} {emp?.position_name ? `• ${emp.position_name}` : ''}</div>
-            <div className="text-[10px] text-slate-400 mt-1">
-              {date} {DAY_FULL_NAMES[getDayOfWeek(date)]}
-            </div>
+          <div>
+            <label className="block text-[10px] font-bold text-slate-600 mb-1">Status Hari</label>
+            <select value={selectedStatus} onChange={e => setSelectedStatus(e.target.value)}
+              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
+              <option value="WORK">Kerja (WORK)</option>
+              <option value="OFF">OFF</option>
+              <option value="LEAVE">Cuti (LEAVE)</option>
+              <option value="SICK">Sakit (SICK)</option>
+              <option value="PERMISSION">Ijin (PERMISSION)</option>
+              <option value="HOLIDAY">Libur (HOLIDAY)</option>
+            </select>
           </div>
-
-          {sched?.schedule_status === 'CHANGED' && (
-            <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-[10px] font-bold text-amber-800">
-              Jadwal telah diubah setelah dipublish
+          {selectedStatus === 'WORK' && (
+            <div>
+              <label className="block text-[10px] font-bold text-slate-600 mb-1">Shift</label>
+              <select value={selectedShiftId} onChange={e => setSelectedShiftId(e.target.value ? Number(e.target.value) : '')}
+                className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
+                <option value="">Pilih Shift...</option>
+                {roster.shift_templates.filter(t => t.is_active).map(t => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.start_time.substring(0, 5)}-{t.end_time.substring(0, 5)})</option>
+                ))}
+              </select>
             </div>
           )}
-
-          {!editMode ? (
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">Shift</span>
-                <span className="text-xs font-bold text-slate-900">{tmpl ? `${tmpl.code} - ${tmpl.name}` : '-'}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">Jam Kerja</span>
-                <span className="text-xs text-slate-700">{tmpl ? `${tmpl.start_time.substring(0, 5)} - ${tmpl.end_time.substring(0, 5)}` : '-'}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">Status</span>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                  sched?.work_status === 'OFF' ? 'bg-slate-100 text-slate-600' :
-                  sched?.work_status === 'WORK' ? 'bg-emerald-100 text-emerald-800' :
-                  'bg-amber-100 text-amber-800'
-                }`}>{sched?.work_status || 'Belum dijadwalkan'}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">Status Publish</span>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                  sched?.schedule_status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-800' :
-                  sched?.schedule_status === 'CHANGED' ? 'bg-amber-100 text-amber-800' :
-                  'bg-slate-100 text-slate-600'
-                }`}>{sched?.schedule_status || '-'}</span>
-              </div>
-              {sched?.notes && (
-                <div>
-                  <span className="text-[10px] font-bold text-slate-500 uppercase">Catatan</span>
-                  <p className="text-xs text-slate-700 mt-0.5">{sched.notes}</p>
-                </div>
-              )}
-              <div className="pt-2">
-                <button onClick={() => setEditMode(true)}
-                  className="w-full px-3 py-2 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] transition cursor-pointer">
-                  Edit Jadwal
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-600 mb-1">Status Hari</label>
-                <select value={selectedStatus} onChange={e => setSelectedStatus(e.target.value as any)}
-                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
-                  <option value="WORK">Kerja (WORK)</option>
-                  <option value="OFF">OFF</option>
-                  <option value="LEAVE">Cuti (LEAVE)</option>
-                  <option value="SICK">Sakit (SICK)</option>
-                  <option value="PERMISSION">Ijin (PERMISSION)</option>
-                  <option value="HOLIDAY">Holiday</option>
-                </select>
-              </div>
-
-              {selectedStatus === 'WORK' && (
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-600 mb-1">Shift</label>
-                  <select value={selectedShiftId} onChange={e => setSelectedShiftId(e.target.value ? Number(e.target.value) : '')}
-                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332] cursor-pointer">
-                    <option value="">Pilih Shift...</option>
-                    {roster?.shift_templates.filter(t => t.is_active).map(t => (
-                      <option key={t.id} value={t.id}>{t.code} - {t.name} ({t.start_time.substring(0, 5)}-{t.end_time.substring(0, 5)})</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-[10px] font-bold text-slate-600 mb-1">Catatan</label>
-                <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
-                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332] resize-none"
-                  placeholder="Opsional..." />
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <button onClick={() => setEditMode(false)}
-                  className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">
-                  Batal
-                </button>
-                <button onClick={handleSave} disabled={saving}
-                  className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] disabled:opacity-50 cursor-pointer">
-                  {saving ? 'Menyimpan...' : 'Simpan'}
-                </button>
-              </div>
-            </div>
-          )}
+          <div className="flex gap-2 pt-1">
+            <button onClick={onClose}
+              className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer">
+              Batal
+            </button>
+            <button onClick={() => onSaved(selectedStatus === 'WORK' ? (selectedShiftId as number) : null, selectedStatus)}
+              className="flex-1 px-3 py-2 text-[11px] font-bold rounded-lg bg-[#1b4332] text-white hover:bg-[#143326] cursor-pointer">
+              Simpan
+            </button>
+          </div>
         </div>
       </div>
     </div>
