@@ -78,6 +78,7 @@ import {
   hotelNightsBetween,
   normalizeHotelDate,
 } from './features/calendar/calendarDates';
+import { getReservationCalendarSpan } from './features/calendar/calendarReservationSpans';
 import {
   normalizeReservationLifecycle,
   type CalendarOperationalFilter,
@@ -555,37 +556,16 @@ function AppContent() {
   const reservationSpans = useMemo(() => {
     const map: Record<string, Array<any>> = {};
 
-    const getNightlySpan = (checkIn: string, checkOut: string) => {
-      const ci = normalizeHotelDate(checkIn);
-      const co = normalizeHotelDate(checkOut);
-      if (!ci || !co || ci === co) return null;
-
-      const firstVisibleDate = days[0]?.date;
-      const visibleRangeEnd = days.length > 0 ? addHotelDays(days[days.length - 1].date, 1) : '';
-      if (!firstVisibleDate || !visibleRangeEnd || co <= firstVisibleDate || ci >= visibleRangeEnd) return null;
-
-      const startIndex = days.findIndex(d => d.date === ci);
-      const endIndex = days.findIndex(d => d.date === co);
-
-      const visibleStart = startIndex === -1 && ci < firstVisibleDate ? 0 : startIndex;
-      const visibleEnd = endIndex === -1 && co >= visibleRangeEnd ? days.length : endIndex;
-      if (visibleStart < 0 || visibleEnd < 0 || visibleEnd <= visibleStart) return null;
-      // Nightly stay is inclusive on check-in and exclusive on check-out.
-      // Example: 20 -> 21 blocks only date 20; 20 -> 28 blocks 20..27.
-      const span = Math.max(1, visibleEnd - visibleStart);
-      return { startIndex: visibleStart, span };
-    };
-
     for (const r of displayedReservations) {
       const { status } = normalizeReservationLifecycle(r?.status);
       if (status === 'CHECKED_OUT' || status === 'CANCELLED') continue;
 
       const roomId = String(r.room_id);
-      const nightlySpan = getNightlySpan(r.check_in, r.check_out);
-      if (!nightlySpan) continue;
+      const visibleSpan = getReservationCalendarSpan(r, days);
+      if (!visibleSpan) continue;
 
       if (!map[roomId]) map[roomId] = [];
-      map[roomId].push({ startIndex: nightlySpan.startIndex, span: nightlySpan.span, res: r });
+      map[roomId].push({ startIndex: visibleSpan.startIndex, span: visibleSpan.span, res: r });
     }
 
     for (const k of Object.keys(map)) {
