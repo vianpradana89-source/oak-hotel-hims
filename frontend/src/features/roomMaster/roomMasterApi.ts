@@ -10,11 +10,12 @@ import {
   type RoomTypeWritePayload,
   RoomMasterApiError
 } from './roomMasterTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(path, init);
+    response = await authenticatedFetch(path, init);
   } catch (err) {
     throw new RoomMasterApiError(
       err instanceof Error ? err.message : 'network error',

@@ -7,6 +7,7 @@ import GuestSearchAutocomplete from './GuestSearchAutocomplete';
 import IdentityExtractionModal, { type ExtractedIdentityData } from './IdentityExtractionModal';
 import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -368,7 +369,7 @@ export default function QuickBookingModal({
 
     try {
       if (!ratePlans || ratePlans.length === 0) {
-        const res = await fetch('/api/pricing/rate-plans?property_id=' + propertyId);
+        const res = await authenticatedFetch('/api/pricing/rate-plans?property_id=' + propertyId);
         const json = await res.json();
 
         if (res.ok) {
@@ -387,8 +388,8 @@ export default function QuickBookingModal({
 
     try {
       const [rulesRes, durRes] = await Promise.all([
-        fetch(`/api/properties/${propertyId}/quick-booking-rules`),
-        fetch(`/api/properties/${propertyId}/day-use-durations`)
+        authenticatedFetch(`/api/properties/${propertyId}/quick-booking-rules`),
+        authenticatedFetch(`/api/properties/${propertyId}/day-use-durations`)
       ]);
       if (rulesRes.ok) {
         const rulesJson = await rulesRes.json();
@@ -501,7 +502,7 @@ export default function QuickBookingModal({
     if (!draft.roomTypeId || !draft.checkIn || (draft.stayType !== 'DAY_USE' && !draft.checkOut)) return;
     try {
       handleUpdateRoom(index, { quoteLoading: true });
-      const res = await fetch('/api/pricing/quote', {
+      const res = await authenticatedFetch('/api/pricing/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -897,7 +898,7 @@ export default function QuickBookingModal({
       const formData = new FormData();
       formData.append('file', file);
       try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const res = await authenticatedFetch('/api/upload', { method: 'POST', body: formData });
         const data = await res.json();
         if (res.ok && data.url) {
           setBuktiBayarPath(data.url);
@@ -1024,7 +1025,7 @@ export default function QuickBookingModal({
 
       if (!selectedCrmGuest && !duplicateBypassed && guestPhone.trim().length >= 7) {
         try {
-          const dupRes = await fetch('/api/guests/duplicate-check', {
+          const dupRes = await authenticatedFetch('/api/guests/duplicate-check', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1148,7 +1149,7 @@ export default function QuickBookingModal({
         })
       };
 
-      const res = await fetch('/api/bookings', {
+      const res = await authenticatedFetch('/api/bookings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

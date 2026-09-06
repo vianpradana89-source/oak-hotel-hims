@@ -7,6 +7,7 @@ import type {
   HkFindingType,
   FindingSeverity
 } from './housekeepingTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface HousekeepingSettingsTabProps {
   propertyId: number;
@@ -199,7 +200,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
 
   const refreshTemplates = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -217,7 +218,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const fetchFindingTypes = useCallback(async () => {
     setIsFindingTypesLoading(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/finding-types?property_id=${propertyId}&scope=all`);
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/finding-types?property_id=${propertyId}&scope=all`);
       if (res.ok) {
         const json = await res.json();
         setFindingTypes(json.data || []);
@@ -321,7 +322,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     setFeedbackMsg(null);
     try {
       if (editingTemplate) {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${editingTemplate.id}`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${editingTemplate.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...templateForm })
@@ -330,7 +331,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
         if (!res.ok) throw new Error(data.message || 'Gagal mengubah template');
         setFeedbackMsg({ type: 'success', text: `Template "${templateForm.name}" berhasil diperbarui.` });
       } else {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...templateForm })
@@ -352,7 +353,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const handleDuplicateTemplate = async (template: ChecklistTemplate) => {
     try {
       setIsSaving(true);
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${template.id}/duplicate`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${template.id}/duplicate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId })
@@ -371,7 +372,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
 
   const handleToggleTemplateActive = async (template: ChecklistTemplate) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${template.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${template.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, is_active: !template.is_active })
@@ -393,7 +394,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     if (!window.confirm(confirmMsg)) return;
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${template.id}?property_id=${propertyId}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${template.id}?property_id=${propertyId}`, {
         method: 'DELETE'
       });
       const data = await res.json();
@@ -441,7 +442,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     setFeedbackMsg(null);
     try {
       if (editingGroup) {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${editingGroup.id}`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${editingGroup.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...groupForm })
@@ -450,7 +451,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
         if (!res.ok) throw new Error(data.message || 'Gagal mengubah grup checklist');
         setFeedbackMsg({ type: 'success', text: `Grup "${groupForm.name}" berhasil diperbarui.` });
       } else {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...groupForm })
@@ -471,7 +472,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const handleToggleGroupActive = async (group: ChecklistTemplateGroup) => {
     if (!selectedTemplate) return;
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${group.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${group.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, is_active: !group.is_active })
@@ -491,7 +492,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     if (!window.confirm(confirmMsg)) return;
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${group.id}?property_id=${propertyId}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/${group.id}?property_id=${propertyId}`, {
         method: 'DELETE'
       });
       const data = await res.json();
@@ -515,7 +516,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     groups.splice(targetIndex, 0, moved);
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/reorder`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -538,7 +539,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     groups.splice(toIndex, 0, moved);
 
     try {
-      await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/reorder`, {
+      await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/groups/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -600,14 +601,14 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     setFeedbackMsg(null);
     try {
       if (editingItem) {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${editingItem.id}`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${editingItem.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...itemForm })
         });
         if (!res.ok) throw new Error('Gagal mengubah butir checklist');
       } else {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...itemForm })
@@ -627,7 +628,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const handleToggleTemplateItemActive = async (item: ChecklistTemplateItem) => {
     if (!selectedTemplate) return;
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${item.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${item.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, is_active: !item.is_active })
@@ -644,7 +645,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     if (!window.confirm(`Hapus / arsipkan butir checklist "${item.label}"?`)) return;
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${item.id}?property_id=${propertyId}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${item.id}?property_id=${propertyId}`, {
         method: 'DELETE'
       });
       const data = await res.json();
@@ -675,7 +676,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
         sort_order: idx + 1
       }));
 
-      await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/reorder`, {
+      await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, items: reorderPayload })
@@ -711,7 +712,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     }));
 
     try {
-      await fetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/reorder`, {
+      await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, items: reorderPayload })
@@ -766,7 +767,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     setFeedbackMsg(null);
     try {
       if (editingFindingType) {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/finding-types/${editingFindingType.id}`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/finding-types/${editingFindingType.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...findingForm })
@@ -776,7 +777,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
           throw new Error(errData.message || 'Gagal memperbarui jenis temuan.');
         }
       } else {
-        const res = await fetch(`${apiBaseUrl}/housekeeping/finding-types`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/finding-types`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ property_id: propertyId, ...findingForm })
@@ -801,7 +802,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
 
   const handleToggleFindingActive = async (ft: HkFindingType) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/finding-types/${ft.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/finding-types/${ft.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, is_active: !ft.is_active })
@@ -820,7 +821,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     const [moved] = list.splice(itemIndex, 1);
     list.splice(targetIndex, 0, moved);
     try {
-      await fetch(`${apiBaseUrl}/housekeeping/finding-types/reorder`, {
+      await authenticatedFetch(`${apiBaseUrl}/housekeeping/finding-types/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, item_ids: list.map((i) => i.id) })

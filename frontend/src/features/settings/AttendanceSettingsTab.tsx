@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { PropertyAttendanceSettings, OutsideGeofencePolicy } from '../employee/attendanceTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const ShieldCheck = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -76,7 +77,7 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
     try {
       setLoading(true);
       setErrorMsg(null);
-      const res = await fetch(`/api/attendance/settings?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/attendance/settings?property_id=${propertyId}`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         setSettings(data.data);
@@ -102,7 +103,7 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
       setErrorMsg(null);
       setSaveSuccess(false);
 
-      const res = await fetch('/api/attendance/settings', {
+      const res = await authenticatedFetch('/api/attendance/settings', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

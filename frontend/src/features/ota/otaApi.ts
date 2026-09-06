@@ -1,4 +1,5 @@
 import type { OtaSource, CreateOtaSourceInput, UpdateOtaSourceInput } from './otaTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const API_BASE = '/api/ota-sources';
 
@@ -24,13 +25,13 @@ export async function fetchOtaSources(
     ...(options?.includeArchived ? { include_archived: 'true' } : {})
   });
 
-  const res = await fetch(`${API_BASE}?${params.toString()}`);
+  const res = await authenticatedFetch(`${API_BASE}?${params.toString()}`);
   const json = await parseJsonResponse(res, 'Gagal memuat daftar OTA');
   return json.data || [];
 }
 
 export async function createOtaSource(dto: CreateOtaSourceInput): Promise<OtaSource> {
-  const res = await fetch(API_BASE, {
+  const res = await authenticatedFetch(API_BASE, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
@@ -40,7 +41,7 @@ export async function createOtaSource(dto: CreateOtaSourceInput): Promise<OtaSou
 }
 
 export async function updateOtaSource(id: number, dto: UpdateOtaSourceInput): Promise<OtaSource> {
-  const res = await fetch(`${API_BASE}/${id}`, {
+  const res = await authenticatedFetch(`${API_BASE}/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
@@ -50,7 +51,7 @@ export async function updateOtaSource(id: number, dto: UpdateOtaSourceInput): Pr
 }
 
 export async function deleteOtaSource(id: number): Promise<{ action: 'DELETED' | 'ARCHIVED'; message: string }> {
-  const res = await fetch(`${API_BASE}/${id}`, {
+  const res = await authenticatedFetch(`${API_BASE}/${id}`, {
     method: 'DELETE'
   });
   const json = await parseJsonResponse(res, 'Gagal menghapus channel OTA');

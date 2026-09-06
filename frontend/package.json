@@ -18,6 +18,7 @@
     "test:design-system": "node test/design_system_and_shell_test.ts",
     "test:access-control": "node test/access_control_mapping_test.ts",
     "test:quick-booking-ocr-isolation": "node test/quick_booking_ocr_state_isolation_test.ts",
+    "test:authenticated-transport": "node test/authenticated_transport_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

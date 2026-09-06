@@ -10,6 +10,7 @@ import { GuestDatabaseTable } from './GuestDatabaseTable';
 import { GuestProfileModal } from './GuestProfileModal';
 import { GuestEditModal } from './GuestEditModal';
 import { GuestDuplicateModal } from './GuestDuplicateModal';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestCrmWorkspaceProps {
   propertyId: number | null;
@@ -40,9 +41,9 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
 
     try {
       const [guestsRes, summaryRes, dupRes] = await Promise.all([
-        fetch(`/api/guests?property_id=${propertyId}`),
-        fetch(`/api/guests/crm-summary?property_id=${propertyId}&hotel_date=${hotelDate}`),
-        fetch(`/api/guests/duplicate-candidates?property_id=${propertyId}`)
+        authenticatedFetch(`/api/guests?property_id=${propertyId}`),
+        authenticatedFetch(`/api/guests/crm-summary?property_id=${propertyId}&hotel_date=${hotelDate}`),
+        authenticatedFetch(`/api/guests/duplicate-candidates?property_id=${propertyId}`)
       ]);
 
       if (!guestsRes.ok || !summaryRes.ok || !dupRes.ok) {

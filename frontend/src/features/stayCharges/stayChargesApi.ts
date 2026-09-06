@@ -6,6 +6,7 @@ import type {
   VoidFolioEntryDto,
   CorrectFolioEntryDto
 } from './stayChargesTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const API_BASE = '/api/stay-charges';
 
@@ -19,7 +20,7 @@ export async function fetchStayChargeRules(
     ...(options?.includeArchived ? { include_archived: 'true' } : {})
   });
 
-  const res = await fetch(`${API_BASE}/rules?${params.toString()}`);
+  const res = await authenticatedFetch(`${API_BASE}/rules?${params.toString()}`);
   const json = await res.json();
   if (!res.ok) {
     throw new Error(json.message || 'Gagal memuat aturan stay charge');
@@ -30,7 +31,7 @@ export async function fetchStayChargeRules(
 export async function createStayChargeRule(
   dto: CreateStayChargeRuleDto
 ): Promise<StayChargeRule> {
-  const res = await fetch(`${API_BASE}/rules`, {
+  const res = await authenticatedFetch(`${API_BASE}/rules`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
@@ -46,7 +47,7 @@ export async function updateStayChargeRule(
   id: number,
   dto: UpdateStayChargeRuleDto
 ): Promise<StayChargeRule> {
-  const res = await fetch(`${API_BASE}/rules/${id}`, {
+  const res = await authenticatedFetch(`${API_BASE}/rules/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
@@ -67,7 +68,7 @@ export async function deleteStayChargeRule(
     property_id: String(propertyId),
     ...(hard ? { hard: 'true' } : {})
   });
-  const res = await fetch(`${API_BASE}/rules/${id}?${params.toString()}`, {
+  const res = await authenticatedFetch(`${API_BASE}/rules/${id}?${params.toString()}`, {
     method: 'DELETE'
   });
   const json = await res.json();
@@ -80,7 +81,7 @@ export async function deleteStayChargeRule(
 export async function postStayChargeToFolio(
   dto: PostStayChargeDto
 ): Promise<{ folio_entry: any; reservation: any }> {
-  const res = await fetch(`${API_BASE}/post-charge`, {
+  const res = await authenticatedFetch(`${API_BASE}/post-charge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
@@ -96,7 +97,7 @@ export async function voidFolioEntry(
   id: number,
   dto: VoidFolioEntryDto
 ): Promise<{ folio_entry: any; reservation: any; reversal_entry: any }> {
-  const res = await fetch(`${API_BASE}/void-entry/${id}`, {
+  const res = await authenticatedFetch(`${API_BASE}/void-entry/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...dto, reason: dto.void_reason })
@@ -117,7 +118,7 @@ export async function correctFolioEntry(
   replacement_entry: any;
   reservation: any;
 }> {
-  const res = await fetch(`${API_BASE}/correct-entry/${id}`, {
+  const res = await authenticatedFetch(`${API_BASE}/correct-entry/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)

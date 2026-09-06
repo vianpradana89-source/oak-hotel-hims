@@ -1,3 +1,5 @@
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
+
 export type MealPlan = 'RO' | 'BB' | 'HB' | 'FB' | 'AI';
 
 export interface MealPlanMaster {
@@ -317,12 +319,12 @@ async function handleResponse<T>(res: Response): Promise<T> {
 
 export const pricingApi = {
   async getSettings(propertyId: number): Promise<PropertyPricingSettings> {
-    const res = await fetch(`${API_BASE}/settings?property_id=${propertyId}`);
+    const res = await authenticatedFetch(`${API_BASE}/settings?property_id=${propertyId}`);
     return handleResponse<PropertyPricingSettings>(res);
   },
 
   async updateSettings(propertyId: number, data: Partial<PropertyPricingSettings>): Promise<PropertyPricingSettings> {
-    const res = await fetch(`${API_BASE}/settings?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/settings?property_id=${propertyId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -339,17 +341,17 @@ export const pricingApi = {
     if (options?.is_active !== undefined) params.set('is_active', String(options.is_active));
     if (options?.include_archived) params.set('include_archived', 'true');
 
-    const res = await fetch(`${API_BASE}/meal-plans?${params.toString()}`);
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans?${params.toString()}`);
     return handleResponse<MealPlanMaster[]>(res);
   },
 
   async getMealPlan(propertyId: number, id: number): Promise<MealPlanMaster> {
-    const res = await fetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`);
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`);
     return handleResponse<MealPlanMaster>(res);
   },
 
   async createMealPlan(propertyId: number, data: CreateMealPlanDto): Promise<MealPlanMaster> {
-    const res = await fetch(`${API_BASE}/meal-plans?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans?property_id=${propertyId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -358,7 +360,7 @@ export const pricingApi = {
   },
 
   async updateMealPlan(propertyId: number, id: number, data: UpdateMealPlanDto): Promise<MealPlanMaster> {
-    const res = await fetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -367,7 +369,7 @@ export const pricingApi = {
   },
 
   async setMealPlanActive(propertyId: number, id: number, isActive: boolean): Promise<MealPlanMaster> {
-    const res = await fetch(`${API_BASE}/meal-plans/${id}/status?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans/${id}/status?property_id=${propertyId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_active: isActive })
@@ -376,7 +378,7 @@ export const pricingApi = {
   },
 
   async deleteMealPlan(propertyId: number, id: number): Promise<{ deleted: boolean; archived: boolean; message: string }> {
-    const res = await fetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/meal-plans/${id}?property_id=${propertyId}`, {
       method: 'DELETE'
     });
     return handleResponse<{ deleted: boolean; archived: boolean; message: string }>(res);
@@ -391,17 +393,17 @@ export const pricingApi = {
     if (options?.is_active !== undefined) params.set('is_active', String(options.is_active));
     if (options?.include_archived) params.set('include_archived', 'true');
 
-    const res = await fetch(`${API_BASE}/rate-plans?${params.toString()}`);
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans?${params.toString()}`);
     return handleResponse<RatePlan[]>(res);
   },
 
   async getRatePlan(propertyId: number, id: number): Promise<RatePlan> {
-    const res = await fetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`);
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`);
     return handleResponse<RatePlan>(res);
   },
 
   async createRatePlan(propertyId: number, data: CreateRatePlanDto): Promise<RatePlan> {
-    const res = await fetch(`${API_BASE}/rate-plans?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans?property_id=${propertyId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -410,7 +412,7 @@ export const pricingApi = {
   },
 
   async updateRatePlan(propertyId: number, id: number, data: UpdateRatePlanDto): Promise<RatePlan> {
-    const res = await fetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -419,7 +421,7 @@ export const pricingApi = {
   },
 
   async duplicateRatePlan(propertyId: number, id: number, data: DuplicateRatePlanDto): Promise<RatePlan> {
-    const res = await fetch(`${API_BASE}/rate-plans/${id}/duplicate?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${id}/duplicate?property_id=${propertyId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -428,7 +430,7 @@ export const pricingApi = {
   },
 
   async setRatePlanActive(propertyId: number, id: number, isActive: boolean): Promise<RatePlan> {
-    const res = await fetch(`${API_BASE}/rate-plans/${id}/status?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${id}/status?property_id=${propertyId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_active: isActive })
@@ -437,7 +439,7 @@ export const pricingApi = {
   },
 
   async deleteRatePlan(propertyId: number, id: number): Promise<{ deleted: boolean; archived: boolean; message: string }> {
-    const res = await fetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${id}?property_id=${propertyId}`, {
       method: 'DELETE'
     });
     return handleResponse<{ deleted: boolean; archived: boolean; message: string }>(res);
@@ -449,12 +451,12 @@ export const pricingApi = {
       start_date: startDate,
       end_date: endDate
     });
-    const res = await fetch(`${API_BASE}/rate-plans/${ratePlanId}/calendar?${params.toString()}`);
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${ratePlanId}/calendar?${params.toString()}`);
     return handleResponse<RateCalendarMatrix>(res);
   },
 
   async upsertRateOverride(propertyId: number, ratePlanId: number, data: CreateRateOverrideDto): Promise<RateOverride> {
-    const res = await fetch(`${API_BASE}/rate-plans/${ratePlanId}/overrides?property_id=${propertyId}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-plans/${ratePlanId}/overrides?property_id=${propertyId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -465,14 +467,14 @@ export const pricingApi = {
   async deleteRateOverride(propertyId: number, overrideId: number, targetDate?: string): Promise<{ success: boolean; message: string }> {
     const params = new URLSearchParams({ property_id: String(propertyId) });
     if (targetDate) params.set('target_date', targetDate);
-    const res = await fetch(`${API_BASE}/rate-overrides/${overrideId}?${params.toString()}`, {
+    const res = await authenticatedFetch(`${API_BASE}/rate-overrides/${overrideId}?${params.toString()}`, {
       method: 'DELETE'
     });
     return handleResponse<{ success: boolean; message: string }>(res);
   },
 
   async previewBulkRateOverrides(propertyId: number, data: BulkRateOverrideDto): Promise<BulkRateOverridePreviewResult> {
-    const res = await fetch(`${API_BASE}/bulk-overrides/preview`, {
+    const res = await authenticatedFetch(`${API_BASE}/bulk-overrides/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-property-id': String(propertyId) },
       body: JSON.stringify({ ...data, property_id: propertyId })
@@ -484,7 +486,7 @@ export const pricingApi = {
     propertyId: number,
     data: BulkRateOverrideDto
   ): Promise<{ success: boolean; message: string; preview_token: string }> {
-    const res = await fetch(`${API_BASE}/bulk-overrides/apply`, {
+    const res = await authenticatedFetch(`${API_BASE}/bulk-overrides/apply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-property-id': String(propertyId) },
       body: JSON.stringify({ ...data, property_id: propertyId })
@@ -502,7 +504,7 @@ export const pricingApi = {
     adults?: number;
     children?: number;
   }): Promise<PriceQuoteResult> {
-    const res = await fetch(`${API_BASE}/quote`, {
+    const res = await authenticatedFetch(`${API_BASE}/quote`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -511,7 +513,7 @@ export const pricingApi = {
   },
 
   async getReservationRateSnapshots(propertyId: number, reservationId: number): Promise<ReservationNightlyRate[]> {
-    const res = await fetch(`${API_BASE}/reservations/${reservationId}/rate-snapshots?property_id=${propertyId}`);
+    const res = await authenticatedFetch(`${API_BASE}/reservations/${reservationId}/rate-snapshots?property_id=${propertyId}`);
     return handleResponse<ReservationNightlyRate[]>(res);
   }
 };

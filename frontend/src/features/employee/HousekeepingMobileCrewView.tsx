@@ -6,6 +6,7 @@ import type {
   HkFindingType,
   HousekeepingTaskFinding
 } from '../housekeeping/housekeepingTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const CheckCircle2 = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -158,8 +159,8 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     try {
       setLoading(true);
       const [activeRes, histRes] = await Promise.all([
-        fetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=active`),
-        fetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`)
+        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=active`),
+        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`)
       ]);
       const activeData = await activeRes.json();
       const histData = await histRes.json();
@@ -182,7 +183,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   // Fetch Active Finding Types Catalog
   const fetchFindingTypes = async () => {
     try {
-      const res = await fetch(`/api/housekeeping/finding-types?property_id=${propertyId}&scope=active`);
+      const res = await authenticatedFetch(`/api/housekeeping/finding-types?property_id=${propertyId}&scope=active`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         const types: HkFindingType[] = data.data || [];
@@ -200,7 +201,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   const loadTaskFindings = async (taskId: number) => {
     try {
       setCleaningFindingsLoading(true);
-      const res = await fetch(`/api/housekeeping/tasks/${taskId}/findings?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${taskId}/findings?property_id=${propertyId}`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         setCleaningFindings(data.data || []);
@@ -214,7 +215,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch(`/api/housekeeping/settings?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/housekeeping/settings?property_id=${propertyId}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -237,7 +238,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     try {
       setChecklistLoading(true);
       setChecklistError(null);
-      const res = await fetch(`/api/housekeeping/tasks/${taskId}/checklist?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${taskId}/checklist?property_id=${propertyId}`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         setChecklistItems(data.data || []);
@@ -254,7 +255,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     const taskId = targetTaskId || selectedTask?.id || activeCleaningTask?.id;
     if (!taskId) return;
     try {
-      const res = await fetch(`/api/housekeeping/tasks/${taskId}/checklist/${itemId}`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${taskId}/checklist/${itemId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -285,7 +286,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     if (!taskId) return;
     try {
       const itemIds = items.map(it => it.id);
-      const res = await fetch(`/api/housekeeping/tasks/${taskId}/checklist/bulk-category`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${taskId}/checklist/bulk-category`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -323,7 +324,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     if (task.status === 'ASSIGNED' || task.status === 'ACKNOWLEDGED') {
       try {
         setSubmittingId(task.id);
-        const res = await fetch(`/api/housekeeping/tasks/${task.id}/start`, {
+        const res = await authenticatedFetch(`/api/housekeeping/tasks/${task.id}/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -353,7 +354,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     try {
       setSubmittingId(task.id);
       setChecklistError(null);
-      const res = await fetch(`/api/housekeeping/tasks/${task.id}/complete`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${task.id}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -412,7 +413,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
 
     try {
       setSubmittingId(activeCleaningTask.id);
-      const res = await fetch(`/api/housekeeping/tasks/${activeCleaningTask.id}/findings`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${activeCleaningTask.id}/findings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -457,7 +458,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   const handleStartTask = async (task: HousekeepingTaskRecord) => {
     try {
       setSubmittingId(task.id);
-      const res = await fetch(`/api/housekeeping/tasks/${task.id}/start`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${task.id}/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -479,7 +480,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   const handleCompleteTask = async (task: HousekeepingTaskRecord) => {
     try {
       setSubmittingId(task.id);
-      const res = await fetch(`/api/housekeeping/tasks/${task.id}/complete`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${task.id}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -510,7 +511,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     try {
       setSubmittingId(task.id);
       setChecklistError(null);
-      const res = await fetch(`/api/housekeeping/tasks/${task.id}/complete`, {
+      const res = await authenticatedFetch(`/api/housekeeping/tasks/${task.id}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -750,7 +751,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
     if (!newTaskPayload.title.trim()) return;
     try {
       setCreateTaskSubmitting(true);
-      const res = await fetch('/api/housekeeping/manual-tasks', {
+      const res = await authenticatedFetch('/api/housekeeping/manual-tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export interface ProductItem {
   id: number;
@@ -49,7 +50,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setLoading(true);
       setErrorMsg(null);
-      const res = await fetch(`/api/pos/menu?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/pos/menu?property_id=${propertyId}`);
       const json = await res.json();
       if (!res.ok) {
         throw new Error(json.message || 'Gagal memuat katalog master produk');
@@ -116,7 +117,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setErrorMsg(null);
-      const res = await fetch('/api/pos/menu/items', {
+      const res = await authenticatedFetch('/api/pos/menu/items', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -156,7 +157,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setErrorMsg(null);
-      const res = await fetch(`/api/pos/menu/items/${item.id}?property_id=${propertyId}`, {
+      const res = await authenticatedFetch(`/api/pos/menu/items/${item.id}?property_id=${propertyId}`, {
         method: 'DELETE'
       });
       const json = await res.json();

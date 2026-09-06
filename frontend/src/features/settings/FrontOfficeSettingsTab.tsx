@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export type FieldMode = 'REQUIRED' | 'OPTIONAL' | 'HIDDEN';
 
@@ -135,7 +136,7 @@ export const FrontOfficeSettingsTab: React.FC<FrontOfficeSettingsTabProps> = ({
 
     try {
       if (editingDuration) {
-        const res = await fetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations/${editingDuration.id}`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations/${editingDuration.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -147,7 +148,7 @@ export const FrontOfficeSettingsTab: React.FC<FrontOfficeSettingsTabProps> = ({
         });
         if (!res.ok) throw new Error('Gagal memperbarui durasi');
       } else {
-        const res = await fetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations`, {
+        const res = await authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -175,7 +176,7 @@ export const FrontOfficeSettingsTab: React.FC<FrontOfficeSettingsTabProps> = ({
   const handleDeleteDuration = async (id: number) => {
     if (!confirm('Apakah Anda yakin ingin menghapus preset durasi ini?')) return;
     try {
-      const res = await fetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations/${id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations/${id}`, {
         method: 'DELETE'
       });
       if (!res.ok) throw new Error('Gagal menghapus durasi');

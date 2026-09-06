@@ -319,7 +319,7 @@ function AppContent() {
   useEffect(() => {
     if (!propertyId) return;
     let isMounted = true;
-    fetch(`/api/properties/${propertyId}/features`)
+    authFetch(`/api/properties/${propertyId}/features`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (isMounted && data?.data) {
@@ -384,7 +384,7 @@ function AppContent() {
   }, [bookingComposerChildren]);
 
   const fetchProperties = useCallback(() => {
-    fetch('/api/properties')
+    authFetch('/api/properties')
       .then(r => r.json())
       .then(d => {
         if (d.status === 'OK' && Array.isArray(d.data)) {
@@ -963,7 +963,7 @@ function AppContent() {
     if (!window.confirm('Batalkan reservasi ini?')) return;
 
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/cancel`, {
+      const response = await authFetch(`/api/reservations/${reservationId}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId })
@@ -1102,14 +1102,14 @@ function AppContent() {
     setFinanceSummary(null);
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes, checkoutRes] = await Promise.all([
-        fetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
-        fetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
-        fetch(`/api/pos/menu?property_id=${targetPropertyId}`),
-        fetch('/api/pos/orders?property_id=' + targetPropertyId),
-        fetch('/api/accounting/summary?property_id=' + targetPropertyId),
-        fetch('/api/hr/employees'),
-        fetch('/api/hr/payroll'),
-        fetch(`/api/housekeeping/checkout-inspections?property_id=${targetPropertyId}`)
+        authFetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
+        authFetch(`/api/maintenance/tasks?property_id=${targetPropertyId}`),
+        authFetch(`/api/pos/menu?property_id=${targetPropertyId}`),
+        authFetch('/api/pos/orders?property_id=' + targetPropertyId),
+        authFetch('/api/accounting/summary?property_id=' + targetPropertyId),
+        authFetch('/api/hr/employees'),
+        authFetch('/api/hr/payroll'),
+        authFetch(`/api/housekeeping/checkout-inspections?property_id=${targetPropertyId}`)
       ]);
 
       const housekeepingData = await housekeepingRes.json();
@@ -1160,7 +1160,7 @@ function AppContent() {
       if (range?.startDate && range?.endDateExclusive) {
         url += `&start_date=${encodeURIComponent(range.startDate)}&end_date=${encodeURIComponent(range.endDateExclusive)}`;
       }
-      const res = await fetch(url);
+      const res = await authFetch(url);
       const json = await res.json().catch(() => null);
       if (requestVersion !== transactionRequestVersionRef.current) return;
       if (res.ok && (json?.status === 'SUCCESS' || json?.status === 'OK') && Array.isArray(json?.data)) {
@@ -1194,7 +1194,7 @@ function AppContent() {
     const requestVersion = ++dailyOperationsRequestVersionRef.current;
     setDailyOperationsLoading(true);
     try {
-      const res = await fetch(`/api/reports/daily-operations?property_id=${propId}`);
+      const res = await authFetch(`/api/reports/daily-operations?property_id=${propId}`);
       const json = await res.json();
       if (requestVersion !== dailyOperationsRequestVersionRef.current) return;
       if (json.status === 'SUCCESS' && json.data) {
@@ -1231,7 +1231,7 @@ function AppContent() {
 
   const fetchReservationAudit = async (reservationId: number) => {
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/audit?property_id=${propertyId}`);
+      const response = await authFetch(`/api/reservations/${reservationId}/audit?property_id=${propertyId}`);
       const data = await response.json();
       setReservationAudit(data.data || []);
     } catch (error) {
@@ -1242,7 +1242,7 @@ function AppContent() {
 
   const fetchRoomAudit = async (roomId: number) => {
     try {
-      const response = await fetch(`/api/rooms/${roomId}/audit?property_id=${propertyId}`);
+      const response = await authFetch(`/api/rooms/${roomId}/audit?property_id=${propertyId}`);
       const data = await response.json();
       return data.data || [];
     } catch (error) {
@@ -1256,7 +1256,7 @@ function AppContent() {
     const sampleItems = posMenu.slice(0, 2).map((item: any) => ({ menu_item_id: item.id, quantity: 1 }));
 
     try {
-      const res = await fetch('/api/pos/orders', {
+      const res = await authFetch('/api/pos/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, table_number: '101', guest_name: 'Walk In Guest', items: sampleItems })
@@ -1277,7 +1277,7 @@ function AppContent() {
       return;
     }
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/folio?property_id=${propertyId}`);
+      const response = await authFetch(`/api/reservations/${reservationId}/folio?property_id=${propertyId}`);
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Failed to load folio');
@@ -1301,7 +1301,7 @@ function AppContent() {
 
   const viewRoomMasterReservation = async (summary: ActiveRoomReservation) => {
     try {
-      const response = await fetch(`/api/reservations/${summary.id}?property_id=${propertyId}`);
+      const response = await authFetch(`/api/reservations/${summary.id}?property_id=${propertyId}`);
       const body = await response.json();
       if (!response.ok) throw new Error(body.message || 'Gagal memuat detail reservasi');
       setSelectedRes({
@@ -1317,7 +1317,7 @@ function AppContent() {
 
   const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout') => {
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
+      const response = await authFetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId })
@@ -1365,7 +1365,7 @@ function AppContent() {
   const handleRequestCheckoutRoomCheck = async () => {
     if (!selectedRes || !selectedRes.id || propertyId === null) return;
     try {
-      const resp = await fetch('/api/housekeeping/checkout-room-check', {
+      const resp = await authFetch('/api/housekeeping/checkout-room-check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1379,7 +1379,7 @@ function AppContent() {
         throw new Error(err.message || 'Gagal meminta pemeriksaan kamar');
       }
       alert('Permintaan pemeriksaan kamar telah dikirim ke Housekeeping (Priority Critical).');
-      const detailRes = await fetch(`/api/reservations/${selectedRes.id}?property_id=${propertyId}`);
+      const detailRes = await authFetch(`/api/reservations/${selectedRes.id}?property_id=${propertyId}`);
       if (detailRes.ok) {
         const json = await detailRes.json();
         if (json.data) setSelectedRes((prev: any) => ({ ...prev, ...json.data }));
@@ -1505,7 +1505,7 @@ function AppContent() {
       }
       formData.append('file', paymentEvidenceForm.file);
 
-      const response = await fetch(`/api/reservations/${selectedRes.id}/payments`, {
+      const response = await authFetch(`/api/reservations/${selectedRes.id}/payments`, {
         method: 'POST',
         body: formData
       });
@@ -1642,7 +1642,7 @@ function AppContent() {
 
     try {
       const evid = deactivateEvidenceModal.evidence;
-      const res = await fetch(`/api/reservations/${selectedRes.id}/payments/${evid.payment_transaction_id}/evidences/${evid.id}/deactivate`, {
+      const res = await authFetch(`/api/reservations/${selectedRes.id}/payments/${evid.payment_transaction_id}/evidences/${evid.id}/deactivate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1681,7 +1681,7 @@ function AppContent() {
         formData.append('note', uploadExtraEvidenceModal.form.note);
       }
 
-      const res = await fetch(`/api/reservations/${selectedRes.id}/payments/${uploadExtraEvidenceModal.paymentId}/evidences`, {
+      const res = await authFetch(`/api/reservations/${selectedRes.id}/payments/${uploadExtraEvidenceModal.paymentId}/evidences`, {
         method: 'POST',
         body: formData
       });
@@ -1754,7 +1754,7 @@ function AppContent() {
       }
       formData.append('file', paymentCorrectionEvidenceForm.file);
 
-      const response = await fetch(
+      const response = await authFetch(
         `/api/reservations/${selectedRes.id}/payments/${paymentCorrectionModal.payment.id}/correct`,
         {
           method: 'POST',
@@ -1862,7 +1862,7 @@ function AppContent() {
     setPaymentVoidModal((prev) => ({ ...prev, submitting: true, error: null }));
 
     try {
-      const response = await fetch(
+      const response = await authFetch(
         `/api/reservations/${selectedRes.id}/payments/${paymentVoidModal.payment.id}/void`,
         {
           method: 'POST',
@@ -1975,8 +1975,8 @@ function AppContent() {
     const fetchBookingDetail = async () => {
       try {
         const [bookingRes, reservationsRes] = await Promise.all([
-          fetch(`/api/bookings/${encodeURIComponent(bid)}?property_id=${propertyId}`),
-          fetch(`/api/bookings/${encodeURIComponent(bid)}/reservations?property_id=${propertyId}`),
+          authFetch(`/api/bookings/${encodeURIComponent(bid)}?property_id=${propertyId}`),
+          authFetch(`/api/bookings/${encodeURIComponent(bid)}/reservations?property_id=${propertyId}`),
         ]);
 
         const bookingData = await bookingRes.json();
@@ -2067,7 +2067,7 @@ function AppContent() {
 
     try {
       const dueAt = dueDate ? new Date(`${dueDate}T12:00:00`).toISOString() : new Date().toISOString();
-      const response = await fetch('/api/housekeeping/tasks', {
+      const response = await authFetch('/api/housekeeping/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2096,7 +2096,7 @@ function AppContent() {
   };
 
   const updateHousekeepingTaskStatus = async (taskId: number, status: 'PENDING' | 'DONE') => {
-    const response = await fetch(`/api/housekeeping/tasks/${taskId}/status`, {
+    const response = await authFetch(`/api/housekeeping/tasks/${taskId}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ property_id: propertyId, status })
@@ -2115,7 +2115,7 @@ function AppContent() {
     const newStatus = currentStatus === 'Ready' ? 'Kotor' : 'Ready';
 
     try {
-      const res = await fetch(`/api/rooms/${roomId}/status`, {
+      const res = await authFetch(`/api/rooms/${roomId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, status: newStatus })
@@ -2852,7 +2852,7 @@ function AppContent() {
 
     try {
       const propId = propertyId || candidate?.property_id || 1;
-      const res = await fetch(`/api/reservations/${reservationId}?property_id=${propId}`);
+      const res = await authFetch(`/api/reservations/${reservationId}?property_id=${propId}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -3054,7 +3054,7 @@ function AppContent() {
     setStayChangeState((prev) => ({ ...prev, submitting: true }));
 
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
+      const response = await authFetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

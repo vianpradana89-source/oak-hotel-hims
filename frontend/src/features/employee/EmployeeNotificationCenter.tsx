@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const Bell = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -59,7 +60,7 @@ export const EmployeeNotificationCenter: React.FC<EmployeeNotificationCenterProp
     try {
       setLoading(true);
       // Fetch urgent checkout tasks & recent assignments for this property
-      const res = await fetch(`/api/housekeeping/tasks?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         const tasks = data.data || [];

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Button } from '../../design-system/Button';
 import { Input } from '../../design-system/Input';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export interface PropertyItem {
   id: number;
@@ -59,7 +60,7 @@ export const PropertyManagementTab: React.FC<PropertyManagementTabProps> = ({
   const loadProperties = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/properties?all=true`);
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties?all=true`);
       const json = await res.json();
       if (json.status === 'OK' && Array.isArray(json.data)) {
         setProperties(json.data);
@@ -100,7 +101,7 @@ export const PropertyManagementTab: React.FC<PropertyManagementTabProps> = ({
     setIsSaving(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/properties`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -145,7 +146,7 @@ export const PropertyManagementTab: React.FC<PropertyManagementTabProps> = ({
     setIsEditSaving(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/properties/${editingProperty.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties/${editingProperty.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -182,7 +183,7 @@ export const PropertyManagementTab: React.FC<PropertyManagementTabProps> = ({
     setIsDeleting(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/properties/${deletingProperty.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties/${deletingProperty.id}`, {
         method: 'DELETE'
       });
       const json = await res.json();

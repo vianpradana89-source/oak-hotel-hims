@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { hotelDateFromInstant } from '../calendar/calendarDates.ts';
 import type {
   OccupancyReportData,
@@ -62,7 +63,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
       setError(null);
 
       try {
-        const res = await fetch(`/api/reports/occupancy?${queryConfig.urlParams}`);
+        const res = await authenticatedFetch(`/api/reports/occupancy?${queryConfig.urlParams}`);
         const json = await res.json().catch(() => null);
 
         if (currentVersion !== requestVersionRef.current) return;

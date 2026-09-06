@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface HrdRolePolicyTabProps {
   propertyId: number;
@@ -19,7 +20,7 @@ export const HrdRolePolicyTab: React.FC<HrdRolePolicyTabProps> = ({ propertyId }
     const fetchPolicy = async () => {
       try {
         setLoading(true);
-        const res = await fetch(`/api/hrd/policies?property_id=${propertyId}`);
+        const res = await authenticatedFetch(`/api/hrd/policies?property_id=${propertyId}`);
         const json = await res.json();
         if (json.status === 'OK' && json.data) {
           setPolicies({
@@ -45,7 +46,7 @@ export const HrdRolePolicyTab: React.FC<HrdRolePolicyTabProps> = ({ propertyId }
     try {
       setSaving(true);
       setFeedback(null);
-      const res = await fetch('/api/hrd/policies', {
+      const res = await authenticatedFetch('/api/hrd/policies', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

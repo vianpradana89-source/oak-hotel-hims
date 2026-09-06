@@ -1,5 +1,6 @@
 import type { PropertyBrandingConfig } from './propertyBrandingTypes';
 import { getFallbackPropertyBranding } from './propertyBrandingTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 /**
  * Fetch authoritative property branding from API
@@ -10,7 +11,7 @@ export async function fetchPropertyBranding(
   fallbackCode?: string
 ): Promise<PropertyBrandingConfig> {
   try {
-    const res = await fetch(`/api/properties/${propertyId}/branding`);
+    const res = await authenticatedFetch(`/api/properties/${propertyId}/branding`);
     if (!res.ok) {
       return getFallbackPropertyBranding(propertyId, fallbackName, fallbackCode);
     }
@@ -51,7 +52,7 @@ export async function savePropertyBranding(
     compact_logo_url: config.compactLogoUrl,
   };
 
-  const res = await fetch(`/api/properties/${propertyId}/branding`, {
+  const res = await authenticatedFetch(`/api/properties/${propertyId}/branding`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',

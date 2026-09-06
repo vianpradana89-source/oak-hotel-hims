@@ -15,6 +15,7 @@ import type {
 import { HousekeepingTaskDetailDrawer } from './HousekeepingTaskDetailDrawer';
 import { CreateTaskModal } from './CreateTaskModal';
 import { MaintenanceIssuesModal } from './MaintenanceIssuesModal';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export type MetricCardKey =
   | 'DIRTY'
@@ -283,7 +284,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     setErrorMsg(null);
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/daily-operations?property_id=${propertyId}&date=${dateStr}`);
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/daily-operations?property_id=${propertyId}&date=${dateStr}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || 'Gagal memuat operasional housekeeping');
@@ -325,7 +326,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   // Fetch housekeeping settings (for category bulk check, etc.)
   const fetchSettings = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`);
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -355,7 +356,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         queryParam = `&preset=${preset}`;
       }
       const url = `${apiBaseUrl}/housekeeping/history?property_id=${propertyId}${queryParam}${incArchived ? '&include_archived=true' : ''}`;
-      const res = await fetch(url);
+      const res = await authenticatedFetch(url);
       if (res.ok) {
         const json = await res.json();
         setHistoryTasks(json.data || []);
@@ -397,7 +398,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
     try {
       setIsHistorySaving(true);
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${historyEditTask.id}/history-edit`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${historyEditTask.id}/history-edit`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -430,7 +431,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     if (!reason) return;
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/archive`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/archive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -456,7 +457,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     if (!confirm(`Batalkan arsip untuk tugas ${task.task_number}?`)) return;
 
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/unarchive`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/unarchive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -545,7 +546,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const handleAcknowledge = async (task: HousekeepingTaskRecord) => {
     setIsActionSubmitting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/acknowledge`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/acknowledge`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, actor_name: 'Housekeeping Staff' })
@@ -566,7 +567,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const handleStart = async (task: HousekeepingTaskRecord) => {
     setIsActionSubmitting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/start`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/start`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId, actor_name: 'Housekeeping Staff' })
@@ -592,7 +593,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     isCompleted: boolean
   ) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist-items/${item.id}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist-items/${item.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -629,7 +630,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   ) => {
     try {
       const itemIds = items.map((i) => i.id);
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist/bulk-category`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist/bulk-category`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -671,7 +672,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   ) => {
     setIsActionSubmitting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/complete`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/complete`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -701,7 +702,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     assigned_user_name_snapshot?: string;
     template_code?: string;
   }) => {
-    const res = await fetch(`${apiBaseUrl}/housekeeping/tasks`, {
+    const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

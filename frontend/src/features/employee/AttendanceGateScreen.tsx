@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const Camera = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -126,7 +127,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       setLoading(true);
       setErrorMsg(null);
       const url = `/api/attendance/status?property_id=${propertyId}${employeeId ? `&employee_id=${employeeId}` : ''}&role=${encodeURIComponent(employeeRole)}`;
-      const res = await fetch(url);
+      const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         setStatusData(data.data);
@@ -294,7 +295,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
         formData.append('photo', photoBlob, 'selfie_attendance.jpg');
       }
 
-      const res = await fetch('/api/attendance/check-in', {
+      const res = await authenticatedFetch('/api/attendance/check-in', {
         method: 'POST',
         body: formData
       });

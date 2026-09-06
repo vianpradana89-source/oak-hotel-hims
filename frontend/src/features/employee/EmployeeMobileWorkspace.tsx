@@ -3,6 +3,7 @@ import { AttendanceGateScreen } from './AttendanceGateScreen';
 import { HousekeepingMobileCrewView } from './HousekeepingMobileCrewView';
 import { EmployeeNotificationCenter } from './EmployeeNotificationCenter';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const Home = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -136,7 +137,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     try {
       setAttendanceLoading(true);
       const url = `/api/attendance/status?property_id=${propertyId}${currentUser.id ? `&employee_id=${currentUser.id}` : ''}&role=${encodeURIComponent(currentUser.role)}`;
-      const res = await fetch(url);
+      const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
         const attData: EmployeeAttendanceStatus = data.data;
@@ -159,8 +160,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const fetchTaskStats = async () => {
     try {
       const [activeRes, histRes] = await Promise.all([
-        fetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=active`),
-        fetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`)
+        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=active`),
+        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`)
       ]);
       const activeData = await activeRes.json();
       const histData = await histRes.json();
@@ -196,7 +197,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       formData.append('attendance_type', 'CHECK_OUT');
       if (clockOutReason.trim()) formData.append('reason', clockOutReason.trim());
 
-      const res = await fetch('/api/attendance/check-out', {
+      const res = await authenticatedFetch('/api/attendance/check-out', {
         method: 'POST',
         body: formData
       });

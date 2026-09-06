@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface TestEntitySummary {
   id: number;
@@ -30,11 +31,6 @@ interface TestDataPurgeTabProps {
   propertyId: number;
 }
 
-const getAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem('token') || sessionStorage.getItem('token');
-  return token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-};
-
 export const TestDataPurgeTab: React.FC<TestDataPurgeTabProps> = ({ propertyId }) => {
   const [data, setData] = useState<TestDataListResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -47,7 +43,7 @@ export const TestDataPurgeTab: React.FC<TestDataPurgeTabProps> = ({ propertyId }
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`/api/hrd/test-data?property_id=${propertyId}`, { headers: getAuthHeaders() });
+      const res = await authenticatedFetch(`/api/hrd/test-data?property_id=${propertyId}`);
       const json = await res.json();
       if (json.status === 'OK') {
         setData(json.data);
@@ -74,9 +70,8 @@ export const TestDataPurgeTab: React.FC<TestDataPurgeTabProps> = ({ propertyId }
     setPurging(true);
     setPurgeResult(null);
     try {
-      const res = await fetch(`/api/hrd/test-data/employees/${purgeTarget.id}/purge?property_id=${propertyId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders()
+      const res = await authenticatedFetch(`/api/hrd/test-data/employees/${purgeTarget.id}/purge?property_id=${propertyId}`, {
+        method: 'DELETE'
       });
       const json = await res.json();
       if (json.status === 'OK') {

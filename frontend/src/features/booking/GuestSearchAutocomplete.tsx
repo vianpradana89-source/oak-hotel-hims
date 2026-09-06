@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Guest } from '../guests/guestTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface Props {
   propertyId: number;
@@ -60,7 +61,7 @@ export default function GuestSearchAutocomplete({
     const timer = setTimeout(async () => {
       try {
         setLoading(true);
-        const res = await fetch(`/api/guests/search?property_id=${propertyId}&q=${encodeURIComponent(query.trim())}`);
+        const res = await authenticatedFetch(`/api/guests/search?property_id=${propertyId}&q=${encodeURIComponent(query.trim())}`);
         const data = await res.json();
         if (data.status === 'OK' || data.success) {
           setResults(data.data || []);

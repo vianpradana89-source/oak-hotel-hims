@@ -12,12 +12,13 @@ import type {
   CustomCategory,
   TransactionLineInput
 } from './transactionDomainTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const API_BASE = '/api/transactions';
 const SUPPLIERS_BASE = '/api/suppliers';
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(url, options);
+  const res = await authenticatedFetch(url, options);
   const contentType = res.headers.get('content-type') || '';
 
   if (!contentType.includes('application/json')) {
@@ -434,7 +435,7 @@ export async function uploadTransactionAttachmentApi(
     formData.append('actor_name', effectiveActor);
   }
 
-  const res = await fetch(`${API_BASE}/${transactionId}/attachments`, {
+  const res = await authenticatedFetch(`${API_BASE}/${transactionId}/attachments`, {
     method: 'POST',
     body: formData
   });

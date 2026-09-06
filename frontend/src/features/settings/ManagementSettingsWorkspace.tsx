@@ -8,6 +8,7 @@ import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
 import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export type SettingsCategoryKey =
   | 'property'
@@ -114,7 +115,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   // Handle Feature Flag Toggle
   const handleUpdateFeatureFlag = async (featureKey: string, enabled: boolean) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/properties/${propertyId}/features/${featureKey}`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/features/${featureKey}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
@@ -140,7 +141,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   // Handle Save Housekeeping Operational Settings
   const handleSaveHkSettings = async (patch: Partial<PropertyHousekeepingSettings>) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/housekeeping/settings`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/settings`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

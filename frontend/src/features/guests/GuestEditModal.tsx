@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { Guest, VipStatus } from './guestTypes';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestEditModalProps {
   isOpen: boolean;
@@ -216,7 +217,7 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
         : `/api/guests`;
       const method = isEditing ? 'PATCH' : 'POST';
 
-      const res = await fetch(url, {
+      const res = await authenticatedFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

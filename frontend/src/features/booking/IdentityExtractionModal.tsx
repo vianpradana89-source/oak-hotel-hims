@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 export interface ExtractedIdentityData {
   full_name: string;
@@ -261,14 +262,14 @@ export default function IdentityExtractionModal({
       if (guestId) formData.append('guest_id', String(guestId));
       if (propertyId) formData.append('property_id', String(propertyId));
 
-      let res = await fetch('/api/ocr/scan-id', {
+      let res = await authenticatedFetch('/api/ocr/scan-id', {
         method: 'POST',
         body: formData
       });
 
       if (!res.ok) {
         // Fallback to /api/identity/extract-ktp
-        res = await fetch('/api/identity/extract-ktp', {
+        res = await authenticatedFetch('/api/identity/extract-ktp', {
           method: 'POST',
           body: formData
         });
@@ -441,7 +442,7 @@ export default function IdentityExtractionModal({
         ocr_provider: finalData.provider
       };
 
-      const res = await fetch('/api/identity/confirm', {
+      const res = await authenticatedFetch('/api/identity/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(confirmPayload)

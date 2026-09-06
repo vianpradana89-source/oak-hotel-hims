@@ -9,6 +9,7 @@ import {
   getVipBadgeClass
 } from './guestCrmHelpers';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestProfileModalProps {
   guestId: number | null;
@@ -48,7 +49,7 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
     setError(null);
     setActionMsg(null);
 
-    fetch(`/api/guests/${guestId}?property_id=${propertyId}`)
+    authenticatedFetch(`/api/guests/${guestId}?property_id=${propertyId}`)
       .then(async (res) => {
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
@@ -88,7 +89,7 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
 
     try {
       const endpoint = isArchiving ? `/api/guests/${guest.id}/archive` : `/api/guests/${guest.id}/restore`;
-      const res = await fetch(endpoint, {
+      const res = await authenticatedFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ property_id: propertyId })
@@ -109,7 +110,7 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
     if (!window.confirm(`Yakin ingin menghapus permanen data tamu "${guest.full_name}"?\nTindakan ini tidak dapat dibatalkan.`)) return;
 
     try {
-      const res = await fetch(`/api/guests/${guest.id}?property_id=${propertyId}`, {
+      const res = await authenticatedFetch(`/api/guests/${guest.id}?property_id=${propertyId}`, {
         method: 'DELETE'
       });
       const data = await res.json();

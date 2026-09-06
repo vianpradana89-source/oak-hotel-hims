@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import type { HousekeepingTaskFinding } from './housekeepingTypes';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface MaintenanceIssuesModalProps {
   isOpen: boolean;
@@ -46,7 +47,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
       const url = `${apiBaseUrl}/housekeeping/findings?property_id=${propertyId}${
         tabFilter === 'OPEN' ? '&status=OPEN' : ''
       }`;
-      const res = await fetch(url);
+      const res = await authenticatedFetch(url);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || 'Gagal memuat daftar kendala');
@@ -100,7 +101,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
         payload.target_room_status = 'VACANT_DIRTY';
       }
 
-      const res = await fetch(`${apiBaseUrl}/housekeeping/findings/${finding.id}/resolve`, {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/findings/${finding.id}/resolve`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
