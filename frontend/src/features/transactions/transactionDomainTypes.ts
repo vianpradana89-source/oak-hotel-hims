@@ -152,6 +152,28 @@ export interface TransactionRecord {
   deleted_by_name_snapshot?: string | null;
   delete_reason?: string | null;
   operational_sheet?: OperationalSheet;
+  effective_net_amount?: number;
+  lifecycle_raw_net_amount?: number;
+  lifecycle_group_key?: string;
+  lifecycle_member_count?: number;
+  is_lifecycle_primary?: boolean;
+  lifecycle_status_label?: string;
+  lifecycle?: {
+    group_key: string;
+    effective_net_amount: number;
+    operational_sheet: OperationalSheet;
+    primary_transaction_id: number;
+    member_count: number;
+    members: Array<{
+      id: number;
+      transaction_no: string | null;
+      role: 'Original Sale' | 'Reversal' | 'Correction';
+      amount: number;
+      net_amount: number;
+      transaction_status: string | null;
+      transaction_date: string | null;
+    }>;
+  };
   lines?: TransactionLine[];
   attachments?: TransactionAttachment[];
   linked_payments?: Array<{
@@ -250,6 +272,16 @@ export interface OperationalStatusDisplay {
   badgeClass: string;
 }
 
+export function displayTransactionNet(tx: {
+  effective_net_amount?: number | string | null;
+  net_amount?: number | string | null;
+}): number {
+  if (tx.effective_net_amount !== undefined && tx.effective_net_amount !== null && tx.effective_net_amount !== '') {
+    return Number(tx.effective_net_amount || 0);
+  }
+  return Number(tx.net_amount || 0);
+}
+
 export function mapToOperationalStatus(tx: {
   transaction_type?: string;
   transaction_status: string;
@@ -258,12 +290,36 @@ export function mapToOperationalStatus(tx: {
   operational_sheet?: OperationalSheet;
   reservation_status?: string | null;
   booking_status?: string | null;
+  is_lifecycle_primary?: boolean;
+  lifecycle_status_label?: string | null;
 }): OperationalStatusDisplay {
   if (tx.operational_sheet === 'HAPUS' || tx.deleted_at) {
     return {
       label: 'Hapus',
       group: 'HAPUS',
       badgeClass: 'bg-slate-100 text-slate-500 border-slate-300'
+    };
+  }
+
+  if (tx.is_lifecycle_primary && tx.operational_sheet === 'BATAL') {
+    return {
+      label: tx.lifecycle_status_label || 'Dibatalkan',
+      group: 'BATAL',
+      badgeClass: 'bg-rose-50 text-rose-700 border-rose-200'
+    };
+  }
+  if (tx.is_lifecycle_primary && tx.operational_sheet === 'SELESAI') {
+    return {
+      label: tx.lifecycle_status_label || 'Selesai',
+      group: 'SELESAI',
+      badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    };
+  }
+  if (tx.is_lifecycle_primary && tx.operational_sheet === 'PROSES') {
+    return {
+      label: tx.lifecycle_status_label || 'Proses',
+      group: 'PROSES',
+      badgeClass: 'bg-amber-50 text-amber-700 border-amber-200'
     };
   }
 

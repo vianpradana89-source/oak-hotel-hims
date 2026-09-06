@@ -29,6 +29,12 @@ import {
 } from './transactionTypes';
 import { generateTransactionNumber, getHotelDateToday } from './transactionNumberService';
 import { generateSupplierCode } from '../suppliers/supplierService';
+import {
+  buildLifecycleHistory,
+  groupSaleLifecycles,
+  presentLifecyclePrimary,
+  siblingExpansionIds,
+} from './saleLifecycleGrouping';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -2074,113 +2080,11 @@ export async function getTransactions(
     valIdx++;
   }
 
-  // Calculate full server-side sheet counts for current filtered domain
-  const sheetCountsQuery = `
-    SELECT
-      COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status NOT IN ('VOIDED', 'CANCELLED', 'REVERSED') AND (
-        (t.transaction_type = 'PURCHASE' AND (t.receiving_status IS NULL OR t.receiving_status NOT IN ('DITERIMA', 'DITERIMA_LENGKAP')))
-        OR (t.transaction_type != 'PURCHASE' AND t.transaction_status NOT IN ('POSTED', 'VOIDED', 'CANCELLED', 'REVERSED'))
-      ) THEN 1 END) AS count_proses,
-      COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status NOT IN ('VOIDED', 'CANCELLED', 'REVERSED') AND (
-        (t.transaction_type = 'PURCHASE' AND t.receiving_status IN ('DITERIMA', 'DITERIMA_LENGKAP'))
-        OR (t.transaction_type != 'PURCHASE' AND t.transaction_status = 'POSTED')
-      ) THEN 1 END) AS count_selesai,
-      COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED') AND NOT EXISTS (
-        SELECT 1 FROM transactions rev WHERE rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED' AND rev.deleted_at IS NULL
-      ) THEN 1 END) AS count_batal,
-      COUNT(CASE WHEN t.deleted_at IS NOT NULL THEN 1 END) AS count_hapus
-    FROM transactions t
-    LEFT JOIN suppliers s ON s.id = t.supplier_id
-    LEFT JOIN reservations r ON r.id = t.reservation_id
-    LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
-    WHERE ${baseConditions.join(' AND ')}
-  `;
-
-  const countsRes = await pool.query(sheetCountsQuery, baseValues);
-  const cRow = countsRes.rows[0] || {};
-  const sheet_counts: TransactionSheetCounts = {
-    proses: Number(cRow.count_proses || 0),
-    selesai: Number(cRow.count_selesai || 0),
-    batal: Number(cRow.count_batal || 0),
-    hapus: Number(cRow.count_hapus || 0)
-  };
-
-  const conditions = [...baseConditions];
-  const values = [...baseValues];
-
   const targetSheet = String(params.operational_sheet || params.operational_status || '').toUpperCase();
-
-  if (targetSheet === 'HAPUS') {
-    conditions.push(`t.deleted_at IS NOT NULL`);
-  } else {
-    // Exclude soft-deleted records from normal active sheets
-    conditions.push(`t.deleted_at IS NULL`);
-
-    if (targetSheet === 'PROSES') {
-      conditions.push(`(
-        t.transaction_status NOT IN ('VOIDED', 'CANCELLED', 'REVERSED') AND (
-          (t.transaction_type = 'PURCHASE' AND (t.receiving_status IS NULL OR t.receiving_status NOT IN ('DITERIMA', 'DITERIMA_LENGKAP')))
-          OR (t.transaction_type != 'PURCHASE' AND t.transaction_status NOT IN ('POSTED', 'VOIDED', 'CANCELLED', 'REVERSED'))
-        )
-      )`);
-    } else if (targetSheet === 'SELESAI') {
-      conditions.push(`(
-        t.transaction_status NOT IN ('VOIDED', 'CANCELLED', 'REVERSED') AND (
-          (t.transaction_type = 'PURCHASE' AND t.receiving_status IN ('DITERIMA', 'DITERIMA_LENGKAP'))
-          OR (t.transaction_type != 'PURCHASE' AND t.transaction_status = 'POSTED')
-        )
-      )`);
-    } else if (targetSheet === 'BATAL') {
-      conditions.push(`t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED')`);
-      conditions.push(`NOT EXISTS (
-        SELECT 1 FROM transactions rev WHERE rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED' AND rev.deleted_at IS NULL
-      )`);
-    } else if (params.transaction_status) {
-      conditions.push(`t.transaction_status = $${valIdx++}`);
-      values.push(params.transaction_status);
-    }
-  }
-
-  const whereClause = `WHERE ${conditions.join(' AND ')}`;
-
-  const summaryQuery = `
-    SELECT
-      COALESCE(SUM(CASE WHEN t.deleted_at IS NULL AND t.transaction_type = 'SALE' THEN t.net_amount ELSE 0 END), 0) AS total_sale,
-      COALESCE(SUM(CASE WHEN t.deleted_at IS NULL AND t.transaction_type = 'PURCHASE' THEN t.net_amount ELSE 0 END), 0) AS total_purchase,
-      COALESCE(SUM(CASE WHEN t.deleted_at IS NULL AND t.transaction_type = 'EXPENSE' THEN t.net_amount ELSE 0 END), 0) AS total_expense,
-      COALESCE(SUM(CASE WHEN t.deleted_at IS NULL AND t.transaction_type = 'INCOME' THEN t.net_amount ELSE 0 END), 0) AS total_income,
-      COUNT(CASE WHEN t.transaction_type = 'SALE' THEN 1 END) AS count_sale,
-      COUNT(CASE WHEN t.transaction_type = 'PURCHASE' THEN 1 END) AS count_purchase,
-      COUNT(CASE WHEN t.transaction_type = 'EXPENSE' THEN 1 END) AS count_expense,
-      COUNT(CASE WHEN t.transaction_type = 'INCOME' THEN 1 END) AS count_income,
-      COUNT(*) AS total_count
-    FROM transactions t
-    LEFT JOIN suppliers s ON s.id = t.supplier_id
-    LEFT JOIN reservations r ON r.id = t.reservation_id
-    LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
-    ${whereClause}
-  `;
-
-  const summaryRes = await pool.query(summaryQuery, values);
-  const sRow = summaryRes.rows[0];
-
-  const summary: TransactionSummary = {
-    total_sale: Number(sRow.total_sale || 0),
-    total_purchase: Number(sRow.total_purchase || 0),
-    total_expense: Number(sRow.total_expense || 0),
-    total_income: Number(sRow.total_income || 0),
-    count_sale: Number(sRow.count_sale || 0),
-    count_purchase: Number(sRow.count_purchase || 0),
-    count_expense: Number(sRow.count_expense || 0),
-    count_income: Number(sRow.count_income || 0),
-  };
-
-  const totalCount = Number(sRow.total_count || 0);
   const limit = Math.min(100, Math.max(1, Number(params.limit || 50)));
   const offset = Math.max(0, Number(params.offset || 0));
 
-  // Authoritatively derive paid_amount and outstanding from payment_transactions
-  const listQuery = `
+  const listSelectSql = `
     SELECT t.*,
            s.name AS supplier_name,
            s.phone AS supplier_phone,
@@ -2204,25 +2108,154 @@ export async function getTransactions(
         AND pt.status = 'SUCCESS'
         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
     ) pmt ON TRUE
-    ${whereClause}
-    ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC
-    LIMIT $${valIdx++} OFFSET $${valIdx++}
   `;
 
-  const listRes = await pool.query(listQuery, [...values, limit, offset]);
+  const hapusCountRes = await pool.query(
+    `SELECT COUNT(*)::int AS count_hapus
+     FROM transactions t
+     LEFT JOIN suppliers s ON s.id = t.supplier_id
+     LEFT JOIN reservations r ON r.id = t.reservation_id
+     LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+     WHERE ${baseConditions.join(' AND ')}
+       AND t.deleted_at IS NOT NULL`,
+    baseValues
+  );
+  const hapusCount = Number(hapusCountRes.rows[0]?.count_hapus || 0);
 
-  const transactions = listRes.rows.map((row: any) => ({
-    ...row,
-    operational_sheet: deriveOperationalSheet(row)
-  }));
+  const candidateRes = await pool.query(
+    `${listSelectSql}
+     WHERE ${baseConditions.join(' AND ')}
+       AND t.deleted_at IS NULL
+     ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC`,
+    baseValues
+  );
+  const candidates = candidateRes.rows;
+  const candidateIds = new Set(candidates.map((row: any) => Number(row.id)));
+
+  let scopedRows = candidates;
+  const expansion = siblingExpansionIds(candidates);
+  if (candidates.length > 0) {
+    const siblingRes = await pool.query(
+      `${listSelectSql}
+       WHERE t.property_id = $1
+         AND t.deleted_at IS NULL
+         AND (
+           t.id = ANY($2::bigint[])
+           OR t.reversal_of_transaction_id = ANY($2::bigint[])
+           OR t.id = ANY($3::bigint[])
+           OR t.reversal_of_transaction_id = ANY($3::bigint[])
+           OR ($4::text[] <> '{}' AND t.correction_group_id = ANY($4::text[]))
+           OR t.metadata->>'restored_from_transaction_id' = ANY($5::text[])
+           OR t.metadata->>'reversal_transaction_id' = ANY($5::text[])
+         )`,
+      [
+        propertyId,
+        expansion.ids,
+        expansion.parentIds.length > 0 ? expansion.parentIds : [0],
+        expansion.groupIds,
+        expansion.ids.map(String),
+      ]
+    );
+    const byId = new Map<number, any>();
+    for (const row of [...candidates, ...siblingRes.rows]) {
+      byId.set(Number(row.id), row);
+    }
+    scopedRows = [...byId.values()];
+  }
+
+  const groups = groupSaleLifecycles(scopedRows).filter((group) =>
+    group.members.some((member) => candidateIds.has(Number(member.id)))
+  );
+
+  if (params.transaction_status) {
+    const wanted = String(params.transaction_status).toUpperCase();
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      if (String(groups[i].primary.transaction_status || '').toUpperCase() !== wanted) {
+        groups.splice(i, 1);
+      }
+    }
+  }
+
+  const sheet_counts: TransactionSheetCounts = {
+    proses: groups.filter((group) => group.sheet === 'PROSES').length,
+    selesai: groups.filter((group) => group.sheet === 'SELESAI').length,
+    batal: groups.filter((group) => group.sheet === 'BATAL').length,
+    hapus: hapusCount,
+  };
+
+  if (targetSheet === 'HAPUS') {
+    const hapusWhere = `WHERE ${baseConditions.join(' AND ')} AND t.deleted_at IS NOT NULL`;
+    const hapusList = await pool.query(
+      `${listSelectSql}
+       ${hapusWhere}
+       ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC
+       LIMIT $${valIdx} OFFSET $${valIdx + 1}`,
+      [...baseValues, limit, offset]
+    );
+    const transactions = hapusList.rows.map((row: any) => ({
+      ...row,
+      operational_sheet: deriveOperationalSheet(row),
+    }));
+    return {
+      transactions,
+      total_count: hapusCount,
+      summary: {
+        total_sale: 0,
+        total_purchase: 0,
+        total_expense: 0,
+        total_income: 0,
+        count_sale: 0,
+        count_purchase: 0,
+        count_expense: 0,
+        count_income: 0,
+      },
+      sheet_counts,
+      limit,
+      offset,
+    };
+  }
+
+  const visibleGroups = targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
+    ? groups.filter((group) => group.sheet === targetSheet)
+    : groups;
+
+  visibleGroups.sort((a, b) => {
+    const dateCmp = String(b.primary.transaction_date || '').localeCompare(String(a.primary.transaction_date || ''));
+    if (dateCmp !== 0) return dateCmp;
+    const timeCmp = String(b.primary.transaction_time || '').localeCompare(String(a.primary.transaction_time || ''));
+    if (timeCmp !== 0) return timeCmp;
+    return Number(b.primary.id) - Number(a.primary.id);
+  });
+
+  const presented = visibleGroups.map((group) => presentLifecyclePrimary(group));
+  const transactions = presented.slice(offset, offset + limit);
+
+  const summary: TransactionSummary = {
+    total_sale: presented
+      .filter((row) => String(row.transaction_type).toUpperCase() === 'SALE')
+      .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
+    total_purchase: presented
+      .filter((row) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
+      .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
+    total_expense: presented
+      .filter((row) => String(row.transaction_type).toUpperCase() === 'EXPENSE')
+      .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
+    total_income: presented
+      .filter((row) => String(row.transaction_type).toUpperCase() === 'INCOME')
+      .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
+    count_sale: presented.filter((row) => String(row.transaction_type).toUpperCase() === 'SALE').length,
+    count_purchase: presented.filter((row) => String(row.transaction_type).toUpperCase() === 'PURCHASE').length,
+    count_expense: presented.filter((row) => String(row.transaction_type).toUpperCase() === 'EXPENSE').length,
+    count_income: presented.filter((row) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
+  };
 
   return {
     transactions,
-    total_count: totalCount,
+    total_count: presented.length,
     summary,
     sheet_counts,
     limit,
-    offset
+    offset,
   };
 }
 
@@ -2318,9 +2351,44 @@ export async function getTransactionById(
     [String(id)]
   );
 
+  const expansion = siblingExpansionIds([tx]);
+  const siblingRes = await pool.query(
+    `SELECT t.*
+     FROM transactions t
+     WHERE t.property_id = $1
+       AND t.deleted_at IS NULL
+       AND (
+         t.id = ANY($2::bigint[])
+         OR t.reversal_of_transaction_id = ANY($2::bigint[])
+         OR t.id = ANY($3::bigint[])
+         OR t.reversal_of_transaction_id = ANY($3::bigint[])
+         OR ($4::text[] <> '{}' AND t.correction_group_id = ANY($4::text[]))
+         OR t.metadata->>'restored_from_transaction_id' = ANY($5::text[])
+         OR t.metadata->>'reversal_transaction_id' = ANY($5::text[])
+       )`,
+    [
+      propertyId,
+      expansion.ids,
+      expansion.parentIds.length > 0 ? expansion.parentIds : [0],
+      expansion.groupIds,
+      [...new Set([...expansion.ids, ...expansion.parentIds])].map(String),
+    ]
+  );
+  const lifecycleGroup = groupSaleLifecycles([tx, ...siblingRes.rows]).find((group) =>
+    group.members.some((member) => Number(member.id) === Number(tx.id))
+  );
+  const lifecycle = lifecycleGroup ? buildLifecycleHistory(lifecycleGroup) : null;
+
   return {
     ...tx,
     operational_sheet: deriveOperationalSheet(tx),
+    effective_net_amount: lifecycleGroup ? lifecycleGroup.effectiveNet : Number(tx.net_amount || 0),
+    is_lifecycle_primary: lifecycleGroup
+      ? Number(lifecycleGroup.primary.id) === Number(tx.id)
+      : true,
+    lifecycle_group_key: lifecycleGroup?.key,
+    lifecycle_member_count: lifecycleGroup?.members.length || 1,
+    lifecycle,
     lines: linesRes.rows,
     attachments: attRes.rows,
     linked_payments: pmtRes.rows,

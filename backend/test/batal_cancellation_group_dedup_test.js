@@ -99,18 +99,26 @@ async function runTests() {
   );
 
   assert.ok(
-    serviceCode.includes("COUNT(CASE WHEN t.deleted_at IS NULL AND t.transaction_status IN ('VOIDED', 'CANCELLED', 'REVERSED') AND NOT EXISTS ("),
-    'Contract: sheetCountsQuery count_batal must exclude paired original transactions with active reversal children'
-  );
-  assert.ok(
-    serviceCode.includes("SELECT 1 FROM transactions rev WHERE rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED' AND rev.deleted_at IS NULL"),
-    "Contract: reversal relation must check rev.reversal_of_transaction_id = t.id AND rev.transaction_status = 'REVERSED'"
+    serviceCode.includes('groupSaleLifecycles'),
+    'Contract: getTransactions groups original/reversal/correction into one operational lifecycle'
   );
   assert.ok(
     serviceCode.includes("targetSheet === 'BATAL'"),
     'Contract: targetSheet BATAL condition must exist'
   );
-  console.log('[PASS] SQL queries in transactionService.ts enforce canonical cancellation group deduplication.');
+  const groupingCode = fs.readFileSync(
+    path.join(process.cwd(), 'src/domains/transactions/saleLifecycleGrouping.ts'),
+    'utf-8'
+  );
+  assert.ok(
+    groupingCode.includes('reversal_of_transaction_id'),
+    'Contract: grouping walks reversal_of_transaction_id'
+  );
+  assert.ok(
+    groupingCode.includes('correction_group_id'),
+    'Contract: grouping uses correction_group_id'
+  );
+  console.log('[PASS] transactionService.ts groups sale lifecycles instead of listing raw audit peers.');
 
   // =========================================================================
   // PART 2: DETERMINISTIC LOGICAL VERIFICATION FOR CASES A - G
@@ -378,7 +386,8 @@ async function runTests() {
       assert.strictEqual(liveBatal.total_count, 1, 'Live DB: BATAL total_count must be 1 for paired VOIDED+REVERSED');
       assert.strictEqual(liveBatal.transactions.length, 1, 'Live DB: BATAL transactions list must have 1 row');
       assert.strictEqual(liveBatal.sheet_counts.batal, 1, 'Live DB: sheet_counts.batal must be 1');
-      assert.strictEqual(Number(liveBatal.transactions[0].net_amount), -418000, 'Live DB: Reversal row returned');
+      assert.strictEqual(Number(liveBatal.transactions[0].effective_net_amount), 0, 'Live DB: cancelled lifecycle effective net is 0');
+      assert.strictEqual(liveBatal.transactions[0].operational_sheet, 'BATAL', 'Live DB: cancelled lifecycle sheet is BATAL');
       console.log('[PASS] Live PostgreSQL query test passed with 100% accuracy');
     } finally {
       await pool.query('DELETE FROM transactions WHERE property_id = $1', [propertyId]);

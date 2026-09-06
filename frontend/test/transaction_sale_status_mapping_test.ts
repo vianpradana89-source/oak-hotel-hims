@@ -39,4 +39,22 @@ const proses = mapToOperationalStatus({
 });
 check(proses.group === 'PROSES', 'non-posted non-terminal sale stays Proses');
 
+const cancelledLifecycle = mapToOperationalStatus({
+  transaction_type: 'SALE',
+  transaction_status: 'REVERSED',
+  operational_sheet: 'BATAL',
+  is_lifecycle_primary: true,
+  lifecycle_status_label: 'Dibatalkan',
+});
+check(cancelledLifecycle.label === 'Dibatalkan', 'cancelled lifecycle primary shows Dibatalkan');
+check(cancelledLifecycle.group === 'BATAL', 'cancelled lifecycle stays on Batal sheet');
+
+const correctedLifecycle = mapToOperationalStatus({
+  transaction_type: 'SALE',
+  transaction_status: 'POSTED',
+  operational_sheet: 'SELESAI',
+  is_lifecycle_primary: true,
+});
+check(correctedLifecycle.label === 'Selesai', 'corrected lifecycle primary shows Selesai');
+
 console.log(`\n=== ALL SALE STATUS MAPPING TESTS PASSED (${assertions} assertions) ===`);

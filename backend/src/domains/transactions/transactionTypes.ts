@@ -169,9 +169,35 @@ export interface TransactionRow {
   deleted_by_name_snapshot?: string | null;
   delete_reason?: string | null;
   operational_sheet?: OperationalSheet;
+  effective_net_amount?: number;
+  lifecycle_raw_net_amount?: number;
+  lifecycle_group_key?: string;
+  lifecycle_member_count?: number;
+  is_lifecycle_primary?: boolean;
+  lifecycle_status_label?: string;
+  lifecycle?: TransactionLifecycleHistory;
   lines?: TransactionLine[];
   attachments?: TransactionAttachment[];
   payments?: TransactionPaymentRecord[];
+}
+
+export interface TransactionLifecycleMember {
+  id: number;
+  transaction_no: string | null;
+  role: 'Original Sale' | 'Reversal' | 'Correction';
+  amount: number;
+  net_amount: number;
+  transaction_status: string | null;
+  transaction_date: string | null;
+}
+
+export interface TransactionLifecycleHistory {
+  group_key: string;
+  effective_net_amount: number;
+  operational_sheet: OperationalSheet;
+  primary_transaction_id: number;
+  member_count: number;
+  members: TransactionLifecycleMember[];
 }
 
 export interface CreateTransactionInput {

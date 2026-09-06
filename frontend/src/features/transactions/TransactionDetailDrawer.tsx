@@ -424,6 +424,49 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 )}
               </div>
 
+              {tx.lifecycle && tx.lifecycle.member_count > 1 && (
+                <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      Riwayat Siklus Transaksi
+                    </span>
+                    <span className="text-[10px] font-semibold text-slate-500">
+                      {tx.lifecycle.member_count} baris audit
+                    </span>
+                  </div>
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="py-2 px-3">Peran</th>
+                          <th className="py-2 px-3">Nomor</th>
+                          <th className="py-2 px-3 text-right">Nominal</th>
+                          <th className="py-2 px-3 text-right">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {tx.lifecycle.members.map((member) => (
+                          <tr key={member.id} className="hover:bg-slate-50/60">
+                            <td className="py-2 px-3 font-semibold text-slate-800">{member.role}</td>
+                            <td className="py-2 px-3 font-mono text-slate-600">{member.transaction_no || `#${member.id}`}</td>
+                            <td className="py-2 px-3 text-right font-mono font-bold text-slate-800">
+                              {formatIdr(member.net_amount)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-bold text-slate-600">
+                              {member.transaction_status}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex justify-between items-center pt-1 text-sm font-bold text-slate-900">
+                    <span>Effective Net</span>
+                    <span className="font-mono text-emerald-800">{formatIdr(tx.lifecycle.effective_net_amount)}</span>
+                  </div>
+                </div>
+              )}
+
               {/* Multi-line Items Table if available */}
               {lines.length > 0 && (
                 <div className="space-y-2">

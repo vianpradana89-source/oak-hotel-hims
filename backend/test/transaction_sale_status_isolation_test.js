@@ -4,6 +4,7 @@ const {
   resolveOriginalFolioEntryId,
   projectFolioEntryToTransaction,
   getTransactions,
+  getTransactionById,
 } = require('../dist/domains/transactions/transactionService');
 
 let assertions = 0;
@@ -139,12 +140,22 @@ async function runIsolation() {
     const listed = await getTransactions(pool, { property_id: propertyId, transaction_type: 'SALE' });
     const rowB = listed.transactions.find((t) => Number(t.id) === Number(saleB.id));
     const rowRev = listed.transactions.find((t) => Number(t.id) === Number(revTx.id));
+    const rowOrig = listed.transactions.find((t) => Number(t.id) === Number(saleA.id));
     expect(Boolean(rowB), 'active sale remains in Penjualan');
+    expect(!rowOrig, 'cancelled original is not a separate peer row in the default list');
+    expect(Boolean(rowRev), 'cancelled lifecycle primary remains in Penjualan');
     expect(rowB.operational_sheet === 'SELESAI', 'active sale operational sheet is SELESAI');
     expect(rowB.transaction_status === 'POSTED', 'active sale DTO status is POSTED');
-    expect(rowRev.operational_sheet === 'BATAL', 'reversal remains BATAL');
+    expect(rowRev.operational_sheet === 'BATAL', 'cancelled lifecycle sheet is BATAL');
+    expect(Number(rowRev.effective_net_amount) === 0, 'cancelled lifecycle effective net is 0');
+    expect(listed.transactions.length === 2, 'default list shows one row per lifecycle');
     expect(Number(listed.summary.total_sale) === 400000, 'cancelled pair nets out; active sale counts once');
-    expect(Number(listed.summary.count_sale) === 3, 'original + reversal + active sale are three historical rows');
+    expect(Number(listed.summary.count_sale) === 2, 'Penjualan count is operational lifecycle rows, not raw audit rows');
+
+    const cancelledDetail = await getTransactionById(pool, propertyId, revTx.id);
+    expect(Boolean(cancelledDetail.lifecycle), 'cancelled detail exposes lifecycle history');
+    expect(cancelledDetail.lifecycle.member_count >= 2, 'cancelled reversal remains visible in Detail history');
+    expect(cancelledDetail.lifecycle.effective_net_amount === 0, 'cancelled detail effective net is 0');
   } finally {
     if (tracked.propertyId) {
       const pid = [tracked.propertyId];

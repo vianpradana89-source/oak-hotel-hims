@@ -9,7 +9,7 @@ import type {
   VerificationStatus,
   ReceivingStatus
 } from './transactionDomainTypes';
-import { mapToOperationalStatus } from './transactionDomainTypes';
+import { displayTransactionNet, mapToOperationalStatus } from './transactionDomainTypes';
 import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
@@ -1184,7 +1184,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           {t.description}
                         </td>
                         <td className="py-3 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">
-                          {formatIdr(t.net_amount)}
+                          <div>{formatIdr(displayTransactionNet(t))}</div>
+                          {Number(t.lifecycle_member_count || 0) > 1 && (
+                            <div className="text-[10px] font-semibold text-slate-400">{t.lifecycle_member_count} riwayat</div>
+                          )}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap">
                           <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -1240,7 +1243,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
-                          {formatIdr(t.net_amount)}
+                          {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap">
                           {renderVerificationBadge(t.verification_status)}
@@ -1309,7 +1312,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
-                          {formatIdr(t.net_amount)}
+                          {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap">
                           {renderVerificationBadge(t.verification_status)}
@@ -1379,7 +1382,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3 px-3 text-right font-mono font-bold text-teal-800 whitespace-nowrap">
-                          {formatIdr(t.net_amount)}
+                          {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap">
                           {renderVerificationBadge(t.verification_status)}
@@ -1476,8 +1479,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               : 'text-slate-800'
                           }
                         >
-                          {formatIdr(t.net_amount)}
+                          {formatIdr(displayTransactionNet(t))}
                         </span>
+                        {Number(t.lifecycle_member_count || 0) > 1 && (
+                          <div className="text-[10px] font-semibold text-slate-400">{t.lifecycle_member_count} riwayat</div>
+                        )}
                       </td>
                       <td className="py-3 px-2 text-center whitespace-nowrap">
                         {renderVerificationBadge(t.verification_status)}
