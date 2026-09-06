@@ -7,6 +7,7 @@ import {
   formatEmployeeDeptPosition,
   type CanonicalEmployeeIdentity
 } from './employeeMobileIdentity';
+import './attendanceGate.css';
 
 const Camera = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -45,6 +46,11 @@ const RefreshCw = ({ className = "w-5 h-5" }: { className?: string }) => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
   </svg>
 );
+function isFrontFacingStream(stream: MediaStream): boolean {
+  const facing = stream.getVideoTracks()[0]?.getSettings()?.facingMode;
+  return facing !== 'environment';
+}
+
 const UserCheck = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -93,6 +99,8 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [usingWebcam, setUsingWebcam] = useState(false);
+  const [livePreviewMirrored, setLivePreviewMirrored] = useState(false);
+  const [capturedPreviewMirrored, setCapturedPreviewMirrored] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -200,6 +208,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           audio: false
         });
         streamRef.current = stream;
+        setLivePreviewMirrored(isFrontFacingStream(stream));
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play();
@@ -220,6 +229,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       streamRef.current = null;
     }
     setUsingWebcam(false);
+    setLivePreviewMirrored(false);
   };
 
   useEffect(() => {
@@ -240,6 +250,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           if (blob) {
             setPhotoBlob(blob);
             setPhotoPreviewUrl(URL.createObjectURL(blob));
+            setCapturedPreviewMirrored(livePreviewMirrored);
             stopCamera();
           }
         }, 'image/jpeg', 0.85);
@@ -252,6 +263,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
     if (file) {
       setPhotoBlob(file);
       setPhotoPreviewUrl(URL.createObjectURL(file));
+      setCapturedPreviewMirrored(false);
       stopCamera();
     }
   };
@@ -259,6 +271,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
   const handleRetake = () => {
     setPhotoBlob(null);
     setPhotoPreviewUrl(null);
+    setCapturedPreviewMirrored(false);
     startCamera();
   };
 
@@ -360,67 +373,62 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
   }
 
   return (
-    <div className="min-h-screen bg-[#112d22] text-[#fcfbf7] flex flex-col justify-between p-4 sm:p-6 max-w-lg mx-auto">
-      {/* Header */}
-      <div className="text-center pt-2 pb-4">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#1b4332] border border-[#d4af37]/30 text-xs text-[#d4af37] mb-3">
-          <ShieldCheck className="w-4 h-4" />
+    <div className="oak-attendance-gate">
+      <div className="oak-attendance-gate__header">
+        <div className="oak-attendance-gate__badge">
+          <ShieldCheck className="w-3.5 h-3.5" />
           <span>OAK HIMS Employee Mobile Portal</span>
         </div>
-        <h1 className="text-2xl font-serif font-bold tracking-tight text-white mb-1">Gerbang Absensi Masuk</h1>
-        <p className="text-xs text-[#fcfbf7]/70">Verifikasi kehadiran resmi sebelum memulai operasional harian</p>
+        <h1 className="oak-attendance-gate__title">Gerbang Absensi Masuk</h1>
+        <p className="oak-attendance-gate__subtitle">Verifikasi kehadiran resmi sebelum memulai operasional harian</p>
       </div>
 
-      {/* Main Card */}
-      <div className="bg-[#1b4332] border border-white/10 rounded-2xl p-5 shadow-2xl space-y-4">
-        {/* Employee Info & Clock */}
-        <div className="flex items-center justify-between pb-3 border-b border-white/10 text-xs">
-          <div>
-            <p className="text-white font-semibold text-sm">{employeeName}</p>
-            <p className="text-[#d4af37]">{formatEmployeeDeptPosition(identity) || '—'}</p>
+      <div className="oak-attendance-gate__card">
+        <div className="oak-attendance-gate__identity">
+          <div className="oak-attendance-gate__identity-copy">
+            <p className="oak-attendance-gate__name">{employeeName}</p>
+            <p className="oak-attendance-gate__dept">{formatEmployeeDeptPosition(identity) || '—'}</p>
           </div>
-          <div className="text-right">
-            <div className="flex items-center gap-1.5 text-emerald-400 font-mono text-xs justify-end">
-              <Clock className="w-3.5 h-3.5" />
-              <span>{currentTimeWib || 'WIB'}</span>
+          <div className="oak-attendance-gate__time">
+            <div className="oak-attendance-gate__time-row">
+              <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="oak-attendance-gate__time-value">{currentTimeWib || 'WIB'}</span>
             </div>
-            <p className="text-[10px] text-white/50">Waktu Resmi Server Hotel</p>
+            <p className="oak-attendance-gate__time-label">Waktu Resmi Server Hotel</p>
           </div>
         </div>
 
-        {/* Location Status */}
-        <div className="bg-[#112d22]/60 rounded-xl p-3 border border-white/5 space-y-1.5">
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1.5 text-white/90">
-              <MapPin className="w-4 h-4 text-[#d4af37]" />
-              <span>Status Lokasi GPS</span>
+        <div className="oak-attendance-gate__gps">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-1.5 text-white/90 min-w-0">
+              <MapPin className="w-4 h-4 text-[#d4af37] shrink-0" />
+              <span className="truncate">Status Lokasi GPS</span>
             </div>
             <button
               type="button"
               onClick={requestLocation}
-              className="text-[11px] text-[#d4af37] hover:underline flex items-center gap-1"
+              className="oak-attendance-gate__gps-refresh text-[11px] text-[#d4af37] hover:underline flex items-center gap-1 shrink-0 px-1"
             >
               <RefreshCw className={`w-3 h-3 ${locationState.loading ? 'animate-spin' : ''}`} />
               Perbarui
             </button>
           </div>
           {locationState.loading ? (
-            <p className="text-[11px] text-white/60">Mencari koordinat lokasi saat ini...</p>
+            <p className="mt-1.5 text-[11px] text-white/60">Mencari koordinat lokasi saat ini...</p>
           ) : locationState.error ? (
-            <p className="text-[11px] text-amber-300 flex items-center gap-1">
+            <p className="mt-1.5 text-[11px] text-amber-300 flex items-center gap-1">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
               {locationState.error}
             </p>
           ) : (
-            <div className="flex items-center justify-between text-[11px] text-emerald-300">
-              <span>Akurasi GPS: ~{locationState.accuracy} meter</span>
-              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-medium">GPS Terkunci</span>
+            <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-emerald-300">
+              <span className="min-w-0 truncate">Akurasi GPS: ~{locationState.accuracy} meter</span>
+              <span className="shrink-0 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-medium">GPS Terkunci</span>
             </div>
           )}
         </div>
 
-        {/* Camera / Selfie Section */}
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <label className="block text-xs font-medium text-white/90">
             Foto Selfie Wajah {statusData?.settings.require_checkin_photo ? '(Wajib)' : '(Opsional)'}
           </label>
@@ -434,35 +442,45 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
             onChange={handleFileInputChange}
           />
 
-          <div className="relative aspect-4/3 w-full rounded-xl overflow-hidden bg-black/40 border border-white/10 flex flex-col items-center justify-center">
+          <div className="oak-attendance-gate__selfie">
             {photoPreviewUrl ? (
               <>
-                <img src={photoPreviewUrl} alt="Selfie preview" className="w-full h-full object-cover" />
+                <img
+                  src={photoPreviewUrl}
+                  alt="Selfie preview"
+                  className={capturedPreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : undefined}
+                />
                 <button
                   type="button"
                   onClick={handleRetake}
-                  className="absolute bottom-3 right-3 py-1.5 px-3 rounded-lg text-xs font-semibold bg-black/70 hover:bg-black text-white backdrop-blur-sm shadow"
+                  className="oak-attendance-gate__retake"
                 >
                   Foto Ulang
                 </button>
               </>
             ) : usingWebcam ? (
               <>
-                <video ref={videoRef} playsInline autoPlay muted className="w-full h-full object-cover" />
+                <video
+                  ref={videoRef}
+                  playsInline
+                  autoPlay
+                  muted
+                  className={livePreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : undefined}
+                />
                 <button
                   type="button"
                   onClick={capturePhoto}
-                  className="absolute bottom-3 py-2 px-6 rounded-full font-bold bg-[#d4af37] text-[#1b4332] shadow-xl hover:bg-white active:scale-95 transition"
+                  className="oak-attendance-gate__capture"
                 >
                   Ambil Foto
                 </button>
               </>
             ) : (
-              <div className="flex flex-col items-center justify-center p-6 text-center space-y-3">
-                <div className="w-14 h-14 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-[#d4af37]">
-                  <Camera className="w-7 h-7" />
+              <div className="oak-attendance-gate__selfie-empty">
+                <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-[#d4af37]">
+                  <Camera className="w-5 h-5" />
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-0.5">
                   <p className="text-xs text-white/80">Nyalakan kamera untuk mengambil foto kehadiran</p>
                   <p className="text-[10px] text-white/50">Pastikan wajah terlihat jelas di tempat terang</p>
                 </div>
@@ -470,14 +488,14 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
                   <button
                     type="button"
                     onClick={startCamera}
-                    className="py-2 px-4 rounded-xl text-xs font-semibold bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] shadow transition"
+                    className="oak-attendance-gate__camera-btn py-2 px-4 rounded-xl text-xs font-semibold bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] shadow transition"
                   >
                     Buka Kamera
                   </button>
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="py-2 px-4 rounded-xl text-xs font-semibold bg-white/10 text-white hover:bg-white/20 transition"
+                    className="oak-attendance-gate__file-btn py-2 px-4 rounded-xl text-xs font-semibold bg-white/10 text-white hover:bg-white/20 transition"
                   >
                     Pilih File
                   </button>
@@ -487,34 +505,31 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           </div>
         </div>
 
-        {/* Reason field if geofence policy allows outside with reason */}
         <div className="space-y-1">
-          <label className="block text-xs text-white/70">Catatan / Alasan (Opsional):</label>
+          <label className="block text-[11px] text-white/70">Catatan / Alasan (Opsional):</label>
           <input
             type="text"
             value={outsideReason}
             onChange={(e) => setOutsideReason(e.target.value)}
             placeholder="Contoh: Tugas luar kota / Sinyal GPS redup"
-            className="w-full py-2 px-3 rounded-xl bg-[#112d22] border border-white/10 text-white text-xs placeholder:text-white/30 focus:outline-none focus:border-[#d4af37]"
+            className="oak-attendance-gate__notes rounded-xl bg-[#112d22] border border-white/10 text-white placeholder:text-white/30 focus:outline-none focus:border-[#d4af37]"
           />
         </div>
 
-        {/* Error Alert */}
         {errorMsg && (
-          <div className="p-3 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2">
+          <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
             <span>{errorMsg}</span>
           </div>
         )}
       </div>
 
-      {/* Footer Actions */}
-      <div className="py-4 space-y-2">
+      <div className="oak-attendance-gate__actions">
         <button
           type="button"
           onClick={handleCheckIn}
           disabled={!canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)}
-          className={`w-full py-3.5 px-6 rounded-xl font-serif font-bold text-sm tracking-wide shadow-xl transition-all flex items-center justify-center gap-2 ${
+          className={`oak-attendance-gate__submit shadow-xl transition-all flex items-center justify-center gap-2 ${
             !canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)
               ? 'bg-white/20 text-white/50 cursor-not-allowed'
               : 'bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] active:scale-[0.98]'
