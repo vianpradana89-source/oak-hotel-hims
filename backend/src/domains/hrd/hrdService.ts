@@ -391,7 +391,11 @@ export async function getEmployees(
            u.is_active AS user_is_active,
            u.access_type,
            u.role_id,
-           r.name AS role_name
+           r.name AS role_name,
+           EXISTS(
+             SELECT 1 FROM employee_face_enrollments fe
+             WHERE fe.employee_id = e.id AND fe.property_id = e.property_id AND fe.status = 'ACTIVE'
+           ) AS has_face_photo
     FROM hr_employees e
     LEFT JOIN hr_departments d ON d.id = e.department_id
     LEFT JOIN hr_positions p ON p.id = e.position_id
@@ -451,6 +455,7 @@ export async function getEmployees(
     user_id: row.user_id ? Number(row.user_id) : null,
     account_status: row.account_status || null,
     user_is_active: row.user_id ? row.user_is_active !== false : null,
+    has_face_photo: row.has_face_photo === true,
     created_at: row.created_at,
     updated_at: row.updated_at
   }));
@@ -3960,6 +3965,36 @@ export async function getEmployeeFaceEnrollmentStatus(
     last_revoked_at: revokedRes.rows.length > 0 ? new Date(revokedRes.rows[0].revoked_at).toISOString() : null,
     last_revocation_reason: revokedRes.rows.length > 0 ? revokedRes.rows[0].revocation_reason : null
   };
+}
+
+export interface FaceEnrollmentPhotoInfo {
+  storage_key: string;
+  mime_type: string;
+}
+
+export async function getEmployeeFaceEnrollmentPhoto(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number
+): Promise<FaceEnrollmentPhotoInfo | null> {
+  const res = await client.query(
+    `SELECT reference_photo_storage_key
+     FROM employee_face_enrollments
+     WHERE employee_id = $1 AND property_id = $2 AND status = 'ACTIVE'
+     ORDER BY enrolled_at DESC LIMIT 1`,
+    [employeeId, propertyId]
+  );
+
+  if (!res.rows.length || !res.rows[0].reference_photo_storage_key) {
+    return null;
+  }
+
+  const storageKey: string = res.rows[0].reference_photo_storage_key;
+  const ext = storageKey.split('.').pop()?.toLowerCase() || 'jpg';
+  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+  const mime_type = mimeMap[ext] || 'image/jpeg';
+
+  return { storage_key: storageKey, mime_type };
 }
 
 export interface HrdFaceEnrollmentResult {

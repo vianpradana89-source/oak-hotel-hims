@@ -38,6 +38,7 @@ interface HrEmployee {
   user_id?: number | null;
   account_status?: string | null;
   user_is_active?: boolean | null;
+  has_face_photo?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -192,6 +193,9 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [faceEnrollSubmitting, setFaceEnrollSubmitting] = useState(false);
   const [faceEnrollError, setFaceEnrollError] = useState<string | null>(null);
   const faceEnrollInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Face Photo Preview Modal state
+  const [facePreviewModal, setFacePreviewModal] = useState<{ employeeName: string; employeeId: number; propertyId: number } | null>(null);
 
   const isPlatformSuperAdmin = currentUser?.role === 'Super Admin';
 
@@ -741,6 +745,27 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       );
     }
     if (emp.account_status === 'READY') {
+      if (emp.has_face_photo) {
+        const photoUrl = `/api/hrd/employees/${emp.id}/face-enrollment/photo`;
+        return (
+          <button
+            type="button"
+            onClick={() => setFacePreviewModal({ employeeName: emp.full_name, employeeId: emp.id, propertyId: emp.property_id })}
+            className="inline-flex items-center gap-1.5 group cursor-pointer"
+            title="Klik untuk pratinjau foto wajah"
+          >
+            <img
+              src={photoUrl}
+              alt={`Foto ${emp.full_name}`}
+              className="w-8 h-8 rounded-full object-cover border-2 border-emerald-300 group-hover:border-emerald-500 transition-colors"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+              Terdaftar
+            </span>
+          </button>
+        );
+      }
       return (
         <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
           Terdaftar
@@ -2088,6 +2113,32 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
               >
                 {faceEnrollSubmitting ? 'Menyimpan...' : 'Simpan Enrollmen'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Face Photo Preview Modal */}
+      {facePreviewModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={() => setFacePreviewModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl p-5 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-bold text-slate-800">Foto Wajah</h3>
+              <button
+                type="button"
+                onClick={() => setFacePreviewModal(null)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex flex-col items-center gap-3">
+              <img
+                src={`/api/hrd/employees/${facePreviewModal.employeeId}/face-enrollment/photo`}
+                alt={`Foto wajah ${facePreviewModal.employeeName}`}
+                className="w-64 h-64 object-cover rounded-2xl border border-slate-200"
+              />
+              <p className="text-xs text-slate-600 font-medium">{facePreviewModal.employeeName}</p>
             </div>
           </div>
         </div>

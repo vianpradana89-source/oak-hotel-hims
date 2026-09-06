@@ -1,4 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
 import multer from 'multer';
 import type { Pool } from 'pg';
 import {
@@ -16,6 +18,7 @@ import {
   repairEmployeeLoginAccount,
   resetEmployeePassword,
   getEmployeeFaceEnrollmentStatus,
+  getEmployeeFaceEnrollmentPhoto,
   enrollEmployeeFace,
   resetEmployeeFaceEnrollment,
   validateAndNormalizeCalendarDate,
@@ -49,6 +52,7 @@ import {
   purgeTestDataBulk
 } from './hrdService';
 import { auditWhatsAppCredentialOpened } from './hrdWhatsapp';
+import { getStorageAdapter, resolveAbsolutePath, getActiveStorageProvider } from '../auth/faceEnrollmentStorageService';
 import type {
   CreateEmployeePayload,
   UpdateEmployeePayload,
@@ -728,6 +732,51 @@ export function createHrdRouter(pool: Pool): Router {
       res.json({ status: 'OK', data: result });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 11d. Get Employee Face Enrollment Photo (Private stream)
+  // SECURITY: propertyId derived exclusively from authenticated token.
+  router.get('/employees/:id/face-enrollment/photo', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId((req as any).user?.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const photoInfo = await getEmployeeFaceEnrollmentPhoto(client, propertyId, employeeId);
+      if (!photoInfo) {
+        res.status(404).json({ status: 'ERROR', code: 'PHOTO_NOT_FOUND', message: 'Foto wajah karyawan tidak ditemukan.' });
+        return;
+      }
+
+      const storageProvider = getActiveStorageProvider();
+
+      if (storageProvider === 'gcs') {
+        const adapter = getStorageAdapter();
+        const bucket = (adapter as any).getBucket();
+        const file = bucket.file(photoInfo.storage_key);
+        res.setHeader('Content-Type', photoInfo.mime_type);
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        file.createReadStream().pipe(res);
+        return;
+      }
+
+      const absPath = resolveAbsolutePath(photoInfo.storage_key);
+      if (!fs.existsSync(absPath)) {
+        res.status(404).json({ status: 'ERROR', code: 'FILE_NOT_FOUND', message: 'File foto tidak ditemukan di storage.' });
+        return;
+      }
+      res.setHeader('Content-Type', photoInfo.mime_type);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.sendFile(absPath);
+    } catch (err: any) {
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
     } finally {
