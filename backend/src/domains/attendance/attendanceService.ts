@@ -1,5 +1,3 @@
-import path from 'path';
-import fs from 'fs';
 import { Pool, PoolClient } from 'pg';
 import {
   PropertyAttendanceSettings,
@@ -7,19 +5,17 @@ import {
   AttendanceStatusResponse,
   RecordAttendancePayload,
   GeofenceResult,
-  AttendanceStatus
+  AttendanceStatus,
+  FaceVerificationStatus
 } from './attendanceTypes';
 import { isFeatureEnabled } from '../features/featureService';
 import { hotelDateFromInstant } from '../../utils/hotelDate';
-
-const UPLOADS_DIR = path.resolve(__dirname, '../../../uploads');
-const ATTENDANCE_UPLOADS_DIR = path.join(UPLOADS_DIR, 'attendance');
-
-function ensureAttendanceUploadsDir() {
-  if (!fs.existsSync(ATTENDANCE_UPLOADS_DIR)) {
-    fs.mkdirSync(ATTENDANCE_UPLOADS_DIR, { recursive: true });
-  }
-}
+import { ATTENDANCE_FACE_NOT_PROCESSED, type SelfAttendanceActor } from './attendanceIdentity';
+import {
+  deleteAttendanceSelfie,
+  getLegacyAttendancePhotoFilePath,
+  saveAttendanceSelfie
+} from './attendancePhotoStorageService';
 
 /**
  * Haversine formula to calculate distance between two coordinates in meters.
@@ -186,7 +182,10 @@ export async function getEmployeeAttendanceStatus(
   let department = 'General';
 
   if (employeeId) {
-    const empRes = await db.query('SELECT full_name, department, position FROM hr_employees WHERE id = $1', [employeeId]);
+    const empRes = await db.query(
+      'SELECT full_name, department, position FROM hr_employees WHERE id = $1 AND ($2::int IS NULL OR property_id = $2 OR property_id IS NULL)',
+      [employeeId, propertyId]
+    );
     if (empRes.rows.length > 0) {
       employeeName = empRes.rows[0].full_name;
       department = empRes.rows[0].department || department;
@@ -214,9 +213,9 @@ export async function getEmployeeAttendanceStatus(
 
     for (const r of recordsRes.rows) {
       if (r.attendance_type === 'CHECK_IN' && !checkInRecord) {
-        checkInRecord = r;
+        checkInRecord = formatAttendanceRecord(r);
       } else if (r.attendance_type === 'CHECK_OUT') {
-        checkOutRecord = r;
+        checkOutRecord = formatAttendanceRecord(r);
       }
     }
   }
@@ -239,27 +238,151 @@ export async function getEmployeeAttendanceStatus(
   };
 }
 
-export function saveAttendancePhotoFile(
-  propertyId: number,
-  file: Express.Multer.File
-): string {
-  ensureAttendanceUploadsDir();
-  const ext = path.extname(file.originalname) || '.jpg';
-  const filename = `att_p${propertyId}_${Date.now()}_${Math.round(Math.random() * 1e9)}${ext}`;
-  const fullPath = path.join(ATTENDANCE_UPLOADS_DIR, filename);
+export function formatAttendanceRecord(row: any): EmployeeAttendanceRecord {
+  const faceStatus = normalizeUnverifiedFaceStatus(row.face_status);
+  const livenessStatus = normalizeUnverifiedFaceStatus(row.liveness_status);
+  return {
+    ...row,
+    id: Number(row.id),
+    property_id: Number(row.property_id),
+    employee_id: row.employee_id != null ? Number(row.employee_id) : null,
+    photo_storage_key: row.photo_storage_key || null,
+    photo_hash: row.photo_hash || null,
+    photo_mime_type: row.photo_mime_type || null,
+    photo_captured_at: row.photo_captured_at ? new Date(row.photo_captured_at).toISOString() : null,
+    face_status: faceStatus,
+    liveness_status: livenessStatus
+  };
+}
 
-  fs.writeFileSync(fullPath, file.buffer);
-  return `attendance/${filename}`;
+function normalizeUnverifiedFaceStatus(raw: unknown): FaceVerificationStatus {
+  const value = String(raw || ATTENDANCE_FACE_NOT_PROCESSED).toUpperCase();
+  if (value === 'VERIFIED' || value === 'MATCH') {
+    return ATTENDANCE_FACE_NOT_PROCESSED;
+  }
+  if (value === 'REVIEW_REQUIRED' || value === 'REJECTED' || value === 'NOT_PROCESSED') {
+    return value;
+  }
+  return ATTENDANCE_FACE_NOT_PROCESSED;
+}
+
+function mapLocationStatus(geofenceResult: GeofenceResult): string {
+  if (geofenceResult === 'INSIDE') return 'INSIDE';
+  if (geofenceResult === 'OUTSIDE') return 'OUTSIDE';
+  if (geofenceResult === 'UNKNOWN') return 'UNKNOWN';
+  return 'NOT_EVALUATED';
+}
+
+async function upsertCanonicalAttendance(
+  client: PoolClient,
+  params: {
+    propertyId: number;
+    employeeId: number;
+    workDate: string;
+    attendanceType: 'CHECK_IN' | 'CHECK_OUT';
+    photoStorageKey: string | null;
+    photoHash: string | null;
+    geofenceResult: GeofenceResult;
+  }
+): Promise<void> {
+  const locationStatus = mapLocationStatus(params.geofenceResult);
+  const isCheckIn = params.attendanceType === 'CHECK_IN';
+
+  await client.query(
+    `INSERT INTO employee_attendance (
+       property_id, employee_id, work_date,
+       clock_in_at, clock_out_at,
+       clock_in_photo_storage_key, clock_out_photo_storage_key,
+       clock_in_photo_hash, clock_out_photo_hash,
+       clock_in_face_status, clock_out_face_status,
+       clock_in_liveness_status, clock_out_liveness_status,
+       clock_in_location_status, clock_out_location_status,
+       attendance_status, review_status,
+       created_at, updated_at
+     ) VALUES (
+       $1, $2, $3,
+       CASE WHEN $4 THEN NOW() ELSE NULL END,
+       CASE WHEN $4 THEN NULL ELSE NOW() END,
+       CASE WHEN $4 THEN $5 ELSE NULL END,
+       CASE WHEN $4 THEN NULL ELSE $5 END,
+       CASE WHEN $4 THEN $6 ELSE NULL END,
+       CASE WHEN $4 THEN NULL ELSE $6 END,
+       $7, $7, $7, $7,
+       CASE WHEN $4 THEN $8 ELSE NULL END,
+       CASE WHEN $4 THEN NULL ELSE $8 END,
+       'PRESENT', 'PENDING',
+       NOW(), NOW()
+     )
+     ON CONFLICT (property_id, employee_id, work_date) DO UPDATE SET
+       clock_in_at = CASE
+         WHEN $4 AND employee_attendance.clock_in_at IS NULL THEN NOW()
+         ELSE employee_attendance.clock_in_at
+       END,
+       clock_out_at = CASE
+         WHEN NOT $4 AND employee_attendance.clock_out_at IS NULL THEN NOW()
+         ELSE employee_attendance.clock_out_at
+       END,
+       clock_in_photo_storage_key = CASE
+         WHEN $4 THEN COALESCE(employee_attendance.clock_in_photo_storage_key, EXCLUDED.clock_in_photo_storage_key)
+         ELSE employee_attendance.clock_in_photo_storage_key
+       END,
+       clock_out_photo_storage_key = CASE
+         WHEN NOT $4 THEN COALESCE(employee_attendance.clock_out_photo_storage_key, EXCLUDED.clock_out_photo_storage_key)
+         ELSE employee_attendance.clock_out_photo_storage_key
+       END,
+       clock_in_photo_hash = CASE
+         WHEN $4 THEN COALESCE(employee_attendance.clock_in_photo_hash, EXCLUDED.clock_in_photo_hash)
+         ELSE employee_attendance.clock_in_photo_hash
+       END,
+       clock_out_photo_hash = CASE
+         WHEN NOT $4 THEN COALESCE(employee_attendance.clock_out_photo_hash, EXCLUDED.clock_out_photo_hash)
+         ELSE employee_attendance.clock_out_photo_hash
+       END,
+       clock_in_face_status = CASE
+         WHEN $4 AND employee_attendance.clock_in_at IS NULL THEN $7
+         ELSE employee_attendance.clock_in_face_status
+       END,
+       clock_out_face_status = CASE
+         WHEN NOT $4 AND employee_attendance.clock_out_at IS NULL THEN $7
+         ELSE employee_attendance.clock_out_face_status
+       END,
+       clock_in_liveness_status = CASE
+         WHEN $4 AND employee_attendance.clock_in_at IS NULL THEN $7
+         ELSE employee_attendance.clock_in_liveness_status
+       END,
+       clock_out_liveness_status = CASE
+         WHEN NOT $4 AND employee_attendance.clock_out_at IS NULL THEN $7
+         ELSE employee_attendance.clock_out_liveness_status
+       END,
+       clock_in_location_status = CASE
+         WHEN $4 AND employee_attendance.clock_in_at IS NULL THEN $8
+         ELSE employee_attendance.clock_in_location_status
+       END,
+       clock_out_location_status = CASE
+         WHEN NOT $4 AND employee_attendance.clock_out_at IS NULL THEN $8
+         ELSE employee_attendance.clock_out_location_status
+       END,
+       updated_at = NOW()`,
+    [
+      params.propertyId,
+      params.employeeId,
+      params.workDate,
+      isCheckIn,
+      params.photoStorageKey,
+      params.photoHash,
+      ATTENDANCE_FACE_NOT_PROCESSED,
+      locationStatus
+    ]
+  );
 }
 
 export async function recordAttendance(
   pool: Pool,
   propertyId: number,
   payload: RecordAttendancePayload,
-  file?: Express.Multer.File,
-  actor?: { id?: number; name?: string; role?: string }
+  file: Express.Multer.File | undefined,
+  actor: SelfAttendanceActor
 ): Promise<EmployeeAttendanceRecord> {
-  // 1. Feature Flag Check
   const isHrdEnabled = await isFeatureEnabled(pool, propertyId, 'hrd.enabled');
   const isAttEnabled = isHrdEnabled && (await isFeatureEnabled(pool, propertyId, 'hrd.attendance'));
   if (!isAttEnabled) {
@@ -280,37 +403,61 @@ export async function recordAttendance(
     throw err;
   }
 
-  let employeeId = payload.employee_id ? Number(payload.employee_id) : null;
-  let employeeName = payload.employee_name || actor?.name || 'Staff';
-  let department = payload.department || 'Housekeeping';
+  const employeeId = actor.employeeId;
+  const employeeName = actor.employeeName;
+  const department = actor.department || payload.department || 'Housekeeping';
 
-  if (employeeId) {
-    const empRes = await pool.query('SELECT full_name, department, position FROM hr_employees WHERE id = $1', [employeeId]);
-    if (empRes.rows.length > 0) {
-      employeeName = empRes.rows[0].full_name;
-      department = empRes.rows[0].department || department;
-    }
-  }
-
-  // Check duplicate CHECK_IN
-  if (attType === 'CHECK_IN' && employeeId) {
+  if (attType === 'CHECK_IN') {
     const existingCheckIn = await pool.query(
       `SELECT * FROM employee_attendance_records
        WHERE property_id = $1 AND employee_id = $2 AND attendance_date = $3 AND attendance_type = 'CHECK_IN'`,
       [propertyId, employeeId, hotelDate]
     );
     if (existingCheckIn.rows.length > 0) {
-      // Return existing record idempotently
-      return existingCheckIn.rows[0];
+      const existing = formatAttendanceRecord(existingCheckIn.rows[0]);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await upsertCanonicalAttendance(client, {
+          propertyId,
+          employeeId,
+          workDate: hotelDate,
+          attendanceType: 'CHECK_IN',
+          photoStorageKey: existing.photo_storage_key,
+          photoHash: existing.photo_hash || null,
+          geofenceResult: existing.geofence_result
+        });
+        await client.query('COMMIT');
+      } catch (healErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw healErr;
+      } finally {
+        client.release();
+      }
+      return existing;
     }
   }
 
-  // 2. Photo validation
   const isPhotoFeatureEnabled = await isFeatureEnabled(pool, propertyId, 'hrd.attendance_photo');
   let photoStorageKey: string | null = null;
+  let photoHash: string | null = null;
+  let photoMimeType: string | null = null;
+  let photoCapturedAt: string | null = null;
 
   if (file && isPhotoFeatureEnabled) {
-    photoStorageKey = saveAttendancePhotoFile(propertyId, file);
+    const saved = await saveAttendanceSelfie({
+      propertyId,
+      employeeId,
+      file: {
+        mimetype: file.mimetype,
+        size: file.size,
+        buffer: file.buffer
+      }
+    });
+    photoStorageKey = saved.storageKey;
+    photoHash = saved.hash;
+    photoMimeType = saved.mimeType;
+    photoCapturedAt = saved.capturedAt;
   }
 
   if (attType === 'CHECK_IN' && settings.require_checkin_photo && isPhotoFeatureEnabled && !photoStorageKey) {
@@ -327,7 +474,6 @@ export async function recordAttendance(
     throw err;
   }
 
-  // 3. Geofence & Location evaluation
   let geofenceResult: GeofenceResult = 'DISABLED';
   let status: AttendanceStatus = 'ACCEPTED';
   let distanceMeters: number | null = null;
@@ -386,12 +532,14 @@ export async function recordAttendance(
          property_id, employee_id, employee_name, department,
          attendance_date, attendance_type, server_recorded_at,
          latitude, longitude, location_accuracy_meters, property_distance_meters,
-         geofence_result, photo_storage_key, source, status, reason, created_at, updated_at
+         geofence_result, photo_storage_key, photo_hash, photo_mime_type, photo_captured_at,
+         face_status, liveness_status, source, status, reason, created_at, updated_at
        ) VALUES (
          $1, $2, $3, $4,
          $5, $6, NOW() AT TIME ZONE 'Asia/Jakarta',
          $7, $8, $9, $10,
-         $11, $12, 'MOBILE_WEB', $13, $14, NOW(), NOW()
+         $11, $12, $13, $14, $15,
+         $16, $16, 'MOBILE_WEB', $17, $18, NOW(), NOW()
        ) RETURNING *`,
       [
         propertyId,
@@ -406,14 +554,27 @@ export async function recordAttendance(
         distanceMeters,
         geofenceResult,
         photoStorageKey,
+        photoHash,
+        photoMimeType,
+        photoCapturedAt,
+        ATTENDANCE_FACE_NOT_PROCESSED,
         status,
         payload.reason || null
       ]
     );
 
-    const record = insertRes.rows[0];
+    const record = formatAttendanceRecord(insertRes.rows[0]);
 
-    // Audit log
+    await upsertCanonicalAttendance(client, {
+      propertyId,
+      employeeId,
+      workDate: hotelDate,
+      attendanceType: attType,
+      photoStorageKey,
+      photoHash,
+      geofenceResult
+    });
+
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -423,15 +584,21 @@ export async function recordAttendance(
         'EMPLOYEE_ATTENDANCE_RECORD',
         Number(record.id),
         JSON.stringify({
+          user_id: actor.userId,
           employee_id: employeeId,
           employee_name: employeeName,
           attendance_type: attType,
-          status: status,
+          status,
           geofence_result: geofenceResult,
           distance_meters: distanceMeters,
-          hotel_date: hotelDate
+          hotel_date: hotelDate,
+          photo_storage_key: photoStorageKey,
+          photo_hash: photoHash,
+          face_status: ATTENDANCE_FACE_NOT_PROCESSED,
+          liveness_status: ATTENDANCE_FACE_NOT_PROCESSED,
+          biometric_verified: false
         }),
-        actor?.name || employeeName,
+        actor.employeeName,
         propertyId
       ]
     );
@@ -440,6 +607,9 @@ export async function recordAttendance(
     return record;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    if (photoStorageKey) {
+      await deleteAttendanceSelfie(photoStorageKey).catch(() => {});
+    }
     throw err;
   } finally {
     client.release();
@@ -501,17 +671,23 @@ export async function getAttendanceRecords(
   `;
 
   const res = await pool.query(query, values);
-  return res.rows;
+  return res.rows.map(formatAttendanceRecord);
 }
 
 export function getAttendancePhotoFilePath(storageKey: string): string | null {
-  if (!storageKey || storageKey.includes('..')) {
+  return getLegacyAttendancePhotoFilePath(storageKey);
+}
+
+export async function getAttendanceRecordById(
+  db: Pool | PoolClient,
+  recordId: number
+): Promise<EmployeeAttendanceRecord | null> {
+  if (!Number.isInteger(recordId) || recordId <= 0) {
     return null;
   }
-  const cleanKey = storageKey.replace(/^attendance\//, '');
-  const fullPath = path.join(ATTENDANCE_UPLOADS_DIR, cleanKey);
-  if (fs.existsSync(fullPath)) {
-    return fullPath;
+  const res = await db.query('SELECT * FROM employee_attendance_records WHERE id = $1', [recordId]);
+  if (res.rows.length === 0) {
+    return null;
   }
-  return null;
+  return formatAttendanceRecord(res.rows[0]);
 }

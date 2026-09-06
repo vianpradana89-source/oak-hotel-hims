@@ -395,11 +395,13 @@ async function runTests() {
     assert.strictEqual(userFinalRes.rows[0].account_status, 'READY');
     assert.strictEqual(userFinalRes.rows[0].must_change_password, false);
 
-    // Verify FULL token can now access PMS
+    // Verify FULL token can now access a permitted PMS/mobile path.
+    // This fixture is a Housekeeping employee — not an HRD admin — so HRD
+    // employee-list access is the wrong proof of FULL-scope readiness.
     const pmsAccessRes = await makeRequest(
       server,
       'GET',
-      `/api/hrd/employees?property_id=${TEST_PROPERTY_ID}`,
+      `/api/attendance/status?property_id=${TEST_PROPERTY_ID}`,
       { Authorization: `Bearer ${fullToken}` }
     );
     assert.strictEqual(pmsAccessRes.status, 200, 'READY user with FULL token must have access');

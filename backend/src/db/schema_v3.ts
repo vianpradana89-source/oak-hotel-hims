@@ -4634,6 +4634,28 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // AUTH-HR-2D1: attendance selfie integrity on the event log.
+    // Additive only. Does not migrate or delete historical /uploads files.
+    // face/liveness default NOT_PROCESSED — never claim MATCH/VERIFIED here.
+    // ------------------------------------------------------------------
+    const attendancePhotoIntegrityCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'auth_hr2d1_attendance_photo_integrity_v1'`
+    );
+    if ((attendancePhotoIntegrityCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS photo_hash VARCHAR(128);
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS photo_mime_type VARCHAR(50);
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS photo_captured_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS face_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED';
+        ALTER TABLE employee_attendance_records ADD COLUMN IF NOT EXISTS liveness_status VARCHAR(30) NOT NULL DEFAULT 'NOT_PROCESSED';
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr2d1_attendance_photo_integrity_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

@@ -75,6 +75,10 @@
     "test:test-data-purge": "npm run build && node test/test_data_purge_security_test.js",
     "test:access-control": "npm run build && node test/auth_hr3b_access_control_test.js",
     "test:access-control-enforcement": "npm run build && node test/auth_hr3b2_effective_permission_enforcement_test.js",
+    "test:attendance-mobile": "npm run build && node test/employee_attendance_mobile_test.js",
+    "test:hr2c-face-enrollment": "npm run build && node test/auth_hr2c_face_enrollment_test.js",
+    "test:hr2c-hrd-enrollment": "npm run build && node test/auth_hr2c_hrd_enrollment_test.js",
+    "test:hr2d1-attendance-identity": "npm run build && node test/auth_hr2d1_attendance_identity_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

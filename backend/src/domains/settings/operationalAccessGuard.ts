@@ -19,6 +19,8 @@ const VIEW_LIKE_POST = [
   /\/room-move-preview$/,
   /\/room-move-availability$/,
   /\/non-op-bulk\/preview$/,
+  /\/api\/attendance\/check-in$/,
+  /\/api\/attendance\/check-out$/,
 ];
 
 const DELETE_LIKE = [
@@ -50,6 +52,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/schedule/, resources: ['HRD'] },
   { pattern: /^\/api\/users/, resources: ['HRD'] },
 
+  { pattern: /^\/api\/attendance\/(check-in|check-out)$/, resources: ['Employee Mobile'], action: 'view' },
   { pattern: /^\/api\/attendance/, resources: ['Employee Mobile'] },
 
   { pattern: /^\/api\/pos\/menu\/items/, resources: ['Master Produk'] },

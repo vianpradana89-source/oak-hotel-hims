@@ -136,7 +136,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     }
     try {
       setAttendanceLoading(true);
-      const url = `/api/attendance/status?property_id=${propertyId}${currentUser.id ? `&employee_id=${currentUser.id}` : ''}&role=${encodeURIComponent(currentUser.role)}`;
+      const url = `/api/attendance/status?property_id=${propertyId}&role=${encodeURIComponent(currentUser.role)}`;
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
@@ -191,7 +191,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       setClockOutSubmitting(true);
       const formData = new FormData();
       formData.append('property_id', String(propertyId));
-      if (currentUser.id) formData.append('employee_id', String(currentUser.id));
       formData.append('employee_name', currentUser.name);
       formData.append('department', currentUser.department || 'Housekeeping');
       formData.append('attendance_type', 'CHECK_OUT');

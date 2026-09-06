@@ -16,6 +16,7 @@ const pool = new Pool({
 
 // Import express app
 const { app } = require('../dist/index');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 let server;
 let baseUrl;
@@ -54,6 +55,9 @@ async function runTests() {
   let testRoomId = null;
   let testTaskId = null;
   let testEmpId = null;
+  let testUserId = null;
+  let employeeToken = null;
+  let superAdminToken = null;
 
   try {
     // 0. Ensure schema is initialized
@@ -71,6 +75,61 @@ async function runTests() {
       [`EMP_${testTag.slice(-6)}`, `Crew_${testTag}`]
     );
     testEmpId = empRes.rows[0].id;
+    await pool.query('UPDATE hr_employees SET property_id = $1 WHERE id = $2', [propertyId, testEmpId]);
+
+    const hkRole = await pool.query(
+      `SELECT id FROM roles WHERE name = 'Housekeeping' AND is_system_role = TRUE AND property_id IS NULL LIMIT 1`
+    );
+    const housekeepingRoleId = hkRole.rows[0]?.id;
+    const userRes = await pool.query(
+      `INSERT INTO users (
+         username, email, password_hash, role_id, property_id, employee_id,
+         is_active, account_status, must_change_password, full_name, access_type
+       ) VALUES ($1, $2, 'dummy_hash', $3, $4, $5, TRUE, 'READY', FALSE, $6, 'MOBILE_ONLY')
+       RETURNING id, username, email, property_id, role_id`,
+      [
+        `${testTag}_user`,
+        `${testTag}@oakhotel.test`,
+        housekeepingRoleId,
+        propertyId,
+        testEmpId,
+        `Crew_${testTag}`
+      ]
+    );
+    testUserId = userRes.rows[0].id;
+    employeeToken = generateToken({
+      id: Number(userRes.rows[0].id),
+      username: userRes.rows[0].username,
+      email: userRes.rows[0].email,
+      full_name: `Crew_${testTag}`,
+      role: 'Housekeeping',
+      role_id: Number(userRes.rows[0].role_id),
+      property_id: propertyId,
+      scope: 'FULL',
+      account_status: 'READY',
+      access_type: 'MOBILE_ONLY'
+    });
+
+    const saRes = await pool.query(`
+      SELECT u.id, u.username, u.full_name, u.email, u.property_id, r.id AS role_id
+      FROM users u JOIN roles r ON r.id = u.role_id
+      WHERE r.name = 'Super Admin' AND r.property_id IS NULL AND r.is_system_role = TRUE
+      LIMIT 1
+    `);
+    if (saRes.rows.length > 0) {
+      const sa = saRes.rows[0];
+      superAdminToken = generateToken({
+        id: Number(sa.id),
+        username: sa.username,
+        email: sa.email,
+        full_name: sa.full_name,
+        role: 'Super Admin',
+        role_id: Number(sa.role_id),
+        property_id: Number(sa.property_id || propertyId),
+        scope: 'FULL',
+        access_type: 'ADMIN'
+      });
+    }
 
     // Create test room fixture
     const roomRes = await pool.query(
@@ -85,14 +144,16 @@ async function runTests() {
     // TEST 1: Get & Update Attendance Settings
     // -------------------------------------------------------------
     console.log('\n--- 1. Attendance Settings API ---');
-    const getSetRes = await fetchJson(`${baseUrl}/api/attendance/settings?property_id=${propertyId}`);
+    const getSetRes = await fetchJson(`${baseUrl}/api/attendance/settings?property_id=${propertyId}`, {
+      headers: { Authorization: `Bearer ${superAdminToken}` }
+    });
     assert.strictEqual(getSetRes.status, 200, 'GET /api/attendance/settings must return 200');
     assert.strictEqual(getSetRes.data.status, 'OK');
     assert.strictEqual(typeof getSetRes.data.data.attendance_enabled, 'boolean');
 
     const patchSetRes = await fetchJson(`${baseUrl}/api/attendance/settings`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         attendance_enabled: true,
@@ -118,7 +179,9 @@ async function runTests() {
     // TEST 2: Employee Attendance Status API
     // -------------------------------------------------------------
     console.log('\n--- 2. Employee Attendance Status API ---');
-    const statusRes = await fetchJson(`${baseUrl}/api/attendance/status?property_id=${propertyId}&employee_id=${testEmpId}&role=Room%20Attendant`);
+    const statusRes = await fetchJson(`${baseUrl}/api/attendance/status?property_id=${propertyId}`, {
+      headers: { Authorization: `Bearer ${employeeToken}` }
+    });
     assert.strictEqual(statusRes.status, 200);
     assert.strictEqual(statusRes.data.data.has_checked_in, false);
     assert.strictEqual(statusRes.data.data.attendance_required, true);
@@ -132,12 +195,9 @@ async function runTests() {
     // Inside geofence check-in
     const checkInRes = await fetchJson(`${baseUrl}/api/attendance/check-in`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${employeeToken}` },
       body: JSON.stringify({
         property_id: propertyId,
-        employee_id: testEmpId,
-        employee_name: `Crew_${testTag}`,
-        department: 'Housekeeping',
         latitude: -6.2089, // ~15m from property
         longitude: 106.8457,
         location_accuracy_meters: 10
@@ -149,19 +209,18 @@ async function runTests() {
     console.log('✓ Check-in within geofence successfully accepted');
 
     // Check status now shows checked in
-    const statusAfterIn = await fetchJson(`${baseUrl}/api/attendance/status?property_id=${propertyId}&employee_id=${testEmpId}`);
+    const statusAfterIn = await fetchJson(`${baseUrl}/api/attendance/status?property_id=${propertyId}`, {
+      headers: { Authorization: `Bearer ${employeeToken}` }
+    });
     assert.strictEqual(statusAfterIn.data.data.has_checked_in, true);
     assert.strictEqual(statusAfterIn.data.data.has_checked_out, false);
 
     // Check-out
     const checkOutRes = await fetchJson(`${baseUrl}/api/attendance/check-out`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${employeeToken}` },
       body: JSON.stringify({
         property_id: propertyId,
-        employee_id: testEmpId,
-        employee_name: `Crew_${testTag}`,
-        department: 'Housekeeping',
         latitude: -6.2089,
         longitude: 106.8457
       })
@@ -171,7 +230,9 @@ async function runTests() {
     console.log('✓ Check-out successfully recorded');
 
     // Attendance records query
-    const recordsRes = await fetchJson(`${baseUrl}/api/attendance/records?property_id=${propertyId}&employee_id=${testEmpId}`);
+    const recordsRes = await fetchJson(`${baseUrl}/api/attendance/records?property_id=${propertyId}`, {
+      headers: { Authorization: `Bearer ${employeeToken}` }
+    });
     assert.strictEqual(recordsRes.status, 200);
     assert.strictEqual(recordsRes.data.data.length >= 2, true);
     console.log('✓ Attendance records list filter verified');
@@ -182,7 +243,7 @@ async function runTests() {
     console.log('\n--- 4. Housekeeping Data Integrity (room_id mandatory for ROOM_CLEANING) ---');
     const invalidTaskRes = await fetchJson(`${baseUrl}/api/housekeeping/tasks`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         task_type: 'ROOM_CLEANING',
@@ -196,7 +257,7 @@ async function runTests() {
     // Valid task creation with room_id
     const validTaskRes = await fetchJson(`${baseUrl}/api/housekeeping/tasks`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         task_type: 'ROOM_CLEANING',
@@ -217,7 +278,7 @@ async function runTests() {
     // Reject edit without reason
     const editNoReason = await fetchJson(`${baseUrl}/api/housekeeping/tasks/${testTaskId}/history-edit`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         priority: 'HIGH'
@@ -229,7 +290,7 @@ async function runTests() {
     // Authorized edit with reason
     const editWithReason = await fetchJson(`${baseUrl}/api/housekeeping/tasks/${testTaskId}/history-edit`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         priority: 'HIGH',
@@ -248,7 +309,7 @@ async function runTests() {
     console.log('\n--- 6. Housekeeping Soft Archive & History Filter ---');
     const archiveRes = await fetchJson(`${baseUrl}/api/housekeeping/tasks/${testTaskId}/archive`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         reason: 'Duplicate operational entry'
@@ -259,12 +320,16 @@ async function runTests() {
     assert.strictEqual(archiveRes.data.data.archive_reason, 'Duplicate operational entry');
 
     // Ensure archived task does not show in standard history
-    const historyRes = await fetchJson(`${baseUrl}/api/housekeeping/history?property_id=${propertyId}&status=ASSIGNED`);
+    const historyRes = await fetchJson(`${baseUrl}/api/housekeeping/history?property_id=${propertyId}&status=ASSIGNED`, {
+      headers: { Authorization: `Bearer ${superAdminToken}` }
+    });
     const isPresentInStandard = historyRes.data.data.some(t => Number(t.id) === testTaskId);
     assert.strictEqual(isPresentInStandard, false, 'Archived task must not appear in standard history view');
 
     // Ensure archived task appears when include_archived=true
-    const historyWithArchived = await fetchJson(`${baseUrl}/api/housekeeping/history?property_id=${propertyId}&status=ASSIGNED&include_archived=true`);
+    const historyWithArchived = await fetchJson(`${baseUrl}/api/housekeeping/history?property_id=${propertyId}&status=ASSIGNED&include_archived=true`, {
+      headers: { Authorization: `Bearer ${superAdminToken}` }
+    });
     const isPresentInArchived = historyWithArchived.data.data.some(t => Number(t.id) === testTaskId);
     assert.strictEqual(isPresentInArchived, true, 'Archived task must appear when include_archived=true');
     console.log('✓ Housekeeping soft archiving and include_archived filter verified');
@@ -284,7 +349,7 @@ async function runTests() {
     // 2. Attempt to toggle room 999 from VACANT_DIRTY to VACANT_CLEAN without override authority
     const overrideAttempt = await fetchJson(`${baseUrl}/api/rooms/${testRoomId}/status`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${superAdminToken}` },
       body: JSON.stringify({
         property_id: propertyId,
         status: 'VACANT_CLEAN'
@@ -298,7 +363,9 @@ async function runTests() {
     // TEST 8: Tape Chart Turnover Clearance Data
     // -------------------------------------------------------------
     console.log('\n--- 8. Tape Chart Turnover Outgoing Clearance ---');
-    const tapeRes = await fetchJson(`${baseUrl}/api/tapechart?property_id=${propertyId}`);
+    const tapeRes = await fetchJson(`${baseUrl}/api/tapechart?property_id=${propertyId}`, {
+      headers: { Authorization: `Bearer ${superAdminToken}` }
+    });
     assert.strictEqual(tapeRes.status, 200);
     assert.strictEqual(Array.isArray(tapeRes.data.rooms), true);
     console.log('✓ Tape chart endpoint returns successfully with enriched turnover structure');
@@ -316,6 +383,10 @@ async function runTests() {
       }
       if (testEmpId) {
         await pool.query('DELETE FROM employee_attendance_records WHERE employee_id = $1', [testEmpId]);
+        await pool.query('DELETE FROM employee_attendance WHERE employee_id = $1', [testEmpId]);
+        if (testUserId) {
+          await pool.query('DELETE FROM users WHERE id = $1', [testUserId]);
+        }
         await pool.query('DELETE FROM hr_employees WHERE id = $1', [testEmpId]);
       }
       if (testRoomId) {

@@ -51,6 +51,11 @@ export interface EmployeeAttendanceRecord {
   property_distance_meters: number | null;
   geofence_result: GeofenceResult;
   photo_storage_key: string | null;
+  photo_hash?: string | null;
+  photo_mime_type?: string | null;
+  photo_captured_at?: string | null;
+  face_status?: 'VERIFIED' | 'REVIEW_REQUIRED' | 'REJECTED' | 'NOT_PROCESSED';
+  liveness_status?: 'VERIFIED' | 'REVIEW_REQUIRED' | 'REJECTED' | 'NOT_PROCESSED';
   source: string;
   status: AttendanceStatus;
   reason: string | null;

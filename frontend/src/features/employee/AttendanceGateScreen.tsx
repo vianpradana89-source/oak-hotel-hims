@@ -126,7 +126,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
     try {
       setLoading(true);
       setErrorMsg(null);
-      const url = `/api/attendance/status?property_id=${propertyId}${employeeId ? `&employee_id=${employeeId}` : ''}&role=${encodeURIComponent(employeeRole)}`;
+      const url = `/api/attendance/status?property_id=${propertyId}&role=${encodeURIComponent(employeeRole)}`;
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
@@ -276,7 +276,6 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
 
       const formData = new FormData();
       formData.append('property_id', String(propertyId));
-      if (employeeId) formData.append('employee_id', String(employeeId));
       formData.append('employee_name', employeeName);
       formData.append('department', employeeDepartment);
       formData.append('attendance_type', 'CHECK_IN');

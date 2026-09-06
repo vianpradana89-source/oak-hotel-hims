@@ -275,7 +275,8 @@ async function runTests() {
       {
         resource: 'Employee Mobile',
         view: ['GET', '/api/attendance/status?property_id=1'],
-        edit: ['POST', '/api/attendance/check-in', { property_id: 1 }],
+        extraView: ['POST', '/api/attendance/check-in', { property_id: 1 }],
+        edit: ['PATCH', '/api/attendance/settings', { property_id: 1 }],
       },
       {
         resource: 'Pengaturan',
@@ -305,6 +306,8 @@ async function runTests() {
       ['PATCH', '/api/rooms/4/status', 'Kalender', 'edit'],
       ['GET', '/api/reports/occupancy', 'Laporan', 'view'],
       ['GET', '/api/attendance/status', 'Employee Mobile', 'view'],
+      ['POST', '/api/attendance/check-in', 'Employee Mobile', 'view'],
+      ['PATCH', '/api/attendance/settings', 'Employee Mobile', 'edit'],
       ['GET', '/api/settings/role-permissions', 'Pengaturan', 'view'],
     ];
     for (const [method, urlPath, resource, action] of mappingExpect) {
