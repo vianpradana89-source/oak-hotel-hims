@@ -120,7 +120,6 @@
 }
 
 .oak-attendance-gate__gps-refresh,
-.oak-attendance-gate__file-btn,
 .oak-attendance-gate__camera-btn,
 .oak-attendance-gate__retake,
 .oak-attendance-gate__capture,
@@ -155,6 +154,24 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.oak-attendance-gate__selfie video.oak-attendance-gate__video--hidden {
+  display: none;
+}
+
+.oak-attendance-gate__selfie-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  text-align: center;
+  background: rgba(17, 45, 34, 0.78);
 }
 
 .oak-attendance-gate__selfie img.oak-attendance-gate__preview--mirrored,

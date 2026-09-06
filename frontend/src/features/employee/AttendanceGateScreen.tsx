@@ -7,6 +7,17 @@ import {
   formatEmployeeDeptPosition,
   type CanonicalEmployeeIdentity
 } from './employeeMobileIdentity';
+import {
+  ATTENDANCE_CAMERA_COPY,
+  applyAttendanceCameraEvent,
+  attachStreamToVideo,
+  canSubmitAttendanceSelfie,
+  createCameraStartGuard,
+  isFrontFacingStream,
+  stopMediaStream,
+  type AttendanceCameraPhase,
+  type AttendanceCaptureSource
+} from './attendanceCamera';
 import './attendanceGate.css';
 
 const Camera = ({ className = "w-5 h-5" }: { className?: string }) => (
@@ -46,11 +57,6 @@ const RefreshCw = ({ className = "w-5 h-5" }: { className?: string }) => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
   </svg>
 );
-function isFrontFacingStream(stream: MediaStream): boolean {
-  const facing = stream.getVideoTracks()[0]?.getSettings()?.facingMode;
-  return facing !== 'environment';
-}
-
 const UserCheck = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -95,15 +101,18 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
     error: null
   });
 
-  // Photo state
+  // Photo / live-camera state
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
-  const [usingWebcam, setUsingWebcam] = useState(false);
+  const [captureSource, setCaptureSource] = useState<AttendanceCaptureSource>(null);
+  const [cameraPhase, setCameraPhase] = useState<AttendanceCameraPhase>('requesting');
   const [livePreviewMirrored, setLivePreviewMirrored] = useState(false);
   const [capturedPreviewMirrored, setCapturedPreviewMirrored] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+  const cameraGuardRef = useRef(createCameraStartGuard());
+  const startCameraRef = useRef<() => Promise<void>>(async () => {});
 
   // Form reason
   const [outsideReason, setOutsideReason] = useState('');
@@ -199,80 +208,124 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
     requestLocation();
   }, []);
 
-  // Camera stream handling
-  const startCamera = async () => {
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false
-        });
-        streamRef.current = stream;
-        setLivePreviewMirrored(isFrontFacingStream(stream));
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play();
-        }
-        setUsingWebcam(true);
-      } else {
-        fileInputRef.current?.click();
-      }
-    } catch (err) {
-      console.warn('Camera access error, fallback to file input:', err);
-      fileInputRef.current?.click();
+  const clearCapturedPreview = () => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
     }
+    setPhotoBlob(null);
+    setPhotoPreviewUrl(null);
+    setCaptureSource(null);
+    setCapturedPreviewMirrored(false);
   };
 
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
+  const releaseCameraStream = () => {
+    const video = videoRef.current;
+    if (video) {
+      video.srcObject = null;
     }
-    setUsingWebcam(false);
+    stopMediaStream(streamRef.current);
+    streamRef.current = null;
     setLivePreviewMirrored(false);
   };
 
+  const startCamera = async () => {
+    const generation = cameraGuardRef.current.next();
+    releaseCameraStream();
+    setCameraPhase(applyAttendanceCameraEvent(cameraPhase, 'start'));
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraPhase(applyAttendanceCameraEvent('requesting', 'fail'));
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      if (!cameraGuardRef.current.isCurrent(generation)) {
+        stopMediaStream(stream);
+        return;
+      }
+
+      streamRef.current = stream;
+      setLivePreviewMirrored(isFrontFacingStream(stream));
+
+      const video = videoRef.current;
+      if (!video) {
+        stopMediaStream(stream);
+        streamRef.current = null;
+        setCameraPhase(applyAttendanceCameraEvent('requesting', 'fail'));
+        return;
+      }
+
+      await attachStreamToVideo(video, stream);
+      if (!cameraGuardRef.current.isCurrent(generation)) {
+        stopMediaStream(stream);
+        return;
+      }
+      setCameraPhase(applyAttendanceCameraEvent('requesting', 'ready'));
+    } catch (err) {
+      if (!cameraGuardRef.current.isCurrent(generation)) return;
+      console.warn('Camera access error:', err);
+      releaseCameraStream();
+      setCameraPhase(applyAttendanceCameraEvent('requesting', 'fail'));
+    }
+  };
+  startCameraRef.current = startCamera;
+
   useEffect(() => {
     return () => {
-      stopCamera();
+      cameraGuardRef.current.invalidate();
+      releaseCameraStream();
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
+      }
     };
   }, []);
 
-  const capturePhoto = () => {
-    if (videoRef.current) {
-      const canvas = document.createElement('canvas');
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob((blob) => {
-          if (blob) {
-            setPhotoBlob(blob);
-            setPhotoPreviewUrl(URL.createObjectURL(blob));
-            setCapturedPreviewMirrored(livePreviewMirrored);
-            stopCamera();
-          }
-        }, 'image/jpeg', 0.85);
-      }
-    }
-  };
+  useEffect(() => {
+    if (loading || successRecorded || !canPermitClockIn(identity)) return;
+    void startCameraRef.current();
+    return () => {
+      cameraGuardRef.current.invalidate();
+      const video = videoRef.current;
+      if (video) video.srcObject = null;
+      stopMediaStream(streamRef.current);
+      streamRef.current = null;
+    };
+  }, [loading, successRecorded, identity.employeeId, identity.propertyId]);
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setPhotoBlob(file);
-      setPhotoPreviewUrl(URL.createObjectURL(file));
-      setCapturedPreviewMirrored(false);
-      stopCamera();
-    }
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    if (!video || cameraPhase !== 'live') return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      const objectUrl = URL.createObjectURL(blob);
+      previewUrlRef.current = objectUrl;
+      setPhotoBlob(blob);
+      setPhotoPreviewUrl(objectUrl);
+      setCaptureSource('live');
+      setCapturedPreviewMirrored(livePreviewMirrored);
+      cameraGuardRef.current.invalidate();
+      releaseCameraStream();
+      setCameraPhase(applyAttendanceCameraEvent('live', 'capture'));
+    }, 'image/jpeg', 0.85);
   };
 
   const handleRetake = () => {
-    setPhotoBlob(null);
-    setPhotoPreviewUrl(null);
-    setCapturedPreviewMirrored(false);
-    startCamera();
+    clearCapturedPreview();
+    setCameraPhase(applyAttendanceCameraEvent(cameraPhase, 'retake'));
+    void startCameraRef.current();
   };
 
   // Submit Check-In
@@ -286,8 +339,12 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       setErrorMsg(null);
 
       const settings = statusData?.settings;
-      if (settings?.require_checkin_photo && !photoBlob) {
-        setErrorMsg('Foto selfie wajah wajib diambil sebelum melakukan absensi masuk.');
+      if (!canSubmitAttendanceSelfie({
+        requirePhoto: Boolean(settings?.require_checkin_photo),
+        photoBlob,
+        captureSource
+      })) {
+        setErrorMsg('Foto selfie wajah wajib diambil dari kamera langsung sebelum melakukan absensi masuk.');
         setSubmitting(false);
         return;
       }
@@ -433,74 +490,70 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
             Foto Selfie Wajah {statusData?.settings.require_checkin_photo ? '(Wajib)' : '(Opsional)'}
           </label>
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            capture="user"
-            className="hidden"
-            onChange={handleFileInputChange}
-          />
-
           <div className="oak-attendance-gate__selfie">
-            {photoPreviewUrl ? (
-              <>
-                <img
-                  src={photoPreviewUrl}
-                  alt="Selfie preview"
-                  className={capturedPreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : undefined}
-                />
-                <button
-                  type="button"
-                  onClick={handleRetake}
-                  className="oak-attendance-gate__retake"
-                >
-                  Foto Ulang
-                </button>
-              </>
-            ) : usingWebcam ? (
-              <>
-                <video
-                  ref={videoRef}
-                  playsInline
-                  autoPlay
-                  muted
-                  className={livePreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : undefined}
-                />
-                <button
-                  type="button"
-                  onClick={capturePhoto}
-                  className="oak-attendance-gate__capture"
-                >
-                  Ambil Foto
-                </button>
-              </>
-            ) : (
-              <div className="oak-attendance-gate__selfie-empty">
+            <video
+              ref={videoRef}
+              playsInline
+              autoPlay
+              muted
+              className={[
+                livePreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : '',
+                cameraPhase === 'captured' ? 'oak-attendance-gate__video--hidden' : ''
+              ].filter(Boolean).join(' ') || undefined}
+            />
+
+            {cameraPhase === 'captured' && photoPreviewUrl && (
+              <img
+                src={photoPreviewUrl}
+                alt="Selfie preview"
+                className={capturedPreviewMirrored ? 'oak-attendance-gate__preview--mirrored' : undefined}
+              />
+            )}
+
+            {cameraPhase === 'requesting' && (
+              <div className="oak-attendance-gate__selfie-overlay" aria-live="polite">
+                <RefreshCw className="w-6 h-6 animate-spin text-[#d4af37]" />
+                <p className="text-xs text-white/85">{ATTENDANCE_CAMERA_COPY.requesting}</p>
+              </div>
+            )}
+
+            {(cameraPhase === 'idle' || cameraPhase === 'error') && (
+              <div className="oak-attendance-gate__selfie-overlay">
                 <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-[#d4af37]">
                   <Camera className="w-5 h-5" />
                 </div>
-                <div className="space-y-0.5">
-                  <p className="text-xs text-white/80">Nyalakan kamera untuk mengambil foto kehadiran</p>
-                  <p className="text-[10px] text-white/50">Pastikan wajah terlihat jelas di tempat terang</p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={startCamera}
-                    className="oak-attendance-gate__camera-btn py-2 px-4 rounded-xl text-xs font-semibold bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] shadow transition"
-                  >
-                    Buka Kamera
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="oak-attendance-gate__file-btn py-2 px-4 rounded-xl text-xs font-semibold bg-white/10 text-white hover:bg-white/20 transition"
-                  >
-                    Pilih File
-                  </button>
-                </div>
+                <p className="text-xs text-white/85">
+                  {cameraPhase === 'error' ? ATTENDANCE_CAMERA_COPY.error : 'Nyalakan kamera untuk mengambil foto kehadiran'}
+                </p>
+                <p className="text-[10px] text-white/50">Pastikan wajah terlihat jelas di tempat terang</p>
+                <button
+                  type="button"
+                  onClick={() => { void startCamera(); }}
+                  className="oak-attendance-gate__camera-btn py-2 px-4 rounded-xl text-xs font-semibold bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] shadow transition"
+                >
+                  {ATTENDANCE_CAMERA_COPY.retry}
+                </button>
               </div>
+            )}
+
+            {cameraPhase === 'live' && (
+              <button
+                type="button"
+                onClick={capturePhoto}
+                className="oak-attendance-gate__capture"
+              >
+                {ATTENDANCE_CAMERA_COPY.capture}
+              </button>
+            )}
+
+            {cameraPhase === 'captured' && (
+              <button
+                type="button"
+                onClick={handleRetake}
+                className="oak-attendance-gate__retake"
+              >
+                {ATTENDANCE_CAMERA_COPY.retake}
+              </button>
             )}
           </div>
         </div>
@@ -528,9 +581,23 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
         <button
           type="button"
           onClick={handleCheckIn}
-          disabled={!canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)}
+          disabled={
+            !canPermitClockIn(identity)
+            || submitting
+            || !canSubmitAttendanceSelfie({
+              requirePhoto: Boolean(statusData?.settings.require_checkin_photo),
+              photoBlob,
+              captureSource
+            })
+          }
           className={`oak-attendance-gate__submit shadow-xl transition-all flex items-center justify-center gap-2 ${
-            !canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)
+            !canPermitClockIn(identity)
+            || submitting
+            || !canSubmitAttendanceSelfie({
+              requirePhoto: Boolean(statusData?.settings.require_checkin_photo),
+              photoBlob,
+              captureSource
+            })
               ? 'bg-white/20 text-white/50 cursor-not-allowed'
               : 'bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] active:scale-[0.98]'
           }`}
