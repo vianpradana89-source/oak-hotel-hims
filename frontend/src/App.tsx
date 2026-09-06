@@ -3198,12 +3198,6 @@ function AppContent() {
         propertyId={activePropId}
         propertyName={activePropName}
         initialTab={window.location.pathname === '/housekeeping' ? 'TASKS' : 'HOME'}
-        currentUser={{
-          id: 1,
-          name: 'Siti Rahmawati',
-          role: 'Housekeeping',
-          department: 'Housekeeping'
-        }}
       />
     );
   }
@@ -3862,12 +3856,6 @@ function AppContent() {
                 propertyId={propertyId}
                 propertyName={properties.find((p: any) => p.id === propertyId)?.name}
                 isPreview={true}
-                currentUser={{
-                  id: 1,
-                  name: 'Siti Rahmawati (Crew HK)',
-                  role: 'Housekeeping',
-                  department: 'Housekeeping'
-                }}
                 onBackToDesktop={() => setSelectedMenu('Employee Mobile')}
               />
             </div>

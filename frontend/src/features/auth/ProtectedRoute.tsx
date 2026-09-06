@@ -57,12 +57,7 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   if (user?.access_type === 'MOBILE_ONLY' && user?.role !== 'Super Admin') {
     return (
       <EmployeeMobileWorkspace
-        propertyId={user.property_id || 1}
-        currentUser={{
-          id: user.id,
-          name: user.full_name || user.username,
-          role: user.role
-        }}
+        propertyId={user.property_id || 0}
       />
     );
   }

@@ -58,6 +58,10 @@ export interface AttendanceStatusResponse {
   employee_id: number;
   employee_name: string;
   department: string;
+  department_id?: number | null;
+  department_name?: string | null;
+  position_id?: number | null;
+  position_name?: string | null;
   hotel_date: string;
   server_time: string;
   timezone: string;

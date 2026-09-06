@@ -178,19 +178,33 @@ export async function getEmployeeAttendanceStatus(
   const hotelDate = hotelDateFromInstant(new Date());
   const serverTime = new Date().toISOString();
 
-  let employeeName = 'Employee';
-  let department = 'General';
+  let employeeName = '';
+  let department = '';
+  let departmentId: number | null = null;
+  let departmentName: string | null = null;
+  let positionId: number | null = null;
+  let positionName: string | null = null;
 
   if (employeeId) {
     const empRes = await db.query(
-      'SELECT full_name, department, position FROM hr_employees WHERE id = $1 AND ($2::int IS NULL OR property_id = $2 OR property_id IS NULL)',
+      `SELECT e.full_name, e.department, e.position, e.department_id, e.position_id,
+              d.name AS department_name, p.name AS position_name
+       FROM hr_employees e
+       LEFT JOIN hr_departments d ON d.id = e.department_id
+       LEFT JOIN hr_positions p ON p.id = e.position_id
+       WHERE e.id = $1 AND ($2::int IS NULL OR e.property_id = $2 OR e.property_id IS NULL)`,
       [employeeId, propertyId]
     );
     if (empRes.rows.length > 0) {
-      employeeName = empRes.rows[0].full_name;
-      department = empRes.rows[0].department || department;
-      if (!employeeRole && empRes.rows[0].position) {
-        employeeRole = empRes.rows[0].position;
+      const emp = empRes.rows[0];
+      employeeName = emp.full_name;
+      departmentName = emp.department_name || emp.department || null;
+      positionName = emp.position_name || emp.position || null;
+      departmentId = emp.department_id != null ? Number(emp.department_id) : null;
+      positionId = emp.position_id != null ? Number(emp.position_id) : null;
+      department = departmentName || '';
+      if (!employeeRole && positionName) {
+        employeeRole = positionName;
       }
     }
   }
@@ -225,6 +239,10 @@ export async function getEmployeeAttendanceStatus(
     employee_id: employeeId || 0,
     employee_name: employeeName,
     department: department,
+    department_id: departmentId,
+    department_name: departmentName,
+    position_id: positionId,
+    position_name: positionName,
     hotel_date: hotelDate,
     server_time: serverTime,
     timezone: 'Asia/Jakarta',

@@ -23,6 +23,7 @@
     "test:day-use-interval": "node test/day_use_interval_test.ts",
     "test:calendar-day-use-span": "node test/calendar_day_use_span_test.ts",
     "test:authenticated-transport": "node test/authenticated_transport_test.ts",
+    "test:hr2d1b-mobile-identity": "node test/employee_mobile_identity_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

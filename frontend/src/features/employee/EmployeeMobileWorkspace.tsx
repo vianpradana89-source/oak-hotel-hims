@@ -4,6 +4,12 @@ import { HousekeepingMobileCrewView } from './HousekeepingMobileCrewView';
 import { EmployeeNotificationCenter } from './EmployeeNotificationCenter';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  EMPLOYEE_UNLINKED_MESSAGE,
+  formatEmployeeDeptPosition,
+  parseCanonicalEmployeeIdentity,
+  type CanonicalEmployeeIdentity
+} from './employeeMobileIdentity';
 
 const Home = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -61,12 +67,6 @@ interface EmployeeMobileWorkspaceProps {
   propertyName?: string;
   isPreview?: boolean;
   initialTab?: 'HOME' | 'TASKS' | 'DEPT' | 'NOTIF' | 'PROFILE';
-  currentUser?: {
-    id?: number;
-    name: string;
-    role: string;
-    department?: string;
-  };
   onBackToDesktop?: () => void;
   onLogout?: () => void;
 }
@@ -76,7 +76,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   propertyName = 'OAK Hotel Grand',
   isPreview = false,
   initialTab = 'TASKS',
-  currentUser = { name: 'Staff Housekeeping', role: 'Staff', department: 'Housekeeping' },
   onBackToDesktop,
   onLogout
 }) => {
@@ -85,7 +84,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   // Attendance Gate State
   const [attendanceGateOpen, setAttendanceGateOpen] = useState(false);
   const [attendanceStatus, setAttendanceStatus] = useState<EmployeeAttendanceStatus | null>(null);
-  const [attendanceLoading, setAttendanceLoading] = useState(!isPreview);
+  const [attendanceLoading, setAttendanceLoading] = useState(true);
+  const [employeeIdentity, setEmployeeIdentity] = useState<CanonicalEmployeeIdentity | null>(null);
+  const [identityError, setIdentityError] = useState<string | null>(null);
+  const [identityLoading, setIdentityLoading] = useState(true);
 
   // Live WIB Clock
   const [currentTimeWib, setCurrentTimeWib] = useState<string>('');
@@ -127,16 +129,45 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     return () => clearInterval(interval);
   }, []);
 
+  const fetchCanonicalIdentity = async (): Promise<CanonicalEmployeeIdentity | null> => {
+    try {
+      setIdentityLoading(true);
+      const res = await authenticatedFetch('/api/employee-mobile/me');
+      const data = await res.json();
+      if (res.ok && data.status === 'OK') {
+        const identity = parseCanonicalEmployeeIdentity(data.data);
+        if (!identity) {
+          setEmployeeIdentity(null);
+          setIdentityError(EMPLOYEE_UNLINKED_MESSAGE);
+          return null;
+        }
+        setEmployeeIdentity(identity);
+        setIdentityError(null);
+        return identity;
+      }
+      setEmployeeIdentity(null);
+      setIdentityError(data.message || data.error || EMPLOYEE_UNLINKED_MESSAGE);
+      return null;
+    } catch (err) {
+      console.error('Failed to load employee identity:', err);
+      setEmployeeIdentity(null);
+      setIdentityError(EMPLOYEE_UNLINKED_MESSAGE);
+      return null;
+    } finally {
+      setIdentityLoading(false);
+    }
+  };
+
   // Fetch Attendance Status & Check Gate (Skipped in Preview Mode)
-  const fetchAttendanceStatus = async () => {
-    if (isPreview) {
+  const fetchAttendanceStatus = async (identity: CanonicalEmployeeIdentity | null) => {
+    if (isPreview || !identity) {
       setAttendanceLoading(false);
       setAttendanceGateOpen(false);
       return;
     }
     try {
       setAttendanceLoading(true);
-      const url = `/api/attendance/status?property_id=${propertyId}&role=${encodeURIComponent(currentUser.role)}`;
+      const url = `/api/attendance/status?property_id=${identity.propertyId}`;
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
@@ -181,18 +212,28 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   };
 
   useEffect(() => {
-    fetchAttendanceStatus();
-    fetchTaskStats();
-  }, [propertyId, currentUser.id, currentUser.role]);
+    let cancelled = false;
+    (async () => {
+      const identity = await fetchCanonicalIdentity();
+      if (cancelled) return;
+      await fetchAttendanceStatus(identity);
+      await fetchTaskStats();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [propertyId]);
 
   // Handle Clock-Out (Absen Pulang)
   const handleClockOut = async () => {
+    if (!employeeIdentity) {
+      setIdentityError(EMPLOYEE_UNLINKED_MESSAGE);
+      return;
+    }
     try {
       setClockOutSubmitting(true);
       const formData = new FormData();
-      formData.append('property_id', String(propertyId));
-      formData.append('employee_name', currentUser.name);
-      formData.append('department', currentUser.department || 'Housekeeping');
+      formData.append('property_id', String(employeeIdentity.propertyId));
       formData.append('attendance_type', 'CHECK_OUT');
       if (clockOutReason.trim()) formData.append('reason', clockOutReason.trim());
 
@@ -207,7 +248,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
         setTimeout(() => {
           setShowClockOutModal(false);
           setClockOutSuccess(false);
-          fetchAttendanceStatus();
+          fetchAttendanceStatus(employeeIdentity);
         }, 1500);
       } else {
         alert(data.message || 'Gagal melakukan absen pulang');
@@ -219,7 +260,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     }
   };
 
-  if (attendanceLoading && !attendanceStatus) {
+  if (identityLoading || (attendanceLoading && !attendanceStatus && !identityError)) {
     return (
       <div className="min-h-screen bg-stone-50 text-neutral-800 flex flex-col items-center justify-center p-6">
         <RefreshCw className="w-8 h-8 animate-spin text-[#1b4332] mb-3" />
@@ -228,17 +269,54 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     );
   }
 
+  if (!employeeIdentity) {
+    return (
+      <div className="min-h-screen bg-stone-50 text-neutral-800 flex flex-col items-center justify-center p-6 max-w-md mx-auto">
+        <div className="w-full bg-white border border-neutral-200 rounded-2xl p-5 shadow-xs text-center space-y-3">
+          <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-700 flex items-center justify-center mx-auto">
+            <User className="w-6 h-6" />
+          </div>
+          <h2 className="font-serif font-bold text-lg text-neutral-900">Identitas Karyawan Tidak Tersedia</h2>
+          <p className="text-sm text-neutral-600 leading-relaxed">
+            {identityError || EMPLOYEE_UNLINKED_MESSAGE}
+          </p>
+          <p className="text-xs text-neutral-500">
+            Clock In tidak dapat dibuka sampai akun terhubung ke data karyawan yang aktif.
+          </p>
+          {(onBackToDesktop || onLogout) && (
+            <div className="space-y-2 pt-1">
+              {onBackToDesktop && (
+                <button
+                  type="button"
+                  onClick={onBackToDesktop}
+                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-white border border-neutral-300 text-neutral-800 hover:bg-neutral-100 transition cursor-pointer"
+                >
+                  Kembali
+                </button>
+              )}
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 transition cursor-pointer"
+                >
+                  Keluar Akun (Logout)
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (attendanceGateOpen) {
     return (
       <AttendanceGateScreen
-        propertyId={propertyId}
-        employeeId={currentUser.id}
-        employeeName={currentUser.name}
-        employeeDepartment={currentUser.department || 'Housekeeping'}
-        employeeRole={currentUser.role}
+        identity={employeeIdentity}
         onAttendanceSuccess={() => {
           setAttendanceGateOpen(false);
-          fetchAttendanceStatus();
+          fetchAttendanceStatus(employeeIdentity);
           fetchTaskStats();
         }}
         onBypassForTesting={() => {
@@ -277,16 +355,18 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
           {/* Left: Brand & Department Title */}
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-7 h-7 rounded-lg bg-[#1b4332] text-[#d4af37] border border-[#d4af37]/30 flex items-center justify-center font-serif font-bold text-xs shrink-0 shadow-xs">
-              {currentUser.name.charAt(0).toUpperCase()}
+              {employeeIdentity.employeeName.charAt(0).toUpperCase()}
             </div>
             <div className="truncate">
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#d4af37]">OAK HIMS</span>
                 <span className="text-neutral-500 text-[10px]">•</span>
-                <span className="text-xs font-bold text-white truncate">Housekeeping</span>
+                <span className="text-xs font-bold text-white truncate">
+                  {employeeIdentity.departmentName || employeeIdentity.positionName || propertyName}
+                </span>
               </div>
               <p className="text-[10px] text-neutral-400 truncate">
-                {currentUser.name} • {propertyName}
+                {employeeIdentity.employeeName} • {propertyName}
               </p>
             </div>
           </div>
@@ -335,7 +415,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                 </span>
               </div>
               <h3 className="font-serif font-bold text-base text-neutral-900 mb-1">
-                Halo, {currentUser.name}
+                Halo, {employeeIdentity.employeeName}
               </h3>
               <p className="text-xs text-neutral-600 leading-relaxed mb-3">
                 {activeTaskCount > 0
@@ -412,8 +492,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
         {activeTab === 'TASKS' && (
           <HousekeepingMobileCrewView
             propertyId={propertyId}
-            crewName={currentUser.name}
-            crewRole={currentUser.role}
+            crewName={employeeIdentity.employeeName}
+            crewRole={employeeIdentity.positionName || employeeIdentity.departmentName || ''}
             onRefreshStats={fetchTaskStats}
           />
         )}
@@ -468,7 +548,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
         {activeTab === 'NOTIF' && (
           <EmployeeNotificationCenter
             propertyId={propertyId}
-            employeeName={currentUser.name}
+            employeeName={employeeIdentity.employeeName}
           />
         )}
 
@@ -477,11 +557,11 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
             {/* Profile Card (White Surface) */}
             <div className="bg-white border border-neutral-200/90 rounded-2xl p-4 shadow-xs text-center space-y-3">
               <div className="w-14 h-14 rounded-2xl bg-[#1b4332] text-[#d4af37] font-serif font-bold text-xl mx-auto flex items-center justify-center shadow-xs">
-                {currentUser.name.charAt(0).toUpperCase()}
+                {employeeIdentity.employeeName.charAt(0).toUpperCase()}
               </div>
               <div>
-                <h3 className="font-serif font-bold text-base text-neutral-900">{currentUser.name}</h3>
-                <p className="text-xs font-semibold text-[#1b4332]">{currentUser.department || 'Housekeeping'} • {currentUser.role}</p>
+                <h3 className="font-serif font-bold text-base text-neutral-900">{employeeIdentity.employeeName}</h3>
+                <p className="text-xs font-semibold text-[#1b4332]">{formatEmployeeDeptPosition(employeeIdentity) || '—'}</p>
                 <p className="text-[11px] text-neutral-500">{propertyName}</p>
               </div>
 
@@ -513,7 +593,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
               <button
                 type="button"
                 onClick={() => setShowClockOutModal(true)}
-                className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-600 text-neutral-950 shadow-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                disabled={!employeeIdentity}
+                className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-600 text-neutral-950 shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <LogOut className="w-4 h-4" />
                 <span>ABSEN PULANG (CLOCK-OUT)</span>

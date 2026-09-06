@@ -97,9 +97,12 @@ export async function resolveSelfAttendanceActor(
   }
 
   const empRes = await db.query(
-    `SELECT id, property_id, full_name, department, position, is_active, status
-     FROM hr_employees
-     WHERE id = $1`,
+    `SELECT e.id, e.property_id, e.full_name, e.department, e.position, e.is_active, e.status,
+            d.name AS department_name, p.name AS position_name
+     FROM hr_employees e
+     LEFT JOIN hr_departments d ON d.id = e.department_id
+     LEFT JOIN hr_positions p ON p.id = e.position_id
+     WHERE e.id = $1`,
     [authUser.employeeId]
   );
 
@@ -126,8 +129,8 @@ export async function resolveSelfAttendanceActor(
     employeeId: Number(emp.id),
     propertyId: authUser.propertyId,
     employeeName: emp.full_name || authUser.fullName,
-    department: emp.department || null,
-    roleName: emp.position || authUser.roleName,
+    department: emp.department_name || emp.department || null,
+    roleName: emp.position_name || emp.position || authUser.roleName,
     isPlatformSuperAdmin: authUser.isPlatformSuperAdmin
   };
 }

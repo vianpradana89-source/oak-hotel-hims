@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  EMPLOYEE_UNLINKED_MESSAGE,
+  canPermitClockIn,
+  formatEmployeeDeptPosition,
+  type CanonicalEmployeeIdentity
+} from './employeeMobileIdentity';
 
 const Camera = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -46,24 +52,19 @@ const UserCheck = ({ className = "w-5 h-5" }: { className?: string }) => (
 );
 
 interface AttendanceGateScreenProps {
-  propertyId: number;
-  employeeId?: number | null;
-  employeeName: string;
-  employeeDepartment?: string;
-  employeeRole?: string;
+  identity: CanonicalEmployeeIdentity;
   onAttendanceSuccess: () => void;
   onBypassForTesting?: () => void;
 }
 
 export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
-  propertyId,
-  employeeId,
-  employeeName,
-  employeeDepartment = 'Housekeeping',
-  employeeRole = 'Staff',
+  identity,
   onAttendanceSuccess,
   onBypassForTesting
 }) => {
+  const employeeName = identity.employeeName;
+  const employeeDepartment = identity.departmentName || '';
+  const propertyId = identity.propertyId;
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [statusData, setStatusData] = useState<EmployeeAttendanceStatus | null>(null);
@@ -126,7 +127,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
     try {
       setLoading(true);
       setErrorMsg(null);
-      const url = `/api/attendance/status?property_id=${propertyId}&role=${encodeURIComponent(employeeRole)}`;
+      const url = `/api/attendance/status?property_id=${propertyId}`;
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
@@ -146,7 +147,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
 
   useEffect(() => {
     fetchStatus();
-  }, [propertyId, employeeId, employeeRole]);
+  }, [propertyId, identity.employeeId]);
 
   // Fetch Geolocation
   const requestLocation = () => {
@@ -263,6 +264,10 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
 
   // Submit Check-In
   const handleCheckIn = async () => {
+    if (!identity.employeeId || !identity.employeeName) {
+      setErrorMsg(EMPLOYEE_UNLINKED_MESSAGE);
+      return;
+    }
     try {
       setSubmitting(true);
       setErrorMsg(null);
@@ -276,8 +281,6 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
 
       const formData = new FormData();
       formData.append('property_id', String(propertyId));
-      formData.append('employee_name', employeeName);
-      formData.append('department', employeeDepartment);
       formData.append('attendance_type', 'CHECK_IN');
 
       if (locationState.lat !== null && locationState.lng !== null) {
@@ -314,6 +317,16 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       setSubmitting(false);
     }
   };
+
+  if (!canPermitClockIn(identity)) {
+    return (
+      <div className="min-h-screen bg-[#1b4332] text-[#fcfbf7] flex flex-col items-center justify-center p-6 text-center">
+        <AlertTriangle className="w-10 h-10 text-[#d4af37] mb-4" />
+        <h2 className="text-xl font-serif font-bold text-white mb-2">Identitas Karyawan Tidak Tersedia</h2>
+        <p className="text-sm text-[#fcfbf7]/80 max-w-sm">{EMPLOYEE_UNLINKED_MESSAGE}</p>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -364,7 +377,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
         <div className="flex items-center justify-between pb-3 border-b border-white/10 text-xs">
           <div>
             <p className="text-white font-semibold text-sm">{employeeName}</p>
-            <p className="text-[#d4af37]">{employeeDepartment} &bull; {employeeRole}</p>
+            <p className="text-[#d4af37]">{formatEmployeeDeptPosition(identity) || '—'}</p>
           </div>
           <div className="text-right">
             <div className="flex items-center gap-1.5 text-emerald-400 font-mono text-xs justify-end">
@@ -500,9 +513,9 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
         <button
           type="button"
           onClick={handleCheckIn}
-          disabled={submitting || (statusData?.settings.require_checkin_photo && !photoBlob)}
+          disabled={!canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)}
           className={`w-full py-3.5 px-6 rounded-xl font-serif font-bold text-sm tracking-wide shadow-xl transition-all flex items-center justify-center gap-2 ${
-            submitting || (statusData?.settings.require_checkin_photo && !photoBlob)
+            !canPermitClockIn(identity) || submitting || (statusData?.settings.require_checkin_photo && !photoBlob)
               ? 'bg-white/20 text-white/50 cursor-not-allowed'
               : 'bg-[#d4af37] text-[#1b4332] hover:bg-[#c49f2f] active:scale-[0.98]'
           }`}

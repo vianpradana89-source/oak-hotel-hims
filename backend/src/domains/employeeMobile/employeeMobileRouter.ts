@@ -4,6 +4,10 @@ import type { Pool } from 'pg';
 import { requireAuth } from '../auth/authMiddleware';
 import { enrollFace, type FaceEnrollmentResult } from '../auth/faceEnrollmentService';
 import { getActiveFaceEnrollment } from '../auth/faceEnrollmentService';
+import {
+  getCanonicalEmployeeIdentity,
+  presentCanonicalEmployeeIdentity
+} from './employeeMobileIdentity';
 
 export function createEmployeeMobileRouter(pool: Pool): Router {
   const router = Router();
@@ -15,6 +19,28 @@ export function createEmployeeMobileRouter(pool: Pool): Router {
   const faceUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 }
+  });
+
+  // GET /api/employee-mobile/me
+  // Canonical authenticated employee identity for Employee Mobile / attendance UI.
+  // Identity is derived exclusively from JWT users.id → users.employee_id.
+  router.get('/me', async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      // Identity is JWT-authoritative. Query/body employee_id is never used as authority.
+      const identity = await getCanonicalEmployeeIdentity(pool, Number(user.id));
+      res.json({
+        status: 'OK',
+        data: presentCanonicalEmployeeIdentity(identity)
+      });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Gagal memuat identitas karyawan.'
+      });
+    }
   });
 
   // GET /api/employee-mobile/me/face-enrollment
