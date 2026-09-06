@@ -9,6 +9,7 @@ export interface LifecycleMemberInput {
   transaction_status?: string;
   transaction_date?: string;
   transaction_time?: string;
+  source_type?: string | null;
   source_id?: string | null;
   net_amount?: number | string;
   amount?: number | string;
@@ -19,6 +20,9 @@ export interface LifecycleMemberInput {
   receiving_status?: string | null;
   deleted_at?: string | null;
   metadata?: Record<string, unknown> | null;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  stay_status?: string | null;
 }
 
 export type LifecycleMemberRole = 'Original Sale' | 'Reversal' | 'Correction';
@@ -189,8 +193,48 @@ export function selectLifecyclePrimary<T extends LifecycleMemberInput>(members: 
   return pool.sort((a, b) => toTxId(b.id) - toTxId(a.id))[0];
 }
 
+const NON_STAY_SALE_SOURCES = new Set(['POS', 'POS_ORDER']);
+
+/**
+ * Reservation-linked stay sales use reservation lifecycle for the operational sheet.
+ * Financial transaction_status (POSTED/VOIDED/REVERSED) is not the stay-complete signal.
+ * POS / non-reservation sales return null so the financial mapping stays in place.
+ */
+export function deriveReservationLinkedSaleSheet(row: {
+  transaction_type?: string;
+  source_type?: string | null;
+  reservation_id?: unknown;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  stay_status?: string | null;
+}): OperationalSheet | null {
+  if (upper(row.transaction_type) !== 'SALE') return null;
+  if (NON_STAY_SALE_SOURCES.has(upper(row.source_type))) return null;
+  const reservationId = Number(row.reservation_id);
+  const hasReservation = Number.isInteger(reservationId) && reservationId > 0;
+  const reservationStatus = upper(row.reservation_status);
+  const stayStatus = upper(row.reservation_stay_status || row.stay_status);
+  if (!hasReservation && !reservationStatus && !stayStatus) return null;
+  if (!reservationStatus && !stayStatus) return null;
+
+  if (reservationStatus === 'CANCELLED' || stayStatus === 'CANCELLED') return 'BATAL';
+  if (reservationStatus === 'CHECKED_OUT' || stayStatus === 'CHECKED_OUT') return 'SELESAI';
+  if (
+    reservationStatus === 'BOOKED'
+    || reservationStatus === 'CHECKED_IN'
+    || stayStatus === 'RESERVED'
+    || stayStatus === 'CHECKED_IN'
+    || stayStatus === 'BOOKED'
+  ) {
+    return 'PROSES';
+  }
+  return hasReservation ? 'PROSES' : null;
+}
+
 export function deriveLifecycleSheet(row: LifecycleMemberInput): OperationalSheet {
   if (row.deleted_at) return 'HAPUS';
+  const reservationSheet = deriveReservationLinkedSaleSheet(row);
+  if (reservationSheet) return reservationSheet;
   const status = upper(row.transaction_status);
   if (TERMINAL.has(status)) return 'BATAL';
   const type = upper(row.transaction_type);

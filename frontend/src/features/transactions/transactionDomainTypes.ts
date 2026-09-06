@@ -282,6 +282,36 @@ export function displayTransactionNet(tx: {
   return Number(tx.net_amount || 0);
 }
 
+function reservationLinkedSaleSheet(tx: {
+  transaction_type?: string;
+  source_type?: string | null;
+  reservation_id?: unknown;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+}): OperationalSheet | null {
+  if (String(tx.transaction_type || '').toUpperCase() !== 'SALE') return null;
+  const source = String(tx.source_type || '').toUpperCase();
+  if (source === 'POS' || source === 'POS_ORDER') return null;
+  const reservationId = Number(tx.reservation_id);
+  const hasReservation = Number.isInteger(reservationId) && reservationId > 0;
+  const reservationStatus = String(tx.reservation_status || '').trim().toUpperCase();
+  const stayStatus = String(tx.reservation_stay_status || '').trim().toUpperCase();
+  if (!hasReservation && !reservationStatus && !stayStatus) return null;
+  if (!reservationStatus && !stayStatus) return null;
+  if (reservationStatus === 'CANCELLED' || stayStatus === 'CANCELLED') return 'BATAL';
+  if (reservationStatus === 'CHECKED_OUT' || stayStatus === 'CHECKED_OUT') return 'SELESAI';
+  if (
+    reservationStatus === 'BOOKED'
+    || reservationStatus === 'CHECKED_IN'
+    || stayStatus === 'RESERVED'
+    || stayStatus === 'CHECKED_IN'
+    || stayStatus === 'BOOKED'
+  ) {
+    return 'PROSES';
+  }
+  return hasReservation ? 'PROSES' : null;
+}
+
 export function mapToOperationalStatus(tx: {
   transaction_type?: string;
   transaction_status: string;
@@ -289,6 +319,9 @@ export function mapToOperationalStatus(tx: {
   deleted_at?: string | null;
   operational_sheet?: OperationalSheet;
   reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  reservation_id?: unknown;
+  source_type?: string | null;
   booking_status?: string | null;
   is_lifecycle_primary?: boolean;
   lifecycle_status_label?: string | null;
@@ -331,6 +364,29 @@ export function mapToOperationalStatus(tx: {
       label: 'Batal',
       group: 'BATAL',
       badgeClass: 'bg-rose-50 text-rose-700 border-rose-200'
+    };
+  }
+
+  const reservationSheet = reservationLinkedSaleSheet(tx);
+  if (reservationSheet === 'BATAL') {
+    return {
+      label: 'Dibatalkan',
+      group: 'BATAL',
+      badgeClass: 'bg-rose-50 text-rose-700 border-rose-200'
+    };
+  }
+  if (reservationSheet === 'SELESAI') {
+    return {
+      label: 'Selesai',
+      group: 'SELESAI',
+      badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    };
+  }
+  if (reservationSheet === 'PROSES') {
+    return {
+      label: 'Proses',
+      group: 'PROSES',
+      badgeClass: 'bg-amber-50 text-amber-700 border-amber-200'
     };
   }
 

@@ -21,9 +21,28 @@ expect(
   deriveOperationalSheet({
     transaction_type: 'SALE',
     transaction_status: 'POSTED',
-    reservation_status: 'CANCELLED',
+    booking_status: 'CANCELLED',
   }) === 'SELESAI',
-  'POSTED sale sheet is SELESAI even if a sibling reservation is cancelled'
+  'POSTED sale sheet is SELESAI when only a sibling booking_status is cancelled'
+);
+expect(
+  deriveOperationalSheet({
+    transaction_type: 'SALE',
+    transaction_status: 'POSTED',
+    reservation_id: 986,
+    reservation_status: 'BOOKED',
+    reservation_stay_status: 'RESERVED',
+  }) === 'PROSES',
+  'BOOKED reservation-linked POSTED sale is PROSES'
+);
+expect(
+  deriveOperationalSheet({
+    transaction_type: 'SALE',
+    transaction_status: 'POSTED',
+    reservation_id: 984,
+    reservation_status: 'CANCELLED',
+  }) === 'BATAL',
+  'CANCELLED reservation-linked sale is BATAL even if financially POSTED'
 );
 expect(
   deriveOperationalSheet({ transaction_type: 'SALE', transaction_status: 'REVERSED' }) === 'BATAL',
@@ -144,7 +163,7 @@ async function runIsolation() {
     expect(Boolean(rowB), 'active sale remains in Penjualan');
     expect(!rowOrig, 'cancelled original is not a separate peer row in the default list');
     expect(Boolean(rowRev), 'cancelled lifecycle primary remains in Penjualan');
-    expect(rowB.operational_sheet === 'SELESAI', 'active sale operational sheet is SELESAI');
+    expect(rowB.operational_sheet === 'PROSES', 'BOOKED reservation-linked sale is Proses, not Selesai');
     expect(rowB.transaction_status === 'POSTED', 'active sale DTO status is POSTED');
     expect(rowRev.operational_sheet === 'BATAL', 'cancelled lifecycle sheet is BATAL');
     expect(Number(rowRev.effective_net_amount) === 0, 'cancelled lifecycle effective net is 0');

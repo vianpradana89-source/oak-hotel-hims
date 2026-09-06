@@ -31,6 +31,7 @@ import { generateTransactionNumber, getHotelDateToday } from './transactionNumbe
 import { generateSupplierCode } from '../suppliers/supplierService';
 import {
   buildLifecycleHistory,
+  deriveReservationLinkedSaleSheet,
   groupSaleLifecycles,
   presentLifecyclePrimary,
   siblingExpansionIds,
@@ -122,9 +123,18 @@ export function deriveOperationalSheet(row: {
   transaction_status: string;
   receiving_status?: string | null;
   deleted_at?: string | null;
+  source_type?: string | null;
+  reservation_id?: unknown;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  stay_status?: string | null;
 }): OperationalSheet {
   if (row.deleted_at) {
     return 'HAPUS';
+  }
+  const reservationSheet = deriveReservationLinkedSaleSheet(row);
+  if (reservationSheet) {
+    return reservationSheet;
   }
   const status = String(row.transaction_status || '').toUpperCase();
   if (isTerminalTransactionStatus(status)) {
@@ -2281,6 +2291,7 @@ export async function getTransactionById(
             r.remaining_balance as reservation_remaining_balance,
             r.booking_number,
             r.status as reservation_status,
+            r.stay_status as reservation_stay_status,
             b.bid as booking_bid,
             b.booking_source,
             b.channel as booking_channel,
@@ -2374,7 +2385,12 @@ export async function getTransactionById(
       [...new Set([...expansion.ids, ...expansion.parentIds])].map(String),
     ]
   );
-  const lifecycleGroup = groupSaleLifecycles([tx, ...siblingRes.rows]).find((group) =>
+  const siblingsWithStay = siblingRes.rows.map((row: any) => ({
+    ...row,
+    reservation_status: row.reservation_status || tx.reservation_status,
+    reservation_stay_status: row.reservation_stay_status || tx.reservation_stay_status,
+  }));
+  const lifecycleGroup = groupSaleLifecycles([tx, ...siblingsWithStay]).find((group) =>
     group.members.some((member) => Number(member.id) === Number(tx.id))
   );
   const lifecycle = lifecycleGroup ? buildLifecycleHistory(lifecycleGroup) : null;
