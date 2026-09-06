@@ -42,6 +42,7 @@ import {
   repairActiveCleaningChecklistSnapshots,
   reconcileDuplicateActiveCleaningTasks
 } from './housekeepingService';
+import { authorizeHousekeepingChecklistMutation } from './assignedCrewChecklistAccess';
 
 function parsePropertyId(raw: any, fieldName = 'property_id'): number {
   if (raw === undefined || raw === null || raw === '') {
@@ -715,12 +716,18 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const propertyId = await resolvePropertyId(req, undefined, taskId);
       await assertPropertyExists(propertyId);
       const itemId = Number(req.params.itemId || req.body.item_id || req.body.itemId);
+      const authz = await authorizeHousekeepingChecklistMutation(
+        pool,
+        (req as any).user,
+        propertyId,
+        taskId
+      );
 
       await client.query('BEGIN');
       const actor = {
-        id: req.body.actor_id,
-        name: req.body.actor_name || 'Staff',
-        role: req.body.actor_role || 'Staff'
+        id: authz.userId,
+        name: req.body.actor_name || req.body.checked_by || authz.employeeName || 'Staff',
+        role: authz.mode === 'ASSIGNED_CREW' ? 'Employee Mobile' : (req.body.actor_role || 'Staff')
       };
       const item = await updateTaskChecklistItem(
         client,
@@ -753,12 +760,18 @@ export function createHousekeepingRouter(pool: Pool): Router {
       const taskId = Number(req.params.id || req.body.task_id || req.body.taskId);
       const propertyId = await resolvePropertyId(req, undefined, taskId);
       await assertPropertyExists(propertyId);
+      const authz = await authorizeHousekeepingChecklistMutation(
+        pool,
+        (req as any).user,
+        propertyId,
+        taskId
+      );
 
       await client.query('BEGIN');
       const actor = {
-        id: req.body.actor_id,
-        name: req.body.actor_name || req.body.checked_by || 'Staff',
-        role: req.body.actor_role || 'Staff'
+        id: authz.userId,
+        name: req.body.actor_name || req.body.checked_by || authz.employeeName || 'Staff',
+        role: authz.mode === 'ASSIGNED_CREW' ? 'Employee Mobile' : (req.body.actor_role || 'Staff')
       };
       const items = await bulkUpdateCategoryChecklistItems(
         client,

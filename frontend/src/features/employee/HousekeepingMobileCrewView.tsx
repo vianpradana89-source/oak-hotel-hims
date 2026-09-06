@@ -7,6 +7,11 @@ import type {
   HousekeepingTaskFinding
 } from '../housekeeping/housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  applyBulkChecklistLocalUpdate,
+  applyChecklistItemLocalUpdate,
+  parseChecklistMutationError
+} from './housekeepingMobileChecklist';
 
 const CheckCircle2 = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -264,14 +269,15 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
           checked_by: crewName
         })
       });
-      if (res.ok) {
-        setChecklistItems(prev =>
-          prev.map(it => (it.id === itemId ? { ...it, is_completed: !currentCompleted, checked_by: crewName } : it))
-        );
-        setChecklistError(null);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        setChecklistError(parseChecklistMutationError(errBody, res.status));
+        return;
       }
-    } catch (err) {
-      console.error('Failed to toggle checklist item:', err);
+      setChecklistItems(prev => applyChecklistItemLocalUpdate(prev, itemId, !currentCompleted, crewName));
+      setChecklistError(null);
+    } catch (err: any) {
+      setChecklistError(err?.message || 'Gagal memperbarui checklist.');
     }
   };
 
@@ -297,17 +303,17 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
           checked_by: crewName
         })
       });
-      if (res.ok) {
-        const data = await res.json();
-        const updatedRows: TaskChecklistItem[] = data.data?.updated_items || [];
-        const updatedMap = new Map<number, TaskChecklistItem>(updatedRows.map(r => [r.id, r]));
-        setChecklistItems(prev =>
-          prev.map(it => updatedMap.get(it.id) || it)
-        );
-        setChecklistError(null);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        setChecklistError(parseChecklistMutationError(errBody, res.status));
+        return;
       }
-    } catch (err) {
-      console.error('Failed to bulk toggle category checklist items:', err);
+      const data = await res.json();
+      const updatedRows: TaskChecklistItem[] = data.data?.updated_items || [];
+      setChecklistItems(prev => applyBulkChecklistLocalUpdate(prev, updatedRows));
+      setChecklistError(null);
+    } catch (err: any) {
+      setChecklistError(err?.message || 'Gagal memperbarui checklist kategori.');
     }
   };
 

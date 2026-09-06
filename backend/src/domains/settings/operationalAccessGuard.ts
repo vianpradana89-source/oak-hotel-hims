@@ -2,6 +2,10 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Pool } from 'pg';
 import { verifyToken } from '../auth/authService';
 import { hasAnyEffectivePermission, type AccessAction } from './accessControlService';
+import {
+  canReachAssignedCrewChecklistMutation,
+  isAssignedCrewChecklistMutationPath
+} from '../housekeeping/assignedCrewChecklistAccess';
 
 export interface OperationalAccessRule {
   pattern: RegExp;
@@ -181,6 +185,20 @@ export function createOperationalAccessGuard(pool: Pool) {
         matched.action
       );
       if (!allowed) {
+        // Narrow exception: assigned-crew checklist PATCH/POST may proceed when the
+        // user can view Employee Mobile or Housekeeping. Assignment is still enforced
+        // in the housekeeping router. This does not grant Housekeeping edit/admin.
+        if (isAssignedCrewChecklistMutationPath(path, req.method)) {
+          const crewViewAllowed = await canReachAssignedCrewChecklistMutation(
+            pool,
+            propertyId,
+            Number(user.id)
+          );
+          if (crewViewAllowed) {
+            next();
+            return;
+          }
+        }
         res.status(403).json({
           status: 'ERROR',
           code: 'FORBIDDEN',

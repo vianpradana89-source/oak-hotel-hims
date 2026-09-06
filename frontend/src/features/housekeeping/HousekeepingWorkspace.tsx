@@ -306,8 +306,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const fetchTemplatesAndRooms = useCallback(async () => {
     try {
       const [tplRes, roomRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`),
-        fetch(`${apiBaseUrl}/rooms?property_id=${propertyId}`)
+        authenticatedFetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`),
+        authenticatedFetch(`${apiBaseUrl}/rooms?property_id=${propertyId}`)
       ]);
 
       if (tplRes.ok) {
