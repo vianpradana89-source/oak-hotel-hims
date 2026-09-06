@@ -31,6 +31,8 @@ import {
 } from './domains/inventory/canonicalAvailability';
 import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
+import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
+import { resolvePropertyTimezone } from './utils/propertyTimezone';
 import {
   PaymentEvidenceType,
   PaymentEvidenceMetadata,
@@ -802,8 +804,8 @@ async function findActiveRoomOverlap(
 ) {
   const stayType = options?.stayType || 'OVERNIGHT';
   if (stayType === 'DAY_USE' && options?.startAt && options?.endAt) {
-    const startTs = new Date(options.startAt).toISOString();
-    const endTs = new Date(options.endAt).toISOString();
+    const startTs = typeof options.startAt === 'string' ? options.startAt : options.startAt.toISOString();
+    const endTs = typeof options.endAt === 'string' ? options.endAt : options.endAt.toISOString();
     const bufferMins = options.bufferMinutes || 60;
     return client.query(
       `SELECT existing.id, existing.booking_number, existing.check_in, existing.check_out, existing.status
@@ -1296,13 +1298,14 @@ async function createCanonicalBooking(
     await client.query('BEGIN');
 
     const propertyResult = await client.query(
-      'SELECT id, property_code FROM properties WHERE id = $1',
+      'SELECT id, property_code, timezone FROM properties WHERE id = $1',
       [bookingPropertyId]
     );
     if (!hasRows(propertyResult)) {
       throw createHttpError(400, 'invalid property_id');
     }
     const propertyCode = String(propertyResult.rows[0].property_code || 'LWG');
+    const propertyTimezone = resolvePropertyTimezone(propertyResult.rows[0].timezone);
 
     const bookingRecord = await createBookingParentRecord(client, {
       propertyId: bookingPropertyId,
@@ -1339,9 +1342,21 @@ async function createCanonicalBooking(
       }
 
       const stayType = child.stay_type || child.stayType || 'OVERNIGHT';
+      let startAt = child.start_at || child.startAt || null;
+      let endAt = child.end_at || child.endAt || null;
       if (stayType === 'DAY_USE') {
         if (checkOut < checkIn) {
           throw createHttpError(400, `reservations[${index}].check_out must be on or after check_in for day use`);
+        }
+        try {
+          const interval = validateDayUseInterval(startAt, endAt, propertyTimezone);
+          startAt = interval.startAt;
+          endAt = interval.endAt;
+        } catch (err: any) {
+          if (err instanceof DayUseIntervalError) {
+            throw createHttpError(400, `reservations[${index}].${err.message}`, err.code);
+          }
+          throw err;
         }
       } else {
         if (checkOut <= checkIn) {
@@ -1355,8 +1370,8 @@ async function createCanonicalBooking(
         checkIn,
         checkOut,
         stayType,
-        startAt: child.start_at || child.startAt || null,
-        endAt: child.end_at || child.endAt || null,
+        startAt,
+        endAt,
         guestId: child.guest_id || child.guestId || bookingPayload.guest_id || null,
         guestName: String(child.guest_name || guestName).trim() || guestName,
         guestPhone: Object.prototype.hasOwnProperty.call(child, 'guest_phone')

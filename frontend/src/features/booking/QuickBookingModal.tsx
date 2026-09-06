@@ -8,6 +8,7 @@ import IdentityExtractionModal, { type ExtractedIdentityData } from './IdentityE
 import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { buildQuickBookingStayFields, tryBuildDayUseInterval } from './dayUseInterval';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -971,6 +972,12 @@ export default function QuickBookingModal({
       if (r.stayType === 'OVERNIGHT' && r.checkIn && r.checkOut && r.checkIn >= r.checkOut) {
         issues.push(label + ': Tanggal check-out harus setelah check-in');
       }
+      if (r.stayType === 'DAY_USE') {
+        const interval = tryBuildDayUseInterval(r.checkIn, r.dayUseStartTime, r.dayUseHours);
+        if (!interval.ok) {
+          issues.push(label + ': ' + interval.error);
+        }
+      }
       if (channelType === 'OTA') {
         if (!r.manualOverridePrice || Number(r.manualOverridePrice) <= 0) {
           issues.push(label + ': Tarif kamar OTA per malam wajib diisi dengan nominal lebih dari 0');
@@ -1103,11 +1110,7 @@ export default function QuickBookingModal({
             booking_channel: channelType === 'OTA' ? 'OTA' : 'WALK_IN',
             ota_source_id: channelType === 'OTA' ? selectedOtaSourceId : null,
             referral: referral.trim() || undefined,
-            check_in: r.checkIn,
-            check_out: r.stayType === 'DAY_USE' ? r.checkIn : r.checkOut,
-            stay_type: r.stayType,
-            start_at: r.stayType === 'DAY_USE' ? (r.checkIn + 'T' + r.dayUseStartTime + ':00') : undefined,
-            end_at: r.stayType === 'DAY_USE' ? (r.checkIn + 'T' + r.dayUseStartTime + ':00') : undefined,
+            ...buildQuickBookingStayFields(r),
             rate_plan_id: channelType === 'OTA' ? undefined : (r.ratePlanId ? Number(r.ratePlanId) : undefined),
             subtotal_amount: calc.roomCharge,
             tax_amount: 0,
