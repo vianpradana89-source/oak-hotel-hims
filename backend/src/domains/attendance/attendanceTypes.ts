@@ -23,6 +23,7 @@ export interface PropertyAttendanceSettings {
   outside_geofence_policy: OutsideGeofencePolicy;
   exempt_roles: string[];
   require_published_schedule_for_attendance: boolean;
+  employee_mobile_manual_logout_enabled: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -93,6 +94,7 @@ export interface AttendanceStatusResponse {
   check_out_record: EmployeeAttendanceRecord | null;
   settings: PropertyAttendanceSettings;
   attendance_eligibility: AttendanceEligibility;
+  manual_logout_enabled: boolean;
 }
 
 export interface RecordAttendancePayload {

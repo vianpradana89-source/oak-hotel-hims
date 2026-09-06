@@ -19,6 +19,7 @@ export interface PropertyAttendanceSettings {
   outside_geofence_policy: OutsideGeofencePolicy;
   exempt_roles: string[];
   require_published_schedule_for_attendance?: boolean;
+  employee_mobile_manual_logout_enabled?: boolean;
   updated_at?: string;
 }
 
@@ -57,6 +58,7 @@ export interface EmployeeAttendanceStatus {
   timezone: string;
   settings: PropertyAttendanceSettings;
   attendance_eligibility?: AttendanceEligibility;
+  manual_logout_enabled?: boolean;
 }
 
 export interface EmployeeAttendanceRecord {

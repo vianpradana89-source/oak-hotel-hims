@@ -86,6 +86,7 @@
     "test:transaction-attachment-access": "npm run build && node test/transaction_attachment_access_test.js",
     "test:housekeeping-assigned-crew-checklist": "npm run build && node test/housekeeping_assigned_crew_checklist_test.js",
     "test:attendance-schedule-gate": "npm run build && node test/attendance_schedule_gate_test.js",
+    "test:employee-mobile-logout-toggle": "npm run build && node test/employee_mobile_logout_toggle_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

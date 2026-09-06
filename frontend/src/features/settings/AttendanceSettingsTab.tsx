@@ -62,7 +62,8 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
     geofence_radius_meters: 100,
     outside_geofence_policy: 'ALLOW_WITH_REASON',
     exempt_roles: ['Owner', 'General Manager'],
-    require_published_schedule_for_attendance: false
+    require_published_schedule_for_attendance: false,
+    employee_mobile_manual_logout_enabled: true
   });
 
   const [loading, setLoading] = useState(true);
@@ -83,7 +84,8 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
       if (res.ok && data.status === 'OK') {
         setSettings({
           ...data.data,
-          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance)
+          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance),
+          employee_mobile_manual_logout_enabled: data.data.employee_mobile_manual_logout_enabled !== false
         });
       } else {
         setErrorMsg(data.message || 'Gagal memuat pengaturan absensi');
@@ -120,7 +122,8 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
       if (res.ok && data.status === 'OK') {
         setSettings({
           ...data.data,
-          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance)
+          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance),
+          employee_mobile_manual_logout_enabled: data.data.employee_mobile_manual_logout_enabled !== false
         });
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3000);
@@ -262,6 +265,25 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
               <span className="text-xs font-semibold text-stone-800">Wajib Jadwal Published untuk Absensi Crew</span>
               <p className="text-[11px] text-stone-500">
                 Jika aktif, crew hanya dapat Clock In pada jadwal kerja Published/Changed yang valid.
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.employee_mobile_manual_logout_enabled !== false}
+              onChange={(e) => setSettings(prev => ({
+                ...prev,
+                employee_mobile_manual_logout_enabled: e.target.checked
+              }))}
+              className="mt-1 w-4 h-4 rounded text-[#1b4332] focus:ring-[#1b4332]"
+            />
+            <div>
+              <span className="text-xs font-semibold text-stone-800">Tampilkan Tombol Keluar Akun di Employee Mobile</span>
+              <p className="text-[11px] text-stone-500">
+                Jika aktif, crew yang belum Clock In dapat keluar akun secara manual.
+                Tidak berlaku saat attendance masih terbuka.
               </p>
             </div>
           </label>

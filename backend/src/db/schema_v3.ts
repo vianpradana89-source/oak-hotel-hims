@@ -4739,6 +4739,26 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // EMPLOYEE-MOBILE-LOGOUT-1B: manual Keluar Akun visibility toggle.
+    // Default TRUE preserves current intended logout availability.
+    // Does not affect CHECK_IN / CHECK_OUT / auto-logout.
+    // ------------------------------------------------------------------
+    const manualLogoutToggleCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'employee_mobile_manual_logout_toggle_v1'`
+    );
+    if ((manualLogoutToggleCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE property_attendance_settings
+          ADD COLUMN IF NOT EXISTS employee_mobile_manual_logout_enabled
+          BOOLEAN NOT NULL DEFAULT TRUE;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('employee_mobile_manual_logout_toggle_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

@@ -72,6 +72,7 @@ export function formatAttendanceSettings(row: any): PropertyAttendanceSettings {
     outside_geofence_policy: row.outside_geofence_policy || 'ALLOW_WITH_REASON',
     exempt_roles: exemptRoles,
     require_published_schedule_for_attendance: Boolean(row.require_published_schedule_for_attendance),
+    employee_mobile_manual_logout_enabled: row.employee_mobile_manual_logout_enabled !== false,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -95,8 +96,9 @@ export async function getAttendanceSettings(
        property_id, attendance_enabled, require_employee_attendance,
        require_checkin_photo, require_checkout_photo, geofence_enabled,
        geofence_radius_meters, outside_geofence_policy,
-       require_published_schedule_for_attendance
-     ) VALUES ($1, TRUE, TRUE, TRUE, FALSE, FALSE, 100, 'ALLOW_WITH_REASON', FALSE)
+       require_published_schedule_for_attendance,
+       employee_mobile_manual_logout_enabled
+     ) VALUES ($1, TRUE, TRUE, TRUE, FALSE, FALSE, 100, 'ALLOW_WITH_REASON', FALSE, TRUE)
      ON CONFLICT (property_id) DO UPDATE SET updated_at = NOW()
      RETURNING *`,
     [propertyId]
@@ -125,14 +127,18 @@ export async function updateAttendanceSettings(
   const requirePublishedSchedule = typeof patch.require_published_schedule_for_attendance === 'boolean'
     ? patch.require_published_schedule_for_attendance
     : current.require_published_schedule_for_attendance;
+  const manualLogoutEnabled = typeof patch.employee_mobile_manual_logout_enabled === 'boolean'
+    ? patch.employee_mobile_manual_logout_enabled
+    : current.employee_mobile_manual_logout_enabled;
 
   const res = await client.query(
     `INSERT INTO property_attendance_settings (
        property_id, attendance_enabled, require_employee_attendance,
        require_checkin_photo, require_checkout_photo, geofence_enabled,
        geofence_latitude, geofence_longitude, geofence_radius_meters,
-       outside_geofence_policy, exempt_roles, require_published_schedule_for_attendance, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+       outside_geofence_policy, exempt_roles, require_published_schedule_for_attendance,
+       employee_mobile_manual_logout_enabled, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
      ON CONFLICT (property_id) DO UPDATE SET
        attendance_enabled = EXCLUDED.attendance_enabled,
        require_employee_attendance = EXCLUDED.require_employee_attendance,
@@ -145,6 +151,7 @@ export async function updateAttendanceSettings(
        outside_geofence_policy = EXCLUDED.outside_geofence_policy,
        exempt_roles = EXCLUDED.exempt_roles,
        require_published_schedule_for_attendance = EXCLUDED.require_published_schedule_for_attendance,
+       employee_mobile_manual_logout_enabled = EXCLUDED.employee_mobile_manual_logout_enabled,
        updated_at = NOW()
      RETURNING *`,
     [
@@ -159,7 +166,8 @@ export async function updateAttendanceSettings(
       geofenceRadius,
       outsidePolicy,
       JSON.stringify(exemptRoles),
-      requirePublishedSchedule
+      requirePublishedSchedule,
+      manualLogoutEnabled
     ]
   );
 
@@ -313,7 +321,8 @@ export async function getEmployeeAttendanceStatus(
     check_in_record: checkInRecord,
     check_out_record: checkOutRecord,
     settings: settings,
-    attendance_eligibility: attendanceEligibility
+    attendance_eligibility: attendanceEligibility,
+    manual_logout_enabled: settings.employee_mobile_manual_logout_enabled !== false
   };
 }
 

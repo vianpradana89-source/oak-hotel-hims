@@ -17,6 +17,17 @@ import {
   parseCanonicalEmployeeIdentity,
   type CanonicalEmployeeIdentity
 } from './employeeMobileIdentity';
+import {
+  EMPLOYEE_MOBILE_LOGOUT_CANCEL_LABEL,
+  EMPLOYEE_MOBILE_LOGOUT_CONFIRM_ACTION_LABEL,
+  EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE,
+  EMPLOYEE_MOBILE_LOGOUT_LABEL,
+  applyEmployeeMobileLogoutUiEvent,
+  canShowEmployeeMobileLogout,
+  logoutAfterSuccessfulCheckOut,
+  resolveManualLogoutEnabled,
+  shouldLogoutAfterCheckOutResponse
+} from './employeeMobileLogoutUi';
 
 const Home = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -69,6 +80,43 @@ const ChevronRight = ({ className = "w-5 h-5" }: { className?: string }) => (
   </svg>
 );
 
+function EmployeeMobileLogoutConfirm({
+  open,
+  onCancel,
+  onConfirm
+}: {
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full max-w-sm bg-white border-t sm:border border-neutral-200 rounded-t-3xl sm:rounded-2xl p-5 text-neutral-900 shadow-xl space-y-4">
+        <h3 className="font-serif font-bold text-base text-neutral-900 text-center">
+          {EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE}
+        </h3>
+        <div className="flex gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 py-2 rounded-xl text-xs font-bold bg-neutral-100 text-neutral-700 hover:bg-neutral-200 transition cursor-pointer"
+          >
+            {EMPLOYEE_MOBILE_LOGOUT_CANCEL_LABEL}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="flex-1 py-2 rounded-xl text-xs font-semibold bg-transparent border border-red-300 text-red-700 hover:bg-red-50 transition cursor-pointer"
+          >
+            {EMPLOYEE_MOBILE_LOGOUT_CONFIRM_ACTION_LABEL}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface EmployeeMobileWorkspaceProps {
   propertyId: number;
   propertyName?: string;
@@ -113,6 +161,31 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const [clockOutSubmitting, setClockOutSubmitting] = useState(false);
   const [clockOutReason, setClockOutReason] = useState('');
   const [clockOutSuccess, setClockOutSuccess] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const logoutAvailable = canShowEmployeeMobileLogout({
+    isPreview,
+    hasLogoutHandler: Boolean(onLogout),
+    identityUnlinked: !identityLoading && !employeeIdentity,
+    attendanceStateKnown: !attendanceLoading && attendanceStatus !== null,
+    hasCheckedIn: attendanceStatus?.has_checked_in,
+    hasCheckedOut: attendanceStatus?.has_checked_out,
+    manualLogoutEnabled: resolveManualLogoutEnabled(attendanceStatus)
+  });
+  const requestLogoutConfirm = () => {
+    setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'REQUEST', onLogout));
+  };
+  const cancelLogoutConfirm = () => {
+    setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'CANCEL', onLogout));
+  };
+  const confirmLogout = () => {
+    setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'CONFIRM', onLogout));
+  };
+
+  useEffect(() => {
+    if (!logoutAvailable && showLogoutConfirm) {
+      setShowLogoutConfirm(false);
+    }
+  }, [logoutAvailable, showLogoutConfirm]);
 
   // Task statistics for summary
   const [taskStats, setTaskStats] = useState<{
@@ -275,9 +348,17 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       });
 
       const data = await res.json();
-      if (res.ok && data.status === 'OK') {
+      const checkoutSucceeded = shouldLogoutAfterCheckOutResponse({
+        httpOk: res.ok,
+        status: data.status
+      });
+      if (checkoutSucceeded) {
         setClockOutSuccess(true);
         setTimeout(() => {
+          if (onLogout) {
+            logoutAfterSuccessfulCheckOut(onLogout);
+            return;
+          }
           setShowClockOutModal(false);
           setClockOutSuccess(false);
           fetchAttendanceStatus(employeeIdentity);
@@ -315,7 +396,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
           <p className="text-xs text-neutral-500">
             Clock In tidak dapat dibuka sampai akun terhubung ke data karyawan yang aktif.
           </p>
-          {(onBackToDesktop || onLogout) && (
+          {(onBackToDesktop || logoutAvailable) && (
             <div className="space-y-2 pt-1">
               {onBackToDesktop && (
                 <button
@@ -326,18 +407,23 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                   Kembali
                 </button>
               )}
-              {onLogout && (
+              {logoutAvailable && (
                 <button
                   type="button"
-                  onClick={onLogout}
-                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 transition cursor-pointer"
+                  onClick={requestLogoutConfirm}
+                  className="w-full py-2 px-3 rounded-xl text-xs font-semibold bg-transparent border border-red-300 text-red-700 hover:bg-red-50 transition cursor-pointer"
                 >
-                  Keluar Akun (Logout)
+                  {EMPLOYEE_MOBILE_LOGOUT_LABEL}
                 </button>
               )}
             </div>
           )}
         </div>
+        <EmployeeMobileLogoutConfirm
+          open={showLogoutConfirm}
+          onCancel={cancelLogoutConfirm}
+          onConfirm={confirmLogout}
+        />
       </div>
     );
   }
@@ -697,19 +783,25 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                   Beralih ke Tampilan Desktop PMS
                 </button>
               )}
-              {onLogout && (
+              {logoutAvailable && (
                 <button
                   type="button"
-                  onClick={onLogout}
-                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 transition cursor-pointer"
+                  onClick={requestLogoutConfirm}
+                  className="w-full py-2 px-3 rounded-xl text-xs font-semibold bg-transparent border border-red-300 text-red-700 hover:bg-red-50 transition cursor-pointer"
                 >
-                  Keluar Akun (Logout)
+                  {EMPLOYEE_MOBILE_LOGOUT_LABEL}
                 </button>
               )}
             </div>
           </div>
         )}
       </main>
+
+      <EmployeeMobileLogoutConfirm
+        open={showLogoutConfirm}
+        onCancel={cancelLogoutConfirm}
+        onConfirm={confirmLogout}
+      />
 
       {/* Clock Out Modal */}
       {showClockOutModal && (

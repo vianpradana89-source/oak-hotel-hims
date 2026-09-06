@@ -170,8 +170,9 @@ export function createPropertiesRouter(pool: Pool): Router {
         `INSERT INTO property_attendance_settings (
           property_id, attendance_enabled, require_employee_attendance, require_checkin_photo, require_checkout_photo,
           geofence_enabled, geofence_radius_meters, outside_geofence_policy,
-          require_published_schedule_for_attendance, created_at, updated_at
-        ) VALUES ($1, true, true, true, false, false, 100, 'ALLOW_WITH_REASON', FALSE, NOW(), NOW())
+          require_published_schedule_for_attendance, employee_mobile_manual_logout_enabled,
+          created_at, updated_at
+        ) VALUES ($1, true, true, true, false, false, 100, 'ALLOW_WITH_REASON', FALSE, TRUE, NOW(), NOW())
         ON CONFLICT (property_id) DO NOTHING`,
         [newId]
       );

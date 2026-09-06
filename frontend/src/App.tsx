@@ -3198,6 +3198,7 @@ function AppContent() {
         propertyId={activePropId}
         propertyName={activePropName}
         initialTab={window.location.pathname === '/housekeeping' ? 'TASKS' : 'HOME'}
+        onLogout={logout}
       />
     );
   }

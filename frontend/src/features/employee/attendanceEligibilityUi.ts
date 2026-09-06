@@ -22,8 +22,11 @@ export function normalizeAttendanceStatus(raw: any): EmployeeAttendanceStatus | 
     today_check_out: raw.today_check_out || raw.check_out_record || null,
     settings: {
       ...settings,
-      require_published_schedule_for_attendance: Boolean(settings.require_published_schedule_for_attendance)
+      require_published_schedule_for_attendance: Boolean(settings.require_published_schedule_for_attendance),
+      employee_mobile_manual_logout_enabled: settings.employee_mobile_manual_logout_enabled !== false
     },
+    manual_logout_enabled: raw.manual_logout_enabled !== false
+      && settings.employee_mobile_manual_logout_enabled !== false,
     attendance_eligibility: eligibility
       ? {
           can_clock_in: Boolean(eligibility.can_clock_in),
