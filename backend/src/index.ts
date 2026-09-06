@@ -33,6 +33,7 @@ import { reconcileCanonicalAvailability } from './domains/inventory/canonicalRec
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
+import { reservationOccupiesTapechartDate, toTapechartCellReservation } from './utils/tapechartReservation';
 import {
   PaymentEvidenceType,
   PaymentEvidenceMetadata,
@@ -6994,41 +6995,10 @@ app.get('/api/tapechart', async (req, res) => {
         const dateStr = d;
         const allRoomRes = reservationsByRoom[String(room.id)] || [];
         // reservations for this room that cover this date (night stay)
-        const resForRoom = allRoomRes.filter((r: any) => {
-          const ci = hotelDateKey(r.check_in);
-          const co = hotelDateKey(r.check_out);
-          // Nightly stay is inclusive on check-in and exclusive on check-out.
-          // Example: 2026-08-20 -> 2026-08-21 blocks only 20; 2026-08-20 -> 2026-08-28 blocks 20..27.
-          return dateStr >= ci && dateStr < co;
-        }).map((r: any) => ({
-          id: r.id,
-          reservation_id: r.reservation_id,
-          booking_id: r.booking_id,
-          bid: r.bid,
-          stay_sequence: r.stay_sequence,
-          guest_name: r.guest_name,
-          guest_phone: r.guest_phone,
-          guest_segment: r.guest_segment,
-          booking_number: r.booking_number,
-          legacy_booking_number: r.legacy_booking_number,
-          booking_type: r.booking_type,
-          payment_status: r.payment_status,
-          check_in: hotelDateKey(r.check_in),
-          check_out: hotelDateKey(r.check_out),
-          booked_room_type_id_snapshot: r.booked_room_type_id_snapshot,
-          booked_room_type_code_snapshot: r.booked_room_type_code_snapshot,
-          booked_room_type_name_snapshot: r.booked_room_type_name_snapshot,
-          booked_room_category_id_snapshot: r.booked_room_category_id_snapshot,
-          booked_room_category_code_snapshot: r.booked_room_category_code_snapshot,
-          booked_room_category_name_snapshot: r.booked_room_category_name_snapshot,
-          classification_snapshot_source: r.classification_snapshot_source,
-          classification_snapshotted_at: r.classification_snapshotted_at,
-          // RM-2B.1: pass the raw lifecycle status through. Legacy rows with a
-          // NULL status are surfaced as null + legacy_status flag instead of a
-          // misleading 'CONFIRMED' label; the frontend owns compatibility mapping.
-          status: r.status ?? null,
-          legacy_status: r.status == null
-        }));
+        // Overnight: [check_in, check_out). DAY_USE occupies only the check_in hotel date.
+        const resForRoom = allRoomRes
+          .filter((r: any) => reservationOccupiesTapechartDate(r, dateStr))
+          .map((r: any) => toTapechartCellReservation(r));
 
         // TURNOVER-1: departures and arrivals on this cell date
         const departures = allRoomRes.filter((r: any) => hotelDateKey(r.check_out) === dateStr);
