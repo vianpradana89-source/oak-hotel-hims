@@ -13,6 +13,8 @@ import {
   formatExpiryDateTime,
   getCanonicalLoginUrl
 } from './whatsappUtils';
+import { SecurePrivateImage } from '../common/SecurePrivateImage';
+import { buildHrdFacePhotoPath } from '../common/securePrivateMedia';
 
 interface HrEmployee {
   id: number;
@@ -746,7 +748,6 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     }
     if (emp.account_status === 'READY') {
       if (emp.has_face_photo) {
-        const photoUrl = `/api/hrd/employees/${emp.id}/face-enrollment/photo`;
         return (
           <button
             type="button"
@@ -754,11 +755,11 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             className="inline-flex items-center gap-1.5 group cursor-pointer"
             title="Klik untuk pratinjau foto wajah"
           >
-            <img
-              src={photoUrl}
+            <SecurePrivateImage
+              src={buildHrdFacePhotoPath(emp.id)}
               alt={`Foto ${emp.full_name}`}
               className="w-8 h-8 rounded-full object-cover border-2 border-emerald-300 group-hover:border-emerald-500 transition-colors"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              unavailableLabel="—"
             />
             <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
               Terdaftar
@@ -2133,10 +2134,11 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
               </button>
             </div>
             <div className="flex flex-col items-center gap-3">
-              <img
-                src={`/api/hrd/employees/${facePreviewModal.employeeId}/face-enrollment/photo`}
+              <SecurePrivateImage
+                src={buildHrdFacePhotoPath(facePreviewModal.employeeId)}
                 alt={`Foto wajah ${facePreviewModal.employeeName}`}
                 className="w-64 h-64 object-cover rounded-2xl border border-slate-200"
+                unavailableLabel="Foto wajah tidak tersedia"
               />
               <p className="text-xs text-slate-600 font-medium">{facePreviewModal.employeeName}</p>
             </div>

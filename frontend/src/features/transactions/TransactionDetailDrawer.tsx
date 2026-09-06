@@ -5,6 +5,7 @@ import {
 } from './transactionDomainTypes';
 import type {
   TransactionRecord,
+  TransactionAttachment,
   VerificationStatus,
   ReceivingStatus,
   AttachmentPurpose
@@ -17,6 +18,68 @@ import {
   deleteTransactionAttachmentApi,
   settleTransactionPaymentApi
 } from './transactionClient';
+import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
+
+function TransactionAttachmentPreview({
+  transactionId,
+  propertyId,
+  attachment
+}: {
+  transactionId: number | string;
+  propertyId: number;
+  attachment: TransactionAttachment;
+}) {
+  const filePath = buildTransactionAttachmentFilePath(transactionId, attachment.id, propertyId);
+  const isImage = attachment.mime_type?.startsWith('image/');
+  const { blobUrl, loading, error } = useSecureDocumentBlob(filePath, true);
+
+  const openBlob = () => {
+    if (!blobUrl) return;
+    window.open(blobUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  if (isImage) {
+    return (
+      <button
+        type="button"
+        onClick={openBlob}
+        disabled={!blobUrl}
+        className="block w-full aspect-video bg-slate-100 rounded-lg overflow-hidden relative group cursor-pointer disabled:cursor-default"
+      >
+        {loading ? (
+          <span className="flex items-center justify-center w-full h-full text-[10px] text-slate-400">Memuat...</span>
+        ) : error || !blobUrl ? (
+          <span className="flex items-center justify-center w-full h-full text-[10px] text-slate-500 text-center px-2">
+            Pratinjau tidak tersedia
+          </span>
+        ) : (
+          <img
+            src={blobUrl}
+            alt={attachment.original_name}
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+          />
+        )}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={openBlob}
+      disabled={!blobUrl}
+      className="w-full p-3 bg-slate-50 hover:bg-slate-100 rounded-lg flex items-center gap-2 text-slate-700 transition-colors cursor-pointer disabled:cursor-default"
+    >
+      <svg className="w-5 h-5 text-rose-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+      </svg>
+      <span className="truncate font-medium">
+        {loading ? 'Memuat...' : error || !blobUrl ? 'Berkas tidak tersedia' : attachment.original_name}
+      </span>
+    </button>
+  );
+}
 
 interface TransactionDetailDrawerProps {
   isOpen: boolean;
@@ -737,10 +800,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {attachments.map((att) => {
-                      const isImage = att.mime_type?.startsWith('image/');
-
-                      return (
+                    {attachments.map((att) => (
                         <div key={att.id} className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
@@ -760,39 +820,17 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                             )}
                           </div>
 
-                          {isImage ? (
-                            <a
-                              href={`/api/transactions/${tx.id}/attachments/${att.id}/file`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="block aspect-video bg-slate-100 rounded-lg overflow-hidden relative group cursor-pointer"
-                            >
-                              <img
-                                src={`/api/transactions/${tx.id}/attachments/${att.id}/file`}
-                                alt={att.original_name}
-                                className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                              />
-                            </a>
-                          ) : (
-                            <a
-                              href={`/api/transactions/${tx.id}/attachments/${att.id}/file`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-3 bg-slate-50 hover:bg-slate-100 rounded-lg flex items-center gap-2 text-slate-700 transition-colors cursor-pointer"
-                            >
-                              <svg className="w-5 h-5 text-rose-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                              </svg>
-                              <span className="truncate font-medium">{att.original_name}</span>
-                            </a>
-                          )}
+                          <TransactionAttachmentPreview
+                            transactionId={tx.id}
+                            propertyId={propertyId}
+                            attachment={att}
+                          />
 
                           <div className="text-[10px] text-slate-400 truncate">
                             {att.original_name} • {(att.file_size / 1024).toFixed(1)} KB
                           </div>
                         </div>
-                      );
-                    })}
+                    ))}
                   </div>
                 )}
               </div>

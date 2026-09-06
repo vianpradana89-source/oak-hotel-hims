@@ -32,6 +32,12 @@ import {
   ReceivingStatus,
   AttachmentPurpose
 } from './transactionTypes';
+import { isPlatformSuperAdmin, verifyToken } from '../auth/authService';
+import {
+  getScopedTransactionAttachment,
+  resolveSafeTransactionAttachmentPath,
+  TRANSACTION_ATTACHMENT_UPLOAD_DIR
+} from './transactionAttachmentAccess';
 
 const txUploadDir = path.join(__dirname, '..', '..', '..', 'uploads', 'transactions');
 fs.mkdirSync(txUploadDir, { recursive: true });
@@ -488,6 +494,104 @@ export function createTransactionsRouter(pool: Pool): Router {
       return res.status(err.statusCode || 500).json({
         success: false,
         error: err.message
+      });
+    }
+  });
+
+  /**
+   * GET /api/transactions/:id/attachments/:attachmentId/file
+   * Authenticated private stream. Property isolation is fail-closed.
+   */
+  router.get('/:id/attachments/:attachmentId/file', async (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        status: 'ERROR',
+        code: 'UNAUTHORIZED',
+        message: 'Akses ditolak. Silakan login terlebih dahulu untuk mengakses lampiran transaksi.'
+      });
+    }
+
+    let user: { id: number; property_id: number };
+    try {
+      user = verifyToken(authHeader.split(' ')[1]);
+    } catch {
+      return res.status(401).json({
+        status: 'ERROR',
+        code: 'INVALID_TOKEN',
+        message: 'Sesi login telah kedaluwarsa atau token tidak valid. Silakan login kembali.'
+      });
+    }
+
+    const transactionId = Number(req.params.id);
+    const attachmentId = Number(req.params.attachmentId);
+    if (!Number.isInteger(transactionId) || transactionId <= 0 || !Number.isInteger(attachmentId) || attachmentId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'ID transaksi atau lampiran tidak valid.'
+      });
+    }
+
+    const requestedPropertyId = Number(req.query.property_id || user.property_id);
+    if (!Number.isInteger(requestedPropertyId) || requestedPropertyId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'INVALID_PROPERTY_ID',
+        message: 'property_id tidak valid.'
+      });
+    }
+
+    try {
+      const isSuperAdmin = await isPlatformSuperAdmin(pool, user.id);
+      if (!isSuperAdmin && Number(user.property_id) !== requestedPropertyId) {
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'FORBIDDEN',
+          message: 'Akses ditolak. Anda tidak memiliki izin untuk melihat lampiran dari properti lain.'
+        });
+      }
+
+      const scoped = await getScopedTransactionAttachment(
+        pool,
+        requestedPropertyId,
+        transactionId,
+        attachmentId
+      );
+      if (!scoped.transactionFound || !scoped.attachment) {
+        return res.status(404).json({
+          status: 'ERROR',
+          code: 'ATTACHMENT_NOT_FOUND',
+          message: 'Lampiran transaksi tidak ditemukan.'
+        });
+      }
+
+      const safePath = resolveSafeTransactionAttachmentPath(
+        scoped.attachment.storage_path,
+        TRANSACTION_ATTACHMENT_UPLOAD_DIR
+      );
+      if (!safePath || !fs.existsSync(safePath)) {
+        return res.status(404).json({
+          status: 'ERROR',
+          code: 'FILE_NOT_FOUND',
+          message: 'File lampiran tidak ditemukan.'
+        });
+      }
+
+      const mimeType = scoped.attachment.mime_type || 'application/octet-stream';
+      const downloadName = scoped.attachment.original_name || scoped.attachment.file_name || 'attachment';
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(downloadName)}"`);
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      return res.sendFile(safePath);
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Gagal memuat lampiran transaksi'
       });
     }
   });

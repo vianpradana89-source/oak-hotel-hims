@@ -261,8 +261,10 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         `SELECT property_id FROM (
            SELECT r.property_id FROM reservations r WHERE r.ktp_path LIKE '%' || $1
            UNION
-           SELECT g.property_id FROM guests g WHERE g.identity_path LIKE '%' || $1
-         ) doc_props LIMIT 1`,
+           SELECT g.created_property_id AS property_id FROM guests g WHERE g.identity_path LIKE '%' || $1
+         ) doc_props
+         WHERE property_id IS NOT NULL
+         LIMIT 1`,
         [filename]
       );
 
