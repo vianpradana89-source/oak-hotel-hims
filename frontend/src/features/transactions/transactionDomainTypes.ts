@@ -123,6 +123,9 @@ export interface TransactionRecord {
   booking_number?: string | null;
   booking_bid?: string | null;
   stay_type?: string | null;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  booking_status?: string | null;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
@@ -253,6 +256,8 @@ export function mapToOperationalStatus(tx: {
   receiving_status?: string | null;
   deleted_at?: string | null;
   operational_sheet?: OperationalSheet;
+  reservation_status?: string | null;
+  booking_status?: string | null;
 }): OperationalStatusDisplay {
   if (tx.operational_sheet === 'HAPUS' || tx.deleted_at) {
     return {
@@ -262,6 +267,8 @@ export function mapToOperationalStatus(tx: {
     };
   }
 
+  // Sale/purchase lifecycle is this transaction row only.
+  // reservation_status / booking_status of sibling stays must not inherit Batal.
   const tStatus = String(tx.transaction_status || '').toUpperCase();
   if (['VOIDED', 'CANCELLED', 'REVERSED'].includes(tStatus)) {
     return {

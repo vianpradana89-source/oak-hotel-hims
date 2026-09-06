@@ -89,6 +89,28 @@ export const DEPARTMENTS: { code: DepartmentCode; name: string }[] = [
  * 3. Fully completed -> SELESAI (PURCHASE: receiving_status=DITERIMA, others: transaction_status=POSTED)
  * 4. In-progress / Draft / Pending -> PROSES
  */
+const TERMINAL_TX_STATUSES = ['VOIDED', 'CANCELLED', 'REVERSED'] as const;
+
+export function isTerminalTransactionStatus(status: unknown): boolean {
+  return (TERMINAL_TX_STATUSES as readonly string[]).includes(String(status || '').toUpperCase());
+}
+
+/**
+ * Resolve the original folio charge for a reversal row.
+ * Prefer reversal_of_entry_id. Never treat stay-charge source_id (rule id) as a folio id.
+ */
+export function resolveOriginalFolioEntryId(entry: {
+  reversal_of_entry_id?: unknown;
+  reference_folio_entry_id?: unknown;
+  related_folio_id?: unknown;
+  source_id?: unknown;
+}): string | null {
+  const raw = entry.reversal_of_entry_id ?? entry.reference_folio_entry_id ?? entry.related_folio_id;
+  const id = Number(raw);
+  if (Number.isInteger(id) && id > 0) return String(id);
+  return null;
+}
+
 export function deriveOperationalSheet(row: {
   transaction_type: string;
   transaction_status: string;
@@ -99,7 +121,7 @@ export function deriveOperationalSheet(row: {
     return 'HAPUS';
   }
   const status = String(row.transaction_status || '').toUpperCase();
-  if (['VOIDED', 'CANCELLED', 'REVERSED'].includes(status)) {
+  if (isTerminalTransactionStatus(status)) {
     return 'BATAL';
   }
   const type = String(row.transaction_type || '').toUpperCase();
@@ -201,16 +223,20 @@ export async function projectFolioEntryToTransaction(
   }
 
   if (entry.entry_type === 'REVERSAL' || entry.direction === 'CREDIT') {
-    const originalFolioEntryId = entry.reference_folio_entry_id || entry.related_folio_id || entry.source_id;
+    const originalFolioEntryId = resolveOriginalFolioEntryId(entry);
     if (!originalFolioEntryId) {
       return null;
     }
 
     const origTxRes = await client.query(
-      `SELECT * FROM transactions 
-       WHERE property_id = $1 AND source_id = $2 AND reversal_of_transaction_id IS NULL
+      `SELECT * FROM transactions
+       WHERE property_id = $1
+         AND source_id = $2
+         AND reversal_of_transaction_id IS NULL
+         AND ($3::int IS NULL OR reservation_id = $3)
+       ORDER BY id DESC
        LIMIT 1`,
-      [propertyId, String(originalFolioEntryId)]
+      [propertyId, originalFolioEntryId, entry.reservation_id ? Number(entry.reservation_id) : null]
     );
 
     if ((origTxRes.rowCount ?? 0) > 0) {
@@ -394,6 +420,9 @@ export async function projectFolioEntryToTransaction(
   );
 
   if ((existingTx.rowCount ?? 0) > 0) {
+    if (isTerminalTransactionStatus(existingTx.rows[0].transaction_status)) {
+      return existingTx.rows[0];
+    }
     const updated = await client.query(
       `UPDATE transactions SET
          amount = $1,
@@ -2157,7 +2186,10 @@ export async function getTransactions(
            s.phone AS supplier_phone,
            r.booking_number,
            r.stay_type,
+           r.status AS reservation_status,
+           r.stay_status AS reservation_stay_status,
            b.bid AS booking_bid,
+           b.booking_status,
            b.booking_source,
            COALESCE(pmt.total_paid, 0) AS paid_amount,
            GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
