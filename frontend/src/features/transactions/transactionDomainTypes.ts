@@ -272,6 +272,24 @@ export interface OperationalStatusDisplay {
   badgeClass: string;
 }
 
+export function formatReservationStayType(stayType?: string | null): 'DAY USE' | 'OVERNIGHT' | '-' {
+  const raw = String(stayType || '').trim().toUpperCase();
+  if (raw === 'DAY_USE') return 'DAY USE';
+  if (raw === 'OVERNIGHT') return 'OVERNIGHT';
+  return '-';
+}
+
+export function stayTypeBadgeClass(stayType?: string | null): string {
+  const label = formatReservationStayType(stayType);
+  if (label === 'DAY USE') {
+    return 'bg-cyan-50 text-cyan-800 border-cyan-200';
+  }
+  if (label === 'OVERNIGHT') {
+    return 'bg-emerald-50 text-emerald-800 border-emerald-200';
+  }
+  return 'bg-transparent text-slate-400 border-transparent';
+}
+
 export function displayTransactionNet(tx: {
   effective_net_amount?: number | string | null;
   net_amount?: number | string | null;

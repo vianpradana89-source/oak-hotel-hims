@@ -9,7 +9,7 @@ import type {
   VerificationStatus,
   ReceivingStatus
 } from './transactionDomainTypes';
-import { displayTransactionNet, mapToOperationalStatus } from './transactionDomainTypes';
+import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass } from './transactionDomainTypes';
 import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
@@ -965,6 +965,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">BID / No. Transaksi</th>
                         <th className="py-3 px-3">Tamu</th>
                         <th className="py-3 px-3">Kamar / Sumber</th>
+                        <th className="py-3 px-3">Tipe Stay</th>
                         <th className="py-3 px-4">Keterangan</th>
                         <th className="py-3 px-3 text-right">Total</th>
                         <th className="py-3 px-2 text-center">Pembayaran</th>
@@ -1179,6 +1180,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             )}
                             <div>{getSourceBadge(t.source_type)}</div>
                           </div>
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          {formatReservationStayType(t.stay_type) === '-' ? (
+                            <span className="text-[11px] font-medium text-slate-400">-</span>
+                          ) : (
+                            <span className={`inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border ${stayTypeBadgeClass(t.stay_type)}`}>
+                              {formatReservationStayType(t.stay_type)}
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-4 max-w-xs truncate text-slate-800" title={t.description}>
                           {t.description}

@@ -210,8 +210,8 @@ async function runDb() {
          booked_room_type_id_snapshot, guest_name, stay_sequence,
          total_price, amount_paid, remaining_balance, payment_status, stay_type
        ) VALUES (
-         $1, $2, 'BOOKED', 'RESERVED', CURRENT_DATE, CURRENT_DATE + 1,
-         $3, 'TAMU 986', 1, 300000, 300000, 0, 'PAID', 'OVERNIGHT'
+         $1, $2, 'BOOKED', 'RESERVED', CURRENT_DATE, CURRENT_DATE,
+         $3, 'TAMU 986', 1, 300000, 300000, 0, 'PAID', 'DAY_USE'
        ) RETURNING id`,
       [bookingRes.rows[0].id, roomRes.rows[0].id, rtRes.rows[0].id]
     );
@@ -298,6 +298,8 @@ async function runDb() {
     expect(Boolean(correctedRow), 'corrected lifecycle shows the POSTED replacement');
     expect(correctedRow.operational_sheet === 'PROSES', 'BOOKED corrected sale is Proses, not Selesai');
     expect(correctedRow.transaction_status === 'POSTED', 'financial transaction_status remains POSTED');
+    expect(correctedRow.stay_type === 'DAY_USE', 'grouped correction preserves canonical reservation stay_type');
+    expect(!normalRow.stay_type, 'non-reservation sale has no stay_type');
     expect(Number(correctedRow.effective_net_amount) === 300000, 'corrected lifecycle list net is 300000');
     expect(Boolean(posRow), 'POS sale remains its own row');
     expect(posRow.operational_sheet === 'SELESAI', 'POS POSTED mapping is unchanged');
@@ -364,6 +366,7 @@ async function runDb() {
     expect(detail.transaction_status === 'POSTED', 'detail preserves financial POSTED');
     expect(detail.operational_sheet === 'PROSES', 'detail operational sheet follows BOOKED reservation');
     expect(detail.lifecycle.operational_sheet === 'PROSES', 'lifecycle sheet follows reservation, not POSTED');
+    expect(detail.stay_type === 'DAY_USE', 'detail receives canonical reservation stay_type');
 
     const cancelledDetail = await getTransactionById(pool, propertyId, reversal.rows[0].id);
     expect(cancelledDetail.lifecycle.member_count === 2, 'cancelled detail history remains available');

@@ -2290,6 +2290,7 @@ export async function getTransactionById(
             r.amount_paid as reservation_amount_paid,
             r.remaining_balance as reservation_remaining_balance,
             r.booking_number,
+            r.stay_type,
             r.status as reservation_status,
             r.stay_status as reservation_stay_status,
             b.bid as booking_bid,

@@ -1,4 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import {
+  formatReservationStayType,
+  stayTypeBadgeClass
+} from './transactionDomainTypes';
 import type {
   TransactionRecord,
   VerificationStatus,
@@ -402,6 +406,14 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                       {tx.booking_bid}
                     </span>
+                    {formatReservationStayType(tx.stay_type) !== '-' && (
+                      <span className="inline-flex items-center gap-1 text-slate-500">
+                        <span>Tipe Stay:</span>
+                        <span className={`inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border ${stayTypeBadgeClass(tx.stay_type)}`}>
+                          {formatReservationStayType(tx.stay_type)}
+                        </span>
+                      </span>
+                    )}
                     {tx.reservation_id && onNavigateToReservation && (
                       <button
                         type="button"

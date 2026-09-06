@@ -143,6 +143,7 @@ export interface TransactionRow {
   room_number_snapshot: string | null;
   reservation_id: number | null;
   booking_id: string | null;
+  stay_type?: string | null;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
