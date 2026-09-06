@@ -21,6 +21,7 @@ export interface ExtractedIdentityData {
   total_fields_count?: number;
   provider: string;
   file_path: string;
+  document_upload_id?: string | null;
   raw_lines?: string[];
 }
 
@@ -320,6 +321,7 @@ export default function IdentityExtractionModal({
         total_fields_count: cand.total_fields_count || 13,
         provider,
         file_path: filePath,
+        document_upload_id: json.document_upload_id || null,
         raw_lines: rawLines
       };
 
@@ -397,6 +399,7 @@ export default function IdentityExtractionModal({
       total_fields_count: 13,
       provider: extractedData?.provider || 'GOOGLE_VISION',
       file_path: extractedData?.file_path || '',
+      document_upload_id: extractedData?.document_upload_id || null,
       raw_lines: extractedData?.raw_lines || []
     };
   };
@@ -436,7 +439,7 @@ export default function IdentityExtractionModal({
         occupation: finalData.occupation || null,
         citizenship: finalData.citizenship || null,
         valid_until: finalData.valid_until || null,
-        identity_path: finalData.file_path || null,
+        document_upload_id: finalData.document_upload_id || null,
         identity_type: 'KTP',
         confidence: finalData.confidence,
         ocr_provider: finalData.provider

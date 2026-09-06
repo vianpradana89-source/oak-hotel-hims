@@ -145,6 +145,7 @@ export interface FaceEnrollmentStorageAdapter {
   savePhoto(storageKey: string, buffer: Buffer, mimetype: string): Promise<void>;
   deletePhoto(storageKey: string): Promise<void>;
   photoExists(storageKey: string): Promise<boolean>;
+  readPhoto?(storageKey: string): Promise<Buffer | null>;
 }
 
 export class LocalStorageAdapter implements FaceEnrollmentStorageAdapter {
@@ -173,6 +174,13 @@ export class LocalStorageAdapter implements FaceEnrollmentStorageAdapter {
     if (!storageKey || storageKey.includes('..')) return false;
     const absolutePath = resolveAbsolutePath(storageKey);
     return fs.existsSync(absolutePath);
+  }
+
+  async readPhoto(storageKey: string): Promise<Buffer | null> {
+    if (!storageKey || storageKey.includes('..')) return null;
+    const absolutePath = resolveAbsolutePath(storageKey);
+    if (!fs.existsSync(absolutePath)) return null;
+    return fs.promises.readFile(absolutePath);
   }
 }
 
@@ -235,6 +243,17 @@ export class GcsStorageAdapter implements FaceEnrollmentStorageAdapter {
       return !!exists;
     } catch {
       return false;
+    }
+  }
+
+  async readPhoto(storageKey: string): Promise<Buffer | null> {
+    if (!storageKey || storageKey.includes('..')) return null;
+    try {
+      const bucket = this.getBucket();
+      const [buffer] = await bucket.file(storageKey).download();
+      return buffer;
+    } catch {
+      return null;
     }
   }
 }

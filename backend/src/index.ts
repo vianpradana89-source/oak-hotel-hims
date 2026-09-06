@@ -80,6 +80,11 @@ import { createTransactionsRouter } from './domains/transactions/transactionsRou
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
+import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
+import {
+  createPendingIdentityDocumentUpload,
+  resolveAuthoritativeIdentityPropertyId
+} from './domains/identity/identityDocumentUploadService';
 import { createIdentityCustodyRouter } from './domains/identity/identityCustodyRouter';
 import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCustodyService';
 import { createDepositRouter } from './domains/deposits/depositRouter';
@@ -3641,15 +3646,43 @@ app.post('/api/reservations', async (req, res) => {
   }
 });
 
-app.post('/api/reservations/upload', upload.fields([
+app.post('/api/reservations/upload', requireAuth, upload.fields([
   { name: 'ktp_file', maxCount: 1 },
   { name: 'bukti_bayar_file', maxCount: 1 }
 ]), async (req, res) => {
   const files = (req as any).files || {};
+  let ktpPath = req.body?.ktp_path || null;
+  const ktpFile = files.ktp_file?.[0];
+  if (ktpFile?.path && fs.existsSync(ktpFile.path)) {
+    try {
+      const propertyId = await resolveAuthoritativeIdentityPropertyId(pool, (req as any).user, req.body?.property_id);
+      const persisted = await persistIdentityDocument({
+        propertyId,
+        buffer: fs.readFileSync(ktpFile.path),
+        mimeType: ktpFile.mimetype || 'image/jpeg',
+        originalFilename: ktpFile.originalname || ktpFile.filename,
+        size: ktpFile.size
+      });
+      await createPendingIdentityDocumentUpload(pool, {
+        propertyId,
+        uploadedByUserId: Number((req as any).user.id),
+        persistResult: persisted
+      });
+      ktpPath = persisted.apiPath;
+      fs.unlink(ktpFile.path, () => {});
+    } catch (persistErr) {
+      console.error('[reservations/upload] Failed to persist private KTP:', persistErr);
+      return res.status((persistErr as any)?.statusCode || 400).json({
+        status: 'ERROR',
+        code: (persistErr as any)?.code || 'IDENTITY_UPLOAD_FAILED',
+        message: (persistErr as any)?.message || 'Gagal menyimpan dokumen identitas.'
+      });
+    }
+  }
   const payload = {
     ...(req.body || {}),
     guest_segment: req.body?.guest_segment || 'Reguler',
-    ktp_path: files.ktp_file?.[0]?.filename ? `/uploads/${files.ktp_file[0].filename}` : req.body?.ktp_path || null,
+    ktp_path: ktpPath,
     bukti_bayar_path: files.bukti_bayar_file?.[0]?.filename ? `/uploads/${files.bukti_bayar_file[0].filename}` : req.body?.bukti_bayar_path || null
   };
 

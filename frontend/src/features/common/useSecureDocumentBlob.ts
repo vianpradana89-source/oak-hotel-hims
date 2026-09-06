@@ -1,5 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import {
+  IDENTITY_DOCUMENT_MISSING_MESSAGE,
+  isHistoricalIdentityFileMissing
+} from '../identity/identityDocumentUi';
 
 /**
  * Custom React hook to securely fetch protected documents (e.g. KTP, Payment Receipts)
@@ -13,6 +17,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -21,6 +26,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
     if (enabled && rawPath) {
       setLoading(true);
       setError(null);
+      setErrorCode(null);
 
       // Clean localhost prefix if any legacy path contains it
       const cleanPath = rawPath.replace(/^http:\/\/localhost(:\d+)?/, '');
@@ -33,7 +39,13 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
           if (!active) return;
           if (!res.ok) {
             const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.message || `Gagal memuat dokumen (${res.status})`);
+            const code = errData.code || null;
+            const message = isHistoricalIdentityFileMissing(code, errData.message)
+              ? IDENTITY_DOCUMENT_MISSING_MESSAGE
+              : (errData.message || `Gagal memuat dokumen (${res.status})`);
+            const err: any = new Error(message);
+            err.code = code;
+            throw err;
           }
           const blob = await res.blob();
           if (!active) return;
@@ -45,6 +57,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
           if (!active) return;
           console.warn('[useSecureDocumentBlob] Error loading document:', err);
           setError(err.message || 'Gagal memuat dokumen');
+          setErrorCode(err.code || null);
           setLoading(false);
         });
     } else {
@@ -54,6 +67,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
       });
       setLoading(false);
       setError(null);
+      setErrorCode(null);
     }
 
     return () => {
@@ -64,5 +78,11 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
     };
   }, [rawPath, enabled, authFetch]);
 
-  return { blobUrl, loading, error };
+  return {
+    blobUrl,
+    loading,
+    error,
+    errorCode,
+    isHistoricalFileMissing: isHistoricalIdentityFileMissing(errorCode, error)
+  };
 }

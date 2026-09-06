@@ -27,6 +27,7 @@
     "test:secure-private-image": "node test/secure_private_image_test.ts",
     "test:attendance-camera": "node test/attendance_camera_test.ts",
     "test:housekeeping-mobile-checklist": "node test/housekeeping_mobile_checklist_test.ts",
+    "test:identity-document-ui": "node test/identity_document_ui_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

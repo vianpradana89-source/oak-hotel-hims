@@ -19,6 +19,7 @@ import {
   updateGuest,
   updateReservationGuest
 } from './guestService';
+import { omitIdentityStorageKey } from '../identity/identityDocumentStorageService';
 
 function getCorrelationId(req: any): string {
   return String(
@@ -168,7 +169,7 @@ export function createGuestsRouter(pool: Pool) {
       const guest = await createGuest(pool, req.body || {}, correlationId);
       return res.status(201).json({
         status: 'SUCCESS',
-        data: guest
+        data: omitIdentityStorageKey(guest)
       });
     } catch (err: any) {
       return handleRouterError(err, res);
@@ -187,7 +188,7 @@ export function createGuestsRouter(pool: Pool) {
       const guest = await getGuestById(pool, guestId, propertyId);
       return res.json({
         status: 'SUCCESS',
-        data: guest
+        data: omitIdentityStorageKey(guest)
       });
     } catch (err: any) {
       return handleRouterError(err, res);
@@ -205,7 +206,7 @@ export function createGuestsRouter(pool: Pool) {
       const guest = await updateGuest(pool, guestId, req.body || {}, correlationId);
       return res.json({
         status: 'SUCCESS',
-        data: guest
+        data: omitIdentityStorageKey(guest)
       });
     } catch (err: any) {
       return handleRouterError(err, res);

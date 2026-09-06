@@ -4656,6 +4656,70 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // IDENTITY-STORAGE-2: persistent private KTP metadata on guests.
+    // Additive only. Does not rewrite identity_path / reservations.ktp_path.
+    // ------------------------------------------------------------------
+    const identityDocumentStorageCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'identity_document_persistent_storage_v1'`
+    );
+    if ((identityDocumentStorageCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_storage_key TEXT;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_mime_type VARCHAR(100);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_file_hash VARCHAR(128);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_original_filename VARCHAR(255);
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_uploaded_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE guests ADD COLUMN IF NOT EXISTS identity_uploaded_by INTEGER;
+
+        CREATE INDEX IF NOT EXISTS idx_guests_identity_storage_key
+          ON guests (identity_storage_key)
+          WHERE identity_storage_key IS NOT NULL;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('identity_document_persistent_storage_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // ------------------------------------------------------------------
+    // IDENTITY-STORAGE-2A: server-authoritative pending upload receipts.
+    // Additive only. Does not rewrite identity_path / reservations.ktp_path.
+    // ------------------------------------------------------------------
+    const identityUploadReceiptCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'identity_document_uploads_v1'`
+    );
+    if ((identityUploadReceiptCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS identity_document_uploads (
+          id UUID PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          uploaded_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+          storage_key TEXT NOT NULL,
+          mime_type VARCHAR(100) NOT NULL,
+          file_hash VARCHAR(128) NOT NULL,
+          original_filename VARCHAR(255),
+          status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+          expires_at TIMESTAMP WITH TIME ZONE,
+          confirmed_at TIMESTAMP WITH TIME ZONE,
+          confirmed_guest_id INTEGER REFERENCES guests(id) ON DELETE SET NULL,
+          CONSTRAINT identity_document_uploads_status_chk
+            CHECK (status IN ('PENDING', 'CONFIRMED', 'EXPIRED', 'FAILED')),
+          CONSTRAINT uq_identity_document_uploads_storage_key UNIQUE (storage_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_identity_document_uploads_property_status
+          ON identity_document_uploads (property_id, status);
+        CREATE INDEX IF NOT EXISTS idx_identity_document_uploads_uploader
+          ON identity_document_uploads (uploaded_by_user_id, created_at DESC);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('identity_document_uploads_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

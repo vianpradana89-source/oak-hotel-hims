@@ -81,6 +81,8 @@
     "test:hr2d1-attendance-identity": "npm run build && node test/auth_hr2d1_attendance_identity_test.js",
     "test:hr2d1b-mobile-identity": "npm run build && node test/auth_hr2d1b_mobile_identity_test.js",
     "test:identity-document-access": "npm run build && node test/identity_document_access_test.js",
+    "test:identity-document-storage": "npm run build && node test/identity_document_storage_test.js",
+    "test:identity-document-binding": "npm run build && node test/identity_document_binding_test.js",
     "test:transaction-attachment-access": "npm run build && node test/transaction_attachment_access_test.js",
     "test:housekeeping-assigned-crew-checklist": "npm run build && node test/housekeeping_assigned_crew_checklist_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { Guest, VipStatus } from './guestTypes';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestEditModalProps {
@@ -52,7 +53,12 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
 
-  const { blobUrl: ktpBlobUrl, loading: ktpLoading, error: ktpError } = useSecureDocumentBlob(guest?.identity_path, isKtpPreviewOpen);
+  const {
+    blobUrl: ktpBlobUrl,
+    loading: ktpLoading,
+    error: ktpError,
+    isHistoricalFileMissing: isKtpHistoricalMissing
+  } = useSecureDocumentBlob(guest?.identity_path, isKtpPreviewOpen);
 
   const handleIdentityConfirmed = (data: ExtractedIdentityData | any) => {
     if (!data) return;
@@ -728,8 +734,14 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
               ) : ktpError ? (
                 <div className="text-center p-8 text-rose-400 text-xs space-y-1">
                   <div className="text-2xl">⚠️</div>
-                  <p className="font-bold">{ktpError}</p>
-                  <p className="text-stone-500 text-[11px]">Pastikan Anda memiliki izin akses ke dokumen properti ini.</p>
+                  <p className="font-bold">
+                    {isKtpHistoricalMissing ? IDENTITY_DOCUMENT_MISSING_MESSAGE : ktpError}
+                  </p>
+                  <p className="text-stone-500 text-[11px]">
+                    {isKtpHistoricalMissing
+                      ? 'Referensi dokumen tetap tersimpan. File fisik historis tidak tersedia di penyimpanan saat ini.'
+                      : 'Pastikan Anda memiliki izin akses ke dokumen properti ini.'}
+                  </p>
                 </div>
               ) : ktpBlobUrl ? (
                 <img

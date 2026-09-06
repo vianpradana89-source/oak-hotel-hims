@@ -58,6 +58,9 @@ export interface NormalizedIdentityExtractionResponse {
   raw_lines: string[];
   raw_text?: string | null;
   file_path: string;
+  identity_mime_type?: string | null;
+  identity_file_hash?: string | null;
+  identity_original_filename?: string | null;
   warnings: string[];
   duplicate_candidate?: DuplicateIdentityCandidate | null;
   name_mismatch?: NameMismatchInfo | null;
@@ -75,6 +78,9 @@ export interface IdentityCandidate extends Partial<IdentityCandidateData> {
 export interface IdentityExtractionResult extends NormalizedIdentityExtractionResponse {}
 
 export interface ConfirmIdentityInput {
+  document_upload_id: string;
+  actor_user_id: number;
+  is_platform_super_admin: boolean;
   guest_id?: number | null;
   property_id: number;
   name: string;
@@ -92,7 +98,6 @@ export interface ConfirmIdentityInput {
   occupation?: string | null;
   citizenship?: string | null;
   valid_until?: string | null;
-  identity_path?: string | null;
   identity_type?: string;
   confidence?: number;
   ocr_provider?: string;

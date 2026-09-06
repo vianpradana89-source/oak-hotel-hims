@@ -9,6 +9,7 @@ import {
   getVipBadgeClass
 } from './guestCrmHelpers';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestProfileModalProps {
@@ -34,7 +35,12 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
 
-  const { blobUrl: ktpBlobUrl, loading: ktpLoading, error: ktpError } = useSecureDocumentBlob(guest?.identity_path, isKtpPreviewOpen);
+  const {
+    blobUrl: ktpBlobUrl,
+    loading: ktpLoading,
+    error: ktpError,
+    isHistoricalFileMissing: isKtpHistoricalMissing
+  } = useSecureDocumentBlob(guest?.identity_path, isKtpPreviewOpen);
 
   useEffect(() => {
     if (!isOpen || !guestId) {
@@ -564,8 +570,14 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
               ) : ktpError ? (
                 <div className="text-center p-8 text-rose-400 text-xs space-y-1">
                   <div className="text-2xl">⚠️</div>
-                  <p className="font-bold">{ktpError}</p>
-                  <p className="text-stone-500 text-[11px]">Pastikan Anda memiliki izin akses ke dokumen properti ini.</p>
+                  <p className="font-bold">
+                    {isKtpHistoricalMissing ? IDENTITY_DOCUMENT_MISSING_MESSAGE : ktpError}
+                  </p>
+                  <p className="text-stone-500 text-[11px]">
+                    {isKtpHistoricalMissing
+                      ? 'Referensi dokumen tetap tersimpan. File fisik historis tidak tersedia di penyimpanan saat ini.'
+                      : 'Pastikan Anda memiliki izin akses ke dokumen properti ini.'}
+                  </p>
                 </div>
               ) : ktpBlobUrl ? (
                 <img

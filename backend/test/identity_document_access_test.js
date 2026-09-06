@@ -6,6 +6,7 @@ const path = require('path');
 const express = require('express');
 const { generateToken } = require('../dist/domains/auth/authService');
 const { createIdentityExtractionRouter } = require('../dist/domains/identity/identityExtractionRouter');
+const { setStorageAdapterForTesting } = require('../dist/domains/auth/faceEnrollmentStorageService');
 
 let passed = 0;
 let failed = 0;
@@ -146,6 +147,7 @@ async function main() {
     assert.ok(!ownership.text.includes('r.property_id'), 'non-existent reservations.property_id is not selected');
     assert.ok(!ownership.text.includes('reservations.property_id'), 'reservations.property_id is not referenced');
     assert.ok(!ownership.text.includes('g.property_id'), 'invalid guests.property_id is not selected');
+    assert.ok(ownership.text.includes('g.identity_storage_key'), 'guest canonical storage_key is dual-read');
     assert.ok(ownership.text.includes('property_id IS NOT NULL'), 'unresolved property is excluded');
     assert.equal(ownership.params[0], filename);
   });
@@ -156,6 +158,8 @@ async function main() {
       const res = await request(port, `/api/identity/document/${filename}`, staffToken(1));
       assert.equal(res.status, 200);
       assert.match(res.headers['content-type'], /image\/jpeg/);
+      assert.match(String(res.headers['cache-control'] || ''), /private/);
+      assert.match(String(res.headers['cache-control'] || ''), /no-store/);
     });
   });
 
@@ -215,6 +219,90 @@ async function main() {
       const res = await request(port, `/api/identity/document/${filename}`);
       assert.equal(res.status, 401);
       assert.equal(res.json.code, 'UNAUTHORIZED');
+    });
+  });
+
+  await test('canonical storage_key document streams from private adapter', async () => {
+    const storedName = '11111111-1111-4111-8111-111111111111.jpg';
+    const storageKey = `identity-documents/1/${storedName}`;
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x11]);
+    const objects = new Map([[storageKey, bytes]]);
+    setStorageAdapterForTesting({
+      provider: 'gcs',
+      async savePhoto(key, buffer) { objects.set(key, buffer); },
+      async deletePhoto(key) { objects.delete(key); },
+      async photoExists(key) { return objects.has(key); },
+      async readPhoto(key) { return objects.get(key) || null; }
+    });
+    const pool = mockPool({ ownershipRows: [{ property_id: 1, storage_key: storageKey }] });
+    try {
+      await withServer(pool, uploadDir, async (port) => {
+        const res = await request(port, `/api/identity/document/${storedName}`, staffToken(1));
+        assert.equal(res.status, 200);
+        assert.match(res.headers['content-type'], /image\/jpeg/);
+        assert.match(String(res.headers['cache-control'] || ''), /no-store/);
+        assert.deepEqual(res.body, bytes);
+        assert.equal(res.json, null);
+      });
+    } finally {
+      setStorageAdapterForTesting(null);
+    }
+  });
+
+  await test('guessed UUID with existing object but no DB reference is 404', async () => {
+    const storedName = '22222222-2222-4222-8222-222222222222.jpg';
+    const storageKey = `identity-documents/1/${storedName}`;
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x22]);
+    setStorageAdapterForTesting({
+      provider: 'gcs',
+      async savePhoto() {},
+      async deletePhoto() {},
+      async photoExists(key) { return key === storageKey; },
+      async readPhoto(key) { return key === storageKey ? bytes : null; }
+    });
+    const pool = mockPool({ ownershipRows: [] });
+    try {
+      await withServer(pool, uploadDir, async (port) => {
+        const res = await request(port, `/api/identity/document/${storedName}`, staffToken(1));
+        assert.equal(res.status, 404);
+        assert.equal(res.json.code, 'DOCUMENT_NOT_FOUND');
+      });
+    } finally {
+      setStorageAdapterForTesting(null);
+    }
+  });
+
+  await test('storage_key property prefix mismatch fails closed', async () => {
+    const storedName = '33333333-3333-4333-8333-333333333333.jpg';
+    const storageKey = `identity-documents/2/${storedName}`;
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x33]);
+    setStorageAdapterForTesting({
+      provider: 'gcs',
+      async savePhoto() {},
+      async deletePhoto() {},
+      async photoExists(key) { return key === storageKey; },
+      async readPhoto(key) { return key === storageKey ? bytes : null; }
+    });
+    const pool = mockPool({ ownershipRows: [{ property_id: 1, storage_key: storageKey }] });
+    try {
+      await withServer(pool, uploadDir, async (port) => {
+        const res = await request(port, `/api/identity/document/${storedName}`, staffToken(1));
+        assert.equal(res.status, 404);
+        assert.equal(res.json.code, 'DOCUMENT_FILE_MISSING');
+      });
+    } finally {
+      setStorageAdapterForTesting(null);
+    }
+  });
+
+  await test('missing legacy physical file returns controlled DOCUMENT_FILE_MISSING', async () => {
+    const missingName = 'legacy-ktp-missing.jpg';
+    const pool = mockPool({ ownershipRows: [{ property_id: 1, storage_key: null }] });
+    await withServer(pool, uploadDir, async (port) => {
+      const res = await request(port, `/api/identity/document/${missingName}`, staffToken(1));
+      assert.equal(res.status, 404);
+      assert.equal(res.json.code, 'DOCUMENT_FILE_MISSING');
+      assert.equal(res.json.message, 'Dokumen tercatat, tetapi file fisik tidak tersedia.');
     });
   });
 

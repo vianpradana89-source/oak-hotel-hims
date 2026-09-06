@@ -6,6 +6,7 @@ import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
+import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 
@@ -62,7 +63,12 @@ export default function ReservationDetailDrawer({
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
-  const { blobUrl: ktpBlobUrl, loading: ktpLoading, error: ktpError } = useSecureDocumentBlob(currentRes?.ktp_path, isKtpPreviewOpen);
+  const {
+    blobUrl: ktpBlobUrl,
+    loading: ktpLoading,
+    error: ktpError,
+    isHistoricalFileMissing: isKtpHistoricalMissing
+  } = useSecureDocumentBlob(currentRes?.ktp_path, isKtpPreviewOpen);
   const { blobUrl: paymentEvidenceBlobUrl, loading: paymentEvidenceLoading, error: paymentEvidenceError } = useSecureDocumentBlob(currentRes?.bukti_bayar_path, isPaymentEvidencePreviewOpen);
 
   // Keyboard Escape listener for document preview modals
@@ -1394,8 +1400,14 @@ export default function ReservationDetailDrawer({
                 ) : ktpError ? (
                   <div className="text-center p-8 text-rose-400 text-xs space-y-1">
                     <div className="text-2xl">⚠️</div>
-                    <p className="font-bold">{ktpError}</p>
-                    <p className="text-stone-500 text-[11px]">Pastikan Anda memiliki izin akses ke dokumen properti ini.</p>
+                    <p className="font-bold">
+                      {isKtpHistoricalMissing ? IDENTITY_DOCUMENT_MISSING_MESSAGE : ktpError}
+                    </p>
+                    <p className="text-stone-500 text-[11px]">
+                      {isKtpHistoricalMissing
+                        ? 'Referensi dokumen tetap tersimpan. File fisik historis tidak tersedia di penyimpanan saat ini.'
+                        : 'Pastikan Anda memiliki izin akses ke dokumen properti ini.'}
+                    </p>
                   </div>
                 ) : ktpBlobUrl ? (
                   data.ktp_path.toLowerCase().endsWith('.pdf') ? (

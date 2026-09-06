@@ -3,36 +3,41 @@ import { Pool } from 'pg';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import {
-  extractIdentityFromDocument,
-  confirmVerifiedIdentity
-} from './identityExtractionService';
+import { extractIdentityFromDocument } from './identityExtractionService';
+import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
 import { isPlatformSuperAdmin, verifyToken, type AuthUserPayload } from '../auth/authService';
+import {
+  IDENTITY_DOCUMENT_MISSING_CODE,
+  IDENTITY_DOCUMENT_MISSING_MESSAGE,
+  MAX_IDENTITY_DOCUMENT_BYTES,
+  assertIdentityStorageKeyForProperty,
+  buildIdentityStorageKeyFromBasename,
+  cleanupIdentityTempFile,
+  decodeIdentityBase64Payload,
+  identityDocumentExists,
+  isIdentityDocumentStorageKey,
+  persistIdentityDocument,
+  readIdentityDocument,
+  writeIdentityOcrTempFile
+} from './identityDocumentStorageService';
+import {
+  confirmVerifiedIdentity,
+  createPendingIdentityDocumentUpload,
+  resolveAuthoritativeIdentityPropertyId
+} from './identityDocumentUploadService';
 
 export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): Router {
   const router = Router();
+  router.use(requireAuth);
 
-  // Storage directory: prefer backend/storage/identity/ for private storage
   const privateStorageDir = path.resolve(uploadDir, 'identity');
   if (!fs.existsSync(privateStorageDir)) {
     fs.mkdirSync(privateStorageDir, { recursive: true });
   }
 
-  const maxFileMb = 15;
-
-  // Multer instance supporting any image field
   const upload = multer({
-    storage: multer.diskStorage({
-      destination: (_req: any, _file: any, cb: (error: Error | null, destination: string) => void) => {
-        cb(null, privateStorageDir);
-      },
-      filename: (_req: any, file: any, cb: (error: Error | null, filename: string) => void) => {
-        const ext = path.extname(file.originalname || '.jpg') || '.jpg';
-        const safeName = `ktp-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-        cb(null, safeName);
-      }
-    }),
-    limits: { fileSize: maxFileMb * 1024 * 1024 },
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_IDENTITY_DOCUMENT_BYTES },
     fileFilter: (_req: any, file: any, cb: any) => {
       const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
       if (allowed.includes(file.mimetype) || file.mimetype.startsWith('image/')) return cb(null, true);
@@ -40,7 +45,6 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
     }
   });
 
-  // Handler for /scan-id, /scan, /extract, /extract-ktp
   const handleExtract = (req: Request, res: Response) => {
     upload.any()(req as any, res as any, async (err: any) => {
       if (err) {
@@ -53,28 +57,39 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         });
       }
 
+      let ocrTempPath: string | null = null;
       try {
-        let localFilePath: string | null = null;
-        let storedRelativePath: string | null = null;
+        const user = (req as any).user as AuthUserPayload | undefined;
+        const propertyId = await resolveAuthoritativeIdentityPropertyId(pool, user, req.body?.property_id);
+        if (!user?.id) {
+          return res.status(401).json({
+            success: false,
+            status: 'FAILED',
+            error: 'UNAUTHORIZED',
+            message: 'Akses ditolak. Silakan login terlebih dahulu untuk mengakses dokumen identitas.'
+          });
+        }
+
+        let buffer: Buffer | null = null;
+        let mimeType = 'image/jpeg';
+        let originalFilename: string | null = null;
 
         const files = (req as any).files as Express.Multer.File[];
         if (files && files.length > 0) {
           const mainFile = files[0];
-          localFilePath = mainFile.path;
-          storedRelativePath = `/api/identity/document/${mainFile.filename}`;
+          buffer = mainFile.buffer;
+          mimeType = mainFile.mimetype || mimeType;
+          originalFilename = mainFile.originalname || null;
         } else if (req.body.image_base64 || req.body.base64_image || req.body.image) {
-          // Handle base64 payload
-          const rawBase64 = String(req.body.image_base64 || req.body.base64_image || req.body.image);
-          const matches = rawBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-          const base64Data = matches ? matches[2] : rawBase64;
-          const ext = matches && matches[1].includes('png') ? '.png' : '.jpg';
-          const filename = `ktp-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-          localFilePath = path.resolve(privateStorageDir, filename);
-          fs.writeFileSync(localFilePath, Buffer.from(base64Data, 'base64'));
-          storedRelativePath = `/api/identity/document/${filename}`;
+          const decoded = decodeIdentityBase64Payload(
+            String(req.body.image_base64 || req.body.base64_image || req.body.image)
+          );
+          buffer = decoded.buffer;
+          mimeType = decoded.mimeType || mimeType;
+          originalFilename = mimeType.includes('png') ? 'identity.png' : 'identity.jpg';
         }
 
-        if (!localFilePath || !fs.existsSync(localFilePath)) {
+        if (!buffer || buffer.length === 0) {
           return res.status(400).json({
             success: false,
             status: 'FAILED',
@@ -86,12 +101,12 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
 
         const guestName = req.body.guest_name ? String(req.body.guest_name) : null;
         const guestId = req.body.guest_id ? Number(req.body.guest_id) : null;
-        const propertyId = req.body.property_id ? Number(req.body.property_id) : 1;
 
+        ocrTempPath = await writeIdentityOcrTempFile(buffer, mimeType);
         const result = await extractIdentityFromDocument(
           pool,
-          localFilePath,
-          storedRelativePath || localFilePath,
+          ocrTempPath,
+          '',
           {
             property_id: propertyId,
             guest_name: guestName,
@@ -99,7 +114,20 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
           }
         );
 
-        // Enrich response with standard Indonesian aliases for seamless frontend consumption
+        const persisted = await persistIdentityDocument({
+          propertyId,
+          buffer,
+          mimeType,
+          originalFilename,
+          size: buffer.length
+        });
+
+        const receipt = await createPendingIdentityDocumentUpload(pool, {
+          propertyId,
+          uploadedByUserId: Number(user.id),
+          persistResult: persisted
+        });
+
         const c = result.data;
         const enrichedData = {
           ...c,
@@ -124,17 +152,21 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
           success: true,
           data: enrichedData,
           ktpData: enrichedData,
-          candidate: enrichedData
+          candidate: enrichedData,
+          file_path: receipt.apiPath,
+          document_upload_id: receipt.documentUploadId
         });
-      } catch (err: any) {
-        console.error('[IdentityExtractionRouter] Extraction error:', err.message);
-        return res.status(500).json({
+      } catch (extractErr: any) {
+        console.error('[IdentityExtractionRouter] Extraction error:', extractErr.message);
+        return res.status(extractErr.statusCode || 500).json({
           success: false,
           status: 'FAILED',
-          error: 'EXTRACTION_ERROR',
-          message: 'Gagal memproses ekstraksi identitas: ' + (err.message || 'Unknown error'),
+          error: extractErr.code || 'EXTRACTION_ERROR',
+          message: 'Gagal memproses ekstraksi identitas: ' + (extractErr.message || 'Unknown error'),
           warnings: ['SERVER_ERROR']
         });
+      } finally {
+        await cleanupIdentityTempFile(ocrTempPath);
       }
     });
   };
@@ -144,12 +176,13 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
   router.post('/extract', handleExtract);
   router.post('/extract-ktp', handleExtract);
 
-  // POST /api/identity/confirm
-  router.post('/confirm', async (req: Request, res: Response) => {
+  router.post('/confirm', async (req: AuthenticatedRequest, res: Response) => {
     try {
+      const user = req.user;
+      const propertyId = await resolveAuthoritativeIdentityPropertyId(pool, user, req.body?.property_id);
+      const isSuperAdmin = await isPlatformSuperAdmin(pool, user?.id);
       const {
         guest_id,
-        property_id = 1,
         name,
         phone,
         nik,
@@ -165,10 +198,10 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         occupation,
         citizenship,
         valid_until,
-        identity_path,
         identity_type = 'KTP',
         confidence,
-        ocr_provider
+        ocr_provider,
+        document_upload_id
       } = req.body;
 
       if (!name || !String(name).trim()) {
@@ -180,8 +213,11 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       }
 
       const guest = await confirmVerifiedIdentity(pool, {
+        document_upload_id: document_upload_id ? String(document_upload_id) : '',
+        actor_user_id: Number(user!.id),
+        is_platform_super_admin: isSuperAdmin,
         guest_id: guest_id ? Number(guest_id) : null,
-        property_id: Number(property_id),
+        property_id: propertyId,
         name: String(name),
         phone: phone ? String(phone) : null,
         nik: String(nik || ''),
@@ -197,7 +233,6 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         occupation: occupation ? String(occupation) : null,
         citizenship: citizenship ? String(citizenship) : null,
         valid_until: valid_until ? String(valid_until) : null,
-        identity_path: identity_path ? String(identity_path) : null,
         identity_type: String(identity_type || 'KTP'),
         confidence: confidence ? Number(confidence) : 1.0,
         ocr_provider: ocr_provider ? String(ocr_provider) : undefined
@@ -208,25 +243,22 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         data: guest,
         message: 'Identitas tamu berhasil diverifikasi dan disimpan ke CRM'
       });
-    } catch (err: any) {
-      console.error('[IdentityExtractionRouter] Confirm error:', err.message);
-      return res.status(err.statusCode || 500).json({
+    } catch (confirmErr: any) {
+      console.error('[IdentityExtractionRouter] Confirm error:', confirmErr.message);
+      return res.status(confirmErr.statusCode || 500).json({
         success: false,
-        error: err.code || 'INTERNAL_ERROR',
-        message: err.message || 'Gagal menyimpan identitas tamu'
+        error: confirmErr.code || 'INTERNAL_ERROR',
+        message: confirmErr.message || 'Gagal menyimpan identitas tamu'
       });
     }
   });
 
-  // GET /api/identity/document/:filename (Protected Document Serving)
   router.get('/document/:filename', async (req: Request, res: Response) => {
     const filename = req.params.filename;
-    // 1. Prevent directory traversal and validate filename format
     if (!filename || /[^a-zA-Z0-9_\-\.]/.test(filename) || filename.includes('..')) {
       return res.status(400).json({ success: false, error: 'INVALID_FILENAME', message: 'Nama file tidak valid' });
     }
 
-    // 2. Authentication: Strictly require Authorization header (No JWT in query params)
     const authHeader = req.headers.authorization;
     let token: string | null = null;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -252,22 +284,28 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       });
     }
 
-    // 3. Fail-Closed Document Ownership & Property Isolation
     const isSuperAdmin = await isPlatformSuperAdmin(pool, user.id);
 
     let docPropId: number | null = null;
+    let storageKey: string | null = null;
     try {
       const docRes = await pool.query(
-        `SELECT property_id FROM (
-           SELECT COALESCE(b.property_id, rm.property_id) AS property_id
+        `SELECT property_id, storage_key FROM (
+           SELECT COALESCE(b.property_id, rm.property_id) AS property_id,
+                  NULL::text AS storage_key
            FROM reservations r
            LEFT JOIN bookings b ON b.id = r.booking_id
            LEFT JOIN rooms rm ON rm.id = r.room_id
            WHERE r.ktp_path LIKE '%' || $1
-           UNION
-           SELECT g.created_property_id AS property_id FROM guests g WHERE g.identity_path LIKE '%' || $1
+           UNION ALL
+           SELECT g.created_property_id AS property_id,
+                  g.identity_storage_key AS storage_key
+           FROM guests g
+           WHERE g.identity_path LIKE '%' || $1
+              OR g.identity_storage_key LIKE '%' || $1
          ) doc_props
          WHERE property_id IS NOT NULL
+         ORDER BY CASE WHEN storage_key IS NOT NULL THEN 0 ELSE 1 END
          LIMIT 1`,
         [filename]
       );
@@ -281,8 +319,9 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       }
 
       docPropId = docRes.rows[0].property_id ? Number(docRes.rows[0].property_id) : null;
-    } catch (err: any) {
-      console.error('[IdentityRouter] Document property isolation query error:', err.message);
+      storageKey = docRes.rows[0].storage_key ? String(docRes.rows[0].storage_key) : null;
+    } catch (queryErr: any) {
+      console.error('[IdentityRouter] Document property isolation query error:', queryErr.message);
       return res.status(500).json({
         status: 'ERROR',
         code: 'INTERNAL_ERROR',
@@ -290,7 +329,6 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       });
     }
 
-    // Enforce property isolation: Only Super Admin may cross properties; GM, FO, and staff are strictly property-scoped
     if (!isSuperAdmin) {
       if (!user.property_id || !docPropId || Number(user.property_id) !== docPropId) {
         return res.status(403).json({
@@ -301,33 +339,76 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       }
     }
 
-    // 4. File existence and stream response
-    const targetPath = path.resolve(privateStorageDir, filename);
-    let resolvedFilePath = targetPath;
-    if (!fs.existsSync(resolvedFilePath)) {
-      const fallbackPath = path.resolve(uploadDir, filename);
-      if (fs.existsSync(fallbackPath)) {
-        resolvedFilePath = fallbackPath;
-      } else {
-        return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'File dokumen fisik tidak ditemukan' });
+    const sendPrivateStream = (buffer: Buffer, mimeType: string) => {
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.end(buffer);
+    };
+
+    if (storageKey && isIdentityDocumentStorageKey(storageKey)) {
+      if (!docPropId || !assertIdentityStorageKeyForProperty(storageKey, docPropId)) {
+        return res.status(404).json({
+          status: 'ERROR',
+          code: IDENTITY_DOCUMENT_MISSING_CODE,
+          message: IDENTITY_DOCUMENT_MISSING_MESSAGE
+        });
+      }
+      const stored = await readIdentityDocument(storageKey);
+      if (stored) {
+        sendPrivateStream(stored.buffer, stored.mimeType);
+        return;
+      }
+      return res.status(404).json({
+        status: 'ERROR',
+        code: IDENTITY_DOCUMENT_MISSING_CODE,
+        message: IDENTITY_DOCUMENT_MISSING_MESSAGE
+      });
+    }
+
+    if (docPropId) {
+      const reconstructed = buildIdentityStorageKeyFromBasename(docPropId, filename);
+      if (reconstructed && assertIdentityStorageKeyForProperty(reconstructed, docPropId) && await identityDocumentExists(reconstructed)) {
+        const stored = await readIdentityDocument(reconstructed);
+        if (stored) {
+          sendPrivateStream(stored.buffer, stored.mimeType);
+          return;
+        }
       }
     }
 
-    const ext = path.extname(filename).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.webp': 'image/webp',
-      '.pdf': 'application/pdf'
-    };
+    const targetPath = path.resolve(privateStorageDir, filename);
+    let resolvedFilePath: string | null = fs.existsSync(targetPath) ? targetPath : null;
+    if (!resolvedFilePath) {
+      const fallbackPath = path.resolve(uploadDir, filename);
+      if (fs.existsSync(fallbackPath)) {
+        resolvedFilePath = fallbackPath;
+      }
+    }
 
-    const contentType = mimeTypes[ext] || 'application/octet-stream';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    fs.createReadStream(resolvedFilePath).pipe(res);
+    if (resolvedFilePath) {
+      const ext = path.extname(filename).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.pdf': 'application/pdf'
+      };
+      res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      fs.createReadStream(resolvedFilePath).pipe(res);
+      return;
+    }
+
+    return res.status(404).json({
+      status: 'ERROR',
+      code: IDENTITY_DOCUMENT_MISSING_CODE,
+      message: IDENTITY_DOCUMENT_MISSING_MESSAGE
+    });
   });
 
   return router;
