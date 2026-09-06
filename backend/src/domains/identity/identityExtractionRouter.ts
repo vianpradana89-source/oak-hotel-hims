@@ -259,7 +259,11 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
     try {
       const docRes = await pool.query(
         `SELECT property_id FROM (
-           SELECT r.property_id FROM reservations r WHERE r.ktp_path LIKE '%' || $1
+           SELECT COALESCE(b.property_id, rm.property_id) AS property_id
+           FROM reservations r
+           LEFT JOIN bookings b ON b.id = r.booking_id
+           LEFT JOIN rooms rm ON rm.id = r.room_id
+           WHERE r.ktp_path LIKE '%' || $1
            UNION
            SELECT g.created_property_id AS property_id FROM guests g WHERE g.identity_path LIKE '%' || $1
          ) doc_props

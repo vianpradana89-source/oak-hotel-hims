@@ -132,7 +132,7 @@ async function main() {
   fs.mkdirSync(path.join(uploadDir, 'identity'), { recursive: true });
   fs.writeFileSync(path.join(uploadDir, 'identity', filename), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
 
-  await test('ownership SQL uses guests.created_property_id and reservations.property_id', async () => {
+  await test('ownership SQL uses guests.created_property_id and booking/room property joins', async () => {
     const pool = mockPool({ ownershipRows: [{ property_id: 1 }] });
     await withServer(pool, uploadDir, async (port) => {
       await request(port, `/api/identity/document/${filename}`, staffToken(1));
@@ -140,8 +140,13 @@ async function main() {
     const ownership = pool.calls.find((call) => call.text.includes('doc_props') || call.text.includes('created_property_id'));
     assert.ok(ownership, 'ownership query was issued');
     assert.ok(ownership.text.includes('g.created_property_id AS property_id'), 'guest column is created_property_id');
-    assert.ok(ownership.text.includes('r.property_id'), 'reservation property_id is preserved');
+    assert.ok(ownership.text.includes('LEFT JOIN bookings b ON b.id = r.booking_id'), 'reservation property comes from bookings');
+    assert.ok(ownership.text.includes('LEFT JOIN rooms rm ON rm.id = r.room_id'), 'room property is the documented fallback');
+    assert.ok(ownership.text.includes('COALESCE(b.property_id, rm.property_id)'), 'canonical reservation property is booking then room');
+    assert.ok(!ownership.text.includes('r.property_id'), 'non-existent reservations.property_id is not selected');
+    assert.ok(!ownership.text.includes('reservations.property_id'), 'reservations.property_id is not referenced');
     assert.ok(!ownership.text.includes('g.property_id'), 'invalid guests.property_id is not selected');
+    assert.ok(ownership.text.includes('property_id IS NOT NULL'), 'unresolved property is excluded');
     assert.equal(ownership.params[0], filename);
   });
 
@@ -154,14 +159,17 @@ async function main() {
     });
   });
 
-  await test('reservation KTP still resolves via reservations.property_id', async () => {
+  await test('reservation KTP resolves property via bookings.property_id join', async () => {
     const pool = mockPool({ ownershipRows: [{ property_id: 1 }] });
     await withServer(pool, uploadDir, async (port) => {
       const res = await request(port, `/api/identity/document/${filename}`, staffToken(1));
       assert.equal(res.status, 200);
+      assert.match(res.headers['content-type'], /image\/jpeg/);
     });
     const ownership = pool.calls.find((call) => call.text.includes('FROM reservations r'));
     assert.ok(ownership, 'reservation ownership lookup remains');
+    assert.ok(ownership.text.includes('JOIN bookings b ON b.id = r.booking_id'), 'uses reservations.booking_id -> bookings.id');
+    assert.ok(!ownership.text.includes('r.property_id'), 'does not read reservations.property_id');
   });
 
   await test('unresolved ownership fails closed with 404', async () => {
