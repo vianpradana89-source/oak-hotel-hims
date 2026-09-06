@@ -3861,3 +3861,402 @@ export async function purgeTestDataBulk(
   const allSuccess = results.every(r => r.success);
   return { success: allSuccess, results };
 }
+
+// ============================================================================
+// AUTH-HR-2C: HRD FACE ENROLLMENT MANAGEMENT
+// ============================================================================
+
+export interface FaceEnrollmentStatus {
+  employee_id: number;
+  employee_name: string;
+  has_login_account: boolean;
+  account_status: string | null;
+  face_enrollment_status: 'NOT_ENROLLED' | 'ENROLLED' | 'REVOKED' | 'NEEDS_REENROLLMENT' | 'NO_ACCOUNT';
+  face_enrollment_label: string;
+  active_enrollment_id: number | null;
+  enrolled_at: string | null;
+  last_revoked_at: string | null;
+  last_revocation_reason: string | null;
+}
+
+export async function getEmployeeFaceEnrollmentStatus(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number
+): Promise<FaceEnrollmentStatus> {
+  const empRes = await client.query(
+    `SELECT id, full_name, is_active, status FROM hr_employees WHERE id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan pada properti ini.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+
+  const emp = empRes.rows[0];
+
+  // Check login account
+  const userRes = await client.query(
+    `SELECT id, account_status FROM users WHERE employee_id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  const hasAccount = hasRows(userRes);
+  const accountStatus = hasAccount ? userRes.rows[0].account_status : null;
+
+  // Check active face enrollment
+  const activeEnrollRes = await client.query(
+    `SELECT id, enrolled_at FROM employee_face_enrollments
+     WHERE employee_id = $1 AND property_id = $2 AND status = 'ACTIVE'
+     ORDER BY enrolled_at DESC LIMIT 1`,
+    [employeeId, propertyId]
+  );
+
+  // Check last revoked enrollment
+  const revokedRes = await client.query(
+    `SELECT revoked_at, revocation_reason FROM employee_face_enrollments
+     WHERE employee_id = $1 AND property_id = $2 AND status = 'REVOKED'
+     ORDER BY revoked_at DESC LIMIT 1`,
+    [employeeId, propertyId]
+  );
+
+  let faceStatus: FaceEnrollmentStatus['face_enrollment_status'] = 'NO_ACCOUNT';
+  let faceLabel = 'Tidak Ada Akun';
+
+  if (!hasAccount) {
+    faceStatus = 'NO_ACCOUNT';
+    faceLabel = 'Tidak Ada Akun';
+  } else if (activeEnrollRes.rows.length > 0) {
+    faceStatus = 'ENROLLED';
+    faceLabel = 'Terdaftar';
+  } else if (accountStatus === 'FACE_ENROLLMENT_REQUIRED') {
+    faceStatus = 'NOT_ENROLLED';
+    faceLabel = 'Belum Enroll';
+  } else if (accountStatus === 'READY' && revokedRes.rows.length > 0) {
+    // READY but was previously enrolled then revoked - should not normally happen
+    // but handle gracefully
+    faceStatus = 'REVOKED';
+    faceLabel = 'Perlu Enroll Ulang';
+  } else if (revokedRes.rows.length > 0) {
+    faceStatus = 'NEEDS_REENROLLMENT';
+    faceLabel = 'Perlu Enroll Ulang';
+  } else {
+    faceStatus = 'NOT_ENROLLED';
+    faceLabel = 'Belum Enroll';
+  }
+
+  return {
+    employee_id: Number(emp.id),
+    employee_name: emp.full_name,
+    has_login_account: hasAccount,
+    account_status: accountStatus,
+    face_enrollment_status: faceStatus,
+    face_enrollment_label: faceLabel,
+    active_enrollment_id: activeEnrollRes.rows.length > 0 ? Number(activeEnrollRes.rows[0].id) : null,
+    enrolled_at: activeEnrollRes.rows.length > 0 ? new Date(activeEnrollRes.rows[0].enrolled_at).toISOString() : null,
+    last_revoked_at: revokedRes.rows.length > 0 ? new Date(revokedRes.rows[0].revoked_at).toISOString() : null,
+    last_revocation_reason: revokedRes.rows.length > 0 ? revokedRes.rows[0].revocation_reason : null
+  };
+}
+
+export interface HrdFaceEnrollmentResult {
+  employee_id: number;
+  enrollment_id: number;
+  enrolled_at: string;
+  quality_status: string;
+  account_status: string;
+  message: string;
+}
+
+/**
+ * HRD admin enrolls an employee's face.
+ * The employee must have a login account in FACE_ENROLLMENT_REQUIRED state.
+ * This is a property-scoped operation.
+ */
+export async function enrollEmployeeFace(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  file: Express.Multer.File,
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<HrdFaceEnrollmentResult> {
+  // 1. Validate employee exists in this property
+  const empRes = await client.query(
+    `SELECT id, full_name, is_active, status FROM hr_employees WHERE id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan pada properti ini.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+
+  const emp = empRes.rows[0];
+
+  if (emp.is_active === false || emp.status !== 'ACTIVE') {
+    throw Object.assign(
+      new Error(`Tidak dapat mendaftarkan wajah: data karyawan '${emp.full_name}' berstatus nonaktif.`),
+      { statusCode: 400, code: 'EMPLOYEE_DEACTIVATED' }
+    );
+  }
+
+  // 2. Resolve login account
+  const userRes = await client.query(
+    `SELECT id, account_status, is_active, full_name, username, email, role_id, access_type, property_id
+     FROM users WHERE employee_id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(userRes)) {
+    throw Object.assign(
+      new Error('Karyawan belum memiliki akun login. Buat akun login terlebih dahulu sebelum mendaftarkan wajah.'),
+      { statusCode: 400, code: 'NO_LOGIN_ACCOUNT' }
+    );
+  }
+
+  const user = userRes.rows[0];
+
+  if (user.is_active === false) {
+    throw Object.assign(
+      new Error('Akun login karyawan sudah dinonaktifkan. Aktifkan akun terlebih dahulu.'),
+      { statusCode: 400, code: 'ACCOUNT_DISABLED' }
+    );
+  }
+
+  if (user.account_status === 'READY') {
+    // Check if there's already an active enrollment
+    const existingRes = await client.query(
+      `SELECT id FROM employee_face_enrollments WHERE employee_id = $1 AND status = 'ACTIVE' LIMIT 1`,
+      [employeeId]
+    );
+    if (existingRes.rows.length > 0) {
+      throw Object.assign(
+        new Error('Karyawan sudah memiliki foto wajah aktif. Gunakan "Enroll Ulang" untuk mengganti.'),
+        { statusCode: 409, code: 'FACE_ENROLLMENT_ALREADY_COMPLETED' }
+      );
+    }
+  }
+
+  if (user.account_status !== 'FACE_ENROLLMENT_REQUIRED' && user.account_status !== 'READY') {
+    throw Object.assign(
+      new Error(`Status akun '${user.account_status}' tidak mengizinkan pendaftaran wajah saat ini.`),
+      { statusCode: 409, code: 'INVALID_ACCOUNT_STATUS' }
+    );
+  }
+
+  // 3. Validate file
+  const { validateFacePhotoUpload, saveFaceEnrollmentPhoto, deleteFaceEnrollmentPhoto } = await import('../auth/faceEnrollmentStorageService');
+  const fileValidation = validateFacePhotoUpload(file);
+  if (!fileValidation.valid) {
+    const err: any = new Error(fileValidation.error || 'File foto tidak valid.');
+    err.statusCode = 400;
+    err.code = fileValidation.code || 'INVALID_FILE';
+    throw err;
+  }
+
+  // 4. Save photo to private storage
+  const savedPhoto = await saveFaceEnrollmentPhoto(
+    propertyId,
+    employeeId,
+    { mimetype: file.mimetype, size: file.size, buffer: file.buffer }
+  );
+
+  let enrollmentRow: any;
+
+  try {
+    // 5. Concurrency defense + insert enrollment
+    const lockCheck = await client.query(
+      `SELECT id FROM employee_face_enrollments WHERE employee_id = $1 AND status = 'ACTIVE' FOR UPDATE`,
+      [employeeId]
+    );
+
+    if (lockCheck.rows.length > 0) {
+      await deleteFaceEnrollmentPhoto(savedPhoto.storageKey).catch(() => {});
+      throw Object.assign(
+        new Error('Karyawan sudah memiliki foto wajah aktif.'),
+        { statusCode: 409, code: 'FACE_ENROLLMENT_ALREADY_COMPLETED' }
+      );
+    }
+
+    const insertRes = await client.query(
+      `INSERT INTO employee_face_enrollments (
+         property_id, employee_id, status,
+         reference_photo_storage_key, reference_photo_hash,
+         enrolled_at, enrolled_by_user_id, enrolled_by_name,
+         verification_provider, verification_version,
+         quality_status, review_status,
+         created_at, updated_at
+       ) VALUES (
+         $1, $2, 'ACTIVE',
+         $3, $4,
+         NOW(), $5, $6,
+         NULL, NULL,
+         'VALID_BASIC', 'AUTO_ACCEPTED',
+         NOW(), NOW()
+       )
+       RETURNING id, enrolled_at, quality_status, status`,
+      [
+        propertyId,
+        employeeId,
+        savedPhoto.storageKey,
+        savedPhoto.hash,
+        actor?.id || null,
+        actor?.name || 'HRD Admin'
+      ]
+    );
+
+    enrollmentRow = insertRes.rows[0];
+
+    // 6. Transition account status if needed
+    if (user.account_status === 'FACE_ENROLLMENT_REQUIRED') {
+      await client.query(
+        `UPDATE users SET account_status = 'READY', updated_at = NOW() WHERE id = $1`,
+        [user.id]
+      );
+    }
+
+    // 7. Audit log
+    await client.query(
+      `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        'HRD',
+        'FACE_ENROLLMENT_CREATED',
+        'EMPLOYEE_FACE_ENROLLMENT',
+        String(enrollmentRow.id),
+        JSON.stringify({
+          actor_user_id: actor?.id || null,
+          actor_name: actor?.name || 'HRD Admin',
+          employee_id: employeeId,
+          target_user_id: user.id,
+          old_account_status: user.account_status,
+          new_account_status: 'READY',
+          quality_status: 'VALID_BASIC',
+          enrollment_id: Number(enrollmentRow.id)
+        }),
+        actor?.name || 'HRD',
+        propertyId
+      ]
+    );
+  } catch (txErr: any) {
+    await deleteFaceEnrollmentPhoto(savedPhoto.storageKey).catch(() => {});
+    throw txErr;
+  }
+
+  return {
+    employee_id: employeeId,
+    enrollment_id: Number(enrollmentRow.id),
+    enrolled_at: new Date(enrollmentRow.enrolled_at).toISOString(),
+    quality_status: enrollmentRow.quality_status,
+    account_status: user.account_status === 'FACE_ENROLLMENT_REQUIRED' ? 'READY' : user.account_status,
+    message: 'Pendaftaran foto wajah karyawan berhasil.'
+  };
+}
+
+export interface FaceEnrollmentResetResult {
+  employee_id: number;
+  revoked_enrollment_id: number | null;
+  account_status: string;
+  message: string;
+}
+
+/**
+ * HRD admin resets an employee's face enrollment.
+ * Revokes the active enrollment and sets account back to FACE_ENROLLMENT_REQUIRED.
+ */
+export async function resetEmployeeFaceEnrollment(
+  client: PoolClient,
+  propertyId: number,
+  employeeId: number,
+  reason: string = 'HRD_ADMIN_RESET',
+  actor?: { id?: number; name?: string; role?: string }
+): Promise<FaceEnrollmentResetResult> {
+  // 1. Validate employee
+  const empRes = await client.query(
+    `SELECT id, full_name, is_active, status FROM hr_employees WHERE id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(empRes)) {
+    throw Object.assign(new Error(`Karyawan dengan ID ${employeeId} tidak ditemukan pada properti ini.`), {
+      statusCode: 404,
+      code: 'EMPLOYEE_NOT_FOUND'
+    });
+  }
+
+  // 2. Resolve login account
+  const userRes = await client.query(
+    `SELECT id, account_status, is_active FROM users WHERE employee_id = $1 AND property_id = $2`,
+    [employeeId, propertyId]
+  );
+
+  if (!hasRows(userRes)) {
+    throw Object.assign(
+      new Error('Karyawan belum memiliki akun login.'),
+      { statusCode: 400, code: 'NO_LOGIN_ACCOUNT' }
+    );
+  }
+
+  const user = userRes.rows[0];
+
+  // 3. Revoke active face enrollment
+  const revokeRes = await client.query(
+    `UPDATE employee_face_enrollments
+     SET status = 'REVOKED',
+         revoked_at = NOW(),
+         revoked_by_user_id = $1,
+         revocation_reason = $2,
+         updated_at = NOW()
+     WHERE employee_id = $3 AND property_id = $4 AND status = 'ACTIVE'
+     RETURNING id`,
+    [actor?.id || null, reason, employeeId, propertyId]
+  );
+
+  // 4. Update account status if the user is currently READY and had an active enrollment
+  let newAccountStatus = user.account_status;
+  if (revokeRes.rows.length > 0 && user.account_status === 'READY') {
+    newAccountStatus = 'FACE_ENROLLMENT_REQUIRED';
+    await client.query(
+      `UPDATE users SET account_status = 'FACE_ENROLLMENT_REQUIRED', updated_at = NOW() WHERE id = $1`,
+      [user.id]
+    );
+  }
+
+  // 5. Audit log
+  await client.query(
+    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      'HRD',
+      'FACE_ENROLLMENT_RESET',
+      'EMPLOYEE_FACE_ENROLLMENT',
+      revokeRes.rows.length > 0 ? String(revokeRes.rows[0].id) : String(employeeId),
+      JSON.stringify({
+        actor_user_id: actor?.id || null,
+        actor_name: actor?.name || 'HRD Admin',
+        employee_id: employeeId,
+        target_user_id: user.id,
+        revocation_reason: reason,
+        enrollments_revoked: revokeRes.rows.length,
+        old_account_status: user.account_status,
+        new_account_status: newAccountStatus
+      }),
+      actor?.name || 'HRD',
+      propertyId
+    ]
+  );
+
+  return {
+    employee_id: employeeId,
+    revoked_enrollment_id: revokeRes.rows.length > 0 ? Number(revokeRes.rows[0].id) : null,
+    account_status: newAccountStatus,
+    message: revokeRes.rows.length > 0
+      ? 'Enrollmen wajah berhasil direset. Karyawan perlu mendaftarkan ulang foto wajah.'
+      : 'Tidak ada enrollmen wajah aktif yang perlu direset.'
+  };
+}

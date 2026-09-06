@@ -184,6 +184,15 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
   const [deleteAccountHistoryDetails, setDeleteAccountHistoryDetails] = useState<string[]>([]);
 
+  // Face Enrollment Modal state
+  const [faceEnrollTarget, setFaceEnrollTarget] = useState<HrEmployee | null>(null);
+  const [faceEnrollModalMode, setFaceEnrollModalMode] = useState<'enroll' | 'reenroll' | null>(null);
+  const [faceEnrollFile, setFaceEnrollFile] = useState<File | null>(null);
+  const [faceEnrollPreview, setFaceEnrollPreview] = useState<string | null>(null);
+  const [faceEnrollSubmitting, setFaceEnrollSubmitting] = useState(false);
+  const [faceEnrollError, setFaceEnrollError] = useState<string | null>(null);
+  const faceEnrollInputRef = React.useRef<HTMLInputElement>(null);
+
   const isPlatformSuperAdmin = currentUser?.role === 'Super Admin';
 
   const [hardDeleteTarget, setHardDeleteTarget] = useState<HrEmployee | null>(null);
@@ -555,6 +564,74 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setDeleteAccountHistoryDetails([]);
   };
 
+  // Face Enrollment Handlers
+  const handleOpenFaceEnroll = (emp: HrEmployee, mode: 'enroll' | 'reenroll') => {
+    setFaceEnrollTarget(emp);
+    setFaceEnrollModalMode(mode);
+    setFaceEnrollFile(null);
+    setFaceEnrollPreview(null);
+    setFaceEnrollError(null);
+  };
+
+  const handleFaceEnrollFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFaceEnrollFile(file);
+    setFaceEnrollError(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => setFaceEnrollPreview(ev.target?.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  const handleExecuteFaceEnroll = async () => {
+    if (!faceEnrollTarget || !faceEnrollFile) return;
+    setFaceEnrollSubmitting(true);
+    setFaceEnrollError(null);
+    try {
+      const formData = new FormData();
+      formData.append('photo', faceEnrollFile);
+      formData.append('property_id', String(propertyId));
+
+      const token = localStorage.getItem('oak_hims_auth_token');
+      const res = await fetch(`/api/hrd/employees/${faceEnrollTarget.id}/face-enrollment`, {
+        method: 'POST',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mendaftarkan foto wajah');
+      setFaceEnrollTarget(null);
+      setFaceEnrollModalMode(null);
+      await fetchData();
+    } catch (err: any) {
+      setFaceEnrollError(err.message || 'Gagal mendaftarkan foto wajah');
+    } finally {
+      setFaceEnrollSubmitting(false);
+    }
+  };
+
+  const handleExecuteFaceReset = async (emp: HrEmployee) => {
+    if (!confirm(`Reset enrollmen wajah untuk "${emp.full_name}"? Karyawan perlu mendaftarkan ulang foto wajah.`)) return;
+    try {
+      const token = localStorage.getItem('oak_hims_auth_token');
+      const res = await fetch(`/api/hrd/employees/${emp.id}/face-enrollment/reset`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ property_id: propertyId, reason: 'HRD_ADMIN_RESET' })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Gagal mereset enrollmen wajah');
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Gagal mereset enrollmen wajah');
+    }
+  };
+
   const handleExecuteDeleteAccount = async () => {
     if (!deleteAccountTarget) return;
     setDeletingAccount(true);
@@ -630,6 +707,49 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     return (
       <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-orange-100 text-orange-800 border border-orange-200">
         Perlu Perbaikan
+      </span>
+    );
+  };
+
+  const getFaceEnrollmentBadge = (emp: HrEmployee) => {
+    if (!emp.user_id) {
+      return (
+        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+          —
+        </span>
+      );
+    }
+    if (emp.account_status === 'DISABLED' || emp.account_status === 'SUSPENDED') {
+      return (
+        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+          —
+        </span>
+      );
+    }
+    if (emp.account_status === 'FIRST_LOGIN_REQUIRED') {
+      return (
+        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200" title="Selesaikan pembuatan password terlebih dahulu">
+          Belum Enroll
+        </span>
+      );
+    }
+    if (emp.account_status === 'FACE_ENROLLMENT_REQUIRED') {
+      return (
+        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">
+          Belum Enroll
+        </span>
+      );
+    }
+    if (emp.account_status === 'READY') {
+      return (
+        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+          Terdaftar
+        </span>
+      );
+    }
+    return (
+      <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+        —
       </span>
     );
   };
@@ -921,6 +1041,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                       </th>
                       <th className="py-3 px-3">Departemen</th>
                       <th className="py-3 px-3 text-center">Status Akun</th>
+                      <th className="py-3 px-3 text-center">Face</th>
                       {employeeScopeTab === 'ARCHIVE' && (
                         <th className="py-3 px-3">Tanggal Diperbarui</th>
                       )}
@@ -967,6 +1088,9 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                           <td className="py-3 px-3 text-center">
                             {getAccountStatusBadge(emp)}
                           </td>
+                          <td className="py-3 px-3 text-center">
+                            {getFaceEnrollmentBadge(emp)}
+                          </td>
                           {employeeScopeTab === 'ARCHIVE' && (
                             <td className="py-3 px-3 text-slate-500 text-[11px]">
                               {emp.updated_at ? new Date(emp.updated_at).toLocaleDateString('id-ID') : '—'}
@@ -995,6 +1119,24 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                                       disabled: !emp.user_id,
                                       disabledReason: 'Tidak ada akun login',
                                       onClick: () => handleExecuteResetPassword(emp),
+                                    },
+                                    {
+                                      key: 'face-enroll',
+                                      label: emp.account_status === 'FACE_ENROLLMENT_REQUIRED' ? 'Enroll Wajah' : 'Enroll Ulang',
+                                      icon: HrdActionIcons.face,
+                                      tone: 'success',
+                                      disabled: !emp.user_id || emp.account_status === 'FIRST_LOGIN_REQUIRED' || emp.account_status === 'DISABLED' || emp.account_status === 'SUSPENDED',
+                                      disabledReason: !emp.user_id ? 'Tidak ada akun login' : emp.account_status === 'FIRST_LOGIN_REQUIRED' ? 'Selesaikan password terlebih dahulu' : 'Akun tidak aktif',
+                                      onClick: () => handleOpenFaceEnroll(emp, emp.account_status === 'FACE_ENROLLMENT_REQUIRED' ? 'enroll' : 'reenroll'),
+                                    },
+                                    {
+                                      key: 'face-reset',
+                                      label: 'Reset Enrollment',
+                                      icon: HrdActionIcons.faceReset,
+                                      tone: 'danger',
+                                      disabled: !emp.user_id || emp.account_status !== 'READY',
+                                      disabledReason: !emp.user_id ? 'Tidak ada akun login' : 'Tidak ada enrollmen aktif',
+                                      onClick: () => handleExecuteFaceReset(emp),
                                     },
                                     {
                                       key: 'deactivate',
@@ -1854,6 +1996,97 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                 className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer disabled:opacity-50"
               >
                 {hardDeleting ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Face Enrollment Modal */}
+      {faceEnrollTarget && faceEnrollModalMode && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <h3 className="font-serif font-bold text-base text-slate-900">
+                {faceEnrollModalMode === 'enroll' ? 'Enroll Wajah' : 'Enroll Ulang Wajah'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => { setFaceEnrollTarget(null); setFaceEnrollModalMode(null); }}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              {faceEnrollModalMode === 'enroll'
+                ? `Daftarkan foto wajah untuk ${faceEnrollTarget.full_name || faceEnrollTarget.username}.`
+                : `Daftarkan ulang foto wajah untuk ${faceEnrollTarget.full_name || faceEnrollTarget.username}. Enrollmen sebelumnya akan diganti.`
+              }
+            </p>
+
+            <div className="space-y-3">
+              <input
+                ref={faceEnrollInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={handleFaceEnrollFileChange}
+              />
+
+              {faceEnrollPreview ? (
+                <div className="relative">
+                  <img
+                    src={faceEnrollPreview}
+                    alt="Preview foto wajah"
+                    className="w-full h-48 object-cover rounded-xl border border-slate-200"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { setFaceEnrollFile(null); setFaceEnrollPreview(null); if (faceEnrollInputRef.current) faceEnrollInputRef.current.value = ''; }}
+                    className="absolute top-2 right-2 px-2 py-1 rounded-lg bg-white/90 text-[10px] font-bold text-slate-700 border border-slate-200 hover:bg-white cursor-pointer"
+                  >
+                    Ganti Foto
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => faceEnrollInputRef.current?.click()}
+                  className="w-full h-48 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center gap-2 text-slate-400 hover:border-[#1b4332] hover:text-[#1b4332] transition cursor-pointer"
+                >
+                  <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  <span className="text-xs font-bold">Ambil Foto / Pilih File</span>
+                  <span className="text-[10px]">JPEG, PNG, WEBP (maks. 5 MB)</span>
+                </button>
+              )}
+            </div>
+
+            {faceEnrollError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold">
+                ⚠ {faceEnrollError}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => { setFaceEnrollTarget(null); setFaceEnrollModalMode(null); }}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={!faceEnrollFile || faceEnrollSubmitting}
+                onClick={handleExecuteFaceEnroll}
+                className="flex-1 py-2.5 rounded-xl bg-[#1b4332] hover:bg-[#143326] disabled:opacity-50 text-white text-xs font-bold transition cursor-pointer"
+              >
+                {faceEnrollSubmitting ? 'Menyimpan...' : 'Simpan Enrollmen'}
               </button>
             </div>
           </div>

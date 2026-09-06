@@ -10,12 +10,25 @@ const ALLOWED_ONBOARDING_PATHS = [
   '/api/auth/complete-initial-password',
   '/api/auth/me',
   '/api/auth/logout',
-  '/api/auth/face-enrollment'
+  '/api/auth/face-enrollment',
+  '/api/employee-mobile/me/face-enrollment'
 ];
+
+// Paths that must be matched exactly (no subpath expansion via startsWith).
+// Face-enrollment endpoints must not leak into unrelated subpaths.
+const EXACT_MATCH_ONBOARDING_PATHS = new Set([
+  '/api/auth/face-enrollment',
+  '/api/employee-mobile/me/face-enrollment'
+]);
 
 export function isOnboardingAllowedPath(url: string): boolean {
   const cleanPath = (url || '').split('?')[0];
-  return ALLOWED_ONBOARDING_PATHS.some(p => cleanPath === p || cleanPath.startsWith(p + '/'));
+  return ALLOWED_ONBOARDING_PATHS.some(p => {
+    if (EXACT_MATCH_ONBOARDING_PATHS.has(p)) {
+      return cleanPath === p;
+    }
+    return cleanPath === p || cleanPath.startsWith(p + '/');
+  });
 }
 
 export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {

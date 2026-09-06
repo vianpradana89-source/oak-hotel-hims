@@ -50,6 +50,17 @@ export const HrdActionIcons = {
       <circle cx="12" cy="19" r="1.6" />
     </svg>
   ),
+  face: (
+    <svg className={ICON_CLASS} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 10h.01M15 10h.01M12 2a10 10 0 100 20 10 10 0 000-20z" />
+    </svg>
+  ),
+  faceReset: (
+    <svg className={ICON_CLASS} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+    </svg>
+  ),
 };
 
 export type HrdIconTone = 'neutral' | 'success' | 'warning' | 'danger';

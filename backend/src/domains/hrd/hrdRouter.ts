@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import multer from 'multer';
 import type { Pool } from 'pg';
 import {
   getHrdRolePolicies,
@@ -14,6 +15,9 @@ import {
   diagnoseEmployeeLoginAccount,
   repairEmployeeLoginAccount,
   resetEmployeePassword,
+  getEmployeeFaceEnrollmentStatus,
+  enrollEmployeeFace,
+  resetEmployeeFaceEnrollment,
   validateAndNormalizeCalendarDate,
   getDepartments,
   createDepartment,
@@ -603,6 +607,127 @@ export function createHrdRouter(pool: Pool): Router {
       await auditWhatsAppCredentialOpened(client, propertyId, employeeId, phone, actor);
       res.json({ status: 'OK', message: 'Audit recorded' });
     } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==========================================================================
+  // AUTH-HR-2C: FACE ENROLLMENT MANAGEMENT
+  // ==========================================================================
+
+  const faceUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }
+  });
+
+  // 11a. Get Employee Face Enrollment Status
+  // SECURITY: propertyId is derived exclusively from authenticated token.
+  // Never trust query/body-supplied property_id to prevent cross-property access.
+  router.get('/employees/:id/face-enrollment', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId((req as any).user?.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const status = await getEmployeeFaceEnrollmentStatus(client, propertyId, employeeId);
+      res.json({ status: 'OK', data: status });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 11b. HRD Enroll Employee Face
+  // SECURITY: propertyId derived exclusively from authenticated token; actor derived from JWT only.
+  router.post('/employees/:id/face-enrollment', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const propertyId = parsePropertyId((req as any).user?.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      // Handle multipart upload inline
+      faceUpload.single('photo')(req, res, async (uploadErr) => {
+        if (uploadErr) {
+          await client.query('ROLLBACK').catch(() => {});
+          client.release();
+          if (uploadErr instanceof multer.MulterError && uploadErr.code === 'LIMIT_FILE_SIZE') {
+            res.status(400).json({ status: 'ERROR', code: 'FILE_TOO_LARGE', message: 'Ukuran file melebihi batas maksimal 5 MB.' });
+          } else {
+            res.status(400).json({ status: 'ERROR', code: 'UPLOAD_ERROR', message: uploadErr.message || 'Gagal mengunggah file.' });
+          }
+          return;
+        }
+
+        if (!req.file) {
+          await client.query('ROLLBACK').catch(() => {});
+          client.release();
+          res.status(400).json({ status: 'ERROR', code: 'FILE_REQUIRED', message: 'Foto wajah wajib diunggah.' });
+          return;
+        }
+
+        try {
+          const actor = {
+            id: (req as any).user?.id,
+            name: (req as any).user?.full_name || 'HRD Admin',
+            role: (req as any).user?.role || 'HRD'
+          };
+
+          const result = await enrollEmployeeFace(client, propertyId, employeeId, req.file, actor);
+          await client.query('COMMIT');
+          res.json({ status: 'OK', data: result });
+        } catch (err: any) {
+          await client.query('ROLLBACK').catch(() => {});
+          const sc = err.statusCode || 500;
+          res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+        } finally {
+          client.release();
+        }
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
+    }
+  });
+
+  // 11c. HRD Reset Employee Face Enrollment
+  // SECURITY: propertyId and actor derived exclusively from authenticated JWT. No body fallbacks.
+  router.post('/employees/:id/face-enrollment/reset', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const propertyId = parsePropertyId((req as any).user?.property_id);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        throw Object.assign(new Error('ID Karyawan tidak valid.'), { statusCode: 400, code: 'INVALID_ID' });
+      }
+
+      const reason = req.body.reason || 'HRD_ADMIN_RESET';
+      const actor = {
+        id: (req as any).user?.id,
+        name: (req as any).user?.full_name || 'HRD Admin',
+        role: (req as any).user?.role || 'HRD'
+      };
+
+      const result = await resetEmployeeFaceEnrollment(client, propertyId, employeeId, reason, actor);
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
       const sc = err.statusCode || 500;
       res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL_ERROR', message: err.message });
     } finally {
