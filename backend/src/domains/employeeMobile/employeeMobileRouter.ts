@@ -8,6 +8,8 @@ import {
   getCanonicalEmployeeIdentity,
   presentCanonicalEmployeeIdentity
 } from './employeeMobileIdentity';
+import { listOwnPublishedSchedules } from '../schedule/scheduleService';
+import { addHotelDays, hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate';
 
 export function createEmployeeMobileRouter(pool: Pool): Router {
   const router = Router();
@@ -39,6 +41,63 @@ export function createEmployeeMobileRouter(pool: Pool): Router {
         status: 'ERROR',
         code: err.code || 'INTERNAL_ERROR',
         message: err.message || 'Gagal memuat identitas karyawan.'
+      });
+    }
+  });
+
+  // GET /api/employee-mobile/me/schedule
+  // Own published/changed schedule only. Identity is JWT-authoritative.
+  router.get('/me/schedule', async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      const identity = await getCanonicalEmployeeIdentity(pool, Number(user.id));
+      const hotelDate = hotelDateFromInstant(new Date());
+      const fromRaw = normalizeHotelDate(req.query.from);
+      const toRaw = normalizeHotelDate(req.query.to);
+      const from = fromRaw || addHotelDays(hotelDate, -7);
+      const to = toRaw || addHotelDays(hotelDate, 7);
+      if (!from || !to || from > to) {
+        res.status(400).json({
+          status: 'ERROR',
+          code: 'INVALID_DATE_RANGE',
+          message: 'Rentang tanggal jadwal tidak valid.'
+        });
+        return;
+      }
+      const start = Date.parse(`${from}T00:00:00Z`);
+      const end = Date.parse(`${to}T00:00:00Z`);
+      const inclusiveDays = Math.round((end - start) / 86400000) + 1;
+      if (inclusiveDays > 31) {
+        res.status(400).json({
+          status: 'ERROR',
+          code: 'DATE_RANGE_TOO_LARGE',
+          message: 'Rentang jadwal maksimal 31 hari.'
+        });
+        return;
+      }
+
+      const rows = await listOwnPublishedSchedules(pool, {
+        propertyId: identity.propertyId,
+        employeeId: identity.employeeId,
+        from,
+        to
+      });
+      res.json({
+        status: 'OK',
+        data: {
+          employee_id: identity.employeeId,
+          property_id: identity.propertyId,
+          from,
+          to,
+          schedules: rows
+        }
+      });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Gagal memuat jadwal kerja.'
       });
     }
   });

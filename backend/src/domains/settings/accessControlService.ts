@@ -46,8 +46,8 @@ const RESOURCE_PERMISSION_KEYS: Record<string, Record<AccessAction, string[]>> =
     delete: ['housekeeping.delete'],
   },
   'HRD': {
-    view: ['hrd.employees.view'],
-    edit: ['hrd.employees.create', 'hrd.employees.edit'],
+    view: ['hrd.employees.view', 'hrd.attendance.view'],
+    edit: ['hrd.employees.create', 'hrd.employees.edit', 'hrd.attendance.edit'],
     delete: ['hrd.employees.delete'],
   },
   'POS': {

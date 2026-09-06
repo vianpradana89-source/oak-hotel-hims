@@ -28,6 +28,7 @@
     "test:attendance-camera": "node test/attendance_camera_test.ts",
     "test:housekeeping-mobile-checklist": "node test/housekeeping_mobile_checklist_test.ts",
     "test:identity-document-ui": "node test/identity_document_ui_test.ts",
+    "test:attendance-schedule-gate-ui": "node test/attendance_schedule_gate_ui_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

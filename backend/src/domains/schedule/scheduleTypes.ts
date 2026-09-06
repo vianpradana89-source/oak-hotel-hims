@@ -149,6 +149,19 @@ export interface AttendanceScheduleResult {
   shift_template: WorkShiftTemplate | null;
 }
 
+export interface AttendanceWorkCycleQuery {
+  propertyId: number;
+  employeeId: number;
+  now?: Date;
+}
+
+export interface AttendanceWorkCycleResult {
+  found: boolean;
+  hotel_date: string;
+  schedule: EmployeeWorkSchedule | null;
+  shift_template: WorkShiftTemplate | null;
+}
+
 export interface MonthlyRosterQuery {
   property_id: number;
   year: number;

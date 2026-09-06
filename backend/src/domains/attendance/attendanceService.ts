@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import {
+  AttendanceEligibility,
   PropertyAttendanceSettings,
   EmployeeAttendanceRecord,
   AttendanceStatusResponse,
@@ -10,13 +11,19 @@ import {
 } from './attendanceTypes';
 import { isFeatureEnabled } from '../features/featureService';
 import { hotelDateFromInstant } from '../../utils/hotelDate';
+import { resolveAttendanceWorkCycle } from '../schedule/scheduleService';
+import type { AttendanceWorkCycleResult } from '../schedule/scheduleTypes';
 import { ATTENDANCE_FACE_NOT_PROCESSED, type SelfAttendanceActor } from './attendanceIdentity';
+import {
+  findOpenAttendanceWorkDate,
+  resolveAttendanceEligibility,
+  scheduleGateHttpError
+} from './attendanceEligibility';
 import {
   deleteAttendanceSelfie,
   getLegacyAttendancePhotoFilePath,
   saveAttendanceSelfie
 } from './attendancePhotoStorageService';
-
 /**
  * Haversine formula to calculate distance between two coordinates in meters.
  */
@@ -64,6 +71,7 @@ export function formatAttendanceSettings(row: any): PropertyAttendanceSettings {
     geofence_radius_meters: Number(row.geofence_radius_meters || 100),
     outside_geofence_policy: row.outside_geofence_policy || 'ALLOW_WITH_REASON',
     exempt_roles: exemptRoles,
+    require_published_schedule_for_attendance: Boolean(row.require_published_schedule_for_attendance),
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -86,8 +94,9 @@ export async function getAttendanceSettings(
     `INSERT INTO property_attendance_settings (
        property_id, attendance_enabled, require_employee_attendance,
        require_checkin_photo, require_checkout_photo, geofence_enabled,
-       geofence_radius_meters, outside_geofence_policy
-     ) VALUES ($1, TRUE, TRUE, TRUE, FALSE, FALSE, 100, 'ALLOW_WITH_REASON')
+       geofence_radius_meters, outside_geofence_policy,
+       require_published_schedule_for_attendance
+     ) VALUES ($1, TRUE, TRUE, TRUE, FALSE, FALSE, 100, 'ALLOW_WITH_REASON', FALSE)
      ON CONFLICT (property_id) DO UPDATE SET updated_at = NOW()
      RETURNING *`,
     [propertyId]
@@ -113,14 +122,17 @@ export async function updateAttendanceSettings(
   const geofenceRadius = patch.geofence_radius_meters !== undefined ? Number(patch.geofence_radius_meters) : current.geofence_radius_meters;
   const outsidePolicy = patch.outside_geofence_policy || current.outside_geofence_policy;
   const exemptRoles = patch.exempt_roles || current.exempt_roles;
+  const requirePublishedSchedule = typeof patch.require_published_schedule_for_attendance === 'boolean'
+    ? patch.require_published_schedule_for_attendance
+    : current.require_published_schedule_for_attendance;
 
   const res = await client.query(
     `INSERT INTO property_attendance_settings (
        property_id, attendance_enabled, require_employee_attendance,
        require_checkin_photo, require_checkout_photo, geofence_enabled,
        geofence_latitude, geofence_longitude, geofence_radius_meters,
-       outside_geofence_policy, exempt_roles, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+       outside_geofence_policy, exempt_roles, require_published_schedule_for_attendance, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
      ON CONFLICT (property_id) DO UPDATE SET
        attendance_enabled = EXCLUDED.attendance_enabled,
        require_employee_attendance = EXCLUDED.require_employee_attendance,
@@ -132,6 +144,7 @@ export async function updateAttendanceSettings(
        geofence_radius_meters = EXCLUDED.geofence_radius_meters,
        outside_geofence_policy = EXCLUDED.outside_geofence_policy,
        exempt_roles = EXCLUDED.exempt_roles,
+       require_published_schedule_for_attendance = EXCLUDED.require_published_schedule_for_attendance,
        updated_at = NOW()
      RETURNING *`,
     [
@@ -145,7 +158,8 @@ export async function updateAttendanceSettings(
       geofenceLng,
       geofenceRadius,
       outsidePolicy,
-      JSON.stringify(exemptRoles)
+      JSON.stringify(exemptRoles),
+      requirePublishedSchedule
     ]
   );
 
@@ -159,13 +173,43 @@ export async function updateAttendanceSettings(
       'UPDATE_ATTENDANCE_SETTINGS',
       'PROPERTY_ATTENDANCE_SETTINGS',
       Number(propertyId),
-      JSON.stringify({ previous: current, updated: updatedSettings }),
+      JSON.stringify({
+        previous: current,
+        updated: updatedSettings,
+        changed_by: actor?.id || null,
+        changed_at: new Date().toISOString()
+      }),
       actor?.name || 'Admin',
       propertyId
     ]
   );
 
   return updatedSettings;
+}
+
+async function loadRecordsForAttendanceDate(
+  db: Pool | PoolClient,
+  propertyId: number,
+  employeeId: number,
+  attendanceDate: string
+): Promise<{ checkIn: EmployeeAttendanceRecord | null; checkOut: EmployeeAttendanceRecord | null }> {
+  const recordsRes = await db.query(
+    `SELECT * FROM employee_attendance_records
+     WHERE property_id = $1 AND employee_id = $2 AND attendance_date = $3
+     ORDER BY id ASC`,
+    [propertyId, employeeId, attendanceDate]
+  );
+
+  let checkIn: EmployeeAttendanceRecord | null = null;
+  let checkOut: EmployeeAttendanceRecord | null = null;
+  for (const r of recordsRes.rows) {
+    if (r.attendance_type === 'CHECK_IN' && !checkIn) {
+      checkIn = formatAttendanceRecord(r);
+    } else if (r.attendance_type === 'CHECK_OUT') {
+      checkOut = formatAttendanceRecord(r);
+    }
+  }
+  return { checkIn, checkOut };
 }
 
 export async function getEmployeeAttendanceStatus(
@@ -175,8 +219,10 @@ export async function getEmployeeAttendanceStatus(
   employeeRole?: string
 ): Promise<AttendanceStatusResponse> {
   const settings = await getAttendanceSettings(db, propertyId);
-  const hotelDate = hotelDateFromInstant(new Date());
-  const serverTime = new Date().toISOString();
+  const now = new Date();
+  const hotelDate = hotelDateFromInstant(now);
+  const serverTime = now.toISOString();
+  const scheduleRequired = Boolean(settings.require_published_schedule_for_attendance);
 
   let employeeName = '';
   let department = '';
@@ -216,23 +262,37 @@ export async function getEmployeeAttendanceStatus(
 
   let checkInRecord: EmployeeAttendanceRecord | null = null;
   let checkOutRecord: EmployeeAttendanceRecord | null = null;
+  let cycle: AttendanceWorkCycleResult | null = null;
+  let alreadyClockedIn = false;
 
   if (employeeId) {
-    const recordsRes = await db.query(
-      `SELECT * FROM employee_attendance_records
-       WHERE property_id = $1 AND employee_id = $2 AND attendance_date = $3
-       ORDER BY id ASC`,
-      [propertyId, employeeId, hotelDate]
-    );
+    cycle = scheduleRequired
+      ? await resolveAttendanceWorkCycle(db, { propertyId, employeeId, now })
+      : null;
+    const lookupDate = scheduleRequired && cycle?.schedule?.work_date
+      ? cycle.schedule.work_date
+      : hotelDate;
+    const records = await loadRecordsForAttendanceDate(db, propertyId, employeeId, lookupDate);
+    checkInRecord = records.checkIn;
+    checkOutRecord = records.checkOut;
+    alreadyClockedIn = Boolean(checkInRecord);
 
-    for (const r of recordsRes.rows) {
-      if (r.attendance_type === 'CHECK_IN' && !checkInRecord) {
-        checkInRecord = formatAttendanceRecord(r);
-      } else if (r.attendance_type === 'CHECK_OUT') {
-        checkOutRecord = formatAttendanceRecord(r);
+    if (scheduleRequired && !alreadyClockedIn) {
+      const openDate = await findOpenAttendanceWorkDate(db, propertyId, employeeId);
+      if (openDate) {
+        const openRecords = await loadRecordsForAttendanceDate(db, propertyId, employeeId, openDate);
+        checkInRecord = openRecords.checkIn;
+        checkOutRecord = null;
+        alreadyClockedIn = Boolean(openRecords.checkIn);
       }
     }
   }
+
+  const attendanceEligibility: AttendanceEligibility = resolveAttendanceEligibility({
+    settings,
+    alreadyClockedIn,
+    cycle
+  });
 
   return {
     property_id: propertyId,
@@ -252,8 +312,19 @@ export async function getEmployeeAttendanceStatus(
     has_checked_out: Boolean(checkOutRecord),
     check_in_record: checkInRecord,
     check_out_record: checkOutRecord,
-    settings: settings
+    settings: settings,
+    attendance_eligibility: attendanceEligibility
   };
+}
+
+function formatAttendanceDateValue(raw: unknown): string {
+  if (typeof raw === 'string') {
+    return raw.slice(0, 10);
+  }
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return hotelDateFromInstant(raw, 'Asia/Jakarta') || hotelDateFromInstant(raw);
+  }
+  return String(raw || '').slice(0, 10);
 }
 
 export function formatAttendanceRecord(row: any): EmployeeAttendanceRecord {
@@ -264,6 +335,7 @@ export function formatAttendanceRecord(row: any): EmployeeAttendanceRecord {
     id: Number(row.id),
     property_id: Number(row.property_id),
     employee_id: row.employee_id != null ? Number(row.employee_id) : null,
+    attendance_date: formatAttendanceDateValue(row.attendance_date),
     photo_storage_key: row.photo_storage_key || null,
     photo_hash: row.photo_hash || null,
     photo_mime_type: row.photo_mime_type || null,
@@ -411,7 +483,8 @@ export async function recordAttendance(
   }
 
   const settings = await getAttendanceSettings(pool, propertyId);
-  const hotelDate = hotelDateFromInstant(new Date());
+  const now = new Date();
+  const hotelDate = hotelDateFromInstant(now);
   const attType = payload.attendance_type;
 
   if (attType !== 'CHECK_IN' && attType !== 'CHECK_OUT') {
@@ -424,12 +497,23 @@ export async function recordAttendance(
   const employeeId = actor.employeeId;
   const employeeName = actor.employeeName;
   const department = actor.department || payload.department || 'Housekeeping';
+  const scheduleRequired = Boolean(settings.require_published_schedule_for_attendance);
+  const cycle = scheduleRequired
+    ? await resolveAttendanceWorkCycle(pool, { propertyId, employeeId, now })
+    : null;
+  let workDate = hotelDate;
+  if (attType === 'CHECK_IN' && scheduleRequired && cycle?.schedule?.work_date) {
+    workDate = cycle.schedule.work_date;
+  }
+  if (attType === 'CHECK_OUT' && scheduleRequired) {
+    workDate = (await findOpenAttendanceWorkDate(pool, propertyId, employeeId)) || hotelDate;
+  }
 
   if (attType === 'CHECK_IN') {
     const existingCheckIn = await pool.query(
       `SELECT * FROM employee_attendance_records
        WHERE property_id = $1 AND employee_id = $2 AND attendance_date = $3 AND attendance_type = 'CHECK_IN'`,
-      [propertyId, employeeId, hotelDate]
+      [propertyId, employeeId, workDate]
     );
     if (existingCheckIn.rows.length > 0) {
       const existing = formatAttendanceRecord(existingCheckIn.rows[0]);
@@ -439,7 +523,7 @@ export async function recordAttendance(
         await upsertCanonicalAttendance(client, {
           propertyId,
           employeeId,
-          workDate: hotelDate,
+          workDate,
           attendanceType: 'CHECK_IN',
           photoStorageKey: existing.photo_storage_key,
           photoHash: existing.photo_hash || null,
@@ -453,6 +537,15 @@ export async function recordAttendance(
         client.release();
       }
       return existing;
+    }
+
+    const eligibility = resolveAttendanceEligibility({
+      settings,
+      alreadyClockedIn: false,
+      cycle
+    });
+    if (!eligibility.can_clock_in) {
+      scheduleGateHttpError(eligibility.reason_code);
     }
   }
 
@@ -545,6 +638,52 @@ export async function recordAttendance(
   try {
     await client.query('BEGIN');
 
+    if (attType === 'CHECK_IN') {
+      const lockedExisting = await client.query(
+        `SELECT * FROM employee_attendance_records
+         WHERE property_id = $1 AND employee_id = $2 AND attendance_date = $3 AND attendance_type = 'CHECK_IN'
+         FOR UPDATE`,
+        [propertyId, employeeId, workDate]
+      );
+      await client.query(
+        `SELECT id FROM employee_attendance
+         WHERE property_id = $1 AND employee_id = $2 AND work_date = $3
+         FOR UPDATE`,
+        [propertyId, employeeId, workDate]
+      );
+
+      if (lockedExisting.rows.length > 0) {
+        const existing = formatAttendanceRecord(lockedExisting.rows[0]);
+        await upsertCanonicalAttendance(client, {
+          propertyId,
+          employeeId,
+          workDate,
+          attendanceType: 'CHECK_IN',
+          photoStorageKey: existing.photo_storage_key,
+          photoHash: existing.photo_hash || null,
+          geofenceResult: existing.geofence_result
+        });
+        await client.query('COMMIT');
+        if (photoStorageKey) {
+          await deleteAttendanceSelfie(photoStorageKey).catch(() => {});
+        }
+        return existing;
+      }
+
+      const lockedSettings = await getAttendanceSettings(client, propertyId);
+      const lockedCycle = lockedSettings.require_published_schedule_for_attendance
+        ? await resolveAttendanceWorkCycle(client, { propertyId, employeeId, now })
+        : null;
+      const lockedEligibility = resolveAttendanceEligibility({
+        settings: lockedSettings,
+        alreadyClockedIn: false,
+        cycle: lockedCycle
+      });
+      if (!lockedEligibility.can_clock_in) {
+        scheduleGateHttpError(lockedEligibility.reason_code);
+      }
+    }
+
     const insertRes = await client.query(
       `INSERT INTO employee_attendance_records (
          property_id, employee_id, employee_name, department,
@@ -564,7 +703,7 @@ export async function recordAttendance(
         employeeId,
         employeeName,
         department,
-        hotelDate,
+        workDate,
         attType,
         lat,
         lng,
@@ -586,7 +725,7 @@ export async function recordAttendance(
     await upsertCanonicalAttendance(client, {
       propertyId,
       employeeId,
-      workDate: hotelDate,
+      workDate,
       attendanceType: attType,
       photoStorageKey,
       photoHash,
@@ -610,6 +749,7 @@ export async function recordAttendance(
           geofence_result: geofenceResult,
           distance_meters: distanceMeters,
           hotel_date: hotelDate,
+          work_date: workDate,
           photo_storage_key: photoStorageKey,
           photo_hash: photoHash,
           face_status: ATTENDANCE_FACE_NOT_PROCESSED,

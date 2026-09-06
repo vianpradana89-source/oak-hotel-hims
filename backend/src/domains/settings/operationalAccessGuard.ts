@@ -56,6 +56,8 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/schedule/, resources: ['HRD'] },
   { pattern: /^\/api\/users/, resources: ['HRD'] },
 
+  { pattern: /^\/api\/attendance\/settings$/, resources: ['HRD', 'Employee Mobile'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/attendance\/settings$/, resources: ['HRD'], action: 'edit', methods: ['PATCH', 'PUT'] },
   { pattern: /^\/api\/attendance\/(check-in|check-out)$/, resources: ['Employee Mobile'], action: 'view' },
   { pattern: /^\/api\/attendance/, resources: ['Employee Mobile'] },
 

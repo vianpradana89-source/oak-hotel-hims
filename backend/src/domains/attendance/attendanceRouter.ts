@@ -14,6 +14,7 @@ import { RecordAttendancePayload } from './attendanceTypes';
 import type { AuthUserPayload } from '../auth/authService';
 import {
   canAdministerAttendancePhotos,
+  canChangeAttendanceSettings,
   loadAuthenticatedAttendanceUser,
   parseOptionalPositiveInt,
   rejectEmployeeImpersonation,
@@ -69,6 +70,16 @@ export function createAttendanceRouter(pool: Pool): Router {
         isPlatformSuperAdmin: authUser.isPlatformSuperAdmin,
         allowAdminPropertyOverride: true
       });
+      const canMutate = await canChangeAttendanceSettings(pool, authUser.userId, propertyId);
+      if (!canMutate) {
+        await client.query('ROLLBACK');
+        res.status(403).json({
+          status: 'ERROR',
+          code: 'FORBIDDEN',
+          message: 'Akses ditolak. Perubahan pengaturan absensi memerlukan hak HRD edit atau Platform Super Admin.'
+        });
+        return;
+      }
       const actor = {
         id: authUser.userId,
         name: authUser.fullName,

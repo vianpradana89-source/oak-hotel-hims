@@ -4720,6 +4720,25 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // AUTH-HR-2D2: published-schedule attendance gate (additive toggle).
+    // Default FALSE preserves current Clock In behavior.
+    // ------------------------------------------------------------------
+    const attendanceScheduleGateCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'auth_hr2d2_require_published_schedule_attendance_v1'`
+    );
+    if ((attendanceScheduleGateCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE property_attendance_settings
+          ADD COLUMN IF NOT EXISTS require_published_schedule_for_attendance
+          BOOLEAN NOT NULL DEFAULT FALSE;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('auth_hr2d2_require_published_schedule_attendance_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

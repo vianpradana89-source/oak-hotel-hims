@@ -22,8 +22,28 @@ export interface PropertyAttendanceSettings {
   geofence_radius_meters: number;
   outside_geofence_policy: OutsideGeofencePolicy;
   exempt_roles: string[];
+  require_published_schedule_for_attendance: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+export type AttendanceEligibilityReason =
+  | 'SCHEDULE_NOT_REQUIRED'
+  | 'ELIGIBLE'
+  | 'NO_PUBLISHED_SCHEDULE'
+  | 'NON_WORKING_DAY'
+  | 'ALREADY_CLOCKED_IN';
+
+export interface AttendanceEligibility {
+  can_clock_in: boolean;
+  reason_code: AttendanceEligibilityReason;
+  schedule_required: boolean;
+  schedule_found: boolean;
+  work_date: string | null;
+  shift_start: string | null;
+  shift_end: string | null;
+  schedule_status: ScheduleStatus | null;
+  work_status: WorkStatusType | null;
 }
 
 export interface EmployeeAttendanceRecord {
@@ -72,6 +92,7 @@ export interface AttendanceStatusResponse {
   check_in_record: EmployeeAttendanceRecord | null;
   check_out_record: EmployeeAttendanceRecord | null;
   settings: PropertyAttendanceSettings;
+  attendance_eligibility: AttendanceEligibility;
 }
 
 export interface RecordAttendancePayload {

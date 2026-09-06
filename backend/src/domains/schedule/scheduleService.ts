@@ -1,5 +1,6 @@
 // backend/src/domains/schedule/scheduleService.ts
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { hotelDateFromInstant } from '../../utils/hotelDate';
 import type {
   CreateShiftTemplatePayload,
   UpdateShiftTemplatePayload,
@@ -15,6 +16,8 @@ import type {
   PublishScheduleResult,
   GetScheduleForAttendanceQuery,
   AttendanceScheduleResult,
+  AttendanceWorkCycleQuery,
+  AttendanceWorkCycleResult,
   MonthlyRosterQuery,
   MonthlyRosterResponse,
   MonthlyRosterEmployee,
@@ -98,7 +101,7 @@ function buildScheduledTimestamps(
   return { scheduled_start_at, scheduled_end_at };
 }
 
-async function fetchPropertyTimezone(client: PoolClient, propertyId: number): Promise<string> {
+async function fetchPropertyTimezone(client: Pool | PoolClient, propertyId: number): Promise<string> {
   const res = await client.query( 'SELECT timezone FROM properties WHERE id = $1', [propertyId]);
   return (res.rows[0]?.timezone as string) || 'Asia/Jakarta';
 }
@@ -1495,6 +1498,140 @@ export async function getScheduleForAttendance(
   }
 
   return { found: true, schedule, shift_template: shiftTemplate };
+}
+
+function intervalContainsNow(
+  startAt: string | null | undefined,
+  endAt: string | null | undefined,
+  now: Date
+): boolean {
+  if (!startAt || !endAt) return false;
+  const start = new Date(startAt).getTime();
+  const end = new Date(endAt).getTime();
+  const current = now.getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return false;
+  return current >= start && current <= end;
+}
+
+export async function resolveAttendanceWorkCycle(
+  db: Pool | PoolClient,
+  query: AttendanceWorkCycleQuery
+): Promise<AttendanceWorkCycleResult> {
+  const propertyId = Number(query.propertyId);
+  const employeeId = Number(query.employeeId);
+  const now = query.now instanceof Date ? query.now : new Date();
+  const timezone = await fetchPropertyTimezone(db, propertyId);
+  const hotelDate = hotelDateFromInstant(now, timezone);
+  const previousDate = addDays(hotelDate, -1);
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0 || !Number.isInteger(employeeId) || employeeId <= 0 || !hotelDate) {
+    return { found: false, hotel_date: hotelDate || '', schedule: null, shift_template: null };
+  }
+
+  const schedRes = await db.query(
+    `SELECT id, property_id, employee_id, work_date::text AS work_date, shift_template_id,
+            schedule_status, work_status, scheduled_start_at, scheduled_end_at,
+            department_snapshot, position_snapshot, published_at, published_by_user_id,
+            published_by_name, notes, created_by_user_id, updated_by_user_id,
+            created_at, updated_at
+     FROM employee_work_schedules
+     WHERE property_id = $1
+       AND employee_id = $2
+       AND work_date IN ($3::date, $4::date)
+       AND schedule_status IN ('PUBLISHED', 'CHANGED')
+     ORDER BY work_date ASC`,
+    [propertyId, employeeId, previousDate, hotelDate]
+  );
+
+  const schedules = schedRes.rows.map((row: any) => formatSchedule(row));
+  const templateIds = [...new Set(schedules.map((row) => row.shift_template_id).filter((id): id is number => id != null && Number.isInteger(id) && id > 0))];
+  const templates = new Map<number, WorkShiftTemplate>();
+  if (templateIds.length > 0) {
+    const tmplRes = await db.query(
+      'SELECT * FROM work_shift_templates WHERE property_id = $1 AND id = ANY($2::int[])',
+      [propertyId, templateIds]
+    );
+    for (const row of tmplRes.rows) {
+      templates.set(Number(row.id), formatShiftTemplate(row));
+    }
+  }
+
+  for (const schedule of schedules) {
+    if (
+      schedule.work_status === 'WORK' &&
+      (!schedule.scheduled_start_at || !schedule.scheduled_end_at) &&
+      schedule.shift_template_id
+    ) {
+      const template = templates.get(Number(schedule.shift_template_id));
+      if (template) {
+        const timestamps = buildScheduledTimestamps(
+          schedule.work_date,
+          template.start_time,
+          template.end_time,
+          template.crosses_midnight,
+          timezone
+        );
+        schedule.scheduled_start_at = timestamps.scheduled_start_at;
+        schedule.scheduled_end_at = timestamps.scheduled_end_at;
+      }
+    }
+  }
+
+  const today = schedules.find((row) => row.work_date === hotelDate) || null;
+  const yesterday = schedules.find((row) => row.work_date === previousDate) || null;
+
+  const containing = [yesterday, today].filter((row): row is EmployeeWorkSchedule => {
+    return !!row && row.work_status === 'WORK' && intervalContainsNow(row.scheduled_start_at, row.scheduled_end_at, now);
+  });
+  const chosen = containing.find((row) => row.work_date === previousDate) || containing[0] || today || null;
+  if (!chosen) {
+    return { found: false, hotel_date: hotelDate, schedule: null, shift_template: null };
+  }
+
+  const shiftTemplate = chosen.shift_template_id ? templates.get(Number(chosen.shift_template_id)) || null : null;
+  return { found: true, hotel_date: hotelDate, schedule: chosen, shift_template: shiftTemplate };
+}
+
+export async function listOwnPublishedSchedules(
+  db: Pool | PoolClient,
+  params: { propertyId: number; employeeId: number; from: string; to: string }
+): Promise<Array<{
+  work_date: string;
+  schedule_status: string;
+  work_status: string;
+  shift_start: string | null;
+  shift_end: string | null;
+  shift_code: string | null;
+  shift_name: string | null;
+}>> {
+  const res = await db.query(
+    `SELECT s.work_date::text AS work_date,
+            s.schedule_status,
+            s.work_status,
+            s.scheduled_start_at,
+            s.scheduled_end_at,
+            t.code AS shift_code,
+            t.name AS shift_name
+     FROM employee_work_schedules s
+     LEFT JOIN work_shift_templates t ON t.id = s.shift_template_id AND t.property_id = s.property_id
+     WHERE s.property_id = $1
+       AND s.employee_id = $2
+       AND s.work_date >= $3::date
+       AND s.work_date <= $4::date
+       AND s.schedule_status IN ('PUBLISHED', 'CHANGED')
+     ORDER BY s.work_date ASC`,
+    [params.propertyId, params.employeeId, params.from, params.to]
+  );
+
+  return res.rows.map((row: any) => ({
+    work_date: String(row.work_date).slice(0, 10),
+    schedule_status: String(row.schedule_status),
+    work_status: String(row.work_status),
+    shift_start: row.scheduled_start_at || null,
+    shift_end: row.scheduled_end_at || null,
+    shift_code: row.shift_code || null,
+    shift_name: row.shift_name || null
+  }));
 }
 
 export async function getScheduleAuditHistory(

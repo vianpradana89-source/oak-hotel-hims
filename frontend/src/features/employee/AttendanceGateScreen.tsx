@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
+import { attendanceEligibilityReasonText, isClockInDisabledByServer, normalizeAttendanceStatus } from './attendanceEligibilityUi';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import {
   EMPLOYEE_UNLINKED_MESSAGE,
@@ -148,7 +149,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
-        setStatusData(data.data);
+        setStatusData(normalizeAttendanceStatus(data.data));
         if (data.data.has_checked_in) {
           setSuccessRecorded(true);
         }
@@ -287,7 +288,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
   }, []);
 
   useEffect(() => {
-    if (loading || successRecorded || !canPermitClockIn(identity)) return;
+    if (loading || successRecorded || !canPermitClockIn(identity) || isClockInDisabledByServer(statusData?.attendance_eligibility)) return;
     void startCameraRef.current();
     return () => {
       cameraGuardRef.current.invalidate();
@@ -296,7 +297,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
       stopMediaStream(streamRef.current);
       streamRef.current = null;
     };
-  }, [loading, successRecorded, identity.employeeId, identity.propertyId]);
+  }, [loading, successRecorded, identity.employeeId, identity.propertyId, statusData?.attendance_eligibility?.can_clock_in]);
 
   const capturePhoto = () => {
     const video = videoRef.current;
@@ -332,6 +333,10 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
   const handleCheckIn = async () => {
     if (!identity.employeeId || !identity.employeeName) {
       setErrorMsg(EMPLOYEE_UNLINKED_MESSAGE);
+      return;
+    }
+    if (isClockInDisabledByServer(statusData?.attendance_eligibility)) {
+      setErrorMsg(attendanceEligibilityReasonText(statusData?.attendance_eligibility) || 'Clock In tidak tersedia.');
       return;
     }
     try {
@@ -569,6 +574,11 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           />
         </div>
 
+        {attendanceEligibilityReasonText(statusData?.attendance_eligibility) && (
+          <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-400/40 text-amber-100 text-xs">
+            {attendanceEligibilityReasonText(statusData?.attendance_eligibility)}
+          </div>
+        )}
         {errorMsg && (
           <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
@@ -584,6 +594,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           disabled={
             !canPermitClockIn(identity)
             || submitting
+            || isClockInDisabledByServer(statusData?.attendance_eligibility)
             || !canSubmitAttendanceSelfie({
               requirePhoto: Boolean(statusData?.settings.require_checkin_photo),
               photoBlob,
@@ -593,6 +604,7 @@ export const AttendanceGateScreen: React.FC<AttendanceGateScreenProps> = ({
           className={`oak-attendance-gate__submit shadow-xl transition-all flex items-center justify-center gap-2 ${
             !canPermitClockIn(identity)
             || submitting
+            || isClockInDisabledByServer(statusData?.attendance_eligibility)
             || !canSubmitAttendanceSelfie({
               requirePhoto: Boolean(statusData?.settings.require_checkin_photo),
               photoBlob,

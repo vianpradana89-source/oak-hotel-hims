@@ -18,7 +18,27 @@ export interface PropertyAttendanceSettings {
   geofence_radius_meters: number;
   outside_geofence_policy: OutsideGeofencePolicy;
   exempt_roles: string[];
+  require_published_schedule_for_attendance?: boolean;
   updated_at?: string;
+}
+
+export type AttendanceEligibilityReason =
+  | 'SCHEDULE_NOT_REQUIRED'
+  | 'ELIGIBLE'
+  | 'NO_PUBLISHED_SCHEDULE'
+  | 'NON_WORKING_DAY'
+  | 'ALREADY_CLOCKED_IN';
+
+export interface AttendanceEligibility {
+  can_clock_in: boolean;
+  reason_code: AttendanceEligibilityReason;
+  schedule_required: boolean;
+  schedule_found: boolean;
+  work_date: string | null;
+  shift_start: string | null;
+  shift_end: string | null;
+  schedule_status: 'DRAFT' | 'PUBLISHED' | 'CHANGED' | 'CANCELLED' | null;
+  work_status: 'WORK' | 'OFF' | 'LEAVE' | 'SICK' | 'PERMISSION' | 'HOLIDAY' | 'OTHER' | null;
 }
 
 export interface EmployeeAttendanceStatus {
@@ -30,10 +50,13 @@ export interface EmployeeAttendanceStatus {
   has_checked_out: boolean;
   today_check_in: EmployeeAttendanceRecord | null;
   today_check_out: EmployeeAttendanceRecord | null;
+  check_in_record?: EmployeeAttendanceRecord | null;
+  check_out_record?: EmployeeAttendanceRecord | null;
   hotel_date: string;
   server_time: string;
   timezone: string;
   settings: PropertyAttendanceSettings;
+  attendance_eligibility?: AttendanceEligibility;
 }
 
 export interface EmployeeAttendanceRecord {

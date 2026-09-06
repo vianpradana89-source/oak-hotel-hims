@@ -3,6 +3,13 @@ import { AttendanceGateScreen } from './AttendanceGateScreen';
 import { HousekeepingMobileCrewView } from './HousekeepingMobileCrewView';
 import { EmployeeNotificationCenter } from './EmployeeNotificationCenter';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
+import {
+  attendanceEligibilityReasonText,
+  isClockInDisabledByServer,
+  nonWorkingScheduleLabel,
+  normalizeAttendanceStatus,
+  shouldAutoOpenAttendanceTaskGate
+} from './attendanceEligibilityUi';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import {
   EMPLOYEE_UNLINKED_MESSAGE,
@@ -88,6 +95,15 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const [employeeIdentity, setEmployeeIdentity] = useState<CanonicalEmployeeIdentity | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [identityLoading, setIdentityLoading] = useState(true);
+  const [ownSchedule, setOwnSchedule] = useState<Array<{
+    work_date: string;
+    schedule_status: string;
+    work_status: string;
+    shift_start: string | null;
+    shift_end: string | null;
+    shift_code: string | null;
+    shift_name: string | null;
+  }>>([]);
 
   // Live WIB Clock
   const [currentTimeWib, setCurrentTimeWib] = useState<string>('');
@@ -171,10 +187,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       const res = await authenticatedFetch(url);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
-        const attData: EmployeeAttendanceStatus = data.data;
+        const attData = normalizeAttendanceStatus(data.data);
         setAttendanceStatus(attData);
 
-        if (attData.attendance_required && !attData.has_checked_in) {
+        if (shouldAutoOpenAttendanceTaskGate(attData)) {
           setAttendanceGateOpen(true);
         } else {
           setAttendanceGateOpen(false);
@@ -184,6 +200,21 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       console.error('Failed to check attendance gate:', err);
     } finally {
       setAttendanceLoading(false);
+    }
+  };
+
+  const fetchOwnSchedule = async () => {
+    try {
+      const res = await authenticatedFetch('/api/employee-mobile/me/schedule');
+      const data = await res.json();
+      if (res.ok && data.status === 'OK' && Array.isArray(data.data?.schedules)) {
+        setOwnSchedule(data.data.schedules);
+      } else {
+        setOwnSchedule([]);
+      }
+    } catch (err) {
+      console.error('Failed to load own schedule:', err);
+      setOwnSchedule([]);
     }
   };
 
@@ -217,6 +248,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       const identity = await fetchCanonicalIdentity();
       if (cancelled) return;
       await fetchAttendanceStatus(identity);
+      await fetchOwnSchedule();
       await fetchTaskStats();
     })();
     return () => {
@@ -327,6 +359,55 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   }
 
   const activeTaskCount = taskStats.assigned + taskStats.in_progress;
+  const eligibility = attendanceStatus?.attendance_eligibility;
+  const clockInBlocked = isClockInDisabledByServer(eligibility);
+  const eligibilityReason = attendanceEligibilityReasonText(eligibility);
+  const hotelDate = attendanceStatus?.hotel_date || '';
+  const todaySchedule = ownSchedule.find((row) => row.work_date === hotelDate)
+    || ownSchedule.find((row) => row.work_date === eligibility?.work_date)
+    || null;
+
+  const renderSelfSchedulePanel = () => (
+    <div className="bg-white border border-neutral-200/90 rounded-2xl p-3.5 shadow-xs space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider">Jadwal Kerja Saya</h4>
+        <span className="text-[10px] font-mono text-neutral-400">{hotelDate || '—'}</span>
+      </div>
+      {todaySchedule ? (
+        <div className="text-xs text-neutral-700 space-y-1">
+          <p className="font-semibold text-neutral-900">
+            {todaySchedule.work_status === 'WORK'
+              ? (todaySchedule.shift_name || todaySchedule.shift_code || 'Jadwal Kerja')
+              : `Jadwal hari ini: ${nonWorkingScheduleLabel(todaySchedule.work_status)}`}
+          </p>
+          {todaySchedule.work_status === 'WORK' && (todaySchedule.shift_start || todaySchedule.shift_end) && (
+            <p className="text-[11px] text-neutral-500 font-mono">
+              {todaySchedule.shift_start ? new Date(todaySchedule.shift_start).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '—'}
+              {' – '}
+              {todaySchedule.shift_end ? new Date(todaySchedule.shift_end).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '—'}
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-neutral-600">Tidak ada jadwal kerja published untuk saat ini.</p>
+      )}
+      {eligibilityReason && (
+        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+          {eligibilityReason}
+        </p>
+      )}
+      {!attendanceStatus?.has_checked_in && (
+        <button
+          type="button"
+          onClick={() => setAttendanceGateOpen(true)}
+          disabled={clockInBlocked || !employeeIdentity}
+          className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-[#1b4332] text-white hover:bg-[#143225] shadow-xs transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Clock In
+        </button>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-stone-50 text-neutral-900 flex flex-col justify-between max-w-md mx-auto select-none shadow-xl">
@@ -430,6 +511,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                 </span>
               </div>
             </div>
+
+            {renderSelfSchedulePanel()}
 
             {/* Quick Metrics */}
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -588,6 +671,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                   </span>
                 </div>
               </div>
+
+              {renderSelfSchedulePanel()}
 
               {/* Clock Out Action */}
               <button

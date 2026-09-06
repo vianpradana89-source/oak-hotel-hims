@@ -61,7 +61,8 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
     geofence_longitude: 106.8456,
     geofence_radius_meters: 100,
     outside_geofence_policy: 'ALLOW_WITH_REASON',
-    exempt_roles: ['Owner', 'General Manager']
+    exempt_roles: ['Owner', 'General Manager'],
+    require_published_schedule_for_attendance: false
   });
 
   const [loading, setLoading] = useState(true);
@@ -80,7 +81,10 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
       const res = await authenticatedFetch(`/api/attendance/settings?property_id=${propertyId}`);
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
-        setSettings(data.data);
+        setSettings({
+          ...data.data,
+          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance)
+        });
       } else {
         setErrorMsg(data.message || 'Gagal memuat pengaturan absensi');
       }
@@ -114,7 +118,10 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
 
       const data = await res.json();
       if (res.ok && data.status === 'OK') {
-        setSettings(data.data);
+        setSettings({
+          ...data.data,
+          require_published_schedule_for_attendance: Boolean(data.data.require_published_schedule_for_attendance)
+        });
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3000);
       } else {
@@ -237,6 +244,24 @@ export const AttendanceSettingsTab: React.FC<AttendanceSettingsTabProps> = ({ pr
               <span className="text-xs font-semibold text-stone-800">Wajibkan Absen Masuk Sebelum Buka Tugas (Gate)</span>
               <p className="text-[11px] text-stone-500">
                 Karyawan non-exempt wajib melakukan absen masuk di portal mobile sebelum dapat melihat dan mengerjakan tugas kamar.
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(settings.require_published_schedule_for_attendance)}
+              onChange={(e) => setSettings(prev => ({
+                ...prev,
+                require_published_schedule_for_attendance: e.target.checked
+              }))}
+              className="mt-1 w-4 h-4 rounded text-[#1b4332] focus:ring-[#1b4332]"
+            />
+            <div>
+              <span className="text-xs font-semibold text-stone-800">Wajib Jadwal Published untuk Absensi Crew</span>
+              <p className="text-[11px] text-stone-500">
+                Jika aktif, crew hanya dapat Clock In pada jadwal kerja Published/Changed yang valid.
               </p>
             </div>
           </label>

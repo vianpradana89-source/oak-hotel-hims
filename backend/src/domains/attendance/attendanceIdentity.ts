@@ -204,6 +204,17 @@ export async function canAdministerAttendancePhotos(
   return hasAnyEffectivePermission(db, recordPropertyId, userId, ['HRD'], 'view');
 }
 
+export async function canChangeAttendanceSettings(
+  db: Pool | PoolClient,
+  userId: number,
+  propertyId: number
+): Promise<boolean> {
+  if (await isPlatformSuperAdmin(db, userId)) {
+    return true;
+  }
+  return hasAnyEffectivePermission(db, propertyId, userId, ['HRD'], 'edit');
+}
+
 export function parseOptionalPositiveInt(raw: unknown): number | null {
   if (raw === undefined || raw === null || raw === '') {
     return null;
