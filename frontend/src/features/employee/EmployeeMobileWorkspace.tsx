@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AttendanceGateScreen } from './AttendanceGateScreen';
 import { HousekeepingMobileCrewView } from './HousekeepingMobileCrewView';
 import { EmployeeNotificationCenter } from './EmployeeNotificationCenter';
@@ -25,10 +25,12 @@ import {
   EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE,
   EMPLOYEE_MOBILE_LOGOUT_LABEL,
   applyEmployeeMobileLogoutUiEvent,
+  attemptCanonicalLogoutOnce,
   canShowEmployeeMobileClockOut,
   canShowEmployeeMobileLogout,
   logoutAfterSuccessfulCheckOut,
   resolveManualLogoutEnabled,
+  shouldAutoLogoutCompletedAttendance,
   shouldLogoutAfterCheckOutResponse
 } from './employeeMobileLogoutUi';
 
@@ -183,6 +185,8 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const completedAttendance = attendanceStateKnown
     && attendanceStatus?.has_checked_in === true
     && attendanceStatus?.has_checked_out === true;
+  const canonicalLogoutGuardRef = useRef(false);
+  const runCanonicalLogoutOnce = () => attemptCanonicalLogoutOnce(canonicalLogoutGuardRef, onLogout);
   const requestLogoutConfirm = () => {
     setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'REQUEST', onLogout));
   };
@@ -198,6 +202,28 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       setShowLogoutConfirm(false);
     }
   }, [logoutAvailable, showLogoutConfirm]);
+
+  useEffect(() => {
+    if (!shouldAutoLogoutCompletedAttendance({
+      isPreview,
+      hasLogoutHandler: Boolean(onLogout),
+      identityUnlinked: !identityLoading && !employeeIdentity,
+      attendanceStateKnown,
+      hasCheckedIn: attendanceStatus?.has_checked_in,
+      hasCheckedOut: attendanceStatus?.has_checked_out
+    })) {
+      return;
+    }
+    runCanonicalLogoutOnce();
+  }, [
+    isPreview,
+    onLogout,
+    identityLoading,
+    employeeIdentity,
+    attendanceStateKnown,
+    attendanceStatus?.has_checked_in,
+    attendanceStatus?.has_checked_out
+  ]);
 
   // Task statistics for summary
   const [taskStats, setTaskStats] = useState<{
@@ -375,7 +401,9 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
         setClockOutSuccess(true);
         setTimeout(() => {
           if (onLogout) {
-            logoutAfterSuccessfulCheckOut(onLogout);
+            attemptCanonicalLogoutOnce(canonicalLogoutGuardRef, () => {
+              logoutAfterSuccessfulCheckOut(onLogout);
+            });
             return;
           }
           setShowClockOutModal(false);

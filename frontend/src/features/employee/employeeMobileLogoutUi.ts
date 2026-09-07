@@ -117,3 +117,34 @@ export function shouldLogoutAfterCheckOutResponse(input: {
 export function logoutAfterSuccessfulCheckOut(onLogout?: () => void): void {
   onLogout?.();
 }
+
+/**
+ * Real Employee Mobile only. Property manual-logout toggle must not suppress this.
+ * Never auto-logout while loading, on fetch failure, in preview, or for unlinked identity.
+ */
+export function shouldAutoLogoutCompletedAttendance(input: {
+  isPreview?: boolean;
+  hasLogoutHandler?: boolean;
+  identityUnlinked?: boolean;
+  attendanceStateKnown?: boolean;
+  hasCheckedIn?: boolean;
+  hasCheckedOut?: boolean;
+  manualLogoutEnabled?: boolean;
+}): boolean {
+  if (input.isPreview === true) return false;
+  if (input.hasLogoutHandler !== true) return false;
+  if (input.identityUnlinked === true) return false;
+  if (input.attendanceStateKnown !== true) return false;
+  return input.hasCheckedIn === true && input.hasCheckedOut === true;
+}
+
+export function attemptCanonicalLogoutOnce(
+  guard: { current: boolean },
+  onLogout?: () => void
+): boolean {
+  if (guard.current) return false;
+  if (typeof onLogout !== 'function') return false;
+  guard.current = true;
+  onLogout();
+  return true;
+}

@@ -10,12 +10,14 @@ import {
   EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE,
   EMPLOYEE_MOBILE_LOGOUT_LABEL,
   applyEmployeeMobileLogoutUiEvent,
+  attemptCanonicalLogoutOnce,
   canShowEmployeeMobileClockOut,
   canShowEmployeeMobileLogout,
   hasCompletedAttendanceSession,
   hasOpenAttendanceSession,
   logoutAfterSuccessfulCheckOut,
   resolveManualLogoutEnabled,
+  shouldAutoLogoutCompletedAttendance,
   shouldLogoutAfterCheckOutResponse
 } from '../src/features/employee/employeeMobileLogoutUi.ts';
 
@@ -28,7 +30,7 @@ const check = (condition: unknown, message: string) => {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readSrc = (relativePath: string) => readFileSync(path.join(root, relativePath), 'utf8');
 
-console.log('=== EMPLOYEE-MOBILE-LOGOUT-1C Completed-attendance UI ===\n');
+console.log('=== EMPLOYEE-MOBILE-LOGOUT-1D Completed-session auto-logout ===\n');
 
 const workspaceSrc = readSrc('src/features/employee/EmployeeMobileWorkspace.tsx');
 const logoutHelperSrc = readSrc('src/features/employee/employeeMobileLogoutUi.ts');
@@ -123,6 +125,7 @@ check(shouldLogoutAfterCheckOutResponse({ httpOk: true, status: 'OK' }) === true
 logoutAfterSuccessfulCheckOut(onLogout);
 check(logoutCalls === 1, 'E: successful CHECK_OUT calls onLogout once');
 check(workspaceSrc.includes('logoutAfterSuccessfulCheckOut(onLogout)'), 'E: workspace auto-logouts after success');
+check(workspaceSrc.includes('attemptCanonicalLogoutOnce(canonicalLogoutGuardRef'), 'E: CHECK_OUT success shares the once-guard');
 
 logoutCalls = 0;
 check(shouldLogoutAfterCheckOutResponse({ httpOk: false, status: 'ERROR' }) === false, 'F: failed CHECK_OUT does not logout');
@@ -184,5 +187,111 @@ check(EMPLOYEE_MOBILE_LOGOUT_CONFIRM_ACTION_LABEL === 'Keluar', 'confirm action 
 check(applyEmployeeMobileLogoutUiEvent(true, 'CANCEL', onLogout) === false, 'Batal still does not logout');
 check(resolveManualLogoutEnabled(null) === false, 'missing status fails closed');
 check(!logoutHelperSrc.includes('/api/attendance/check-out'), 'visibility helper does not POST attendance');
+
+const completedLogoutReady = {
+  isPreview: false,
+  hasLogoutHandler: true,
+  identityUnlinked: false,
+  attendanceStateKnown: true,
+  hasCheckedIn: true,
+  hasCheckedOut: true
+};
+
+check(
+  shouldAutoLogoutCompletedAttendance({
+    ...completedLogoutReady,
+    hasCheckedIn: false,
+    hasCheckedOut: false
+  }) === false,
+  '1D-A: not clocked in -> no auto logout'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({
+    ...completedLogoutReady,
+    hasCheckedOut: false
+  }) === false,
+  '1D-B: open attendance -> no auto logout'
+);
+check(
+  canShowEmployeeMobileClockOut({
+    attendanceStateKnown: true,
+    hasCheckedIn: true,
+    hasCheckedOut: false
+  }) === true,
+  '1D-B: open attendance still shows Clock Out'
+);
+check(
+  shouldAutoLogoutCompletedAttendance(completedLogoutReady) === true,
+  '1D-C: completed known status auto-logouts'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({ ...completedLogoutReady, manualLogoutEnabled: false }) === true,
+  '1D-D: completed + toggle OFF still auto-logouts'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({ ...completedLogoutReady, manualLogoutEnabled: true }) === true,
+  '1D-E: completed + toggle ON still auto-logouts'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({ ...completedLogoutReady, attendanceStateKnown: false }) === false,
+  '1D-F: loading/unknown attendance -> no logout'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({
+    ...completedLogoutReady,
+    attendanceStateKnown: false,
+    hasCheckedIn: undefined,
+    hasCheckedOut: undefined
+  }) === false,
+  '1D-G: fetch failure/null status -> no logout'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({ ...completedLogoutReady, identityUnlinked: true }) === false,
+  '1D-H: unlinked identity does not auto-logout completed state'
+);
+check(
+  canShowEmployeeMobileLogout({
+    isPreview: false,
+    hasLogoutHandler: true,
+    identityUnlinked: true,
+    attendanceStateKnown: true,
+    hasCheckedIn: true,
+    hasCheckedOut: true,
+    manualLogoutEnabled: false
+  }) === true,
+  '1D-H: unlinked identity keeps manual logout'
+);
+check(
+  shouldAutoLogoutCompletedAttendance({ ...completedLogoutReady, isPreview: true }) === false,
+  '1D-I: preview completed state does not auto-logout'
+);
+check(!previewMount.includes('onLogout'), '1D-I: desktop preview still does not wire onLogout');
+
+logoutCalls = 0;
+const successGuard = { current: false };
+check(shouldLogoutAfterCheckOutResponse({ httpOk: true, status: 'OK' }) === true, '1D-J: successful CHECK_OUT may logout');
+check(attemptCanonicalLogoutOnce(successGuard, onLogout) === true, '1D-J: first success logout consumes the guard');
+check(attemptCanonicalLogoutOnce(successGuard, onLogout) === false, '1D-J: completed-state follow-up does not logout again');
+check(logoutCalls === 1, '1D-J: successful CHECK_OUT total onLogout is exactly once');
+
+logoutCalls = 0;
+check(shouldLogoutAfterCheckOutResponse({ httpOk: false, status: 'ERROR' }) === false, '1D-K: failed CHECK_OUT does not logout');
+check(logoutCalls === 0, '1D-K: failed CHECK_OUT leaves onLogout at zero');
+
+check(
+  workspaceSrc.includes('canShowEmployeeMobileClockOut({')
+    && workspaceSrc.includes('if (!canShowEmployeeMobileClockOut({'),
+  '1D-L: completed status cannot create another CHECK_OUT'
+);
+check(!logoutHelperSrc.includes('/api/attendance/check-in'), '1D-L: completed helper does not POST check-in');
+
+logoutCalls = 0;
+const rerenderGuard = { current: false };
+check(attemptCanonicalLogoutOnce(rerenderGuard, onLogout) === true, '1D-M: first completed render logs out');
+check(attemptCanonicalLogoutOnce(rerenderGuard, onLogout) === false, '1D-M: rerender does not duplicate logout');
+check(attemptCanonicalLogoutOnce(rerenderGuard, onLogout) === false, '1D-M: third completed render stays at one logout');
+check(logoutCalls === 1, '1D-M: rerender completed workspace invokes onLogout once');
+check(workspaceSrc.includes('shouldAutoLogoutCompletedAttendance({'), '1D-M: workspace uses completed auto-logout helper');
+check(workspaceSrc.includes('attemptCanonicalLogoutOnce(canonicalLogoutGuardRef'), '1D-M: workspace guards logout with a ref');
 
 console.log(`\n${assertions} assertions passed.`);
