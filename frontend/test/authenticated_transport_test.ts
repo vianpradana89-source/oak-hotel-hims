@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { authenticatedFetch } from '../src/lib/authenticatedFetch.ts';
 
 let assertions = 0;
@@ -161,6 +164,27 @@ check(headers8.get('Authorization') === 'Bearer correct-canonical-key', 'Uses ca
 // Clean up
 delete mockStorage['token'];
 delete mockStorage['oak_hims_auth_token'];
+
+// ---------------------------------------------------------------------------
+// Test 9: Front Office quick-booking-rules uses authenticatedFetch, not raw fetch
+// ---------------------------------------------------------------------------
+console.log('--- 9. FrontOfficeSettingsTab quick-booking-rules transport ---');
+const here = dirname(fileURLToPath(import.meta.url));
+const foSettingsSrc = readFileSync(join(here, '../src/features/settings/FrontOfficeSettingsTab.tsx'), 'utf8');
+check(foSettingsSrc.includes("from '../../lib/authenticatedFetch'"), 'FrontOfficeSettingsTab imports authenticatedFetch');
+check(
+  foSettingsSrc.includes('authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`)'),
+  'GET quick-booking-rules uses authenticatedFetch'
+);
+check(
+  foSettingsSrc.includes('authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations`)'),
+  'GET day-use-durations uses authenticatedFetch'
+);
+check(
+  /authenticatedFetch\(`\$\{apiBaseUrl\}\/properties\/\$\{propertyId\}\/quick-booking-rules`,\s*\{\s*method:\s*'PUT'/.test(foSettingsSrc),
+  'PUT quick-booking-rules uses authenticatedFetch'
+);
+check(!/\bfetch\s*\(/.test(foSettingsSrc), 'FrontOfficeSettingsTab has no remaining raw fetch calls');
 
 // ---------------------------------------------------------------------------
 // Summary

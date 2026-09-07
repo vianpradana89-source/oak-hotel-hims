@@ -65,8 +65,8 @@ export const FrontOfficeSettingsTab: React.FC<FrontOfficeSettingsTabProps> = ({
     setLoading(true);
     try {
       const [rulesRes, durationsRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`),
-        fetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations`)
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`),
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/day-use-durations`)
       ]);
 
       if (rulesRes.ok) {
@@ -98,12 +98,12 @@ export const FrontOfficeSettingsTab: React.FC<FrontOfficeSettingsTabProps> = ({
     setFeedback(null);
     try {
       const [walkInRes, otaRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`, {
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channel_type: 'WALK_IN', rules: walkInRules })
         }),
-        fetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`, {
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/quick-booking-rules`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channel_type: 'OTA', rules: otaRules })
