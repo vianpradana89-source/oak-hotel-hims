@@ -98,10 +98,12 @@ import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsS
 import { getReservationEditAvailability, getBookingCreateAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
 import {
   ReservationBillingError,
+  allocateBookingPaymentToChildren,
   allocateCommercialDiscount,
   buildBookingGlobalDiscount,
   buildChildReservationBilling,
   hasBookingGlobalDiscountInput,
+  hasBookingLevelPaymentInput,
   stayChargeLineGrosses
 } from './domains/reservations/reservationBilling';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
@@ -1301,14 +1303,18 @@ async function createCanonicalBooking(
     }
   }
   if (rulesMap['payment_amount'] === 'REQUIRED') {
-    const totalAmountPaid = rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0);
+    const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+      ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+      : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
     if (totalAmountPaid <= 0) {
       missingFields.push('payment_amount');
     }
   }
   if (rulesMap['payment_evidence'] === 'REQUIRED') {
     const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
-    const totalAmountPaid = rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0);
+    const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+      ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+      : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
     const paymentEvidence = bookingPayload.bukti_bayar_path || bookingPayload.initial_payment?.payment_evidence_path || rawReservationPayloads[0]?.bukti_bayar_path;
     if (totalAmountPaid > 0 && String(paymentMethod).toUpperCase() !== 'CASH' && !paymentEvidence) {
       missingFields.push('payment_evidence');
@@ -1350,6 +1356,16 @@ async function createCanonicalBooking(
 
     const bookingActor = String(req?.user?.username || req?.user?.name || 'PMS');
     const useGlobalDiscount = hasBookingGlobalDiscountInput(bookingPayload);
+    const useBookingLevelPayment = hasBookingLevelPaymentInput(bookingPayload);
+    const bookingLevelCash = useBookingLevelPayment
+      ? (bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+      : null;
+    const bookingPaymentEvidencePath = bookingPayload.bukti_bayar_path
+      || bookingPayload.initial_payment?.payment_evidence_path
+      || null;
+    const bookingPaymentMethod = bookingPayload.payment_method
+      || bookingPayload.initial_payment?.payment_method
+      || null;
 
     const bookingRecord = await createBookingParentRecord(client, {
       propertyId: bookingPropertyId,
@@ -1420,7 +1436,9 @@ async function createCanonicalBooking(
           discountPercent: useGlobalDiscount ? 0 : (child.discount_percent ?? child.discountPercent),
           discountAmount: useGlobalDiscount ? 0 : (child.discount_amount ?? child.discountAmount),
           discountReason: useGlobalDiscount ? null : (child.discount_reason || child.discountReason || bookingPayload.discount_reason),
-          amountPaid: child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)
+          amountPaid: useBookingLevelPayment
+            ? 0
+            : (child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0))
         });
       } catch (err: any) {
         if (err instanceof ReservationBillingError) {
@@ -1462,9 +1480,14 @@ async function createCanonicalBooking(
         discountType: childBilling.discountType,
         discountValue: childBilling.discountValue,
         discountReason: childBilling.reason,
-        amountPaid: Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
+        amountPaid: useBookingLevelPayment
+          ? 0
+          : Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
         paymentMethod: child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
-        paymentStatus: child.payment_status || null,
+        paymentStatus: useBookingLevelPayment ? null : (child.payment_status || null),
+        attachPaymentEvidence: false,
+        bookingPaymentGroupId: null,
+        bookingPaymentReferenceCode: null,
         stayCharges: child.stay_charges || child.stayCharges || (index === 0 ? bookingPayload.stay_charges : []) || [],
         quantity: (() => {
           const q = toPositiveInteger(child.qty ?? child.quantity ?? 1, 1);
@@ -1550,6 +1573,34 @@ async function createCanonicalBooking(
       bookingRecord.global_discount_reason = bookingGlobalDiscount.reason;
       bookingRecord.global_discount_gross_before = bookingGlobalDiscount.gross;
       bookingRecord.global_discount_net_after = bookingGlobalDiscount.net;
+    }
+
+    if (useBookingLevelPayment) {
+      const childNets = normalizedChildren.map((childRow) => (
+        Math.max(0, Number(childRow.discountBase || 0) - Number(childRow.discountAmount || 0))
+      ));
+      const paymentAllocation = allocateBookingPaymentToChildren(childNets, bookingLevelCash);
+      if (paymentAllocation.bookingCash > paymentAllocation.bookingNet) {
+        throw createHttpError(400, 'Nominal pembayaran melebihi sisa tagihan', 'OVERPAYMENT_NOT_ALLOWED');
+      }
+
+      const paymentGroupId = `QB-PAY-${bookingRecord.id}-${correlationId || Date.now()}`;
+      let evidenceAttached = false;
+      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
+        const allocated = Number(paymentAllocation.allocations[childIndex] || 0);
+        const childRow = normalizedChildren[childIndex];
+        childRow.amountPaid = allocated;
+        childRow.paymentStatus = null;
+        childRow.paymentMethod = bookingPaymentMethod || childRow.paymentMethod || 'CASH';
+        if (allocated > 0) {
+          childRow.bookingPaymentGroupId = paymentGroupId;
+          childRow.bookingPaymentReferenceCode = paymentGroupId;
+          if (!evidenceAttached) {
+            childRow.attachPaymentEvidence = true;
+            evidenceAttached = true;
+          }
+        }
+      }
     }
 
     const roomKeyMap = new Map<string, { ident: RoomTypeIdentity; date: string; delta: number }>();
@@ -1944,16 +1995,37 @@ async function createCanonicalBooking(
 
       if (Number(child.amountPaid || 0) > 0) {
         const pMethod = child.paymentMethod || 'CASH';
+        const groupedBookingPayment = Boolean(child.bookingPaymentGroupId);
         const pTxRes = await client.query(
-          `INSERT INTO payment_transactions (
-             reservation_id, transaction_type, amount, payment_method, status, created_by, created_at
-           ) VALUES ($1, 'PAYMENT', $2, $3, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
-           RETURNING id`,
-          [inserted.reservation.id, Number(child.amountPaid || 0), pMethod]
+          groupedBookingPayment
+            ? `INSERT INTO payment_transactions (
+                 reservation_id, transaction_type, amount, payment_method, reference_code, correction_group_id,
+                 status, created_by, created_at
+               ) VALUES ($1, 'PAYMENT', $2, $3, $4, $5, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
+               RETURNING id`
+            : `INSERT INTO payment_transactions (
+                 reservation_id, transaction_type, amount, payment_method, status, created_by, created_at
+               ) VALUES ($1, 'PAYMENT', $2, $3, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
+               RETURNING id`,
+          groupedBookingPayment
+            ? [
+              inserted.reservation.id,
+              Number(child.amountPaid || 0),
+              pMethod,
+              child.bookingPaymentReferenceCode,
+              child.bookingPaymentGroupId
+            ]
+            : [inserted.reservation.id, Number(child.amountPaid || 0), pMethod]
         );
         const pTxId = pTxRes.rows[0].id;
 
-        if (child.buktiBayarPath) {
+        const shouldAttachEvidence = groupedBookingPayment
+          ? Boolean(child.attachPaymentEvidence)
+          : Boolean(child.buktiBayarPath);
+        const evidencePath = shouldAttachEvidence
+          ? (child.buktiBayarPath || (groupedBookingPayment ? bookingPaymentEvidencePath : null))
+          : null;
+        if (evidencePath) {
           await client.query(
             `INSERT INTO payment_evidences (
                property_id, reservation_id, payment_transaction_id, evidence_type, storage_key, original_filename,
@@ -1963,17 +2035,33 @@ async function createCanonicalBooking(
               bookingPropertyId,
               inserted.reservation.id,
               pTxId,
-              child.buktiBayarPath,
-              path.basename(child.buktiBayarPath)
+              evidencePath,
+              path.basename(evidencePath)
             ]
           );
         }
 
-        await client.query(
-          `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
-           VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
-          [inserted.reservation.id, bookingPropertyId, 'PAYMENT', `Pembayaran awal (${pMethod})`, Number(child.amountPaid || 0)]
-        );
+        if (groupedBookingPayment) {
+          await client.query(
+            `INSERT INTO folio_entries (
+               reservation_id, property_id, entry_type, source_type, source_id, description, amount, direction, correction_group_id
+             ) VALUES ($1, $2, 'PAYMENT', 'BOOKING_PAYMENT', $3, $4, $5, 'CREDIT', $6)`,
+            [
+              inserted.reservation.id,
+              bookingPropertyId,
+              String(bookingRecord.id),
+              `Pembayaran awal (${pMethod})`,
+              Number(child.amountPaid || 0),
+              child.bookingPaymentGroupId
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+             VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
+            [inserted.reservation.id, bookingPropertyId, 'PAYMENT', `Pembayaran awal (${pMethod})`, Number(child.amountPaid || 0)]
+          );
+        }
       }
 
       try {

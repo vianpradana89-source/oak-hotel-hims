@@ -4,12 +4,14 @@ const assert = require('assert/strict');
 const { Pool } = require('pg');
 const {
   ReservationBillingError,
+  allocateBookingPaymentToChildren,
   allocateCommercialDiscount,
   allocateGlobalDiscountToChildren,
   buildBookingGlobalDiscount,
   buildChildReservationBilling,
   computeAuthoritativeDiscount,
   hasBookingGlobalDiscountInput,
+  hasBookingLevelPaymentInput,
   shouldApplyPostedCommercialDiscount
 } = require('../dist/domains/reservations/reservationBilling');
 
@@ -223,6 +225,38 @@ async function runHelperTests() {
   assert.equal(hasBookingGlobalDiscountInput({ global_discount_type: 'PERCENTAGE' }), true);
   assert.equal(hasBookingGlobalDiscountInput({ global_discount_value: 0 }), true);
   assert.equal(hasBookingGlobalDiscountInput({ discount_type: 'PERCENTAGE' }), false, 'child discount keys are not booking-global');
+
+  const hadira = allocateBookingPaymentToChildren([368000, 427200], 460000);
+  assert.deepEqual(hadira.allocations, [368000, 92000], 'A: sequential 368,000 then 92,000');
+  assert.equal(hadira.totalAllocated, 460000, 'A: total allocated equals cash');
+  assert.equal(hadira.remainingBalance, 335200, 'A: booking remaining 335,200');
+  assert.equal(368000 - hadira.allocations[0], 0, 'A: first remaining 0');
+  assert.equal(427200 - hadira.allocations[1], 335200, 'A: second remaining 335,200');
+
+  const fullPay = allocateBookingPaymentToChildren([400000, 600000], 1000000);
+  assert.deepEqual(fullPay.allocations, [400000, 600000], 'B: both children paid in full');
+  assert.equal(fullPay.remainingBalance, 0, 'B: booking remaining 0');
+
+  const zeroPay = allocateBookingPaymentToChildren([400000, 600000], 0);
+  assert.deepEqual(zeroPay.allocations, [0, 0], 'C: payment 0 allocates nothing');
+  assert.equal(zeroPay.totalAllocated, 0, 'C: total allocated 0');
+
+  const firstPartial = allocateBookingPaymentToChildren([400000, 600000], 200000);
+  assert.deepEqual(firstPartial.allocations, [200000, 0], 'D: first partial, second unpaid');
+
+  const exactFirst = allocateBookingPaymentToChildren([400000, 600000], 400000);
+  assert.deepEqual(exactFirst.allocations, [400000, 0], 'E: exact first child, second unpaid');
+
+  const threeSpan = allocateBookingPaymentToChildren([100000, 200000, 300000], 350000);
+  assert.deepEqual(threeSpan.allocations, [100000, 200000, 50000], 'F: spans first two and part of third');
+
+  const noOverChild = allocateBookingPaymentToChildren([368000, 427200], 999999);
+  assert.ok(noOverChild.allocations.every((take, index) => take <= [368000, 427200][index]), 'M: helper never exceeds child net');
+  assert.ok(noOverChild.allocations.every((take) => take >= 0), 'helper never negative');
+
+  assert.equal(hasBookingLevelPaymentInput({ amount_paid: 0 }), true);
+  assert.equal(hasBookingLevelPaymentInput({ initial_payment: { amount: 1000 } }), true);
+  assert.equal(hasBookingLevelPaymentInput({ reservations: [{ amount_paid: 1000 }] }), false, 'child amount_paid is not booking-level');
 
   console.log('   helper assertions passed');
 }

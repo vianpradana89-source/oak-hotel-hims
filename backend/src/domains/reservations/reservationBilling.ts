@@ -230,6 +230,51 @@ export function hasBookingGlobalDiscountInput(payload: Record<string, unknown> |
     || Object.prototype.hasOwnProperty.call(payload, 'global_discount_value');
 }
 
+export function hasBookingLevelPaymentInput(payload: Record<string, unknown> | null | undefined): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(payload, 'amount_paid')) return true;
+  const initialPayment = payload.initial_payment;
+  if (initialPayment && typeof initialPayment === 'object' && !Array.isArray(initialPayment)) {
+    return Object.prototype.hasOwnProperty.call(initialPayment, 'amount');
+  }
+  return false;
+}
+
+/**
+ * Sequential booking-level cash allocation across child nets (stay_sequence order).
+ * Does not over-allocate a child. Caller must reject bookingCash > SUM(child nets).
+ */
+export function allocateBookingPaymentToChildren(
+  childNets: unknown[],
+  bookingCash: unknown
+): {
+  allocations: number[];
+  totalAllocated: number;
+  remainingBalance: number;
+  bookingNet: number;
+  bookingCash: number;
+} {
+  const nets = (Array.isArray(childNets) ? childNets : []).map((value) => Math.max(0, roundIdr(value)));
+  const bookingNet = nets.reduce((sum, value) => sum + value, 0);
+  const cash = Math.max(0, roundIdr(bookingCash));
+  const allocations = nets.map(() => 0);
+  let remainingCash = cash;
+  for (let index = 0; index < nets.length; index += 1) {
+    if (remainingCash <= 0) break;
+    const take = Math.min(nets[index], remainingCash);
+    allocations[index] = take;
+    remainingCash -= take;
+  }
+  const totalAllocated = allocations.reduce((sum, value) => sum + value, 0);
+  return {
+    allocations,
+    totalAllocated,
+    remainingBalance: Math.max(0, bookingNet - totalAllocated),
+    bookingNet,
+    bookingCash: cash
+  };
+}
+
 /**
  * Split a booking-level discount across children in proportion to each child's
  * gross. Last eligible child (gross > 0) receives the rounding remainder.

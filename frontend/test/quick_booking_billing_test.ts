@@ -102,5 +102,9 @@ check(modalSrc.includes('DISKON KESELURUHAN') || modalSrc.includes('Diskon Kesel
 check(modalSrc.includes('Bayar Pas / Lunas (Rp {grandTotal.toLocaleString'), 'Bayar Pas uses net grandTotal');
 check(modalSrc.includes('min="0"'), '100% / complimentary allows amount paid 0');
 check(!modalSrc.includes('Net Kamar'), 'Net Kamar per-room summary line removed');
+check(!modalSrc.includes('amount_paid: idx === 0 ? amountPaid'), 'children do not copy booking cash onto reservations[0]');
+check(modalSrc.includes('amount_paid: amountPaid'), 'payload keeps one booking-level amount_paid');
+check(modalSrc.includes('amount_paid: 0'), 'children send amount_paid 0 for compatibility');
+check(!modalSrc.includes("payment_status: amountPaid >= grandTotal"), 'children do not copy booking payment_status');
 
 console.log(`\nPASS ${assertions} assertions`);

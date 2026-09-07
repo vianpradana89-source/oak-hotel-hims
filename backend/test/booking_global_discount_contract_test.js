@@ -254,7 +254,9 @@ async function run() {
     expect(Number(childRows.rows[0].discount_amount) === 38500, 'child 1 allocated 38,500');
     expect(Number(childRows.rows[1].discount_amount) === 53400, 'child 2 allocated 53,400');
     expect(Number(childRows.rows[0].total_price) + Number(childRows.rows[1].total_price) === 827100, 'sum child net = booking net');
-    expect(Number(childRows.rows[0].amount_paid) === 827100, 'payment uses booking net, not gross');
+    expect(Number(childRows.rows[0].amount_paid) === 346500, 'sequential payment fills first child net, not booking cash');
+    expect(Number(childRows.rows[1].amount_paid) === 480600, 'remainder of booking cash lands on second child');
+    expect(Number(childRows.rows[0].amount_paid) + Number(childRows.rows[1].amount_paid) === 827100, 'sum child paid = booking net payment');
     expect(Number(childRows.rows[0].subtotal_amount) === 385000, 'child subtotal remains room gross');
     childRows.rows.forEach((row) => {
       expect(Number(row.total_price) >= 0, 'no child negative net');
