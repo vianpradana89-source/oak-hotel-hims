@@ -30,7 +30,6 @@ import {
   canShowEmployeeMobileLogout,
   logoutAfterSuccessfulCheckOut,
   resolveManualLogoutEnabled,
-  shouldAutoLogoutCompletedAttendance,
   shouldLogoutAfterCheckOutResponse
 } from './employeeMobileLogoutUi';
 
@@ -186,7 +185,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     && attendanceStatus?.has_checked_in === true
     && attendanceStatus?.has_checked_out === true;
   const canonicalLogoutGuardRef = useRef(false);
-  const runCanonicalLogoutOnce = () => attemptCanonicalLogoutOnce(canonicalLogoutGuardRef, onLogout);
   const requestLogoutConfirm = () => {
     setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'REQUEST', onLogout));
   };
@@ -202,28 +200,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       setShowLogoutConfirm(false);
     }
   }, [logoutAvailable, showLogoutConfirm]);
-
-  useEffect(() => {
-    if (!shouldAutoLogoutCompletedAttendance({
-      isPreview,
-      hasLogoutHandler: Boolean(onLogout),
-      identityUnlinked: !identityLoading && !employeeIdentity,
-      attendanceStateKnown,
-      hasCheckedIn: attendanceStatus?.has_checked_in,
-      hasCheckedOut: attendanceStatus?.has_checked_out
-    })) {
-      return;
-    }
-    runCanonicalLogoutOnce();
-  }, [
-    isPreview,
-    onLogout,
-    identityLoading,
-    employeeIdentity,
-    attendanceStateKnown,
-    attendanceStatus?.has_checked_in,
-    attendanceStatus?.has_checked_out
-  ]);
 
   // Task statistics for summary
   const [taskStats, setTaskStats] = useState<{

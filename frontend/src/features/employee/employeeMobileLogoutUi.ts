@@ -119,10 +119,12 @@ export function logoutAfterSuccessfulCheckOut(onLogout?: () => void): void {
 }
 
 /**
- * Real Employee Mobile only. Property manual-logout toggle must not suppress this.
+ * Auto-logout is only for in-session CHECK_OUT success (source: checkout_success).
+ * Bootstrap of an already-completed today must stay authenticated (source: bootstrap).
  * Never auto-logout while loading, on fetch failure, in preview, or for unlinked identity.
  */
 export function shouldAutoLogoutCompletedAttendance(input: {
+  source?: 'bootstrap' | 'checkout_success';
   isPreview?: boolean;
   hasLogoutHandler?: boolean;
   identityUnlinked?: boolean;
@@ -131,6 +133,7 @@ export function shouldAutoLogoutCompletedAttendance(input: {
   hasCheckedOut?: boolean;
   manualLogoutEnabled?: boolean;
 }): boolean {
+  if (input.source !== 'checkout_success') return false;
   if (input.isPreview === true) return false;
   if (input.hasLogoutHandler !== true) return false;
   if (input.identityUnlinked === true) return false;
