@@ -4,14 +4,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildDailyKpiCards,
+  formatKpiStayRange,
   formatOccupancyPercent,
   formatOccupancyPrimary,
+  maintenanceSourceLabel,
 } from '../src/features/calendar/dailyKpiFormat.ts';
 import type { DailyKpiData } from '../src/features/calendar/calendarApi.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(here, '../src/App.tsx'), 'utf8');
 const apiSrc = readFileSync(join(here, '../src/features/calendar/calendarApi.ts'), 'utf8');
+const drilldownSrc = readFileSync(join(here, '../src/features/calendar/DailyKpiDrilldownList.tsx'), 'utf8');
 
 let assertions = 0;
 const check = (condition: unknown, message: string) => {
@@ -78,5 +81,28 @@ check(appSrc.includes('fetchDailyKpisApi(propId, undefined, authFetch)'), 'X6. K
 check(apiSrc.includes('/api/reports/daily-kpis?'), 'X7. client calls daily-kpis endpoint');
 check(appSrc.includes('secondary={card.secondary}'), 'X8. StatCard receives secondary text');
 check(appSrc.includes('function StatCard({ title, value, secondary, color, onClick, isActive, badge }: any)'), 'X9. StatCard supports secondary');
+
+console.log('--- KPI-2 drilldown drawers ---');
+check(apiSrc.includes('/api/reports/daily-kpis/drilldown?'), 'Y1. client calls daily-kpis/drilldown');
+check(apiSrc.includes('export async function fetchDailyKpiDrilldown'), 'Y2. fetchDailyKpiDrilldown exported');
+check(appSrc.includes('fetchDailyKpiDrilldownApi('), 'Y3. App uses canonical drilldown fetch');
+check(appSrc.includes('DailyKpiDrilldownList'), 'Y4. drawer renders DailyKpiDrilldownList');
+check(!appSrc.includes('Tidak ada pemeriksaan checkout yang menunggu saat ini.'), 'Y5. old empty checkoutInspections copy removed');
+check(!appSrc.includes('7 / 23 kamar sellable') && !appSrc.includes('kamar sellable'), 'Y6. occupancy summary-only early return removed');
+check(!/summaryDrawerType === 'inspection'[\s\S]{0,80}checkoutInspections/.test(appSrc), 'Y7. checkout check drawer not bound to checkoutInspections');
+check(!/summaryDrawerType === 'dirty'[\s\S]{0,120}rooms\.filter/.test(appSrc), 'Y8. dirty drawer not tapechart rooms.filter');
+check(!appSrc.includes('filteredReservations.slice(0, 50)'), 'Y9. old tapechart reservation slice retired');
+check(appSrc.includes('Tanggal hotel ${kpiDrilldown?.business_date || dailyKpis?.business_date}'), 'Y10. subtitle uses backend business_date');
+check(!/DailyKpiDrilldownList[\s\S]{0,200}calendarSearchQuery/.test(appSrc), 'V4. drilldown list not tied to calendarSearchQuery');
+check(!/fetchDailyKpiDrilldownApi[\s\S]{0,120}days\[/.test(appSrc), 'V5. drilldown fetch not tied to tapechart days');
+check(drilldownSrc.includes('Tidak ada data untuk tanggal hotel ini.'), 'W. empty copy is canonical zero-state');
+check(drilldownSrc.includes('Memuat rincian KPI'), 'Y11. loading state present');
+check(drilldownSrc.includes('Belum Ditentukan'), 'Y12. unassigned occupancy label');
+check(drilldownSrc.includes('data.groups.map'), 'Y13. booked drawer groups by booking');
+check(drilldownSrc.includes('item.checked_in_at') && drilldownSrc.includes('item.checked_out_at'), 'Y14. CI/CO show actual timestamps');
+check(maintenanceSourceLabel(true, true) === 'Status + Block', 'Y15. maintenance both sources');
+check(formatKpiStayRange('2026-09-07', '2026-09-08') === '07 Sep → 08 Sep', 'Y16. occupancy stay range format');
+check(appSrc.includes('kpiDrilldownRequestVersionRef'), 'Y17. drilldown request-version safety');
+check(appSrc.includes('[summaryDrawerType, propertyId, dailyKpis, authFetch]'), 'Y18. open drawer refetches when dailyKpis refresh');
 
 console.log(`\n=== PASSED: ${assertions} assertions ===`);

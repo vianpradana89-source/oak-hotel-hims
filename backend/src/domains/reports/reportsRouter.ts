@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate';
-import { getDailyKpis } from './dailyKpiService';
+import { getDailyKpiDrilldown, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 
 function parsePositiveInt(value: any): number | null {
@@ -180,6 +180,52 @@ export function createReportsRouter(pool: Pool): Router {
       console.error('Error in /api/reports/daily-operations:', err);
       return res.status(500).json({
         status: 'ERROR',
+        message: err.message || 'Internal server error'
+      });
+    }
+  });
+
+  /**
+   * GET /api/reports/daily-kpis/drilldown
+   * Query params:
+   *   - property_id (required, positive integer)
+   *   - type (required): occupancy | booked | checkin | checkout | dirty | vacant_clean | checkout_check | maintenance
+   *   - date (optional, YYYY-MM-DD, defaults to hotel today in property timezone)
+   */
+  router.get('/daily-kpis/drilldown', async (req: Request, res: Response) => {
+    const propertyId = parsePositiveInt(req.query.property_id);
+    if (propertyId === null) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'property_id is required and must be a positive integer'
+      });
+    }
+
+    try {
+      const data = await getDailyKpiDrilldown(
+        pool,
+        propertyId,
+        req.query.type,
+        req.query.date as string | undefined
+      );
+      return res.json({
+        status: 'SUCCESS',
+        data
+      });
+    } catch (err: any) {
+      if (err.statusCode && err.code) {
+        return res.status(err.statusCode).json({
+          status: 'ERROR',
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {})
+        });
+      }
+      console.error('Error in /api/reports/daily-kpis/drilldown:', err);
+      return res.status(500).json({
+        status: 'ERROR',
+        code: 'INTERNAL_ERROR',
         message: err.message || 'Internal server error'
       });
     }

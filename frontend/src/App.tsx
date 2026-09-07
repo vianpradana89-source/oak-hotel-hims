@@ -67,9 +67,10 @@ import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
-import { buildAvailabilityRequest, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
-import type { DailyKpiData } from './features/calendar/calendarApi';
-import { buildDailyKpiCards } from './features/calendar/dailyKpiFormat';
+import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
+import type { DailyKpiData, DailyKpiDrilldownData } from './features/calendar/calendarApi';
+import { buildDailyKpiCards, DRAWER_TYPE_TO_KPI_DRILLDOWN } from './features/calendar/dailyKpiFormat';
+import { DailyKpiDrilldownList } from './features/calendar/DailyKpiDrilldownList';
 import {
   addHotelDays,
   buildHotelDateWindow,
@@ -241,7 +242,7 @@ function AppContent() {
   });
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
-  const [checkoutInspections, setCheckoutInspections] = useState<any[]>([]);
+  const [, setCheckoutInspections] = useState<any[]>([]);
   const [, setPendingCheckoutInspectionsCount] = useState<number>(0);
   const [selectedCheckoutInspection, setSelectedCheckoutInspection] = useState<any | null>(null);
   const [, setMaintenanceTasks] = useState<any[]>([]);
@@ -369,6 +370,10 @@ function AppContent() {
 
   const [dailyKpis, setDailyKpis] = useState<DailyKpiData | null>(null);
   const dailyKpiRequestVersionRef = useRef(0);
+  const [kpiDrilldown, setKpiDrilldown] = useState<DailyKpiDrilldownData | null>(null);
+  const [kpiDrilldownLoading, setKpiDrilldownLoading] = useState(false);
+  const [kpiDrilldownError, setKpiDrilldownError] = useState<string | null>(null);
+  const kpiDrilldownRequestVersionRef = useRef(0);
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
   const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
@@ -1101,6 +1106,37 @@ function AppContent() {
     }
   };
   loadDailyKpisRef.current = loadDailyKpis;
+
+  useEffect(() => {
+    const apiType = summaryDrawerType ? DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] : undefined;
+    if (!apiType || propertyId === null) {
+      kpiDrilldownRequestVersionRef.current += 1;
+      setKpiDrilldown(null);
+      setKpiDrilldownLoading(false);
+      setKpiDrilldownError(null);
+      return;
+    }
+    const requestVersion = ++kpiDrilldownRequestVersionRef.current;
+    const propId = propertyId;
+    const date = dailyKpis?.business_date;
+    setKpiDrilldownLoading(true);
+    setKpiDrilldownError(null);
+    void fetchDailyKpiDrilldownApi(propId, apiType, date, authFetch)
+      .then((data) => {
+        if (requestVersion !== kpiDrilldownRequestVersionRef.current) return;
+        setKpiDrilldown(data);
+      })
+      .catch((err: unknown) => {
+        if (requestVersion !== kpiDrilldownRequestVersionRef.current) return;
+        setKpiDrilldown(null);
+        setKpiDrilldownError(err instanceof Error ? err.message : 'Rincian KPI hari ini belum dapat dimuat.');
+      })
+      .finally(() => {
+        if (requestVersion === kpiDrilldownRequestVersionRef.current) {
+          setKpiDrilldownLoading(false);
+        }
+      });
+  }, [summaryDrawerType, propertyId, dailyKpis, authFetch]);
 
   useEffect(() => {
     if (selectedMenu === 'Kalender' && propertyId !== null) void fetchDataRef.current();
@@ -3330,7 +3366,12 @@ function AppContent() {
                     value={card.value}
                     secondary={card.secondary}
                     color={card.color}
-                    onClick={() => setSummaryDrawerType(card.drawerType)}
+                    onClick={() => {
+                      setKpiDrilldown(null);
+                      setKpiDrilldownError(null);
+                      setKpiDrilldownLoading(true);
+                      setSummaryDrawerType(card.drawerType);
+                    }}
                     badge={card.key === 'checkoutCheck' ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
                   />
                 ))}
@@ -4130,7 +4171,13 @@ function AppContent() {
 
       <OperationalSummaryDrawer
         isOpen={summaryDrawerType !== null}
-        onClose={() => setSummaryDrawerType(null)}
+        onClose={() => {
+          kpiDrilldownRequestVersionRef.current += 1;
+          setSummaryDrawerType(null);
+          setKpiDrilldown(null);
+          setKpiDrilldownError(null);
+          setKpiDrilldownLoading(false);
+        }}
         title={
           summaryDrawerType === 'occupancy' ? 'Okupansi Hari Ini' :
           summaryDrawerType === 'booked' ? 'Booked Hari Ini' :
@@ -4141,15 +4188,22 @@ function AppContent() {
           summaryDrawerType === 'inspection' ? 'Pemeriksaan Checkout' :
           summaryDrawerType === 'maintenance' ? 'Maintenance' : ''
         }
+        subtitle={
+          (kpiDrilldown?.business_date || dailyKpis?.business_date)
+            ? `Tanggal hotel ${kpiDrilldown?.business_date || dailyKpis?.business_date}`
+            : undefined
+        }
         count={
-          summaryDrawerType === 'occupancy' ? (dailyKpis?.occupancy.occupied_rooms ?? 0) :
-          summaryDrawerType === 'booked' ? (dailyKpis?.booked_today.rooms ?? 0) :
-          summaryDrawerType === 'checkin' ? (dailyKpis?.check_in_today.rooms ?? 0) :
-          summaryDrawerType === 'checkout' ? (dailyKpis?.check_out_today.rooms ?? 0) :
-          summaryDrawerType === 'dirty' ? (dailyKpis?.rooms.dirty ?? 0) :
-          summaryDrawerType === 'ready' ? (dailyKpis?.rooms.vacant_clean ?? 0) :
-          summaryDrawerType === 'inspection' ? (dailyKpis?.checkout_check.pending ?? 0) :
-          summaryDrawerType === 'maintenance' ? (dailyKpis?.rooms.maintenance_ooo_oos ?? 0) : 0
+          kpiDrilldown && DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType || ''] === kpiDrilldown.type
+            ? kpiDrilldown.count
+            : summaryDrawerType === 'occupancy' ? (dailyKpis?.occupancy.occupied_rooms ?? 0) :
+              summaryDrawerType === 'booked' ? (dailyKpis?.booked_today.rooms ?? 0) :
+              summaryDrawerType === 'checkin' ? (dailyKpis?.check_in_today.rooms ?? 0) :
+              summaryDrawerType === 'checkout' ? (dailyKpis?.check_out_today.rooms ?? 0) :
+              summaryDrawerType === 'dirty' ? (dailyKpis?.rooms.dirty ?? 0) :
+              summaryDrawerType === 'ready' ? (dailyKpis?.rooms.vacant_clean ?? 0) :
+              summaryDrawerType === 'inspection' ? (dailyKpis?.checkout_check.pending ?? 0) :
+              summaryDrawerType === 'maintenance' ? (dailyKpis?.rooms.maintenance_ooo_oos ?? 0) : 0
         }
         countLabel={
           summaryDrawerType === 'inspection' ? 'pending' :
@@ -4163,156 +4217,11 @@ function AppContent() {
           summaryDrawerType === 'ready' ? 'emerald' : 'slate'
         }
       >
-        {summaryDrawerType === 'inspection' ? (
-          checkoutInspections.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-400">
-              Tidak ada pemeriksaan checkout yang menunggu saat ini.
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {checkoutInspections.map((chk: any) => {
-                const isPending = ['REQUESTED', 'ASSIGNED'].includes(chk.status);
-                const isInProgress = ['ACKNOWLEDGED', 'IN_PROGRESS'].includes(chk.status);
-                const isClear = chk.status === 'DONE' && chk.inspection_result === 'CLEAR';
-                const isIssue = chk.status === 'DONE' && chk.inspection_result === 'ISSUE_FOUND';
-                const statusLabel = isPending ? 'MENUNGGU' : isInProgress ? 'SEDANG DICEK' : isClear ? '✓ AMAN' : isIssue ? '⚠ ADA TEMUAN' : chk.status;
-                const statusBadge = isPending ? 'bg-amber-100 text-amber-900 border-amber-300' : isInProgress ? 'bg-blue-100 text-blue-900 border-blue-300' : isClear ? 'bg-emerald-100 text-emerald-900 border-emerald-300' : isIssue ? 'bg-rose-100 text-rose-900 border-rose-300' : 'bg-slate-100 text-slate-700 border-slate-200';
-                return (
-                  <div key={chk.id} onClick={() => { setSummaryDrawerType(null); setSelectedCheckoutInspection(chk); }} className="p-3 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition cursor-pointer">
-                    <div className="flex items-center justify-between">
-                      <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                        <span className={`w-2 h-2 rounded-full ${isClear ? 'bg-emerald-500' : isIssue ? 'bg-rose-500' : 'bg-amber-500'}`} />
-                        Kamar {chk.room_number || '-'}
-                      </div>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${statusBadge}`}>{statusLabel}</span>
-                    </div>
-                    <div className="text-slate-500 text-[11px] mt-1">
-                      {chk.created_at ? new Date(chk.created_at).toLocaleString('id-ID') : '-'}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )
-        ) : summaryDrawerType === 'maintenance' ? (
-          (() => {
-            const blockedRooms = rooms.filter((room: any) => {
-              const raw = String(room.operational_status || room.status || '').toUpperCase();
-              return raw === 'OUT_OF_ORDER' || raw === 'OUT_OF_SERVICE';
-            });
-            return blockedRooms.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400">
-                Tidak ada kamar OOO/OOS aktif saat ini.
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {blockedRooms.map((room: any) => (
-                  <div key={room.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-slate-900">{room.room_number}</span>
-                      <span className="text-slate-500 ml-2">{room.room_type_name || ''}</span>
-                    </div>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-100 text-rose-800">
-                      {String(room.operational_status || room.status || '').toUpperCase()}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            );
-          })()
-        ) : summaryDrawerType === 'dirty' || summaryDrawerType === 'ready' ? (
-          (() => {
-            const filteredRooms = rooms.filter((room: any) => {
-              const raw = String(room.operational_status || room.status || '').toUpperCase();
-              return summaryDrawerType === 'dirty'
-                ? raw === 'VACANT_DIRTY' || raw === 'OCCUPIED_DIRTY'
-                : raw === 'VACANT_CLEAN';
-            });
-            return filteredRooms.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400">
-                {summaryDrawerType === 'dirty' ? 'Tidak ada kamar kotor saat ini.' : 'Tidak ada kamar vacant clean saat ini.'}
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {filteredRooms.map((room: any) => (
-                  <div key={room.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-slate-900">{room.room_number}</span>
-                      <span className="text-slate-500 ml-2">{room.room_type_name || ''}</span>
-                    </div>
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${summaryDrawerType === 'dirty' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
-                      {roomStatuses[String(room.id)] || '-'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            );
-          })()
-        ) : (
-          (() => {
-            if (summaryDrawerType === 'occupancy' || summaryDrawerType === 'booked' || summaryDrawerType === 'checkin' || summaryDrawerType === 'checkout') {
-              const dateLabel = dailyKpis?.business_date || '';
-              const detail =
-                summaryDrawerType === 'occupancy'
-                  ? `${dailyKpis?.occupancy.occupied_rooms ?? 0} / ${dailyKpis?.occupancy.sellable_rooms ?? 0} kamar sellable`
-                  : summaryDrawerType === 'booked'
-                    ? `${dailyKpis?.booked_today.rooms ?? 0} kamar · ${dailyKpis?.booked_today.bookings ?? 0} booking`
-                    : `${summaryDrawerType === 'checkin' ? (dailyKpis?.check_in_today.rooms ?? 0) : (dailyKpis?.check_out_today.rooms ?? 0)} kamar`;
-              return (
-                <div className="py-6 text-center text-xs text-slate-500">
-                  <div className="font-semibold text-slate-800">{detail}</div>
-                  <div className="mt-1">Tanggal hotel {dateLabel || 'hari ini'} (bukan jendela kalender).</div>
-                </div>
-              );
-            }
-            const filteredReservations = reservations.filter((r: any) => {
-              const status = String(r?.status || '').toUpperCase();
-              if (summaryDrawerType === 'booked') return status !== 'CHECKED_IN' && status !== 'CHECKED_OUT' && status !== 'CANCELLED';
-              if (summaryDrawerType === 'checkin') return status === 'CHECKED_IN';
-              if (summaryDrawerType === 'checkout') return status === 'CHECKED_OUT';
-              return true;
-            });
-            return filteredReservations.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400">
-                Tidak ada reservasi untuk kategori ini.
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {filteredReservations.slice(0, 50).map((res: any) => {
-                  const room = rooms.find((r: any) => Number(r.id) === Number(res.room_id));
-                  return (
-                    <div key={res.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-slate-900">{res.guest_name || '-'}</span>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                          res.status === 'CHECKED_IN' ? 'bg-emerald-100 text-emerald-800' :
-                          res.status === 'CHECKED_OUT' ? 'bg-slate-100 text-slate-700' :
-                          res.status === 'CANCELLED' ? 'bg-rose-100 text-rose-800' :
-                          'bg-blue-50 text-blue-800'
-                        }`}>
-                          {res.status}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
-                        <span>{res.booking_number || res.bid || '-'}</span>
-                        <span>·</span>
-                        <span>Kamar {room?.room_number || '-'}</span>
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5">
-                        {res.check_in ? new Date(res.check_in).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '?'} → {res.check_out ? new Date(res.check_out).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '?'}
-                      </div>
-                    </div>
-                  );
-                })}
-                {filteredReservations.length > 50 && (
-                  <div className="text-center text-[11px] text-slate-400 pt-2">
-                    Menampilkan 50 dari {filteredReservations.length} data
-                  </div>
-                )}
-              </div>
-            );
-          })()
-        )}
+        <DailyKpiDrilldownList
+          data={kpiDrilldown}
+          loading={kpiDrilldownLoading}
+          error={kpiDrilldownError}
+        />
       </OperationalSummaryDrawer>
 
       {quickReservation && (

@@ -5,6 +5,8 @@ const http = require('http');
 const { once } = require('events');
 const { app, pool } = require('../dist/index');
 const { generateToken } = require('../dist/domains/auth/authService');
+const { ACCESS_RESOURCES, setRoleAccess } = require('../dist/domains/settings/accessControlService');
+const { matchOperationalAccessRule } = require('../dist/domains/settings/operationalAccessGuard');
 
 let server;
 let baseUrl;
@@ -23,9 +25,9 @@ function assert(condition, message) {
 
 let authToken = '';
 
-async function api(method, path) {
+async function api(method, path, token = authToken) {
   const headers = { 'Content-Type': 'application/json' };
-  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(baseUrl + path, { method, headers });
   const json = await res.json().catch(() => null);
   return { status: res.status, body: json };
@@ -36,6 +38,38 @@ async function kpis(propertyId, date) {
     ? `/api/reports/daily-kpis?property_id=${propertyId}&date=${date}`
     : `/api/reports/daily-kpis?property_id=${propertyId}`;
   return api('GET', qs);
+}
+
+async function drilldown(propertyId, type, date, token) {
+  let qs = `/api/reports/daily-kpis/drilldown?property_id=${propertyId}`;
+  if (type) qs += `&type=${encodeURIComponent(type)}`;
+  if (date) qs += `&date=${date}`;
+  return api('GET', qs, token);
+}
+
+async function assertReconcile(propertyId, date, label) {
+  const kpiRes = await kpis(propertyId, date);
+  assert(kpiRes.status === 200, `${label} kpi 200`);
+  const d = kpiRes.body.data;
+  const occ = await drilldown(propertyId, 'occupancy', date);
+  const booked = await drilldown(propertyId, 'booked', date);
+  const ci = await drilldown(propertyId, 'checkin', date);
+  const co = await drilldown(propertyId, 'checkout', date);
+  const dirty = await drilldown(propertyId, 'dirty', date);
+  const vc = await drilldown(propertyId, 'vacant_clean', date);
+  const chk = await drilldown(propertyId, 'checkout_check', date);
+  const mnt = await drilldown(propertyId, 'maintenance', date);
+  assert(occ.status === 200 && occ.body.data.items.length === d.occupancy.occupied_rooms, `${label} occupancy items == occupied_rooms`);
+  assert(booked.body.data.groups.length === d.booked_today.bookings, `${label} booked groups == bookings`);
+  const roomSum = (booked.body.data.groups || []).reduce((sum, g) => sum + Number(g.room_count || 0), 0);
+  assert(roomSum === d.booked_today.rooms && booked.body.data.rooms === d.booked_today.rooms, `${label} booked room_count sum == rooms`);
+  assert(ci.body.data.items.length === d.check_in_today.rooms, `${label} checkin items == check_in_today.rooms`);
+  assert(co.body.data.items.length === d.check_out_today.rooms, `${label} checkout items == check_out_today.rooms`);
+    assert(dirty.status === 200 && dirty.body.data.items.length === d.rooms.dirty, `${label} dirty items == rooms.dirty`);
+    assert(vc.status === 200 && vc.body.data.items.length === d.rooms.vacant_clean, `${label} vacant_clean items == rooms.vacant_clean`);
+    assert(chk.status === 200 && chk.body.data.items.length === d.checkout_check.pending, `${label} checkout_check items == pending`);
+    assert(mnt.status === 200 && mnt.body.data.items.length === d.rooms.maintenance_ooo_oos, `${label} maintenance items == ooo_oos`);
+  return { d, occ: occ.body.data, booked: booked.body.data, ci: ci.body.data, co: co.body.data, dirty: dirty.body.data, vc: vc.body.data, chk: chk.body.data, mnt: mnt.body.data };
 }
 
 async function insertBooking(propertyId, bid, guest, createdAt) {
@@ -84,7 +118,7 @@ async function insertReservation(params) {
 }
 
 async function main() {
-  console.log('=== DASHBOARD-DAILY-KPI-1 Tests ===\n');
+  console.log('=== DASHBOARD-DAILY-KPI-1/2 Tests ===\n');
 
   server = http.createServer(app);
   server.listen(0);
@@ -113,6 +147,8 @@ async function main() {
   const blockIds = [];
   const taskIds = [];
   const moveIds = [];
+  const cleanupUserIds = [];
+  const cleanupRoleIds = [];
 
   try {
     const propARes = await pool.query(
@@ -222,6 +258,9 @@ async function main() {
     reservationIds.push(rA);
     const aRes = await kpis(propA, D);
     assert(aRes.body.data.occupancy.occupied_rooms === 1, 'A. CHECKED_IN occupying D => occupancy +1');
+    const occA = await drilldown(propA, 'occupancy', D);
+    assert(occA.body.data.items.length === 1, 'A. occupancy drilldown 1 child');
+    assert(Number(occA.body.data.items[0].reservation_id) === rA, 'A. occupancy row is the CHECKED_IN child');
 
     console.log('--- B. one BID three children ---');
     const bMulti = await insertBooking(propA, `KPI-M-${stamp}`, 'Multi', createdOld);
@@ -237,6 +276,10 @@ async function main() {
     }
     const bRes = await kpis(propA, D);
     assert(bRes.body.data.occupancy.occupied_rooms === 4, 'B. 1 existing + 3 children => occupancy 4');
+    const occB = await drilldown(propA, 'occupancy', D);
+    const multiRows = occB.body.data.items.filter((i) => String(i.bid || '').includes(`KPI-M-${stamp}`));
+    assert(multiRows.length === 3, 'B. 1 BID 3 occupancy children');
+    assert(multiRows.every((i) => i.room_id == null), 'C. unassigned occupied children appear');
 
     console.log('--- C. cancelled excluded ---');
     const bCan = await insertBooking(propA, `KPI-C-${stamp}`, 'Cancelled', createdToday);
@@ -310,6 +353,8 @@ async function main() {
     const gRes = await kpis(propA, D);
     assert(gRes.body.data.check_in_today.rooms === 2, 'G. planned arrival without checked_in_at not counted');
     assert(gRes.body.data.occupancy.occupied_rooms === 5, 'G. planned BOOKED occupying D still in occupancy');
+    const ciG = await drilldown(propA, 'checkin', D);
+    assert(!ciG.body.data.items.some((i) => Number(i.reservation_id) === rPlan), 'H. planned CI only excluded from checkin drilldown');
 
     console.log('--- H/I check-out today vs planned ---');
     const hRes = await kpis(propA, D);
@@ -327,11 +372,14 @@ async function main() {
     const iRes = await kpis(propA, D);
     assert(iRes.body.data.check_out_today.rooms === 1, 'I. planned departure without checkout timestamp not counted');
     assert(iRes.body.data.occupancy.occupied_rooms === 5, 'I. stayover with check_out=D does not occupy D (half-open)');
+    const coI = await drilldown(propA, 'checkout', D);
+    assert(!coI.body.data.items.some((i) => Number(i.reservation_id) === rStay), 'K. planned CO only excluded from checkout drilldown');
+    assert(coI.body.data.items.some((i) => Number(i.reservation_id) === rOut), 'J. actual CO today in checkout drilldown');
 
     console.log('--- J/K booked today vs old BOOKED ---');
     const bNew = await insertBooking(propA, `KPI-J-${stamp}`, 'New sale', createdToday);
     bookingIds.push(bNew);
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       const id = await insertReservation({
         bookingId: bNew, staySequence: i + 1, roomId: null, guest: `New ${i + 1}`,
         checkIn: '2026-09-10', checkOut: '2026-09-12', status: 'BOOKED',
@@ -340,10 +388,15 @@ async function main() {
       reservationIds.push(id);
     }
     const jRes = await kpis(propA, D);
-    assert(jRes.body.data.booked_today.rooms === 2, 'J. booking created today 2 children => 2 rooms');
+    assert(jRes.body.data.booked_today.rooms === 3, 'J. booking created today 3 children => 3 rooms');
     assert(jRes.body.data.booked_today.bookings === 1, 'J. booking created today => 1 booking');
     assert(jRes.body.data.occupancy.occupied_rooms === 5, 'K. old BOOKED occupying D is occupancy not booked-today');
     assert(jRes.body.data.booked_today.bookings === 1, 'K. old BOOKED stock not in booked-today');
+    const bookedJ = await drilldown(propA, 'booked', D);
+    assert(bookedJ.body.data.groups.length === 1, 'F. booked drilldown 1 group');
+    assert(bookedJ.body.data.groups[0].room_count === 3, 'F. 1 BID 3 rooms => room_count 3');
+    assert(bookedJ.body.data.rooms === 3, 'F. booked rooms 3');
+    assert(!bookedJ.body.data.groups.some((g) => String(g.bid || '').includes(`KPI-A-${stamp}`)), 'E. old BOOKED absent from booked-today groups');
 
     console.log('--- L. DAY_USE ---');
     const bDu = await insertBooking(propA, `KPI-L-${stamp}`, 'Day use', createdToday);
@@ -358,7 +411,9 @@ async function main() {
     const lRes = await kpis(propA, D);
     assert(lRes.body.data.occupancy.occupied_rooms === 6, 'L. DAY_USE CHECKED_IN occupying D included');
     assert(lRes.body.data.check_in_today.rooms === 3, 'L. DAY_USE checked_in_at today counted');
-    assert(lRes.body.data.booked_today.rooms === 3, 'L. DAY_USE booking created today included');
+    assert(lRes.body.data.booked_today.rooms === 4, 'L. DAY_USE booking created today included');
+    const occL = await drilldown(propA, 'occupancy', D);
+    assert(occL.body.data.items.some((i) => Number(i.reservation_id) === rDu && String(i.stay_type).toUpperCase() === 'DAY_USE'), 'D. DAY_USE occupancy row present');
 
     await pool.query(
       `UPDATE reservations
@@ -370,6 +425,12 @@ async function main() {
     assert(lOut.body.data.occupancy.occupied_rooms === 5, 'L. DAY_USE after checkout excluded from occupancy');
     assert(lOut.body.data.check_in_today.rooms === 3, 'L. same-day CI remains after checkout');
     assert(lOut.body.data.check_out_today.rooms === 2, 'L. DAY_USE checkout today counted');
+    const ciSame = await drilldown(propA, 'checkin', D);
+    const coSame = await drilldown(propA, 'checkout', D);
+    assert(ciSame.body.data.items.some((i) => Number(i.reservation_id) === rDu), 'I. same-day CI then CO still in checkin list');
+    assert(coSame.body.data.items.some((i) => Number(i.reservation_id) === rDu), 'I. same-day CI then CO still in checkout list');
+    const ciActual = await drilldown(propA, 'checkin', D);
+    assert(ciActual.body.data.items.some((i) => Number(i.reservation_id) === rA && i.checked_in_at), 'G. actual CI today in checkin drilldown');
 
     console.log('--- M. room move no double count ---');
     const move = await pool.query(
@@ -420,6 +481,11 @@ async function main() {
     const oY = await kpis(propA, '2026-09-06');
     assert(oRes.body.data.check_in_today.rooms === 3, 'O. 17:00Z Sep 6 is Sep 7 Jakarta check-in');
     assert(oY.body.data.check_in_today.rooms >= 1, 'O. 16:59:59Z Sep 6 stays on Sep 6 Jakarta');
+    const ciTodayDd = await drilldown(propA, 'checkin', D);
+    const ciYestDd = await drilldown(propA, 'checkin', '2026-09-06');
+    assert(ciTodayDd.body.data.items.some((i) => Number(i.reservation_id) === rA), 'R. 17:00Z buckets to Sep 7 Jakarta checkin list');
+    assert(!ciTodayDd.body.data.items.some((i) => Number(i.reservation_id) === rTz), 'R. 16:59Z excluded from Sep 7 Jakarta checkin list');
+    assert(ciYestDd.body.data.items.some((i) => Number(i.reservation_id) === rTz), 'R. 16:59Z included on Sep 6 Jakarta checkin list');
 
     console.log('--- Q. checkout-check pending > 20 ---');
     for (let i = 0; i < 25; i++) {
@@ -443,6 +509,21 @@ async function main() {
     );
     const qRes = await kpis(propA, D);
     assert(qRes.body.data.checkout_check.pending === 25, 'Q. pending checkout-check is exact 25, not capped at 20');
+    const chkQ = await drilldown(propA, 'checkout_check', D);
+    assert(chkQ.body.data.items.length === 25, 'P. checkout-check drilldown 25 open rows');
+    assert(!chkQ.body.data.items.some((i) => String(i.status).toUpperCase() === 'DONE'), 'Q. DONE checkout check excluded from drilldown');
+
+    const archived = await pool.query(
+      `INSERT INTO housekeeping_tasks (
+        property_id, task_type, task_category, title, room_id, status, source_type, notes, is_archived
+      ) VALUES (
+        $1, 'CHECKOUT_ROOM_CHECK', 'CHECKOUT_INSPECTION', $2, $3, 'ASSIGNED', 'FRONT_OFFICE', 'KPI_CHK_ARCH', TRUE
+      ) RETURNING id`,
+      [propA, `KPI_CHK_ARCH_${stamp}`, roomsA[0]]
+    );
+    taskIds.push(archived.rows[0].id);
+    const chkArch = await drilldown(propA, 'checkout_check', D);
+    assert(chkArch.body.data.items.length === 25, 'Q. archived checkout check excluded');
 
     console.log('--- T. sellable 0 => pct null ---');
     const codeZ = `KZ${stamp.slice(0, 4)}`;
@@ -480,6 +561,82 @@ async function main() {
     await pool.query('DELETE FROM room_types WHERE id = $1', [rtZ]);
     await pool.query('DELETE FROM properties WHERE id = $1', [propZ]);
 
+    console.log('--- KPI-2 dirty / vacant clean / maintenance ---');
+    const snap = await assertReconcile(propA, D, 'KPI-2 snapshot');
+    assert(snap.dirty.items.length === 2, 'L. dirty exact 2 rooms');
+    assert(snap.dirty.items.every((i) => ['VACANT_DIRTY', 'OCCUPIED_DIRTY'].includes(String(i.status || '').toUpperCase())), 'L. dirty statuses exact');
+    assert(snap.vc.items.every((i) => i.status === 'VACANT_CLEAN'), 'M. vacant clean exact VACANT_CLEAN');
+    assert(snap.mnt.items.length === 2, 'N. maintenance union 2 rooms');
+    const mntIds = snap.mnt.items.map((i) => Number(i.room_id));
+    assert(new Set(mntIds).size === mntIds.length, 'O. same maintenance room only once');
+    const statusOoo = snap.mnt.items.find((i) => Number(i.room_id) === roomsA[6]);
+    const blockOos = snap.mnt.items.find((i) => Number(i.room_id) === roomsA[7]);
+    assert(statusOoo && statusOoo.from_room_status === true && statusOoo.from_operational_block === true, 'N. OOO status + block flagged both');
+    assert(blockOos && blockOos.from_operational_block === true && blockOos.from_room_status === false, 'N. OOS block-only room included');
+
+    console.log('--- KPI-2 access ---');
+    const unauthDd = await fetch(`${baseUrl}/api/reports/daily-kpis/drilldown?property_id=${propA}&type=occupancy&date=${D}`);
+    assert(unauthDd.status === 401, 'S. anonymous drilldown returns 401');
+    const badType = await drilldown(propA, 'not-a-type', D);
+    assert(badType.status === 400, 'invalid drilldown type returns 400');
+    const mapped = matchOperationalAccessRule('/api/reports/daily-kpis/drilldown', 'GET');
+    assert(mapped && mapped.resources.includes('Kalender') && mapped.resources.includes('Laporan') && mapped.action === 'view', 'U. drilldown maps to Kalender or Laporan view');
+    const occupancyMapped = matchOperationalAccessRule('/api/reports/occupancy', 'GET');
+    assert(occupancyMapped && occupancyMapped.resources.length === 1 && occupancyMapped.resources[0] === 'Laporan', 'U. occupancy remains Laporan-only');
+    const operationsMapped = matchOperationalAccessRule('/api/reports/daily-operations', 'GET');
+    assert(operationsMapped && operationsMapped.resources[0] === 'Laporan', 'U. daily-operations remains Laporan-only');
+
+    const kalRole = await pool.query(
+      `INSERT INTO roles (property_id, name, description, is_active, is_system_role, is_test_data)
+       VALUES ($1, $2, $3, TRUE, FALSE, TRUE) RETURNING id`,
+      [propA, `KPI_KAL_${stamp}`, 'KPI Kalender view only']
+    );
+    cleanupRoleIds.push(kalRole.rows[0].id);
+    const grid = {};
+    for (const resource of ACCESS_RESOURCES) {
+      grid[resource.key] = { view: resource.key === 'Kalender', edit: false, delete: false };
+    }
+    const actor = {
+      id: Number(sa.id),
+      name: sa.full_name || sa.username,
+      property_id: propA,
+      is_platform_super_admin: true,
+    };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await setRoleAccess(client, propA, kalRole.rows[0].id, grid, actor);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+    const kalUser = await pool.query(
+      `INSERT INTO users (property_id, role_id, username, email, password_hash, full_name, is_active, is_test_data)
+       VALUES ($1, $2, $3, $4, 'x', $5, TRUE, TRUE) RETURNING id, username, full_name, email`,
+      [propA, kalRole.rows[0].id, `kpi_kal_${stamp}`, `kpi_kal_${stamp}@test.local`, 'KPI Kalender']
+    );
+    cleanupUserIds.push(kalUser.rows[0].id);
+    const kalToken = generateToken({
+      id: Number(kalUser.rows[0].id),
+      email: kalUser.rows[0].email,
+      username: kalUser.rows[0].username,
+      full_name: kalUser.rows[0].full_name,
+      role: 'KPI Kalender',
+      role_id: kalRole.rows[0].id,
+      property_id: propA,
+      scope: 'FULL',
+      access_type: 'PMS_STAFF',
+    });
+    const kalDd = await drilldown(propA, 'checkout_check', D, kalToken);
+    assert(kalDd.status === 200 && kalDd.body.data.items.length === 25, 'T. Kalender user can GET checkout_check drilldown without Housekeeping');
+    const kalOcc = await api('GET', `/api/reports/occupancy?property_id=${propA}&date=${D}`, kalToken);
+    assert(kalOcc.status === 403, 'U. Kalender user cannot read unrelated occupancy report');
+    const kalHk = await api('GET', `/api/housekeeping/checkout-inspections?property_id=${propA}`, kalToken);
+    assert(kalHk.status === 403, 'T. Kalender user still cannot call housekeeping checkout-inspections');
+
     console.log('--- Occupancy percent rounding ---');
     const pct = eRes.body.data.occupancy.occupancy_pct;
     assert(typeof pct === 'number', 'occupancy_pct is a number when sellable > 0');
@@ -488,13 +645,19 @@ async function main() {
     failed++;
   } finally {
     try {
+      if (cleanupUserIds.length) await pool.query('DELETE FROM users WHERE id = ANY($1::int[])', [cleanupUserIds]);
+      if (cleanupRoleIds.length) {
+        await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::int[])', [cleanupRoleIds]);
+        await pool.query('DELETE FROM roles WHERE id = ANY($1::int[])', [cleanupRoleIds]);
+      }
       if (moveIds.length) await pool.query('DELETE FROM reservation_room_moves WHERE id = ANY($1::int[])', [moveIds]);
       if (taskIds.length) await pool.query('DELETE FROM housekeeping_tasks WHERE id = ANY($1::int[])', [taskIds]);
-      await pool.query("DELETE FROM housekeeping_tasks WHERE notes IN ('KPI_CHK', 'KPI_CHK_DONE') OR title LIKE 'KPI_CHK_%'");
+      await pool.query("DELETE FROM housekeeping_tasks WHERE notes IN ('KPI_CHK', 'KPI_CHK_DONE', 'KPI_CHK_ARCH') OR title LIKE 'KPI_CHK_%'");
       if (reservationIds.length) await pool.query('DELETE FROM reservations WHERE id = ANY($1::int[])', [reservationIds]);
       if (bookingIds.length) await pool.query('DELETE FROM bookings WHERE id = ANY($1::int[])', [bookingIds]);
       if (blockIds.length) await pool.query('DELETE FROM room_operational_blocks WHERE id = ANY($1::int[])', [blockIds]);
       if (propA) {
+        await pool.query('DELETE FROM audit_logs WHERE property_id = $1', [propA]);
         await pool.query('DELETE FROM rooms WHERE property_id = $1', [propA]);
         await pool.query('DELETE FROM room_types WHERE property_id = $1', [propA]);
         await pool.query('DELETE FROM properties WHERE id = $1', [propA]);

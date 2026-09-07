@@ -1,4 +1,48 @@
-import type { DailyKpiData } from './calendarApi';
+import type { DailyKpiData, DailyKpiDrilldownType } from './calendarApi';
+
+export const DRAWER_TYPE_TO_KPI_DRILLDOWN: Record<string, DailyKpiDrilldownType> = {
+  occupancy: 'occupancy',
+  booked: 'booked',
+  checkin: 'checkin',
+  checkout: 'checkout',
+  dirty: 'dirty',
+  ready: 'vacant_clean',
+  inspection: 'checkout_check',
+  maintenance: 'maintenance',
+};
+
+export function formatKpiStayRange(checkIn: string | null | undefined, checkOut: string | null | undefined): string {
+  const start = formatKpiHotelDay(checkIn);
+  const end = formatKpiHotelDay(checkOut);
+  return `${start} → ${end}`;
+}
+
+export function formatKpiHotelDay(value: string | null | undefined): string {
+  const key = String(value || '').slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!match) return '?';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  return `${match[3]} ${months[Number(match[2]) - 1]}`;
+}
+
+export function formatKpiClock(value: string | null | undefined, timeZone: string): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return new Intl.DateTimeFormat('id-ID', {
+    timeZone: timeZone || 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+export function maintenanceSourceLabel(fromStatus: boolean, fromBlock: boolean): string {
+  if (fromStatus && fromBlock) return 'Status + Block';
+  if (fromStatus) return 'Status OOO/OOS';
+  if (fromBlock) return 'Operational Block';
+  return 'OOO/OOS';
+}
 
 export function formatOccupancyPercent(pct: number | null | undefined): string | null {
   if (pct == null || Number.isNaN(Number(pct))) return null;

@@ -74,7 +74,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/room-types/, resources: ['Master Kamar'] },
   { pattern: /^\/api\/rooms/, resources: ['Master Kamar'] },
 
-  { pattern: /^\/api\/reports\/daily-kpis$/, resources: ['Kalender', 'Laporan'], methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/reports\/daily-kpis(\/drilldown)?$/, resources: ['Kalender', 'Laporan'], methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/reports/, resources: ['Laporan'] },
   { pattern: /^\/api\/accounting/, resources: ['Laporan'] },
 

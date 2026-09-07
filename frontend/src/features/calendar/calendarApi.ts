@@ -220,3 +220,131 @@ export async function fetchDailyKpis(
   }
   return result.data.data;
 }
+
+export const DAILY_KPI_DRILLDOWN_TYPES = [
+  'occupancy',
+  'booked',
+  'checkin',
+  'checkout',
+  'dirty',
+  'vacant_clean',
+  'checkout_check',
+  'maintenance',
+] as const;
+
+export type DailyKpiDrilldownType = (typeof DAILY_KPI_DRILLDOWN_TYPES)[number];
+
+export interface DailyKpiStayItem {
+  reservation_id: number;
+  booking_id: number;
+  bid: string | null;
+  guest_name: string | null;
+  room_id: number | null;
+  room_number: string | null;
+  room_type_name: string | null;
+  status: string | null;
+  stay_type: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  checked_in_at?: string | null;
+  checked_out_at?: string | null;
+}
+
+export interface DailyKpiBookedChild {
+  reservation_id: number;
+  room_id: number | null;
+  room_number: string | null;
+  room_type_name: string | null;
+  status: string | null;
+}
+
+export interface DailyKpiBookedGroup {
+  booking_id: number;
+  bid: string | null;
+  guest_name: string | null;
+  booking_status: string | null;
+  booking_source: string | null;
+  created_at: string | null;
+  room_count: number;
+  children: DailyKpiBookedChild[];
+}
+
+export interface DailyKpiRoomItem {
+  room_id: number;
+  room_number: string | null;
+  room_type_name: string | null;
+  status: string | null;
+}
+
+export interface DailyKpiCheckoutCheckItem {
+  task_id: number;
+  task_number: string | null;
+  status: string | null;
+  room_id: number | null;
+  room_number: string | null;
+  room_type_name: string | null;
+  reservation_id: number | null;
+  guest_name: string | null;
+  bid: string | null;
+  created_at: string | null;
+}
+
+export interface DailyKpiMaintenanceItem {
+  room_id: number;
+  room_number: string | null;
+  room_type_name: string | null;
+  room_status: string | null;
+  from_room_status: boolean;
+  from_operational_block: boolean;
+  block_type: string | null;
+}
+
+interface DailyKpiDrilldownBase {
+  property_id: number;
+  business_date: string;
+  timezone: string;
+  count: number;
+}
+
+export type DailyKpiDrilldownData =
+  | (DailyKpiDrilldownBase & { type: 'occupancy'; items: DailyKpiStayItem[] })
+  | (DailyKpiDrilldownBase & {
+      type: 'booked';
+      groups: DailyKpiBookedGroup[];
+      bookings: number;
+      rooms: number;
+    })
+  | (DailyKpiDrilldownBase & { type: 'checkin'; items: DailyKpiStayItem[] })
+  | (DailyKpiDrilldownBase & { type: 'checkout'; items: DailyKpiStayItem[] })
+  | (DailyKpiDrilldownBase & { type: 'dirty'; items: DailyKpiRoomItem[] })
+  | (DailyKpiDrilldownBase & { type: 'vacant_clean'; items: DailyKpiRoomItem[] })
+  | (DailyKpiDrilldownBase & { type: 'checkout_check'; items: DailyKpiCheckoutCheckItem[] })
+  | (DailyKpiDrilldownBase & { type: 'maintenance'; items: DailyKpiMaintenanceItem[] });
+
+export interface DailyKpiDrilldownResponse {
+  status: string;
+  data: DailyKpiDrilldownData;
+}
+
+export async function fetchDailyKpiDrilldown(
+  propertyId: number,
+  type: DailyKpiDrilldownType,
+  date: string | undefined,
+  fetchImpl: FetchLike = fetch
+): Promise<DailyKpiDrilldownData> {
+  const params = new URLSearchParams({
+    property_id: String(propertyId),
+    type,
+  });
+  if (date) params.set('date', date);
+  const result = await safeFetchJson<DailyKpiDrilldownResponse>(
+    `/api/reports/daily-kpis/drilldown?${params.toString()}`,
+    undefined,
+    'Rincian KPI hari ini belum dapat dimuat.',
+    fetchImpl
+  );
+  if (!result.ok || !result.data?.data) {
+    throw new Error(result.errorMessage || `Daily KPI drilldown request failed (${result.status})`);
+  }
+  return result.data.data;
+}
