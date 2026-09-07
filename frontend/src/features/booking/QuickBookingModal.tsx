@@ -20,6 +20,7 @@ import {
   QUICK_BOOKING_NO_TYPES_MESSAGE,
   QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE,
 } from './quickBookingAvailability';
+import { computeQuickBookingRoomDiscount, toBackendDiscountType } from './quickBookingBilling';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -668,14 +669,12 @@ export default function QuickBookingModal({
         : Math.max(0, Number(draft.roomNightlyRate) || 0);
 
       const stayChargesTotal = draft.stayCharges.reduce((acc, curr) => acc + curr.amount, 0);
-      
-      let discountAmount = 0;
-      if (draft.discountType === 'PERCENT') {
-        discountAmount = Math.round((roomCharge + stayChargesTotal) * (Math.min(100, Math.max(0, draft.discountValue)) / 100));
-      } else {
-        discountAmount = Math.min(roomCharge + stayChargesTotal, Math.max(0, draft.discountValue));
-      }
-
+      const discountAmount = computeQuickBookingRoomDiscount({
+        roomCharge,
+        stayChargesTotal,
+        discountType: draft.discountType,
+        discountValue: draft.discountValue
+      });
       const netSubtotal = Math.max(0, roomCharge + stayChargesTotal - discountAmount);
 
       const matchedRoom = rooms.find(r => Number(r.id) === Number(draft.roomId));
@@ -1082,6 +1081,21 @@ export default function QuickBookingModal({
           issues.push(label + ': Alasan override harga manual wajib diisi');
         }
       }
+      if (r.discountType === 'PERCENT' && Number(r.discountValue) > 100) {
+        issues.push(label + ': Persentase diskon tidak boleh lebih dari 100');
+      }
+      if (Number(r.discountValue) < 0) {
+        issues.push(label + ': Nilai diskon tidak boleh negatif');
+      }
+      const rowDiscount = computeQuickBookingRoomDiscount({
+        roomCharge: Number(roomCalculations[idx]?.roomCharge || 0),
+        stayChargesTotal: Number(roomCalculations[idx]?.stayChargesTotal || 0),
+        discountType: r.discountType,
+        discountValue: r.discountValue
+      });
+      if (rowDiscount > 0 && !r.discountReason.trim()) {
+        issues.push(label + ': Alasan diskon wajib diisi');
+      }
       if (r.roomId && overlappingSiblingTakesRoom(roomsList, idx, r.roomId)) {
         issues.push(label + ': Kamar fisik bentrok dengan baris lain pada periode yang sama');
       }
@@ -1117,7 +1131,8 @@ export default function QuickBookingModal({
     roomsList,
     getFieldMode,
     rowAvailabilityTypes,
-    availabilityLoading
+    availabilityLoading,
+    roomCalculations
   ]);
 
   const isValid = validationIssues.length === 0;
@@ -1220,14 +1235,15 @@ export default function QuickBookingModal({
             subtotal_amount: calc.roomCharge,
             tax_amount: 0,
             service_amount: 0,
-            total_price: calc.netSubtotal,
+            total_price: calc.roomCharge + calc.stayChargesTotal,
             is_manual_override: channelType === 'OTA' ? true : Boolean(r.isManualOverride),
             manual_override_reason: channelType === 'OTA'
               ? (r.manualOverrideReason || (selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking'))
               : (r.isManualOverride ? r.manualOverrideReason : undefined),
             discount_amount: calc.discountAmount,
-            discount_type: r.discountType,
+            discount_type: toBackendDiscountType(r.discountType),
             discount_value: r.discountValue,
+            discount_percent: r.discountType === 'PERCENT' ? r.discountValue : 0,
             discount_reason: r.discountReason.trim() || undefined,
             stay_charges: r.stayCharges,
             amount_paid: idx === 0 ? amountPaid : 0,
@@ -2346,7 +2362,7 @@ export default function QuickBookingModal({
                           </div>
                           <div>
                             <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                              Alasan Diskon
+                              Alasan Diskon{Number(roomDraft.discountValue) > 0 ? ' *' : ''}
                             </label>
                             <input
                               type="text"
@@ -2482,6 +2498,11 @@ export default function QuickBookingModal({
                         <span className="font-mono font-semibold">-Rp {totalDiscounts.toLocaleString('id-ID')}</span>
                       </div>
                     )}
+
+                    <div className="flex justify-between text-stone-700">
+                      <span>Net Kamar</span>
+                      <span className="font-mono font-semibold">Rp {grandTotal.toLocaleString('id-ID')}</span>
+                    </div>
 
                     <div className="border-t border-stone-200 pt-2 flex justify-between text-stone-900 font-bold text-sm">
                       <span>Grand Total</span>

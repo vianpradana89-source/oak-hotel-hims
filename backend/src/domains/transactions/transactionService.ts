@@ -199,7 +199,7 @@ export async function getCategoryMeta(
 export async function projectFolioEntryToTransaction(
   client: PoolClient | Pool,
   folioEntryId: number,
-  options: { propertyId?: number; actorName?: string; actorUserId?: string } = {}
+  options: { propertyId?: number; actorName?: string; actorUserId?: string; discountAmount?: number } = {}
 ): Promise<TransactionRow | null> {
   const entryRes = await client.query(
     `SELECT 
@@ -279,6 +279,8 @@ export async function projectFolioEntryToTransaction(
       const servAmt = Math.round(rawEntryServ > 0 ? rawEntryServ : Number(origTx.service_amount || 0));
       const rawEntryNet = Number(entry.amount || 0);
       const netAmt = Math.round(rawEntryNet > 0 ? rawEntryNet : Number(origTx.net_amount || 0));
+      const origDiscount = Math.round(Number(origTx.discount_amount || 0));
+      const origNet = Math.round(Number(origTx.net_amount || 0));
 
       const revInsert = await client.query(
         `INSERT INTO transactions (
@@ -315,10 +317,10 @@ export async function projectFolioEntryToTransaction(
           origTx.department_code,
           `Pembalik: ${entry.description || origTx.description}`,
           -Math.abs(baseAmt),
-          0,
+          origDiscount !== 0 ? -Math.abs(origDiscount) : 0,
           -Math.abs(servAmt),
           -Math.abs(taxAmt),
-          -Math.abs(netAmt),
+          -Math.abs(origNet > 0 ? origNet : netAmt),
           origTx.payment_status,
           origTx.payment_method,
           origTx.guest_id,
@@ -425,7 +427,9 @@ export async function projectFolioEntryToTransaction(
   );
   const taxAmt = Math.round(Number(entry.tax_amount || 0));
   const servAmt = Math.round(Number(entry.service_amount || 0));
-  const netAmt = Math.round(rawNetAmt > 0 ? rawNetAmt : (baseAmt + taxAmt + servAmt));
+  const discountAmt = Math.max(0, Math.round(Number(options.discountAmount || 0)));
+  const grossNet = Math.round(rawNetAmt > 0 ? rawNetAmt : (baseAmt + taxAmt + servAmt));
+  const netAmt = Math.max(0, grossNet - discountAmt);
   const txDate = getHotelDateToday(entry.created_at);
 
   const existingTx = await client.query(
@@ -444,18 +448,20 @@ export async function projectFolioEntryToTransaction(
          amount = $1,
          tax_amount = $2,
          service_amount = $3,
-         net_amount = $4,
-         description = $5,
-         payment_status = $6,
-         room_number_snapshot = COALESCE($7, room_number_snapshot),
-         guest_name_snapshot = COALESCE($8, guest_name_snapshot),
+         discount_amount = $4,
+         net_amount = $5,
+         description = $6,
+         payment_status = $7,
+         room_number_snapshot = COALESCE($8, room_number_snapshot),
+         guest_name_snapshot = COALESCE($9, guest_name_snapshot),
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $9
+       WHERE id = $10
        RETURNING *`,
       [
         baseAmt,
         taxAmt,
         servAmt,
+        discountAmt,
         netAmt,
         entry.description || categoryName,
         entry.reservation_payment_status || 'UNPAID',
@@ -495,6 +501,7 @@ export async function projectFolioEntryToTransaction(
       amount = EXCLUDED.amount,
       tax_amount = EXCLUDED.tax_amount,
       service_amount = EXCLUDED.service_amount,
+      discount_amount = EXCLUDED.discount_amount,
       net_amount = EXCLUDED.net_amount,
       description = EXCLUDED.description,
       payment_status = EXCLUDED.payment_status,
@@ -513,7 +520,7 @@ export async function projectFolioEntryToTransaction(
       departmentCode,
       entry.description || categoryName,
       baseAmt,
-      0,
+      discountAmt,
       servAmt,
       taxAmt,
       netAmt,

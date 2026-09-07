@@ -96,6 +96,12 @@ import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { getReservationEditAvailability, getBookingCreateAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
+import {
+  ReservationBillingError,
+  allocateCommercialDiscount,
+  buildChildReservationBilling,
+  stayChargeLineGrosses
+} from './domains/reservations/reservationBilling';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
@@ -1068,7 +1074,9 @@ async function createChildReservationRecord(
   }
 ) {
   const child = params.child;
-  const billingSummary = computeBillingSummary(child.totalPrice, child.discountAmount, child.discountPercent, child.amountPaid);
+  const discountBase = Number(child.discountBase ?? child.roomGross ?? child.subtotalAmount ?? child.totalPrice ?? 0);
+  const billingSummary = computeBillingSummary(discountBase, child.discountAmount, 0, child.amountPaid);
+  billingSummary.discountPercent = Number(child.discountPercent || 0);
   const reservationBookingType = normalizeBookingSourceValue(child.bookingType || params.bookingSource);
   const reservationPaymentStatus = child.paymentStatus || billingSummary.paymentStatus;
   let attempt = 0;
@@ -1088,7 +1096,7 @@ async function createChildReservationRecord(
           classification_snapshot_source, classification_snapshotted_at,
           stay_type, start_at, end_at,
           rate_plan_id, subtotal_amount, tax_amount, service_amount,
-          is_manual_override, manual_override_reason
+          is_manual_override, manual_override_reason, discount_reason
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
@@ -1097,7 +1105,7 @@ async function createChildReservationRecord(
           $24, $25, $26, $27, $28, $29, $30, CURRENT_TIMESTAMP,
           $31, $32, $33,
           $34, $35, $36, $37,
-          $38, $39
+          $38, $39, $40
         )
         RETURNING *;`,
         [
@@ -1135,11 +1143,12 @@ async function createChildReservationRecord(
           child.startAt || null,
           child.endAt || null,
           child.ratePlanId || null,
-          child.subtotalAmount || billingSummary.totalAfterDiscount,
+          child.roomGross ?? child.subtotalAmount ?? billingSummary.subtotal,
           child.taxAmount || 0,
           child.serviceAmount || 0,
           Boolean(child.isManualOverride),
-          child.manualOverrideReason || null
+          child.manualOverrideReason || null,
+          child.discountReason || null
         ]
       );
 
@@ -1375,6 +1384,26 @@ async function createCanonicalBooking(
         }
       }
 
+      let childBilling;
+      try {
+        childBilling = buildChildReservationBilling({
+          subtotalAmount: child.subtotal_amount ?? child.subtotalAmount,
+          totalPrice: child.total_price ?? child.totalPrice,
+          stayCharges: child.stay_charges || child.stayCharges || (index === 0 ? bookingPayload.stay_charges : []) || [],
+          discountType: child.discount_type || child.discountType,
+          discountValue: child.discount_value ?? child.discountValue,
+          discountPercent: child.discount_percent ?? child.discountPercent,
+          discountAmount: child.discount_amount ?? child.discountAmount,
+          discountReason: child.discount_reason || child.discountReason || bookingPayload.discount_reason,
+          amountPaid: child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)
+        });
+      } catch (err: any) {
+        if (err instanceof ReservationBillingError) {
+          throw createHttpError(err.statusCode, `reservations[${index}]: ${err.message}`, err.code);
+        }
+        throw err;
+      }
+
       normalizedChildren.push({
         index,
         roomId,
@@ -1394,15 +1423,20 @@ async function createCanonicalBooking(
         otaSourceId: child.ota_source_id || child.otaSourceId || otaSourceId,
         referral: child.referral || referral,
         bookingType: normalizeBookingSourceValue(child.booking_type || child.bookingType || bookingSource),
-        totalPrice: Number(child.total_price ?? child.subtotal_amount ?? 0),
-        subtotalAmount: Number(child.subtotal_amount ?? child.subtotalAmount ?? child.total_price ?? 0),
+        totalPrice: childBilling.discountBase,
+        subtotalAmount: childBilling.roomGross,
+        roomGross: childBilling.roomGross,
+        stayGross: childBilling.stayGross,
+        discountBase: childBilling.discountBase,
         taxAmount: Number(child.tax_amount ?? child.taxAmount ?? 0),
         serviceAmount: Number(child.service_amount ?? child.serviceAmount ?? 0),
         isManualOverride: Boolean(child.is_manual_override || child.isManualOverride),
         manualOverrideReason: child.manual_override_reason ? String(child.manual_override_reason).trim() : null,
-        discountAmount: Number(child.discount_amount ?? 0),
-        discountPercent: Number(child.discount_percent ?? 0),
-        discountReason: child.discount_reason || child.discountReason || bookingPayload.discount_reason || null,
+        discountAmount: childBilling.discount,
+        discountPercent: childBilling.discountPercent,
+        discountType: childBilling.discountType,
+        discountValue: childBilling.discountValue,
+        discountReason: childBilling.reason,
         amountPaid: Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
         paymentMethod: child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
         paymentStatus: child.payment_status || null,
@@ -1644,17 +1678,22 @@ async function createCanonicalBooking(
       }
 
       const bookingPropertyId = Number(bookingRecord.property_id || 1);
+      const roomGross = Math.max(0, Math.round(Number(child.roomGross ?? inserted.reservation.subtotal_amount ?? 0)));
+      const stayLineGrosses = stayChargeLineGrosses(child.stayCharges);
+      const discountAllocation = allocateCommercialDiscount(roomGross, stayLineGrosses, child.discountAmount);
 
-      const roomTotalPrice = Number(inserted.reservation.total_price || 0);
-      if (roomTotalPrice > 0) {
+      if (roomGross > 0) {
         const rcRes = await client.query(
           `INSERT INTO folio_entries (reservation_id, property_id, entry_type, source_type, description, amount, base_amount, unit_price, quantity, direction)
            VALUES ($1, $2, $3, $4, $5, $6, $6, $6, 1, 'DEBIT') RETURNING id`,
-          [inserted.reservation.id, bookingPropertyId, 'ROOM_CHARGE', 'ROOM_CHARGE', 'Reservasi kamar', roomTotalPrice]
+          [inserted.reservation.id, bookingPropertyId, 'ROOM_CHARGE', 'ROOM_CHARGE', 'Reservasi kamar', roomGross]
         );
         if ((rcRes.rowCount ?? 0) > 0) {
           try {
-            await projectFolioEntryToTransaction(client, rcRes.rows[0].id, { propertyId: bookingPropertyId });
+            await projectFolioEntryToTransaction(client, rcRes.rows[0].id, {
+              propertyId: bookingPropertyId,
+              discountAmount: discountAllocation.roomDiscount
+            });
           } catch (e: any) {
             console.warn('[Transactions] Room charge projection warning:', e.message);
           }
@@ -1663,9 +1702,10 @@ async function createCanonicalBooking(
 
       const stayChargesList = Array.isArray(child.stayCharges) ? child.stayCharges : [];
       const stayDurationNights = child.stayType === 'DAY_USE' ? 1 : Math.max(1, enumerateHotelDates(child.checkIn, child.checkOut).length);
-      const roomSubtotal = Number(inserted.reservation.total_price || 0);
+      const roomSubtotal = roomGross;
 
-      for (const sc of stayChargesList) {
+      for (let scIndex = 0; scIndex < stayChargesList.length; scIndex += 1) {
+        const sc = stayChargesList[scIndex];
         const scType = sc.charge_type || sc.chargeType || 'EXTRA_BED';
         const scQuantity = Math.max(1, Number(sc.quantity || 1));
         let scDesc = sc.description || sc.name || `Biaya tambahan: ${scType}`;
@@ -1778,7 +1818,10 @@ async function createCanonicalBooking(
           );
           if ((folioScRes.rowCount ?? 0) > 0) {
             try {
-              await projectFolioEntryToTransaction(client, folioScRes.rows[0].id, { propertyId: bookingPropertyId });
+              await projectFolioEntryToTransaction(client, folioScRes.rows[0].id, {
+                propertyId: bookingPropertyId,
+                discountAmount: discountAllocation.stayDiscounts[scIndex] || 0
+              });
             } catch (e: any) {
               console.warn('[Transactions] Stay charge projection warning:', e.message);
             }
@@ -2112,7 +2155,9 @@ async function createCanonicalBooking(
       ]
     );
 
-    for (const reservation of insertedChildren) {
+    for (let reservationIndex = 0; reservationIndex < insertedChildren.length; reservationIndex += 1) {
+      const reservation = insertedChildren[reservationIndex];
+      const billedChild = normalizedChildren[reservationIndex];
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -2130,7 +2175,15 @@ async function createCanonicalBooking(
             check_in: hotelDateKey(reservation.check_in),
             check_out: hotelDateKey(reservation.check_out),
             status: reservation.status,
-            correlation_id: correlationId
+            correlation_id: correlationId,
+            actor: req?.user?.username || req?.user?.name || 'PMS',
+            room_gross: Number(billedChild?.roomGross ?? reservation.subtotal_amount ?? 0),
+            discount_base: Number(billedChild?.discountBase ?? 0),
+            discount_type: billedChild?.discountType || null,
+            discount_value: billedChild?.discountValue ?? null,
+            discount_amount: Number(reservation.discount_amount || 0),
+            discount_reason: reservation.discount_reason || billedChild?.discountReason || null,
+            net_amount: Number(reservation.total_price || 0)
           }),
           correlationId,
           bookingPropertyId

@@ -10,6 +10,7 @@ import type {
   CorrectFolioEntryDto
 } from './stayChargesTypes';
 import { projectFolioEntryToTransaction } from '../transactions/transactionService';
+import { shouldApplyPostedCommercialDiscount } from '../reservations/reservationBilling';
 
 // ============================================================================
 // AUDIT LOGGING HELPER
@@ -377,6 +378,18 @@ export async function recalculateReservationFinancials(
          WHEN direction = 'CREDIT' AND (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL' OR entry_type LIKE '%_REVERSAL') THEN amount
          ELSE 0
        END), 0) AS charge_reversals,
+       COALESCE(SUM(CASE
+         WHEN direction = 'DEBIT' AND entry_type = 'ROOM_CHARGE' AND COALESCE(is_voided, FALSE) = FALSE THEN amount
+         ELSE 0
+       END), 0) AS room_charge_posted,
+       COALESCE(SUM(CASE
+         WHEN direction = 'CREDIT'
+          AND entry_type = 'DISCOUNT'
+          AND COALESCE(is_voided, FALSE) = FALSE
+          AND reversal_of_entry_id IS NULL
+         THEN amount
+         ELSE 0
+       END), 0) AS commercial_discounts,
        COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN 1 END)::int as charge_count
      FROM folio_entries
      WHERE reservation_id = $1`,
@@ -385,11 +398,22 @@ export async function recalculateReservationFinancials(
 
   const grossCharges = Math.round(Number(folioDebitsRes.rows[0]?.gross_charges || 0));
   const chargeReversals = Math.round(Number(folioDebitsRes.rows[0]?.charge_reversals || 0));
+  const roomChargePosted = Math.round(Number(folioDebitsRes.rows[0]?.room_charge_posted || 0));
+  const commercialDiscounts = Math.round(Number(folioDebitsRes.rows[0]?.commercial_discounts || 0));
   const chargeCount = Number(folioDebitsRes.rows[0]?.charge_count || 0);
 
   let netTotalCharges: number;
   if (chargeCount > 0) {
     netTotalCharges = Math.max(0, grossCharges - chargeReversals);
+    if (
+      commercialDiscounts > 0
+      && shouldApplyPostedCommercialDiscount({
+        roomChargePosted,
+        persistedSubtotal: resRow.subtotal_amount
+      })
+    ) {
+      netTotalCharges = Math.max(0, netTotalCharges - commercialDiscounts);
+    }
   } else {
     // Fallback for legacy reservations where folio charges haven't been backfilled
     const nightlySumRes = await client.query(
