@@ -21,6 +21,11 @@ import {
   QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE,
 } from './quickBookingAvailability';
 import { computeQuickBookingGlobalDiscount, toBackendDiscountType } from './quickBookingBilling';
+import {
+  bumpOvernightCheckoutIfNeeded,
+  overnightNights,
+  resolveOvernightStayDates
+} from './quickBookingDates';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -102,13 +107,6 @@ export default function QuickBookingModal({
   const [internalRatePlans, setInternalRatePlans] = useState<any[]>(ratePlans);
   const [internalStayChargeRules, setInternalStayChargeRules] = useState<any[]>(stayChargeRules);
 
-  const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
-  const tomorrowStr = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().slice(0, 10);
-  }, []);
-
   // --- Booking-Level Shared State: Channel & Source ---
   const [channelType, setChannelType] = useState<'WALKIN' | 'OTA'>('WALKIN');
   const [walkinSubSource, setWalkinSubSource] = useState<'DIRECT' | 'PHONE_WA' | 'WEBSITE'>('DIRECT');
@@ -174,13 +172,15 @@ export default function QuickBookingModal({
       }
     }
 
+    const { checkIn, checkOut } = resolveOvernightStayDates(initialDate);
+
     return {
       id: 'room-' + Date.now() + '-' + index + '-' + Math.random().toString(36).substring(2, 6),
       roomTypeId: defaultTypeId,
       roomId: initRId,
       stayType: 'OVERNIGHT',
-      checkIn: initialDate || todayStr,
-      checkOut: tomorrowStr,
+      checkIn,
+      checkOut,
       dayUseHours: 6,
       dayUseStartTime: '10:00',
       adults: 1,
@@ -193,7 +193,7 @@ export default function QuickBookingModal({
       quoteLoading: false,
       stayCharges: []
     };
-  }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr]);
+  }, [rooms, initialDate]);
 
   // --- Live Room Draft for adding additional rooms during an active session ---
   const createNewRoomDraft = useCallback((index: number, initRId: number | null = null): RoomDraft => {
@@ -206,14 +206,15 @@ export default function QuickBookingModal({
     }
     const isOta = channelType === 'OTA';
     const otaReason = selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking';
+    const { checkIn, checkOut } = resolveOvernightStayDates(initialDate);
 
     return {
       id: 'room-' + Date.now() + '-' + index + '-' + Math.random().toString(36).substring(2, 6),
       roomTypeId: defaultTypeId,
       roomId: initRId,
       stayType: 'OVERNIGHT',
-      checkIn: initialDate || todayStr,
-      checkOut: tomorrowStr,
+      checkIn,
+      checkOut,
       dayUseHours: 6,
       dayUseStartTime: '10:00',
       adults: 1,
@@ -226,7 +227,7 @@ export default function QuickBookingModal({
       quoteLoading: false,
       stayCharges: []
     };
-  }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr, channelType, selectedOtaSourceName]);
+  }, [rooms, initialDate, channelType, selectedOtaSourceName]);
 
   const [roomsList, setRoomsList] = useState<RoomDraft[]>([createInitialRoomDraft(0, initialRoomId)]);
   const [availabilityByKey, setAvailabilityByKey] = useState<Record<string, BookingCreateAvailability>>({});
@@ -279,16 +280,10 @@ export default function QuickBookingModal({
         const updated = prev.map(draft => {
           if (draft.stayType === 'DAY_USE') {
             changed = true;
-            let newCheckOut = draft.checkOut;
-            if (!newCheckOut || newCheckOut <= draft.checkIn) {
-              const d = new Date(draft.checkIn || todayStr);
-              d.setDate(d.getDate() + 1);
-              newCheckOut = d.toISOString().slice(0, 10);
-            }
             return {
               ...draft,
               stayType: 'OVERNIGHT' as const,
-              checkOut: newCheckOut,
+              checkOut: bumpOvernightCheckoutIfNeeded(draft.checkIn, draft.checkOut),
               ratePlanId: null
             };
           }
@@ -297,7 +292,7 @@ export default function QuickBookingModal({
         return changed ? updated : prev;
       });
     }
-  }, [isDayUseAllowed, todayStr]);
+  }, [isDayUseAllowed]);
 
   // Helper for resilient room type matching (ID, Code prefix, and Name)
   const matchRatePlanToRoomType = useCallback((rp: any, targetTypeId: number | null): boolean => {
@@ -467,23 +462,28 @@ export default function QuickBookingModal({
 
   const prevIsOpenRef = useRef(false);
   const prevInitialRoomIdRef = useRef<number | null>(null);
+  const prevInitialDateRef = useRef<string | null>(null);
 
   // Reset entirely on open/close for fresh new booking session
   useEffect(() => {
     const wasOpen = prevIsOpenRef.current;
     const prevInitialRoomId = prevInitialRoomIdRef.current;
+    const prevInitialDate = prevInitialDateRef.current;
     prevIsOpenRef.current = isOpen;
     prevInitialRoomIdRef.current = initialRoomId;
+    prevInitialDateRef.current = initialDate;
 
     if (isOpen) {
-      if (!wasOpen || initialRoomId !== prevInitialRoomId) {
+      const gridContextChanged =
+        initialRoomId !== prevInitialRoomId || initialDate !== prevInitialDate;
+      if (!wasOpen || gridContextChanged) {
         resetQuickBookingState();
         setRoomsList([createInitialRoomDraft(0, initialRoomId)]);
       }
     } else if (wasOpen) {
       resetQuickBookingState();
     }
-  }, [isOpen, initialRoomId, createInitialRoomDraft, resetQuickBookingState]);
+  }, [isOpen, initialRoomId, initialDate, createInitialRoomDraft, resetQuickBookingState]);
 
   // Multi-room management actions
   const handleAddRoom = () => {
@@ -650,14 +650,7 @@ export default function QuickBookingModal({
     return roomsList.map((draft, idx) => {
       let nightsCount = 1;
       if (draft.stayType === 'OVERNIGHT') {
-        try {
-          const d1 = new Date(draft.checkIn);
-          const d2 = new Date(draft.checkOut);
-          const diff = Math.round((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
-          nightsCount = diff > 0 ? diff : 0;
-        } catch {
-          nightsCount = 0;
-        }
+        nightsCount = overnightNights(draft.checkIn, draft.checkOut);
       }
       // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount
       const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(0, nightsCount);
@@ -1701,19 +1694,13 @@ export default function QuickBookingModal({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  let newCheckOut = roomDraft.checkOut;
-                                  if (!newCheckOut || newCheckOut <= roomDraft.checkIn) {
-                                    const d = new Date(roomDraft.checkIn || todayStr);
-                                    d.setDate(d.getDate() + 1);
-                                    newCheckOut = d.toISOString().slice(0, 10);
-                                  }
                                   const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
                                   const matchingPlan = allPlans.find(
                                     (rp: any) => matchRatePlanToRoomType(rp, roomDraft.roomTypeId) && rp.rate_type !== 'DAY_USE'
                                   );
                                   handleUpdateRoom(roomIdx, {
                                     stayType: 'OVERNIGHT',
-                                    checkOut: newCheckOut,
+                                    checkOut: bumpOvernightCheckoutIfNeeded(roomDraft.checkIn, roomDraft.checkOut),
                                     ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
                                   });
                                 }}
@@ -1758,13 +1745,10 @@ export default function QuickBookingModal({
                                 value={roomDraft.checkIn}
                                 onChange={e => {
                                   const newCheckIn = e.target.value;
-                                  let newCheckOut = roomDraft.checkOut;
-                                  if (newCheckOut && newCheckOut <= newCheckIn) {
-                                    const d = new Date(newCheckIn);
-                                    d.setDate(d.getDate() + 1);
-                                    newCheckOut = d.toISOString().slice(0, 10);
-                                  }
-                                  handleUpdateRoom(roomIdx, { checkIn: newCheckIn, checkOut: newCheckOut });
+                                  handleUpdateRoom(roomIdx, {
+                                    checkIn: newCheckIn,
+                                    checkOut: bumpOvernightCheckoutIfNeeded(newCheckIn, roomDraft.checkOut)
+                                  });
                                 }}
                                 className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
                               />
