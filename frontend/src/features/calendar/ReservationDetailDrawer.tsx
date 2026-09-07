@@ -329,6 +329,10 @@ export default function ReservationDetailDrawer({
       setPaymentError('Masukkan nominal pembayaran yang valid');
       return;
     }
+    if (!paymentEvidenceFile) {
+      setPaymentError('Bukti pembayaran wajib dilampirkan sebelum memproses pembayaran');
+      return;
+    }
 
     try {
       setPaymentSubmitting(true);
@@ -338,9 +342,7 @@ export default function ReservationDetailDrawer({
       formData.append('amount', String(amountNum));
       formData.append('payment_method', paymentMethod);
       formData.append('property_id', String(activePropId));
-      if (paymentEvidenceFile) {
-        formData.append('evidence', paymentEvidenceFile);
-      }
+      formData.append('file', paymentEvidenceFile);
 
       const res = await authFetch(`/api/reservations/${data.id}/payments`, {
         method: 'POST',

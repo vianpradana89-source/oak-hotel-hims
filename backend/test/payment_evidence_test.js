@@ -495,6 +495,35 @@ async function runTests() {
   expect(noEvidFoPay.status === 400, '11.1 FO payment creation without file is rejected with 400');
   expect(noEvidFoPay.json.code === 'PAYMENT_EVIDENCE_REQUIRED', '11.2 error code is PAYMENT_EVIDENCE_REQUIRED');
 
+  const payCountBeforeWrongField = await pool.query(
+    'SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reservation_id = $1',
+    [resIdB]
+  );
+  const wrongFieldForm = new FormData();
+  wrongFieldForm.append('property_id', String(propIdB));
+  wrongFieldForm.append('amount', '100000');
+  wrongFieldForm.append('payment_method', 'TRANSFER');
+  wrongFieldForm.append('evidence', new Blob(['WRONG_FIELD_PROOF'], { type: 'image/jpeg' }), 'bukti.jpg');
+  const wrongFieldRes = await api('POST', `/api/reservations/${resIdB}/payments`, wrongFieldForm, false);
+  expect(wrongFieldRes.status === 400, '11.3 wrong multipart field is rejected with 400');
+  expect(wrongFieldRes.json.code === 'UPLOAD_ERROR', '11.4 wrong field code is UPLOAD_ERROR');
+  expect(
+    String(wrongFieldRes.json.message || '').includes('file'),
+    '11.5 controlled message names canonical field file'
+  );
+  expect(
+    String(wrongFieldRes.json.message || '') !== 'Unexpected field',
+    '11.6 raw multer Unexpected field is not exposed'
+  );
+  const payCountAfterWrongField = await pool.query(
+    'SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reservation_id = $1',
+    [resIdB]
+  );
+  expect(
+    payCountAfterWrongField.rows[0].count === payCountBeforeWrongField.rows[0].count,
+    '11.7 wrong multipart field creates no payment transaction'
+  );
+
   // Test 12: Atomic FO Payment Creation with Evidence
   console.log('\n--- 12. Atomic FO Payment Creation with Evidence ---');
   const payEvidBlob = new Blob(['VALID_ATOMIC_PAYMENT_PROOF'], { type: 'image/png' });

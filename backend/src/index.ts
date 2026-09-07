@@ -151,6 +151,13 @@ const handlePaymentUpload = (req: any, res: any, next: any) => {
           message: 'Ukuran file melebihi batas maksimum 10 MB'
         });
       }
+      if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'UPLOAD_ERROR',
+          message: 'Field unggahan bukti pembayaran harus bernama file'
+        });
+      }
       return res.status(400).json({
         status: 'ERROR',
         code: 'UPLOAD_ERROR',
