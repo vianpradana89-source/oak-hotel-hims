@@ -17,6 +17,7 @@
     "test:hotel-date-invariants": "node test/hotel_date_invariants_test.js",
     "test:tapechart-future-indicator": "node test/tapechart_future_indicator_contract_test.js",
     "test:tapechart-day-use": "node test/tapechart_day_use_contract_test.js",
+    "test:tapechart-effective-markers": "node test/tapechart_effective_marker_contract_test.js",
     "test:sale-status-isolation": "node test/transaction_sale_status_isolation_test.js",
     "test:tx986-sale-remediation": "npm run build && node test/tx986_sale_remediation_test.js",
     "test:sale-lifecycle-grouping": "npm run build && node test/sale_lifecycle_grouping_test.js",

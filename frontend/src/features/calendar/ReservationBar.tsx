@@ -1,4 +1,5 @@
 import type { PointerEvent as ReactPointerEvent } from 'react';
+import { isEffectiveArrival } from './effectiveStayMarkers.ts';
 
 interface Props {
   reservation: any;
@@ -38,6 +39,7 @@ export default function ReservationBar(props: Props) {
   const turnover = props.turnoverInfo;
   const outgoingClearance = turnover?.outgoing_clearance;
   const isShortSpan = props.span <= 2;
+  const showEffectiveArrival = isEffectiveArrival(reservation);
 
   return (
     <td colSpan={props.span} className="p-1 border align-middle h-14">
@@ -50,8 +52,7 @@ export default function ReservationBar(props: Props) {
       >
         <div className="reservation-card-stack">
           <div className="reservation-card-topline flex-wrap items-center gap-1">
-            {/* Arrival starting-edge indicator on longer stays */}
-            {!isShortSpan && (
+            {showEffectiveArrival && (
               <span
                 className="inline-flex items-center text-[10px] font-extrabold text-sky-900 bg-sky-100/90 px-1.5 py-0.5 rounded border border-sky-300/80 shadow-2xs select-none shrink-0"
                 title={`Check-in: ${reservation.check_in}`}

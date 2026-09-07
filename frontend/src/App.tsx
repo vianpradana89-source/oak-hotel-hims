@@ -79,6 +79,7 @@ import {
   normalizeHotelDate,
 } from './features/calendar/calendarDates';
 import { getReservationCalendarSpan } from './features/calendar/calendarReservationSpans';
+import { emptyCellEffectiveMarkers, reservationMarkerId } from './features/calendar/effectiveStayMarkers';
 import {
   normalizeReservationLifecycle,
   type CalendarOperationalFilter,
@@ -3479,8 +3480,10 @@ function AppContent() {
                                   } else {
                                     const day = days[i];
                                     const cellData = room.cells?.find(c => c.date === day.date);
-                                    const departures = cellData?.departures || [];
-                                    const arrivals = cellData?.arrivals || [];
+                                    const visibleBarIds = spans
+                                      .map((span: { res?: { id?: unknown; reservation_id?: unknown } }) => reservationMarkerId(span.res))
+                                      .filter(Boolean);
+                                    const { arrivals, departures } = emptyCellEffectiveMarkers(cellData, visibleBarIds);
                                     const hasDepartures = departures.length > 0;
                                     const hasArrivals = arrivals.length > 0;
 

@@ -108,7 +108,13 @@ const overnightDto = toTapechartCellReservation({
 expect(Object.prototype.hasOwnProperty.call(overnightDto, 'stay_type'), 'overnight DTO still includes stay_type');
 expect(Object.prototype.hasOwnProperty.call(overnightDto, 'start_at'), 'overnight DTO still includes start_at');
 expect(Object.prototype.hasOwnProperty.call(overnightDto, 'end_at'), 'overnight DTO still includes end_at');
+expect(Object.prototype.hasOwnProperty.call(overnightDto, 'room_id'), 'overnight DTO exposes room_id for effective markers');
+expect(Object.prototype.hasOwnProperty.call(overnightDto, 'stay_status'), 'overnight DTO exposes stay_status');
+expect(Object.prototype.hasOwnProperty.call(overnightDto, 'checked_in_at'), 'overnight DTO exposes checked_in_at');
+expect(Object.prototype.hasOwnProperty.call(overnightDto, 'checked_out_at'), 'overnight DTO exposes checked_out_at');
 expect(overnightDto.guest_name === 'Overnight Guest', 'existing DTO fields are preserved');
+expect(onCheckIn[0].checked_in_at === null, 'BOOKED DAY_USE DTO keeps checked_in_at null');
+expect(onCheckIn[0].status === 'BOOKED', 'BOOKED DAY_USE occupancy DTO status is unchanged');
 
 console.log('Tapechart Day Use contract');
 console.log(`PASS | ${assertions} assertions`);

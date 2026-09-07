@@ -80,12 +80,27 @@ export interface BlockingFindingInfo {
   block_room_ready: boolean;
 }
 
+export interface EffectiveStayMarker {
+  id: number | string;
+  reservation_id?: number | string;
+  guest_name?: string | null;
+  room_id?: number | null;
+  status?: string | null;
+  stay_status?: string | null;
+  check_in?: string;
+  check_out?: string;
+  checked_in_at?: string | null;
+  checked_out_at?: string | null;
+}
+
 export interface CalendarCell {
   date: string;
   reservations: any[];
   operational_blocks?: RoomOperationalBlock[];
   departures?: any[];
   arrivals?: any[];
+  effective_arrivals?: EffectiveStayMarker[];
+  effective_departures?: EffectiveStayMarker[];
   turnover?: CellTurnoverInfo | null;
   availability: any | null;
 }

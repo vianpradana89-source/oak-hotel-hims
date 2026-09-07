@@ -33,7 +33,12 @@ import { reconcileCanonicalAvailability } from './domains/inventory/canonicalRec
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
-import { reservationOccupiesTapechartDate, toTapechartCellReservation } from './utils/tapechartReservation';
+import {
+  listEffectiveArrivalsForDate,
+  listEffectiveDeparturesForDate,
+  reservationOccupiesTapechartDate,
+  toTapechartCellReservation
+} from './utils/tapechartReservation';
 import {
   PaymentEvidenceType,
   PaymentEvidenceMetadata,
@@ -7136,6 +7141,8 @@ app.get('/api/tapechart', async (req, res) => {
             check_in: hotelDateKey(r.check_in),
             status: r.status
           })),
+          effective_arrivals: listEffectiveArrivalsForDate(allRoomRes, dateStr),
+          effective_departures: listEffectiveDeparturesForDate(allRoomRes, dateStr),
           turnover,
           availability: avail
         };
