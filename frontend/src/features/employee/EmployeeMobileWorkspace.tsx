@@ -18,11 +18,14 @@ import {
   type CanonicalEmployeeIdentity
 } from './employeeMobileIdentity';
 import {
+  EMPLOYEE_MOBILE_COMPLETED_SHIFT_BODY,
+  EMPLOYEE_MOBILE_COMPLETED_SHIFT_TITLE,
   EMPLOYEE_MOBILE_LOGOUT_CANCEL_LABEL,
   EMPLOYEE_MOBILE_LOGOUT_CONFIRM_ACTION_LABEL,
   EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE,
   EMPLOYEE_MOBILE_LOGOUT_LABEL,
   applyEmployeeMobileLogoutUiEvent,
+  canShowEmployeeMobileClockOut,
   canShowEmployeeMobileLogout,
   logoutAfterSuccessfulCheckOut,
   resolveManualLogoutEnabled,
@@ -162,15 +165,24 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const [clockOutReason, setClockOutReason] = useState('');
   const [clockOutSuccess, setClockOutSuccess] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const attendanceStateKnown = !attendanceLoading && attendanceStatus !== null;
   const logoutAvailable = canShowEmployeeMobileLogout({
     isPreview,
     hasLogoutHandler: Boolean(onLogout),
     identityUnlinked: !identityLoading && !employeeIdentity,
-    attendanceStateKnown: !attendanceLoading && attendanceStatus !== null,
+    attendanceStateKnown,
     hasCheckedIn: attendanceStatus?.has_checked_in,
     hasCheckedOut: attendanceStatus?.has_checked_out,
     manualLogoutEnabled: resolveManualLogoutEnabled(attendanceStatus)
   });
+  const clockOutAvailable = canShowEmployeeMobileClockOut({
+    attendanceStateKnown,
+    hasCheckedIn: attendanceStatus?.has_checked_in,
+    hasCheckedOut: attendanceStatus?.has_checked_out
+  });
+  const completedAttendance = attendanceStateKnown
+    && attendanceStatus?.has_checked_in === true
+    && attendanceStatus?.has_checked_out === true;
   const requestLogoutConfirm = () => {
     setShowLogoutConfirm(applyEmployeeMobileLogoutUiEvent(showLogoutConfirm, 'REQUEST', onLogout));
   };
@@ -333,6 +345,13 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   const handleClockOut = async () => {
     if (!employeeIdentity) {
       setIdentityError(EMPLOYEE_UNLINKED_MESSAGE);
+      return;
+    }
+    if (!canShowEmployeeMobileClockOut({
+      attendanceStateKnown,
+      hasCheckedIn: attendanceStatus?.has_checked_in,
+      hasCheckedOut: attendanceStatus?.has_checked_out
+    })) {
       return;
     }
     try {
@@ -760,16 +779,23 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
 
               {renderSelfSchedulePanel()}
 
-              {/* Clock Out Action */}
-              <button
-                type="button"
-                onClick={() => setShowClockOutModal(true)}
-                disabled={!employeeIdentity}
-                className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-600 text-neutral-950 shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <LogOut className="w-4 h-4" />
-                <span>ABSEN PULANG (CLOCK-OUT)</span>
-              </button>
+              {clockOutAvailable && (
+                <button
+                  type="button"
+                  onClick={() => setShowClockOutModal(true)}
+                  className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-600 text-neutral-950 shadow-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span>ABSEN PULANG (CLOCK-OUT)</span>
+                </button>
+              )}
+
+              {completedAttendance && (
+                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-center space-y-1">
+                  <p className="text-xs font-bold text-emerald-800">{EMPLOYEE_MOBILE_COMPLETED_SHIFT_TITLE}</p>
+                  <p className="text-[11px] text-emerald-700">{EMPLOYEE_MOBILE_COMPLETED_SHIFT_BODY}</p>
+                </div>
+              )}
             </div>
 
             {/* Desktop Mode & Logout */}

@@ -2,6 +2,8 @@ export const EMPLOYEE_MOBILE_LOGOUT_LABEL = 'Keluar Akun';
 export const EMPLOYEE_MOBILE_LOGOUT_CONFIRM_TITLE = 'Keluar dari akun ini?';
 export const EMPLOYEE_MOBILE_LOGOUT_CANCEL_LABEL = 'Batal';
 export const EMPLOYEE_MOBILE_LOGOUT_CONFIRM_ACTION_LABEL = 'Keluar';
+export const EMPLOYEE_MOBILE_COMPLETED_SHIFT_TITLE = 'Shift hari ini telah selesai';
+export const EMPLOYEE_MOBILE_COMPLETED_SHIFT_BODY = 'Absen masuk dan pulang telah tercatat.';
 
 export type EmployeeMobileLogoutUiEvent = 'REQUEST' | 'CANCEL' | 'CONFIRM';
 
@@ -9,7 +11,24 @@ export function hasOpenAttendanceSession(status: {
   has_checked_in?: boolean | null;
   has_checked_out?: boolean | null;
 } | null | undefined): boolean {
-  return Boolean(status?.has_checked_in) && !status?.has_checked_out;
+  return status?.has_checked_in === true && status?.has_checked_out !== true;
+}
+
+export function hasCompletedAttendanceSession(status: {
+  has_checked_in?: boolean | null;
+  has_checked_out?: boolean | null;
+} | null | undefined): boolean {
+  return status?.has_checked_in === true && status?.has_checked_out === true;
+}
+
+export function canShowEmployeeMobileClockOut(input: {
+  attendanceStateKnown?: boolean;
+  hasCheckedIn?: boolean;
+  hasCheckedOut?: boolean;
+}): boolean {
+  return input.attendanceStateKnown === true
+    && input.hasCheckedIn === true
+    && input.hasCheckedOut !== true;
 }
 
 export function resolveManualLogoutEnabled(status: {
@@ -50,10 +69,7 @@ export function canShowEmployeeMobileLogout(input: {
   if (input.attendanceStateKnown !== true) {
     return false;
   }
-  if (hasOpenAttendanceSession({
-    has_checked_in: input.hasCheckedIn,
-    has_checked_out: input.hasCheckedOut
-  })) {
+  if (input.hasCheckedIn !== false) {
     return false;
   }
   return input.manualLogoutEnabled === true;
