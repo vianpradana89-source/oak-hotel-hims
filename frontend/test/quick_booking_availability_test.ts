@@ -7,6 +7,7 @@ import {
   createAvailabilityRequestFromDraft,
   DAY_USE_OVERLAP_BUFFER_MINUTES,
   eligibleRoomsForRow,
+  formatCreateAvailabilityRoomLabel,
   overlappingSiblingTakesRoom,
   QUICK_BOOKING_NO_TYPES_MESSAGE,
   QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE,
@@ -133,5 +134,54 @@ check(workspaceSrc.includes('QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE'), 'X: 
 check(QUICK_BOOKING_NO_TYPES_MESSAGE.includes('Tidak ada tipe kamar tersedia'), 'X: no-availability copy text is preserved');
 check(QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE.includes('sudah tidak tersedia'), 'X: invalid-selection copy text is preserved');
 check(helperSrc.includes('DAY_USE_OVERLAP_BUFFER_MINUTES = 60'), 'Y: helper keeps the canonical buffer');
+
+const kingType: CreateAvailabilityRoomType = {
+  id: 1,
+  code: 'STD-K',
+  name: 'STANDARD KING',
+  rooms: [{ id: 104, room_number: '104', floor: '1', name: 'STD King' }],
+};
+const twinType: CreateAvailabilityRoomType = {
+  id: 2,
+  code: 'STD-T',
+  name: 'STANDARD TWIN',
+  rooms: [
+    { id: 105, room_number: '105', floor: '1', name: 'STD King' },
+    { id: 106, room_number: '106', floor: '1', name: 'STD Twin' },
+  ],
+};
+check(
+  formatCreateAvailabilityRoomLabel(twinType.rooms[0], twinType.name) === 'Kamar 105 (STANDARD TWIN)',
+  'A: room 105 uses canonical STANDARD TWIN, not rooms.name STD King'
+);
+check(
+  formatCreateAvailabilityRoomLabel(twinType.rooms[1], twinType.name) === 'Kamar 106 (STANDARD TWIN)',
+  'B: room 106 uses canonical STANDARD TWIN'
+);
+check(
+  formatCreateAvailabilityRoomLabel(kingType.rooms[0], kingType.name) === 'Kamar 104 (STANDARD KING)',
+  'C: room 104 uses canonical STANDARD KING'
+);
+check(
+  !formatCreateAvailabilityRoomLabel(twinType.rooms[0], twinType.name).includes('STD King'),
+  'D: Twin-grouped 105 cannot display legacy STD King'
+);
+check(
+  eligibleRoomsForRow([draft({ id: 'twin', roomTypeId: 2 })], 0, [kingType, twinType], 2).map((room) => room.id).join(',') === '105,106',
+  'F: Twin filter still returns only Twin rooms'
+);
+check(
+  eligibleRoomsForRow([draft({ id: 'king', roomTypeId: 1 })], 0, [kingType, twinType], 1).map((room) => room.id).join(',') === '104',
+  'F: King filter still returns only King rooms'
+);
+const typeChange = applyInvalidAvailabilitySelections(
+  [draft({ id: 'swap', roomTypeId: 2, roomId: 104 })],
+  [[twinType]],
+  { autoPickEmpty: false }
+);
+check(typeChange.drafts[0].roomId == null, 'E: changing selected type clears incompatible room 104 from Twin');
+check(typeChange.clearedIndexes.includes(0), 'E: incompatible room is reported as cleared');
+check(!helperSrc.includes('room.name ? ` (${room.name})'), 'formatter does not parenthesize rooms.name');
+check(workspaceSrc.includes('formatCreateAvailabilityRoomLabel(rm, selectedAvailabilityType?.name)'), 'call site passes parent create-availability type name');
 
 console.log(`\n${assertions} assertions passed.`);

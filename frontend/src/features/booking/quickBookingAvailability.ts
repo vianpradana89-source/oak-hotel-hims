@@ -273,6 +273,12 @@ export function applyInvalidAvailabilitySelections<T extends QuickBookingAvailab
   return { drafts: next, clearedIndexes };
 }
 
-export function formatCreateAvailabilityRoomLabel(room: CreateAvailabilityRoom): string {
-  return `Kamar ${room.room_number}${room.name ? ` (${room.name})` : ''}`;
+export function formatCreateAvailabilityRoomLabel(
+  room: CreateAvailabilityRoom,
+  roomTypeName?: string | null
+): string {
+  const roomNumber = String(room.room_number || '').trim();
+  const typeName = String(roomTypeName || '').trim();
+  if (typeName) return `Kamar ${roomNumber} (${typeName})`;
+  return `Kamar ${roomNumber}`;
 }

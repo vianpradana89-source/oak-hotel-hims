@@ -1650,6 +1650,10 @@ export default function QuickBookingModal({
                   };
 
                   const isDayUse = roomDraft.stayType === 'DAY_USE';
+                  const rowServerTypes = rowAvailabilityTypes[roomIdx] || [];
+                  const selectedAvailabilityType = rowServerTypes.find(
+                    (rt) => Number(rt.id) === Number(roomDraft.roomTypeId)
+                  );
                   const availableRPlans = (internalRatePlans.length > 0 ? internalRatePlans : ratePlans).filter(
                     (rp: any) => {
                       if (!matchRatePlanToRoomType(rp, roomDraft.roomTypeId)) return false;
@@ -1911,9 +1915,9 @@ export default function QuickBookingModal({
                             className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                           >
                             <option value="">-- Pilih nomor kamar --</option>
-                            {eligibleRoomsForRow(roomsList, roomIdx, rowAvailabilityTypes[roomIdx] || [], roomDraft.roomTypeId).map(rm => (
+                            {eligibleRoomsForRow(roomsList, roomIdx, rowServerTypes, roomDraft.roomTypeId).map(rm => (
                               <option key={rm.id} value={rm.id}>
-                                {formatCreateAvailabilityRoomLabel(rm)}
+                                {formatCreateAvailabilityRoomLabel(rm, selectedAvailabilityType?.name)}
                               </option>
                             ))}
                           </select>
