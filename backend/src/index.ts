@@ -95,7 +95,7 @@ import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCu
 import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
-import { getReservationEditAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
+import { getReservationEditAvailability, getBookingCreateAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
@@ -1478,6 +1478,21 @@ async function createCanonicalBooking(
 
       if (!isRoomStatusSellable(roomInfo.room_status)) {
         throw createHttpError(409, `room ${child.roomId} is not sellable: status=${roomInfo.room_status}`);
+      }
+
+      const blockCheckOut = child.stayType === 'DAY_USE' && (!child.checkOut || child.checkOut === child.checkIn)
+        ? addHotelDays(child.checkIn, 1)
+        : child.checkOut;
+      if (!blockCheckOut) {
+        throw createHttpError(400, `room ${child.roomId} has an invalid operational-block date range`);
+      }
+      const blockOverlap = await findActiveOperationalBlockOverlap(client, child.roomId, child.checkIn, blockCheckOut);
+      if (hasRows(blockOverlap)) {
+        throw createHttpError(
+          409,
+          `Kamar ${roomInfo.room_number || child.roomId} diblokir untuk tanggal ${child.checkIn} s/d ${child.checkOut || child.checkIn}`,
+          'ROOM_OPERATIONAL_BLOCK'
+        );
       }
 
       child.roomType = String(roomInfo.room_type || '');
@@ -3528,6 +3543,26 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
     res.status(500).json({ status: 'ERROR', message });
   } finally {
     client.release();
+  }
+});
+
+app.get('/api/bookings/create-availability', requireAuth, async (req: any, res: any) => {
+  try {
+    const availability = await getBookingCreateAvailability(pool, {
+      propertyId: Number(req.query.property_id),
+      checkIn: String(req.query.check_in || ''),
+      checkOut: req.query.check_out != null ? String(req.query.check_out) : null,
+      stayType: String(req.query.stay_type || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT',
+      startAt: req.query.start_at != null ? String(req.query.start_at) : null,
+      endAt: req.query.end_at != null ? String(req.query.end_at) : null
+    });
+    return res.json({ status: 'OK', data: availability });
+  } catch (err: any) {
+    return res.status(err?.statusCode || 400).json({
+      status: 'ERROR',
+      code: err?.code,
+      message: err?.message || 'Gagal memuat ketersediaan kamar untuk Quick Booking.'
+    });
   }
 });
 

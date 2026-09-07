@@ -9,6 +9,17 @@ import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { buildQuickBookingStayFields, tryBuildDayUseInterval } from './dayUseInterval';
+import {
+  applyInvalidAvailabilitySelections,
+  createAvailabilityRequestFromDraft,
+  eligibleRoomsForRow,
+  formatCreateAvailabilityRoomLabel,
+  overlappingSiblingTakesRoom,
+  visibleRoomTypesForRow,
+  type BookingCreateAvailability,
+  QUICK_BOOKING_NO_TYPES_MESSAGE,
+  QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE,
+} from './quickBookingAvailability';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -154,11 +165,11 @@ export default function QuickBookingModal({
 
   // --- Initial Room Draft for a fresh booking session (always WALKIN default) ---
   const createInitialRoomDraft = useCallback((index: number, initRId: number | null = null): RoomDraft => {
-    let defaultTypeId = roomTypes.length > 0 ? roomTypes[0].id : null;
+    let defaultTypeId: number | null = null;
     if (initRId) {
       const match = rooms.find(r => Number(r.id) === Number(initRId));
       if (match) {
-        defaultTypeId = match.room_type_id || match.canonical_room_type_id || defaultTypeId;
+        defaultTypeId = match.room_type_id || match.canonical_room_type_id || null;
       }
     }
 
@@ -188,11 +199,11 @@ export default function QuickBookingModal({
 
   // --- Live Room Draft for adding additional rooms during an active session ---
   const createNewRoomDraft = useCallback((index: number, initRId: number | null = null): RoomDraft => {
-    let defaultTypeId = roomTypes.length > 0 ? roomTypes[0].id : null;
+    let defaultTypeId: number | null = null;
     if (initRId) {
       const match = rooms.find(r => Number(r.id) === Number(initRId));
       if (match) {
-        defaultTypeId = match.room_type_id || match.canonical_room_type_id || defaultTypeId;
+        defaultTypeId = match.room_type_id || match.canonical_room_type_id || null;
       }
     }
     const isOta = channelType === 'OTA';
@@ -223,6 +234,10 @@ export default function QuickBookingModal({
   }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr, channelType, selectedOtaSourceName]);
 
   const [roomsList, setRoomsList] = useState<RoomDraft[]>([createInitialRoomDraft(0, initialRoomId)]);
+  const [availabilityByKey, setAvailabilityByKey] = useState<Record<string, BookingCreateAvailability>>({});
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
+  const availabilityRequestRef = useRef(0);
 
   // Track previous channelType to detect user-initiated channel transitions
   const prevChannelTypeRef = useRef<'WALKIN' | 'OTA'>(channelType);
@@ -446,6 +461,10 @@ export default function QuickBookingModal({
     setSubmitting(false);
     setErrorMsg(null);
     setChargeWarningMap({});
+    setAvailabilityByKey({});
+    setAvailabilityLoading(false);
+    setSelectionWarning(null);
+    availabilityRequestRef.current += 1;
   }, []);
 
   const prevIsOpenRef = useRef(false);
@@ -497,6 +516,81 @@ export default function QuickBookingModal({
       return copy;
     });
   };
+
+  const availabilityIntervalSignature = roomsList
+    .map((draft) => [draft.id, draft.stayType, draft.checkIn, draft.checkOut, draft.dayUseStartTime, draft.dayUseHours].join(':'))
+    .join('|');
+
+  const rowAvailabilityTypes = useMemo(() => {
+    return roomsList.map((draft) => {
+      const request = createAvailabilityRequestFromDraft(propertyId, draft);
+      return request ? availabilityByKey[request.key]?.room_types : undefined;
+    });
+  }, [roomsList, propertyId, availabilityByKey]);
+
+  useEffect(() => {
+    if (!isOpen || !propertyId) return;
+    const requests = roomsList
+      .map((draft) => createAvailabilityRequestFromDraft(propertyId, draft))
+      .filter((item): item is { key: string; params: URLSearchParams } => item != null);
+    const unique = new Map<string, URLSearchParams>();
+    requests.forEach((item) => {
+      if (!unique.has(item.key)) unique.set(item.key, item.params);
+    });
+    const missing = [...unique.entries()].filter(([key]) => !availabilityByKey[key]);
+    if (missing.length === 0) {
+      setAvailabilityLoading(false);
+      return;
+    }
+
+    const requestId = ++availabilityRequestRef.current;
+    const controller = new AbortController();
+    setAvailabilityLoading(true);
+    (async () => {
+      try {
+        const entries = await Promise.all(missing.map(async ([key, params]) => {
+          const res = await authenticatedFetch(`/api/bookings/create-availability?${params.toString()}`, {
+            signal: controller.signal
+          });
+          const json = await res.json();
+          if (!res.ok || json.status !== 'OK' || !json.data) {
+            throw new Error(json.message || 'Gagal memuat ketersediaan kamar');
+          }
+          return [key, json.data as BookingCreateAvailability] as const;
+        }));
+        if (requestId !== availabilityRequestRef.current) return;
+        setAvailabilityByKey((prev) => {
+          const next = { ...prev };
+          entries.forEach(([key, data]) => {
+            next[key] = data;
+          });
+          return next;
+        });
+        setAvailabilityLoading(false);
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || requestId !== availabilityRequestRef.current) return;
+        setAvailabilityLoading(false);
+        setErrorMsg(err?.message || 'Gagal memuat ketersediaan kamar');
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [isOpen, propertyId, availabilityIntervalSignature]);
+
+  useEffect(() => {
+    const applied = applyInvalidAvailabilitySelections(roomsList, rowAvailabilityTypes, { autoPickEmpty: true });
+    if (applied.clearedIndexes.length > 0) {
+      setSelectionWarning(QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE);
+    }
+    const changed = applied.drafts.some((draft, index) => (
+      draft.roomTypeId !== roomsList[index].roomTypeId || draft.roomId !== roomsList[index].roomId
+    ));
+    if (changed) {
+      setRoomsList(applied.drafts);
+    }
+  }, [roomsList, rowAvailabilityTypes]);
 
   // Pricing Quotes for Each Room
   const fetchQuoteForRoom = useCallback(async (index: number, draft: RoomDraft) => {
@@ -585,12 +679,14 @@ export default function QuickBookingModal({
       const netSubtotal = Math.max(0, roomCharge + stayChargesTotal - discountAmount);
 
       const matchedRoom = rooms.find(r => Number(r.id) === Number(draft.roomId));
-      const matchedType = roomTypes.find(rt => Number(rt.id) === Number(draft.roomTypeId));
+      const availabilityType = rowAvailabilityTypes[idx]?.find(rt => Number(rt.id) === Number(draft.roomTypeId));
+      const availabilityRoom = availabilityType?.rooms.find(rm => Number(rm.id) === Number(draft.roomId));
+      const matchedType = roomTypes.find(rt => Number(rt.id) === Number(draft.roomTypeId)) || availabilityType;
 
       return {
         index: idx,
         roomLabel: 'Kamar ' + (idx + 1),
-        roomNumber: matchedRoom?.room_number || matchedRoom?.name || 'Belum dipilih',
+        roomNumber: matchedRoom?.room_number || availabilityRoom?.room_number || matchedRoom?.name || 'Belum dipilih',
         roomTypeName: matchedType?.name || 'Tipe Kamar',
         nights: nightsCount,
         nightlyRate: draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge),
@@ -600,7 +696,7 @@ export default function QuickBookingModal({
         netSubtotal
       };
     });
-  }, [roomsList, rooms, roomTypes]);
+  }, [roomsList, rooms, roomTypes, rowAvailabilityTypes]);
 
   const totalStayCharges = useMemo(() => roomCalculations.reduce((s, c) => s + c.stayChargesTotal, 0), [roomCalculations]);
   const totalDiscounts = useMemo(() => roomCalculations.reduce((s, c) => s + c.discountAmount, 0), [roomCalculations]);
@@ -962,7 +1058,6 @@ export default function QuickBookingModal({
       issues.push('Minimal 1 kamar harus dipilih');
     }
 
-    const assignedRoomIds = new Set<number>();
     roomsList.forEach((r, idx) => {
       const label = 'Kamar ' + (idx + 1);
       if (!r.roomTypeId) issues.push(label + ': Tipe kamar belum dipilih');
@@ -987,11 +1082,19 @@ export default function QuickBookingModal({
           issues.push(label + ': Alasan override harga manual wajib diisi');
         }
       }
-      if (r.roomId) {
-        if (assignedRoomIds.has(r.roomId)) {
-          issues.push(label + ': Kamar fisik yang sama tidak boleh dipilih dua kali pada reservasi ini');
+      if (r.roomId && overlappingSiblingTakesRoom(roomsList, idx, r.roomId)) {
+        issues.push(label + ': Kamar fisik bentrok dengan baris lain pada periode yang sama');
+      }
+      const serverTypes = rowAvailabilityTypes[idx];
+      if (availabilityLoading || serverTypes === undefined) {
+        issues.push(label + ': Ketersediaan kamar sedang dimuat');
+      } else if (r.roomId) {
+        const eligible = eligibleRoomsForRow(roomsList, idx, serverTypes, r.roomTypeId);
+        if (!eligible.some((room) => Number(room.id) === Number(r.roomId))) {
+          issues.push(label + ': ' + QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE);
         }
-        assignedRoomIds.add(r.roomId);
+      } else if (visibleRoomTypesForRow(roomsList, idx, serverTypes).length === 0) {
+        issues.push(label + ': ' + QUICK_BOOKING_NO_TYPES_MESSAGE);
       }
     });
 
@@ -1012,7 +1115,9 @@ export default function QuickBookingModal({
     buktiBayarFile,
     buktiBayarPath,
     roomsList,
-    getFieldMode
+    getFieldMode,
+    rowAvailabilityTypes,
+    availabilityLoading
   ]);
 
   const isValid = validationIssues.length === 0;
@@ -1743,7 +1848,8 @@ export default function QuickBookingModal({
                             value={roomDraft.roomTypeId || ''}
                             onChange={e => {
                               const newTypeId = Number(e.target.value);
-                              const matchingRooms = rooms.filter(rm => (rm.room_type_id || rm.canonical_room_type_id) === newTypeId);
+                              const serverTypes = rowAvailabilityTypes[roomIdx] || [];
+                              const matchingRooms = eligibleRoomsForRow(roomsList, roomIdx, serverTypes, newTypeId);
                               const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
                               const matchingPlan = allPlans.find(
                                 (rp: any) =>
@@ -1751,19 +1857,31 @@ export default function QuickBookingModal({
                                   (roomDraft.stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
                               );
                               handleUpdateRoom(roomIdx, {
-                                roomTypeId: newTypeId,
+                                roomTypeId: newTypeId || null,
                                 roomId: matchingRooms.length > 0 ? matchingRooms[0].id : null,
                                 ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
                               });
+                              setSelectionWarning(null);
                             }}
                             className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                           >
-                            {roomTypes.map(rt => (
+                            <option value="">
+                              {availabilityLoading && rowAvailabilityTypes[roomIdx] === undefined
+                                ? 'Memuat ketersediaan...'
+                                : '-- Pilih tipe kamar --'}
+                            </option>
+                            {visibleRoomTypesForRow(roomsList, roomIdx, rowAvailabilityTypes[roomIdx] || []).map(rt => (
                               <option key={rt.id} value={rt.id}>
                                 {rt.name}
                               </option>
                             ))}
                           </select>
+                          {!availabilityLoading && rowAvailabilityTypes[roomIdx] && visibleRoomTypesForRow(roomsList, roomIdx, rowAvailabilityTypes[roomIdx] || []).length === 0 && (
+                            <p className="mt-1 text-[11px] text-amber-800">{QUICK_BOOKING_NO_TYPES_MESSAGE}</p>
+                          )}
+                          {selectionWarning && !roomDraft.roomTypeId && visibleRoomTypesForRow(roomsList, roomIdx, rowAvailabilityTypes[roomIdx] || []).length > 0 && (
+                            <p className="mt-1 text-[11px] text-amber-800">{selectionWarning}</p>
+                          )}
                         </div>
 
                         <div>
@@ -1772,20 +1890,19 @@ export default function QuickBookingModal({
                           </label>
                           <select
                             value={roomDraft.roomId || ''}
-                            onChange={e => handleUpdateRoom(roomIdx, { roomId: Number(e.target.value) })}
+                            onChange={e => handleUpdateRoom(roomIdx, { roomId: Number(e.target.value) || null })}
                             className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                           >
-                            {rooms
-                              .filter(rm => !roomDraft.roomTypeId || (rm.room_type_id || rm.canonical_room_type_id) === roomDraft.roomTypeId)
-                              .map(rm => {
-                                const isTakenByOther = roomsList.some((other, oIdx) => oIdx !== roomIdx && Number(other.roomId) === Number(rm.id));
-                                return (
-                                  <option key={rm.id} value={rm.id} disabled={isTakenByOther}>
-                                    Kamar {rm.room_number} ({rm.name || rm.status}){isTakenByOther ? ' (Dipilih Kamar Lain)' : ''}
-                                  </option>
-                                );
-                              })}
+                            <option value="">-- Pilih nomor kamar --</option>
+                            {eligibleRoomsForRow(roomsList, roomIdx, rowAvailabilityTypes[roomIdx] || [], roomDraft.roomTypeId).map(rm => (
+                              <option key={rm.id} value={rm.id}>
+                                {formatCreateAvailabilityRoomLabel(rm)}
+                              </option>
+                            ))}
                           </select>
+                          {selectionWarning && roomDraft.roomTypeId && !roomDraft.roomId && (
+                            <p className="mt-1 text-[11px] text-amber-800">{selectionWarning}</p>
+                          )}
                         </div>
 
                         {channelType !== 'OTA' && (

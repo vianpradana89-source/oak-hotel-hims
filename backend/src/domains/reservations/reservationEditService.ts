@@ -2,6 +2,8 @@ import { Pool, PoolClient } from 'pg';
 import { addDays, calculatePriceQuote, createReservationRateSnapshots, toHotelDateString } from '../pricing/pricingService';
 import { validateEvidenceUpload, saveEvidenceFile, deleteEvidenceFile } from '../payments/evidenceStorageService';
 import { createPaymentInTransaction } from '../payments/paymentDomainService';
+import { validateDayUseInterval } from '../../utils/dayUseInterval';
+import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
 
 export interface ReservationEditPayload {
   property_id?: number;
@@ -43,6 +45,20 @@ export interface ReservationEditAvailability {
     }>;
   }>;
 }
+
+export type BookingCreateAvailability = ReservationEditAvailability;
+
+export interface BookingCreateAvailabilityInput {
+  propertyId: number;
+  checkIn: string;
+  checkOut?: string | null;
+  stayType?: 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT';
+  startAt?: string | null;
+  endAt?: string | null;
+}
+
+/** Must stay aligned with findActiveRoomOverlap() in index.ts. */
+export const CREATE_AVAILABILITY_DAY_USE_BUFFER_MINUTES = 60;
 
 // ============================================================================
 // SHARED CANONICAL EDIT RESULT (returned by internal applyReservationEdit)
@@ -192,6 +208,171 @@ export async function getReservationEditAvailability(
     check_out: effectiveCheckOut,
     stay_type: stayType,
     room_types: [...roomTypes.values()]
+  };
+}
+
+function groupEligibleRooms(
+  rows: Array<{
+    room_type_id: unknown;
+    room_type_code: unknown;
+    room_type_name: unknown;
+    room_id: unknown;
+    room_number: unknown;
+    floor: unknown;
+    room_name: unknown;
+  }>
+): BookingCreateAvailability['room_types'] {
+  const roomTypes = new Map<number, BookingCreateAvailability['room_types'][number]>();
+  for (const row of rows) {
+    const roomTypeId = Number(row.room_type_id);
+    let roomType = roomTypes.get(roomTypeId);
+    if (!roomType) {
+      roomType = { id: roomTypeId, code: String(row.room_type_code), name: String(row.room_type_name), rooms: [] };
+      roomTypes.set(roomTypeId, roomType);
+    }
+    roomType.rooms.push({
+      id: Number(row.room_id),
+      room_number: String(row.room_number),
+      floor: row.floor === null || row.floor === undefined ? null : String(row.floor),
+      name: row.room_name ? String(row.room_name) : null
+    });
+  }
+  return [...roomTypes.values()];
+}
+
+function throwAvailabilityValidation(message: string, code = 'VALIDATION_ERROR', statusCode = 400): never {
+  const err: any = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  throw err;
+}
+
+/**
+ * Read-only physical-room selector for Quick Booking create.
+ * Reuses Room Master + operational-block filters from edit-availability.
+ * Reservation overlap predicates must match findActiveRoomOverlap() (create submit).
+ */
+export async function getBookingCreateAvailability(
+  pool: Pool,
+  input: BookingCreateAvailabilityInput
+): Promise<BookingCreateAvailability> {
+  const propertyId = Number(input.propertyId);
+  const stayType = String(input.stayType || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT';
+  const checkIn = String(input.checkIn || '');
+  const checkOutInput = String(input.checkOut || checkIn);
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throwAvailabilityValidation('property_id tidak valid.');
+  }
+  if (!['OVERNIGHT', 'DAY_USE', 'TRANSIT'].includes(stayType) || !isValidHotelDate(checkIn)) {
+    throwAvailabilityValidation('Tanggal atau tipe menginap tidak valid.');
+  }
+
+  const property = await pool.query(
+    'SELECT id, timezone FROM properties WHERE id = $1',
+    [propertyId]
+  );
+  if (property.rows.length === 0) {
+    throwAvailabilityValidation(`Properti #${propertyId} tidak ditemukan.`, 'PROPERTY_NOT_FOUND', 404);
+  }
+  const propertyTimezone = resolvePropertyTimezone(property.rows[0].timezone || DEFAULT_PROPERTY_TIMEZONE);
+
+  let overlapResult: { rows: any[] };
+  if (stayType === 'DAY_USE') {
+    const interval = validateDayUseInterval(input.startAt, input.endAt, propertyTimezone);
+    const effectiveCheckOut = isValidHotelDate(checkOutInput) && checkOutInput > checkIn
+      ? checkOutInput
+      : addDays(checkIn, 1);
+    overlapResult = await pool.query(
+      `SELECT rt.id AS room_type_id, rt.code AS room_type_code, rt.name AS room_type_name,
+              r.id AS room_id, r.room_number, r.floor, r.name AS room_name
+       FROM room_types rt
+       JOIN rooms r ON r.room_type_id = rt.id AND r.property_id = rt.property_id
+       WHERE rt.property_id = $1
+         AND r.property_id = $1
+         AND rt.is_active = TRUE
+         AND COALESCE(r.is_active, TRUE) = TRUE
+         AND UPPER(COALESCE(r.status, 'READY')) NOT IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM room_operational_blocks rob
+           WHERE rob.room_id = r.id
+             AND rob.property_id = $1
+             AND rob.status IN ('ACTIVE', 'RELEASED')
+             AND rob.start_date < $3::date
+             AND rob.end_date > $2::date
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM reservations conflict
+           WHERE conflict.room_id = r.id
+             AND conflict.status IN ('BOOKED', 'CHECKED_IN')
+             AND (
+               (conflict.stay_type = 'DAY_USE' AND conflict.start_at < ($5::timestamptz + ($6 || ' minutes')::interval) AND (conflict.end_at + ($6 || ' minutes')::interval) > $4::timestamptz)
+               OR
+               (conflict.stay_type = 'OVERNIGHT' AND (
+                 (conflict.check_in < $4::date AND conflict.check_out > $4::date)
+                 OR (conflict.check_in::date = $4::date AND $5::timestamptz > (conflict.check_in::date + TIME '14:00:00' - ($6 || ' minutes')::interval))
+                 OR (conflict.check_out::date = $4::date AND $4::timestamptz < (conflict.check_out::date + TIME '12:00:00' + ($6 || ' minutes')::interval))
+               ))
+             )
+         )
+       ORDER BY rt.display_order, rt.id, r.room_number`,
+      [propertyId, checkIn, effectiveCheckOut, interval.startAt, interval.endAt, CREATE_AVAILABILITY_DAY_USE_BUFFER_MINUTES]
+    );
+    return {
+      property_id: propertyId,
+      check_in: checkIn,
+      check_out: effectiveCheckOut,
+      stay_type: stayType,
+      room_types: groupEligibleRooms(overlapResult.rows)
+    };
+  }
+
+  if (!isValidHotelDate(checkOutInput) || checkIn >= checkOutInput) {
+    throwAvailabilityValidation('Rentang tanggal menginap tidak valid.');
+  }
+
+  overlapResult = await pool.query(
+    `SELECT rt.id AS room_type_id, rt.code AS room_type_code, rt.name AS room_type_name,
+            r.id AS room_id, r.room_number, r.floor, r.name AS room_name
+     FROM room_types rt
+     JOIN rooms r ON r.room_type_id = rt.id AND r.property_id = rt.property_id
+     WHERE rt.property_id = $1
+       AND r.property_id = $1
+       AND rt.is_active = TRUE
+       AND COALESCE(r.is_active, TRUE) = TRUE
+       AND UPPER(COALESCE(r.status, 'READY')) NOT IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM room_operational_blocks rob
+         WHERE rob.room_id = r.id
+           AND rob.property_id = $1
+           AND rob.status IN ('ACTIVE', 'RELEASED')
+           AND rob.start_date < $3::date
+           AND rob.end_date > $2::date
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM reservations conflict
+         WHERE conflict.room_id = r.id
+           AND conflict.status IN ('BOOKED', 'CHECKED_IN')
+           AND (
+             (conflict.stay_type = 'OVERNIGHT' AND conflict.check_in < $3::date AND conflict.check_out > $2::date)
+             OR
+             (conflict.stay_type = 'DAY_USE' AND conflict.start_at::date >= $2::date AND conflict.start_at::date < $3::date)
+           )
+       )
+     ORDER BY rt.display_order, rt.id, r.room_number`,
+    [propertyId, checkIn, checkOutInput]
+  );
+
+  return {
+    property_id: propertyId,
+    check_in: checkIn,
+    check_out: checkOutInput,
+    stay_type: stayType,
+    room_types: groupEligibleRooms(overlapResult.rows)
   };
 }
 
