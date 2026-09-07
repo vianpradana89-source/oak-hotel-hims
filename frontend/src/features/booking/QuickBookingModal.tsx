@@ -20,7 +20,7 @@ import {
   QUICK_BOOKING_NO_TYPES_MESSAGE,
   QUICK_BOOKING_SELECTION_UNAVAILABLE_MESSAGE,
 } from './quickBookingAvailability';
-import { computeQuickBookingRoomDiscount, toBackendDiscountType } from './quickBookingBilling';
+import { computeQuickBookingGlobalDiscount, toBackendDiscountType } from './quickBookingBilling';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -85,9 +85,6 @@ export interface RoomDraft {
   manualOverrideReason: string;
   quoteLoading: boolean;
   stayCharges: StayChargeLineItem[];
-  discountType: 'NOMINAL' | 'PERCENT';
-  discountValue: number;
-  discountReason: string;
 }
 
 export default function QuickBookingModal({
@@ -146,6 +143,9 @@ export default function QuickBookingModal({
   const [buktiBayarFile, setBuktiBayarFile] = useState<File | null>(null);
   const [buktiBayarPath, setBuktiBayarPath] = useState<string | null>(null);
   const [specialRequests, setSpecialRequests] = useState('');
+  const [globalDiscountType, setGlobalDiscountType] = useState<'NOMINAL' | 'PERCENT'>('NOMINAL');
+  const [globalDiscountValue, setGlobalDiscountValue] = useState<number>(0);
+  const [globalDiscountReason, setGlobalDiscountReason] = useState('');
 
   // --- Front Office Dynamic Property Rules & Day Use Presets ---
   const [propertyRules, setPropertyRules] = useState<{ WALK_IN: Record<string, string>; OTA: Record<string, string> }>({ WALK_IN: {}, OTA: {} });
@@ -191,10 +191,7 @@ export default function QuickBookingModal({
       manualOverridePrice: 0,
       manualOverrideReason: '',
       quoteLoading: false,
-      stayCharges: [],
-      discountType: 'NOMINAL',
-      discountValue: 0,
-      discountReason: ''
+      stayCharges: []
     };
   }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr]);
 
@@ -227,10 +224,7 @@ export default function QuickBookingModal({
       manualOverridePrice: 0,
       manualOverrideReason: isOta ? otaReason : '',
       quoteLoading: false,
-      stayCharges: [],
-      discountType: 'NOMINAL',
-      discountValue: 0,
-      discountReason: ''
+      stayCharges: []
     };
   }, [roomTypes, rooms, initialDate, todayStr, tomorrowStr, channelType, selectedOtaSourceName]);
 
@@ -459,6 +453,9 @@ export default function QuickBookingModal({
     setBuktiBayarFile(null);
     setBuktiBayarPath(null);
     setSpecialRequests('');
+    setGlobalDiscountType('NOMINAL');
+    setGlobalDiscountValue(0);
+    setGlobalDiscountReason('');
     setSubmitting(false);
     setErrorMsg(null);
     setChargeWarningMap({});
@@ -669,13 +666,7 @@ export default function QuickBookingModal({
         : Math.max(0, Number(draft.roomNightlyRate) || 0);
 
       const stayChargesTotal = draft.stayCharges.reduce((acc, curr) => acc + curr.amount, 0);
-      const discountAmount = computeQuickBookingRoomDiscount({
-        roomCharge,
-        stayChargesTotal,
-        discountType: draft.discountType,
-        discountValue: draft.discountValue
-      });
-      const netSubtotal = Math.max(0, roomCharge + stayChargesTotal - discountAmount);
+      const grossSubtotal = roomCharge + stayChargesTotal;
 
       const matchedRoom = rooms.find(r => Number(r.id) === Number(draft.roomId));
       const availabilityType = rowAvailabilityTypes[idx]?.find(rt => Number(rt.id) === Number(draft.roomTypeId));
@@ -691,15 +682,25 @@ export default function QuickBookingModal({
         nightlyRate: draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge),
         roomCharge,
         stayChargesTotal,
-        discountAmount,
-        netSubtotal
+        grossSubtotal
       };
     });
   }, [roomsList, rooms, roomTypes, rowAvailabilityTypes]);
 
   const totalStayCharges = useMemo(() => roomCalculations.reduce((s, c) => s + c.stayChargesTotal, 0), [roomCalculations]);
-  const totalDiscounts = useMemo(() => roomCalculations.reduce((s, c) => s + c.discountAmount, 0), [roomCalculations]);
-  const grandTotal = useMemo(() => roomCalculations.reduce((s, c) => s + c.netSubtotal, 0), [roomCalculations]);
+  const grossBookingTotal = useMemo(
+    () => roomCalculations.reduce((s, c) => s + c.grossSubtotal, 0),
+    [roomCalculations]
+  );
+  const globalDiscountAmount = useMemo(
+    () => computeQuickBookingGlobalDiscount({
+      grossBookingTotal,
+      discountType: globalDiscountType,
+      discountValue: globalDiscountValue
+    }),
+    [grossBookingTotal, globalDiscountType, globalDiscountValue]
+  );
+  const grandTotal = Math.max(0, grossBookingTotal - globalDiscountAmount);
   const remainingBill = Math.max(0, grandTotal - amountPaid);
 
   // Auto-sync amountPaid when grandTotal changes if it was full or 0
@@ -1081,21 +1082,6 @@ export default function QuickBookingModal({
           issues.push(label + ': Alasan override harga manual wajib diisi');
         }
       }
-      if (r.discountType === 'PERCENT' && Number(r.discountValue) > 100) {
-        issues.push(label + ': Persentase diskon tidak boleh lebih dari 100');
-      }
-      if (Number(r.discountValue) < 0) {
-        issues.push(label + ': Nilai diskon tidak boleh negatif');
-      }
-      const rowDiscount = computeQuickBookingRoomDiscount({
-        roomCharge: Number(roomCalculations[idx]?.roomCharge || 0),
-        stayChargesTotal: Number(roomCalculations[idx]?.stayChargesTotal || 0),
-        discountType: r.discountType,
-        discountValue: r.discountValue
-      });
-      if (rowDiscount > 0 && !r.discountReason.trim()) {
-        issues.push(label + ': Alasan diskon wajib diisi');
-      }
       if (r.roomId && overlappingSiblingTakesRoom(roomsList, idx, r.roomId)) {
         issues.push(label + ': Kamar fisik bentrok dengan baris lain pada periode yang sama');
       }
@@ -1111,6 +1097,16 @@ export default function QuickBookingModal({
         issues.push(label + ': ' + QUICK_BOOKING_NO_TYPES_MESSAGE);
       }
     });
+
+    if (globalDiscountType === 'PERCENT' && Number(globalDiscountValue) > 100) {
+      issues.push('Persentase diskon keseluruhan tidak boleh lebih dari 100');
+    }
+    if (Number(globalDiscountValue) < 0) {
+      issues.push('Nilai diskon keseluruhan tidak boleh negatif');
+    }
+    if (globalDiscountAmount > 0 && !globalDiscountReason.trim()) {
+      issues.push('Alasan diskon wajib diisi');
+    }
 
     return issues;
   }, [
@@ -1132,7 +1128,11 @@ export default function QuickBookingModal({
     getFieldMode,
     rowAvailabilityTypes,
     availabilityLoading,
-    roomCalculations
+    roomCalculations,
+    globalDiscountType,
+    globalDiscountValue,
+    globalDiscountAmount,
+    globalDiscountReason
   ]);
 
   const isValid = validationIssues.length === 0;
@@ -1215,6 +1215,9 @@ export default function QuickBookingModal({
         bukti_bayar_path: buktiBayarPath || undefined,
         require_strict_gates: true,
         special_requests: specialRequests.trim() || undefined,
+        global_discount_type: toBackendDiscountType(globalDiscountType),
+        global_discount_value: globalDiscountValue,
+        global_discount_reason: globalDiscountReason.trim() || undefined,
         reservations: roomsList.map((r, idx) => {
           const calc = roomCalculations[idx];
           return {
@@ -1240,11 +1243,11 @@ export default function QuickBookingModal({
             manual_override_reason: channelType === 'OTA'
               ? (r.manualOverrideReason || (selectedOtaSourceName ? `OTA: ${selectedOtaSourceName}` : 'OTA Booking'))
               : (r.isManualOverride ? r.manualOverrideReason : undefined),
-            discount_amount: calc.discountAmount,
-            discount_type: toBackendDiscountType(r.discountType),
-            discount_value: r.discountValue,
-            discount_percent: r.discountType === 'PERCENT' ? r.discountValue : 0,
-            discount_reason: r.discountReason.trim() || undefined,
+            discount_amount: 0,
+            discount_type: undefined,
+            discount_value: 0,
+            discount_percent: 0,
+            discount_reason: undefined,
             stay_charges: r.stayCharges,
             amount_paid: idx === 0 ? amountPaid : 0,
             payment_status: amountPaid >= grandTotal ? 'PAID' : (amountPaid > 0 ? 'PARTIAL' : 'UNPAID'),
@@ -1644,8 +1647,7 @@ export default function QuickBookingModal({
                   const calc = roomCalculations[roomIdx] || {
                     roomCharge: 0,
                     stayChargesTotal: 0,
-                    discountAmount: 0,
-                    netSubtotal: 0
+                    grossSubtotal: 0
                   };
 
                   const isDayUse = roomDraft.stayType === 'DAY_USE';
@@ -2317,63 +2319,6 @@ export default function QuickBookingModal({
                           </div>
                         )}
                       </div>
-
-                      {/* Diskon per Room */}
-                      <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500">
-                            Diskon Kamar {roomIdx + 1}
-                          </span>
-                          <div className="flex gap-1 p-0.5 bg-stone-200/70 rounded-md text-[10px] font-semibold">
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateRoom(roomIdx, { discountType: 'NOMINAL' })}
-                              className={'px-2 py-0.5 rounded transition cursor-pointer ' + (
-                                roomDraft.discountType === 'NOMINAL' ? 'bg-white text-stone-900 shadow-2xs font-bold' : 'text-stone-600'
-                              )}
-                            >
-                              Nominal (Rp)
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateRoom(roomIdx, { discountType: 'PERCENT' })}
-                              className={'px-2 py-0.5 rounded transition cursor-pointer ' + (
-                                roomDraft.discountType === 'PERCENT' ? 'bg-white text-stone-900 shadow-2xs font-bold' : 'text-stone-600'
-                              )}
-                            >
-                              Persentase (%)
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                              Nilai Diskon ({roomDraft.discountType === 'PERCENT' ? '%' : 'Rp'})
-                            </label>
-                            <input
-                              type="number"
-                              min={0}
-                              max={roomDraft.discountType === 'PERCENT' ? 100 : undefined}
-                              value={roomDraft.discountValue}
-                              onChange={e => handleUpdateRoom(roomIdx, { discountValue: Number(e.target.value) })}
-                              className="w-full text-xs px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                              Alasan Diskon{Number(roomDraft.discountValue) > 0 ? ' *' : ''}
-                            </label>
-                            <input
-                              type="text"
-                              value={roomDraft.discountReason}
-                              onChange={e => handleUpdateRoom(roomIdx, { discountReason: e.target.value })}
-                              placeholder="Contoh: Promo Direct Booking..."
-                              className="w-full text-xs px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg"
-                            />
-                          </div>
-                        </div>
-                      </div>
                     </div>
                   );
                 })}
@@ -2431,7 +2376,7 @@ export default function QuickBookingModal({
                     <input
                       type="number"
                       required
-                      min="1"
+                      min="0"
                       step="1000"
                       value={amountPaid}
                       onChange={e => setAmountPaid(Number(e.target.value))}
@@ -2492,16 +2437,69 @@ export default function QuickBookingModal({
                       </div>
                     )}
 
-                    {totalDiscounts > 0 && (
-                      <div className="flex justify-between text-emerald-800 font-medium">
-                        <span>Total Diskon</span>
-                        <span className="font-mono font-semibold">-Rp {totalDiscounts.toLocaleString('id-ID')}</span>
-                      </div>
-                    )}
+                    <div className="flex justify-between text-stone-800 font-medium pt-1 border-t border-stone-100">
+                      <span>Gross Total</span>
+                      <span className="font-mono font-semibold">Rp {grossBookingTotal.toLocaleString('id-ID')}</span>
+                    </div>
 
-                    <div className="flex justify-between text-stone-700">
-                      <span>Net Kamar</span>
-                      <span className="font-mono font-semibold">Rp {grandTotal.toLocaleString('id-ID')}</span>
+                    <div className="p-2.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500">
+                          Diskon Keseluruhan
+                        </span>
+                        <div className="flex gap-1 p-0.5 bg-stone-200/70 rounded-md text-[10px] font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => setGlobalDiscountType('NOMINAL')}
+                            className={'px-2 py-0.5 rounded transition cursor-pointer ' + (
+                              globalDiscountType === 'NOMINAL' ? 'bg-white text-stone-900 shadow-2xs font-bold' : 'text-stone-600'
+                            )}
+                          >
+                            Nominal (Rp)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setGlobalDiscountType('PERCENT')}
+                            className={'px-2 py-0.5 rounded transition cursor-pointer ' + (
+                              globalDiscountType === 'PERCENT' ? 'bg-white text-stone-900 shadow-2xs font-bold' : 'text-stone-600'
+                            )}
+                          >
+                            Persentase (%)
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                            Nilai Diskon ({globalDiscountType === 'PERCENT' ? '%' : 'Rp'})
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={globalDiscountType === 'PERCENT' ? 100 : undefined}
+                            value={globalDiscountValue}
+                            onChange={e => setGlobalDiscountValue(Number(e.target.value))}
+                            className="w-full text-xs px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                            Alasan Diskon{globalDiscountAmount > 0 ? ' *' : ''}
+                          </label>
+                          <input
+                            type="text"
+                            value={globalDiscountReason}
+                            onChange={e => setGlobalDiscountReason(e.target.value)}
+                            placeholder="Contoh: Promo Direct Booking..."
+                            className="w-full text-xs px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-between text-emerald-800 font-medium">
+                      <span>Total Diskon</span>
+                      <span className="font-mono font-semibold">-Rp {globalDiscountAmount.toLocaleString('id-ID')}</span>
                     </div>
 
                     <div className="border-t border-stone-200 pt-2 flex justify-between text-stone-900 font-bold text-sm">

@@ -99,7 +99,9 @@ import { getReservationEditAvailability, getBookingCreateAvailability, previewRe
 import {
   ReservationBillingError,
   allocateCommercialDiscount,
+  buildBookingGlobalDiscount,
   buildChildReservationBilling,
+  hasBookingGlobalDiscountInput,
   stayChargeLineGrosses
 } from './domains/reservations/reservationBilling';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
@@ -407,7 +409,7 @@ if (require.main === module) {
   });
 }
 
-export { app, pool };
+export { app, pool, createCanonicalBooking };
 
 // Helper generate booking identifier with source-based prefix.
 // Example: WALKIN-20260821-0001 or OTA-20260821-0001.
@@ -995,6 +997,13 @@ async function createBookingParentRecord(
     channel: string | null;
     currencyCode: string;
     correlationId: string | null;
+    createdBy?: string | null;
+    globalDiscountType?: string | null;
+    globalDiscountValue?: number;
+    globalDiscountAmount?: number;
+    globalDiscountReason?: string | null;
+    globalDiscountGrossBefore?: number;
+    globalDiscountNetAfter?: number;
   }
 ) {
   const propertyCode = String(bookingPayload.propertyCode || 'LWG').trim().toUpperCase();
@@ -1024,9 +1033,15 @@ async function createBookingParentRecord(
           legacy_booking_number,
           created_by,
           correlation_id,
+          global_discount_type,
+          global_discount_value,
+          global_discount_amount,
+          global_discount_reason,
+          global_discount_gross_before,
+          global_discount_net_after,
           created_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), NOW())
         RETURNING *;`,
         [
           bid,
@@ -1043,8 +1058,14 @@ async function createBookingParentRecord(
           'ACTIVE',
           bookingPayload.currencyCode || 'IDR',
           null,
-          'PMS',
-          bookingPayload.correlationId || null
+          bookingPayload.createdBy || 'PMS',
+          bookingPayload.correlationId || null,
+          bookingPayload.globalDiscountType || null,
+          Number(bookingPayload.globalDiscountValue || 0),
+          Number(bookingPayload.globalDiscountAmount || 0),
+          bookingPayload.globalDiscountReason || null,
+          Number(bookingPayload.globalDiscountGrossBefore || 0),
+          Number(bookingPayload.globalDiscountNetAfter || 0)
         ]
       );
 
@@ -1327,6 +1348,9 @@ async function createCanonicalBooking(
     const propertyCode = String(propertyResult.rows[0].property_code || 'LWG');
     const propertyTimezone = resolvePropertyTimezone(propertyResult.rows[0].timezone);
 
+    const bookingActor = String(req?.user?.username || req?.user?.name || 'PMS');
+    const useGlobalDiscount = hasBookingGlobalDiscountInput(bookingPayload);
+
     const bookingRecord = await createBookingParentRecord(client, {
       propertyId: bookingPropertyId,
       propertyCode,
@@ -1340,7 +1364,8 @@ async function createCanonicalBooking(
       referral,
       channel,
       currencyCode,
-      correlationId
+      correlationId,
+      createdBy: bookingActor
     });
 
     const normalizedChildren: any[] = [];
@@ -1390,11 +1415,11 @@ async function createCanonicalBooking(
           subtotalAmount: child.subtotal_amount ?? child.subtotalAmount,
           totalPrice: child.total_price ?? child.totalPrice,
           stayCharges: child.stay_charges || child.stayCharges || (index === 0 ? bookingPayload.stay_charges : []) || [],
-          discountType: child.discount_type || child.discountType,
-          discountValue: child.discount_value ?? child.discountValue,
-          discountPercent: child.discount_percent ?? child.discountPercent,
-          discountAmount: child.discount_amount ?? child.discountAmount,
-          discountReason: child.discount_reason || child.discountReason || bookingPayload.discount_reason,
+          discountType: useGlobalDiscount ? null : (child.discount_type || child.discountType),
+          discountValue: useGlobalDiscount ? 0 : (child.discount_value ?? child.discountValue),
+          discountPercent: useGlobalDiscount ? 0 : (child.discount_percent ?? child.discountPercent),
+          discountAmount: useGlobalDiscount ? 0 : (child.discount_amount ?? child.discountAmount),
+          discountReason: useGlobalDiscount ? null : (child.discount_reason || child.discountReason || bookingPayload.discount_reason),
           amountPaid: child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)
         });
       } catch (err: any) {
@@ -1464,8 +1489,67 @@ async function createCanonicalBooking(
         roomCategoryCodeSnapshot: null,
         roomCategoryNameSnapshot: null,
         classificationSnapshotSource: 'CANONICAL_ROOM_MASTER',
-        ratePlanId: (child.rate_plan_id || child.ratePlanId) ? Number(child.rate_plan_id || child.ratePlanId) : null
+        ratePlanId: (child.rate_plan_id || child.ratePlanId) ? Number(child.rate_plan_id || child.ratePlanId) : null,
+        discountSource: useGlobalDiscount ? 'GLOBAL_DISCOUNT' : 'RESERVATION_DISCOUNT'
       });
+    }
+
+    let bookingGlobalDiscount: ReturnType<typeof buildBookingGlobalDiscount> | null = null;
+    if (useGlobalDiscount) {
+      try {
+        bookingGlobalDiscount = buildBookingGlobalDiscount({
+          childGrosses: normalizedChildren.map((childRow) => childRow.discountBase),
+          discountType: bookingPayload.global_discount_type ?? bookingPayload.globalDiscountType,
+          discountValue: bookingPayload.global_discount_value ?? bookingPayload.globalDiscountValue,
+          discountPercent: bookingPayload.global_discount_percent ?? bookingPayload.globalDiscountPercent,
+          discountAmount: bookingPayload.global_discount_amount ?? bookingPayload.globalDiscountAmount,
+          discountReason: bookingPayload.global_discount_reason ?? bookingPayload.globalDiscountReason
+        });
+      } catch (err: any) {
+        if (err instanceof ReservationBillingError) {
+          throw createHttpError(err.statusCode, err.message, err.code);
+        }
+        throw err;
+      }
+
+      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
+        const allocated = Number(bookingGlobalDiscount.allocations[childIndex] || 0);
+        const childRow = normalizedChildren[childIndex];
+        childRow.discountAmount = allocated;
+        childRow.discountPercent = 0;
+        childRow.discountType = bookingGlobalDiscount.discountType;
+        childRow.discountValue = allocated;
+        childRow.discountReason = bookingGlobalDiscount.reason;
+        childRow.totalPrice = Math.max(0, Number(childRow.discountBase || 0) - allocated);
+        childRow.globalDiscountAllocated = allocated;
+      }
+
+      await client.query(
+        `UPDATE bookings
+         SET global_discount_type = $1,
+             global_discount_value = $2,
+             global_discount_amount = $3,
+             global_discount_reason = $4,
+             global_discount_gross_before = $5,
+             global_discount_net_after = $6,
+             updated_at = NOW()
+         WHERE id = $7`,
+        [
+          bookingGlobalDiscount.discountType,
+          bookingGlobalDiscount.discountValue,
+          bookingGlobalDiscount.discount,
+          bookingGlobalDiscount.reason,
+          bookingGlobalDiscount.gross,
+          bookingGlobalDiscount.net,
+          Number(bookingRecord.id)
+        ]
+      );
+      bookingRecord.global_discount_type = bookingGlobalDiscount.discountType;
+      bookingRecord.global_discount_value = bookingGlobalDiscount.discountValue;
+      bookingRecord.global_discount_amount = bookingGlobalDiscount.discount;
+      bookingRecord.global_discount_reason = bookingGlobalDiscount.reason;
+      bookingRecord.global_discount_gross_before = bookingGlobalDiscount.gross;
+      bookingRecord.global_discount_net_after = bookingGlobalDiscount.net;
     }
 
     const roomKeyMap = new Map<string, { ident: RoomTypeIdentity; date: string; delta: number }>();
@@ -1830,12 +1914,32 @@ async function createCanonicalBooking(
       }
 
       if (Number(child.discountAmount || 0) > 0) {
-        const discountDesc = child.discountReason ? `Diskon: ${child.discountReason}` : 'Diskon Reservasi';
-        await client.query(
-          `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
-           VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
-          [inserted.reservation.id, bookingPropertyId, 'DISCOUNT', discountDesc, Number(child.discountAmount || 0)]
-        );
+        const isGlobalDiscount = child.discountSource === 'GLOBAL_DISCOUNT';
+        const discountDesc = isGlobalDiscount
+          ? (child.discountReason ? `Diskon Keseluruhan: ${child.discountReason}` : 'Diskon Keseluruhan')
+          : (child.discountReason ? `Diskon: ${child.discountReason}` : 'Diskon Reservasi');
+        if (isGlobalDiscount) {
+          await client.query(
+            `INSERT INTO folio_entries (
+               reservation_id, property_id, entry_type, source_type, source_id, description, amount, direction
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'CREDIT')`,
+            [
+              inserted.reservation.id,
+              bookingPropertyId,
+              'DISCOUNT',
+              'GLOBAL_DISCOUNT',
+              String(bookingRecord.id),
+              discountDesc,
+              Number(child.discountAmount || 0)
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+             VALUES ($1, $2, $3, $4, $5, 'CREDIT')`,
+            [inserted.reservation.id, bookingPropertyId, 'DISCOUNT', discountDesc, Number(child.discountAmount || 0)]
+          );
+        }
       }
 
       if (Number(child.amountPaid || 0) > 0) {
@@ -2103,15 +2207,22 @@ async function createCanonicalBooking(
           check_out: child.checkOut,
           stay_type: child.stayType
         });
-        if ((child.isManualOverride || (!child.ratePlanId && child.totalPrice > 0)) && child.totalPrice > 0) {
-          quote.room_subtotal = child.subtotalAmount || child.totalPrice;
+        if (
+          child.isManualOverride
+          || !child.ratePlanId
+          || Number(child.discountAmount || 0) > 0
+          || Number(child.roomGross ?? child.subtotalAmount ?? 0) > 0
+        ) {
+          const canonicalRoomGross = Number(child.roomGross ?? child.subtotalAmount ?? child.totalPrice ?? 0);
+          const canonicalNet = Number(child.totalPrice ?? 0);
+          quote.room_subtotal = canonicalRoomGross;
           quote.tax_amount = child.taxAmount || 0;
           quote.service_amount = child.serviceAmount || 0;
-          quote.grand_total = child.totalPrice;
-          const nightlyShare = Math.round((child.subtotalAmount || child.totalPrice) / (quote.nightly_breakdown.length || 1));
+          quote.grand_total = canonicalNet;
+          const nightlyShare = Math.round((canonicalRoomGross || canonicalNet) / (quote.nightly_breakdown.length || 1));
           quote.nightly_breakdown.forEach((n, idx) => {
             n.final_room_rate = idx === quote.nightly_breakdown.length - 1
-              ? (child.subtotalAmount || child.totalPrice) - nightlyShare * (quote.nightly_breakdown.length - 1)
+              ? (canonicalRoomGross || canonicalNet) - nightlyShare * (quote.nightly_breakdown.length - 1)
               : nightlyShare;
             n.total_amount = n.final_room_rate;
           });
@@ -2148,7 +2259,23 @@ async function createCanonicalBooking(
           channel,
           booking_status: 'ACTIVE',
           reservation_count: insertedChildren.length,
-          correlation_id: correlationId
+          correlation_id: correlationId,
+          actor: bookingActor,
+          gross_booking_total: bookingGlobalDiscount ? bookingGlobalDiscount.gross : null,
+          global_discount_type: bookingGlobalDiscount ? bookingGlobalDiscount.discountType : null,
+          global_discount_value: bookingGlobalDiscount ? bookingGlobalDiscount.discountValue : null,
+          global_discount_amount: bookingGlobalDiscount ? bookingGlobalDiscount.discount : null,
+          global_discount_reason: bookingGlobalDiscount ? bookingGlobalDiscount.reason : null,
+          net_booking_total: bookingGlobalDiscount ? bookingGlobalDiscount.net : null,
+          child_allocation: bookingGlobalDiscount
+            ? normalizedChildren.map((childRow: any) => ({
+                stay_sequence: Number(childRow.index) + 1,
+                room_id: Number(childRow.roomId),
+                child_gross: Number(childRow.discountBase || 0),
+                allocated_discount: Number(childRow.discountAmount || 0),
+                child_net: Math.max(0, Number(childRow.discountBase || 0) - Number(childRow.discountAmount || 0))
+              }))
+            : null
         }),
         correlationId,
         bookingPropertyId

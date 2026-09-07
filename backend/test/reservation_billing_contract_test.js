@@ -5,8 +5,11 @@ const { Pool } = require('pg');
 const {
   ReservationBillingError,
   allocateCommercialDiscount,
+  allocateGlobalDiscountToChildren,
+  buildBookingGlobalDiscount,
   buildChildReservationBilling,
   computeAuthoritativeDiscount,
+  hasBookingGlobalDiscountInput,
   shouldApplyPostedCommercialDiscount
 } = require('../dist/domains/reservations/reservationBilling');
 
@@ -115,6 +118,111 @@ async function runHelperTests() {
     false,
     'legacy ROOM_CHARGE posted at already-net total_price is not treated as gross'
   );
+
+  const twoRoom = buildBookingGlobalDiscount({
+    childGrosses: [385000, 534000],
+    discountType: 'PERCENTAGE',
+    discountValue: 10,
+    discountAmount: 1,
+    discountReason: 'Promo 10%'
+  });
+  assert.equal(twoRoom.gross, 919000, 'A: 2-room gross 919,000');
+  assert.equal(twoRoom.discount, 91900, 'A: 10% of 919,000 is 91,900');
+  assert.equal(twoRoom.net, 827100, 'A: net 827,100');
+  assert.deepEqual(twoRoom.allocations, [38500, 53400], 'A: proportional 38,500 + 53,400');
+  assert.notEqual(twoRoom.discount, 1, 'manipulated FE global amount is ignored');
+
+  const thirty = buildBookingGlobalDiscount({
+    childGrosses: [600000, 400000],
+    discountType: 'PERCENTAGE',
+    discountValue: 30,
+    discountReason: 'Group 30%'
+  });
+  assert.equal(thirty.discount, 300000, 'B: 30% of 1,000,000 is 300,000');
+  assert.equal(thirty.net, 700000, 'B: net 700,000');
+  assert.deepEqual(thirty.allocations, [180000, 120000], 'B: 180,000 + 120,000');
+
+  const threeRoom = allocateGlobalDiscountToChildren([500000, 300000, 200000], 100000);
+  assert.deepEqual(threeRoom, [50000, 30000, 20000], 'C: 3-room 10% allocates 50+30+20');
+  assert.equal(threeRoom.reduce((sum, value) => sum + value, 0), 100000, 'C: allocation sums exactly');
+
+  const remainder = allocateGlobalDiscountToChildren([333333, 333333, 333334], 100000);
+  assert.equal(remainder.reduce((sum, value) => sum + value, 0), 100000, 'rounding remainder sums exactly');
+  assert.equal(remainder[2], 100000 - remainder[0] - remainder[1], 'last eligible child receives remainder');
+  remainder.forEach((share, index) => {
+    assert.ok(share >= 0, `share ${index} is not negative`);
+    assert.ok(share <= [333333, 333333, 333334][index], `share ${index} does not exceed child gross`);
+  });
+
+  const fullGlobal = buildBookingGlobalDiscount({
+    childGrosses: [500000, 500000],
+    discountType: 'PERCENTAGE',
+    discountValue: 100,
+    discountReason: 'Complimentary'
+  });
+  assert.equal(fullGlobal.discount, 1000000, '100% discount equals gross');
+  assert.equal(fullGlobal.net, 0, '100% net is 0');
+  assert.deepEqual(fullGlobal.allocations, [500000, 500000], '100% allocates full child gross');
+  assert.ok(fullGlobal.allocations.every((share) => share >= 0), '100% has no negative allocation');
+
+  const zeroGlobal = buildBookingGlobalDiscount({
+    childGrosses: [385000],
+    discountType: 'PERCENTAGE',
+    discountValue: 0
+  });
+  assert.equal(zeroGlobal.discount, 0, '0% discount is 0');
+  assert.equal(zeroGlobal.net, 385000, '0% net equals gross');
+
+  const single = buildBookingGlobalDiscount({
+    childGrosses: [385000],
+    discountType: 'PERCENTAGE',
+    discountValue: 10,
+    discountReason: 'Walk-in promo'
+  });
+  assert.equal(single.discount, 38500, 'single room 10% of 385,000');
+  assert.equal(single.net, 346500, 'single room net 346,500');
+  assert.deepEqual(single.allocations, [38500], 'single room allocation is the full discount');
+
+  const extras = buildBookingGlobalDiscount({
+    childGrosses: [500000, 700000],
+    discountType: 'PERCENTAGE',
+    discountValue: 10,
+    discountReason: 'Promo extras'
+  });
+  assert.equal(extras.gross, 1200000, 'gross includes stay extras on children');
+  assert.equal(extras.discount, 120000, '10% of 1.2M');
+  assert.equal(extras.net, 1080000, 'net 1.08M');
+
+  expectCode(
+    () => buildBookingGlobalDiscount({
+      childGrosses: [1000000],
+      discountType: 'PERCENTAGE',
+      discountValue: 101,
+      discountReason: 'x'
+    }),
+    'DISCOUNT_PERCENT_INVALID'
+  );
+  expectCode(
+    () => buildBookingGlobalDiscount({
+      childGrosses: [1000000],
+      discountType: 'NOMINAL',
+      discountValue: -1,
+      discountReason: 'x'
+    }),
+    'DISCOUNT_NEGATIVE'
+  );
+  expectCode(
+    () => buildBookingGlobalDiscount({
+      childGrosses: [1000000],
+      discountType: 'PERCENTAGE',
+      discountValue: 10
+    }),
+    'DISCOUNT_REASON_REQUIRED'
+  );
+
+  assert.equal(hasBookingGlobalDiscountInput({ global_discount_type: 'PERCENTAGE' }), true);
+  assert.equal(hasBookingGlobalDiscountInput({ global_discount_value: 0 }), true);
+  assert.equal(hasBookingGlobalDiscountInput({ discount_type: 'PERCENTAGE' }), false, 'child discount keys are not booking-global');
 
   console.log('   helper assertions passed');
 }

@@ -11,6 +11,19 @@ export function computeQuickBookingRoomDiscount(input: {
   discountValue: number;
 }): number {
   const gross = Math.max(0, roundIdr(input.roomCharge) + roundIdr(input.stayChargesTotal));
+  return computeQuickBookingGlobalDiscount({
+    grossBookingTotal: gross,
+    discountType: input.discountType,
+    discountValue: input.discountValue
+  });
+}
+
+export function computeQuickBookingGlobalDiscount(input: {
+  grossBookingTotal: number;
+  discountType: 'NOMINAL' | 'PERCENT';
+  discountValue: number;
+}): number {
+  const gross = Math.max(0, roundIdr(input.grossBookingTotal));
   if (input.discountType === 'PERCENT') {
     const percent = Number(input.discountValue);
     if (!Number.isFinite(percent) || percent <= 0) return 0;

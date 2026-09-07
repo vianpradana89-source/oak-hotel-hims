@@ -4759,6 +4759,36 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // QUICK-BOOKING-GLOBAL-DISCOUNT-1: booking-level commercial discount.
+    // Additive nullable/default-safe columns. Existing rows remain 0 / NULL.
+    // Does not rewrite reservations, folios, or transactions.
+    // ------------------------------------------------------------------
+    const globalDiscountCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'booking_global_discount_v1'`
+    );
+    if ((globalDiscountCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_type VARCHAR(20);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_value NUMERIC(14,4) NOT NULL DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_amount BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_reason VARCHAR(255);
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_gross_before BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS global_discount_net_after BIGINT NOT NULL DEFAULT 0;
+
+        DO $$ BEGIN
+          ALTER TABLE bookings
+            ADD CONSTRAINT bookings_global_discount_type_chk
+            CHECK (global_discount_type IS NULL OR global_discount_type IN ('NOMINAL', 'PERCENTAGE'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('booking_global_discount_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

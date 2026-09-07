@@ -223,3 +223,99 @@ export function shouldApplyPostedCommercialDiscount(input: {
   if (subtotal <= 0 || posted <= 0) return false;
   return Math.abs(posted - subtotal) <= 1;
 }
+
+export function hasBookingGlobalDiscountInput(payload: Record<string, unknown> | null | undefined): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(payload, 'global_discount_type')
+    || Object.prototype.hasOwnProperty.call(payload, 'global_discount_value');
+}
+
+/**
+ * Split a booking-level discount across children in proportion to each child's
+ * gross. Last eligible child (gross > 0) receives the rounding remainder.
+ * No share may exceed that child's gross. Any leftover is filled from the start.
+ */
+export function allocateGlobalDiscountToChildren(
+  childGrosses: unknown[],
+  discount: unknown
+): number[] {
+  const grosses = (Array.isArray(childGrosses) ? childGrosses : []).map((value) => Math.max(0, roundIdr(value)));
+  const totalGross = grosses.reduce((sum, value) => sum + value, 0);
+  const totalDiscount = Math.min(Math.max(0, roundIdr(discount)), totalGross);
+  const allocations = grosses.map(() => 0);
+  if (totalGross <= 0 || totalDiscount <= 0 || allocations.length === 0) return allocations;
+
+  let lastEligible = -1;
+  for (let index = grosses.length - 1; index >= 0; index -= 1) {
+    if (grosses[index] > 0) {
+      lastEligible = index;
+      break;
+    }
+  }
+
+  let remaining = totalDiscount;
+  for (let index = 0; index < grosses.length; index += 1) {
+    if (grosses[index] <= 0) continue;
+    if (index === lastEligible) {
+      allocations[index] = Math.min(grosses[index], remaining);
+      remaining -= allocations[index];
+      continue;
+    }
+    const proportional = roundIdr((totalDiscount * grosses[index]) / totalGross);
+    const share = Math.min(grosses[index], remaining, proportional);
+    allocations[index] = share;
+    remaining -= share;
+  }
+
+  if (remaining > 0) {
+    for (let index = 0; index < grosses.length && remaining > 0; index += 1) {
+      const capacity = grosses[index] - allocations[index];
+      if (capacity <= 0) continue;
+      const extra = Math.min(capacity, remaining);
+      allocations[index] += extra;
+      remaining -= extra;
+    }
+  }
+
+  return allocations;
+}
+
+export function buildBookingGlobalDiscount(input: {
+  childGrosses: unknown[];
+  discountType?: unknown;
+  discountValue?: unknown;
+  discountPercent?: unknown;
+  discountAmount?: unknown;
+  discountReason?: unknown;
+}): {
+  gross: number;
+  discountType: ReservationDiscountType | null;
+  discountValue: number;
+  discount: number;
+  discountPercent: number;
+  reason: string | null;
+  net: number;
+  allocations: number[];
+} {
+  const childGrosses = (Array.isArray(input.childGrosses) ? input.childGrosses : []).map((value) => Math.max(0, roundIdr(value)));
+  const gross = childGrosses.reduce((sum, value) => sum + value, 0);
+  const computed = computeAuthoritativeDiscount({
+    gross,
+    discountType: input.discountType,
+    discountValue: input.discountValue,
+    discountPercent: input.discountPercent,
+    discountAmount: input.discountAmount,
+    discountReason: input.discountReason
+  });
+  const allocations = allocateGlobalDiscountToChildren(childGrosses, computed.discount);
+  return {
+    gross,
+    discountType: computed.discountType,
+    discountValue: computed.discountValue,
+    discount: computed.discount,
+    discountPercent: computed.discountPercent,
+    reason: computed.reason ? computed.reason.slice(0, 255) : null,
+    net: Math.max(0, gross - computed.discount),
+    allocations
+  };
+}
