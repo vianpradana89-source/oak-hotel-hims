@@ -2577,6 +2577,26 @@ app.get('/api/reservations/:id', async (req, res) => {
   }
 });
 
+app.get('/api/bookings/create-availability', requireAuth, async (req: any, res: any) => {
+  try {
+    const availability = await getBookingCreateAvailability(pool, {
+      propertyId: Number(req.query.property_id),
+      checkIn: String(req.query.check_in || ''),
+      checkOut: req.query.check_out != null ? String(req.query.check_out) : null,
+      stayType: String(req.query.stay_type || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT',
+      startAt: req.query.start_at != null ? String(req.query.start_at) : null,
+      endAt: req.query.end_at != null ? String(req.query.end_at) : null
+    });
+    return res.json({ status: 'OK', data: availability });
+  } catch (err: any) {
+    return res.status(err?.statusCode || 400).json({
+      status: 'ERROR',
+      code: err?.code,
+      message: err?.message || 'Gagal memuat ketersediaan kamar untuk Quick Booking.'
+    });
+  }
+});
+
 // GET booking by BID (new read-only endpoint)
 app.get('/api/bookings/:bid', async (req, res) => {
   const bidParam = String(req.params.bid || '').toUpperCase().trim();
@@ -3543,26 +3563,6 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
     res.status(500).json({ status: 'ERROR', message });
   } finally {
     client.release();
-  }
-});
-
-app.get('/api/bookings/create-availability', requireAuth, async (req: any, res: any) => {
-  try {
-    const availability = await getBookingCreateAvailability(pool, {
-      propertyId: Number(req.query.property_id),
-      checkIn: String(req.query.check_in || ''),
-      checkOut: req.query.check_out != null ? String(req.query.check_out) : null,
-      stayType: String(req.query.stay_type || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT',
-      startAt: req.query.start_at != null ? String(req.query.start_at) : null,
-      endAt: req.query.end_at != null ? String(req.query.end_at) : null
-    });
-    return res.json({ status: 'OK', data: availability });
-  } catch (err: any) {
-    return res.status(err?.statusCode || 400).json({
-      status: 'ERROR',
-      code: err?.code,
-      message: err?.message || 'Gagal memuat ketersediaan kamar untuk Quick Booking.'
-    });
   }
 });
 

@@ -1,7 +1,26 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { Pool } = require('pg');
 const { initializeDatabase } = require('../dist/db/schema_v3');
 const { getBookingCreateAvailability } = require('../dist/domains/reservations/reservationEditService');
+
+const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.ts'), 'utf8');
+const createAvailabilityRoute = "app.get('/api/bookings/create-availability'";
+const bookingByBidRoute = "app.get('/api/bookings/:bid'";
+const createAvailabilityIndex = indexSrc.indexOf(createAvailabilityRoute);
+const bookingByBidIndex = indexSrc.indexOf(bookingByBidRoute);
+assert.ok(createAvailabilityIndex >= 0, 'GET /api/bookings/create-availability must be registered');
+assert.ok(bookingByBidIndex >= 0, 'GET /api/bookings/:bid must remain registered');
+assert.ok(
+  createAvailabilityIndex < bookingByBidIndex,
+  'GET /api/bookings/create-availability must be registered before GET /api/bookings/:bid so create-availability is not parsed as a BID'
+);
+assert.strictEqual(
+  indexSrc.split(createAvailabilityRoute).length - 1,
+  1,
+  'create-availability handler must be registered exactly once'
+);
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
