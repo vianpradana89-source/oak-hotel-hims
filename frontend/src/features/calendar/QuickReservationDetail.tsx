@@ -5,6 +5,11 @@ import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import {
+  formatReservationRatePlanLabel,
+  formatReservationSourceLabel,
+  reservationSpecialRequestsText,
+} from './reservationContextMetadata';
 
 export interface QuickReservationDetailProps {
   reservation: any;
@@ -198,28 +203,9 @@ export default function QuickReservationDetail({
   const checkOut = normalizeHotelDate(data.check_out) || String(data.check_out || '').slice(0, 10);
   const nights = Number(data.nights || data.num_nights || 1);
   const isDayUse = data.stay_type === 'DAY_USE';
-
-  // Booking Source Formatting
-  const formatBookingSource = () => {
-    if (data.ota_source_name) {
-      return `OTA — ${data.ota_source_name}`;
-    }
-    const channel = String(data.channel || '').toUpperCase();
-    const source = String(data.booking_source || '').toUpperCase();
-    if (source.includes('OTA') || channel.includes('OTA')) {
-      return `OTA — ${data.booking_source || 'Online Agent'}`;
-    }
-    if (source === 'WALKIN' || channel === 'FRONT_DESK' || source === 'FRONT_DESK') {
-      return 'Direct / Walk-in';
-    }
-    if (source === 'ONLINE_DIRECT' || source === 'WEBSITE') {
-      return 'Direct / Website';
-    }
-    if (source === 'PHONE' || source === 'WHATSAPP') {
-      return 'Direct / WhatsApp';
-    }
-    return data.booking_source || data.channel || 'Direct / Front Office';
-  };
+  const sourceLabel = formatReservationSourceLabel(data);
+  const ratePlanLabel = formatReservationRatePlanLabel(data);
+  const specialRequestsNote = reservationSpecialRequestsText(data);
 
   // Financial status & values
   const totalPrice = Number(data.total_price || 0);
@@ -391,15 +377,34 @@ export default function QuickReservationDetail({
                   {bidCopied ? 'Tersalin ✓' : 'Salin'}
                 </button>
               </div>
-              <span className="text-[11px] font-semibold text-stone-500 bg-white px-2 py-0.5 rounded border border-stone-200">
-                {formatBookingSource()}
-              </span>
             </div>
 
             <div className="flex items-baseline justify-between pt-1 border-t border-stone-200/80">
               <span className="text-sm font-bold text-stone-900">{roomNumber}</span>
               <span className="text-xs text-stone-600 font-medium">{roomTypeName}</span>
             </div>
+          </div>
+
+          {/* Compact reservation context metadata */}
+          <div className="p-2.5 bg-white rounded-xl border border-stone-200 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-[11px] text-stone-500 block font-medium">Sumber</span>
+                <strong className="text-xs font-semibold text-stone-800">{sourceLabel}</strong>
+              </div>
+              <div>
+                <span className="text-[11px] text-stone-500 block font-medium">Rate Plan</span>
+                <strong className="text-xs font-semibold text-stone-800">{ratePlanLabel}</strong>
+              </div>
+            </div>
+            {specialRequestsNote ? (
+              <div className="pt-1 border-t border-stone-100">
+                <span className="text-[11px] text-stone-500 block font-medium">Catatan</span>
+                <p className="text-xs text-stone-800 line-clamp-2" title={specialRequestsNote}>
+                  {specialRequestsNote}
+                </p>
+              </div>
+            ) : null}
           </div>
 
           {/* Stay Dates & Duration */}

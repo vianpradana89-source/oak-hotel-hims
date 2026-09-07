@@ -116,6 +116,8 @@ import {
   stayChargeLineGrosses
 } from './domains/reservations/reservationBilling';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
+import { createReservationSpecialRequestsRouter } from './domains/reservations/reservationSpecialRequestsRouter';
+import { normalizeSpecialRequests } from './domains/reservations/reservationSpecialRequests';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
@@ -1135,7 +1137,7 @@ async function createChildReservationRecord(
           classification_snapshot_source, classification_snapshotted_at,
           stay_type, start_at, end_at,
           rate_plan_id, subtotal_amount, tax_amount, service_amount,
-          is_manual_override, manual_override_reason, discount_reason
+          is_manual_override, manual_override_reason, discount_reason, special_requests
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
@@ -1144,7 +1146,7 @@ async function createChildReservationRecord(
           $24, $25, $26, $27, $28, $29, $30, CURRENT_TIMESTAMP,
           $31, $32, $33,
           $34, $35, $36, $37,
-          $38, $39, $40
+          $38, $39, $40, $41
         )
         RETURNING *;`,
         [
@@ -1187,7 +1189,8 @@ async function createChildReservationRecord(
           child.serviceAmount || 0,
           Boolean(child.isManualOverride),
           child.manualOverrideReason || null,
-          child.discountReason || null
+          child.discountReason || null,
+          child.specialRequests || null
         ]
       );
 
@@ -1528,6 +1531,9 @@ async function createCanonicalBooking(
         roomCategoryCodeSnapshot: null,
         roomCategoryNameSnapshot: null,
         classificationSnapshotSource: 'CANONICAL_ROOM_MASTER',
+        specialRequests: normalizeSpecialRequests(
+          child.special_requests ?? child.specialRequests ?? bookingPayload.special_requests
+        ),
         ratePlanId: (child.rate_plan_id || child.ratePlanId) ? Number(child.rate_plan_id || child.ratePlanId) : null,
         discountSource: useGlobalDiscount ? 'GLOBAL_DISCOUNT' : 'RESERVATION_DISCOUNT',
         submittedRoomGross: childBilling.roomGross,
@@ -2647,7 +2653,14 @@ async function getCanonicalReservationDto(clientOrPool: any, reservationId: numb
       b.property_id AS booking_property_id,
       COALESCE(r.booker_name, b.booker_name) AS booker_name,
       COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
+      b.booking_source,
+      COALESCE(b.booking_channel, r.booking_channel) AS booking_channel,
       ota.name AS ota_source_name,
+      r.rate_plan_id,
+      r.rate_plan_code_snapshot,
+      r.rate_plan_name_snapshot,
+      r.special_requests,
+      r.is_manual_override,
       ro.room_number,
       ro.floor,
       COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
@@ -2842,7 +2855,15 @@ app.get('/api/reservations/:id', async (req, res) => {
         b.id as booking_id_value,
         COALESCE(r.booker_name, b.booker_name) AS booker_name,
         COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
-      ota.name as ota_source_name,
+        b.booking_source,
+        COALESCE(b.booking_channel, r.booking_channel) AS booking_channel,
+        b.property_id AS booking_property_id,
+        ota.name AS ota_source_name,
+        r.rate_plan_id,
+        r.rate_plan_code_snapshot,
+        r.rate_plan_name_snapshot,
+        r.special_requests,
+        r.is_manual_override,
       ro.room_number,
       ro.floor,
       COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
@@ -7284,6 +7305,7 @@ app.use('/api/reports', createReportsRouter(pool));
 app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
+app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));
 app.use('/api', createRoomMoveRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
 app.use('/api/attendance', createAttendanceRouter(pool));

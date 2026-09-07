@@ -4789,6 +4789,24 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // RESERVATION-CONTEXT-METADATA-1: operational special requests.
+    // Additive TEXT column. Existing rows remain NULL. No data rewrite.
+    // ------------------------------------------------------------------
+    const specialRequestsCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'reservation_special_requests_v1'`
+    );
+    if ((specialRequestsCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE reservations
+          ADD COLUMN IF NOT EXISTS special_requests TEXT;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('reservation_special_requests_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

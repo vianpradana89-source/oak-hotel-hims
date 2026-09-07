@@ -12,6 +12,12 @@ import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import {
+  canEditReservationSpecialRequests,
+  formatReservationRatePlanLabel,
+  formatReservationSourceLabel,
+  reservationSpecialRequestsText,
+} from './reservationContextMetadata';
 
 interface Props {
   reservation: any;
@@ -61,6 +67,10 @@ export default function ReservationDetailDrawer({
   const [isEditingPhone, setIsEditingPhone] = useState<boolean>(false);
   const [phoneDraft, setPhoneDraft] = useState<string>('');
   const [savingPhone, setSavingPhone] = useState<boolean>(false);
+  const [isEditingNotes, setIsEditingNotes] = useState<boolean>(false);
+  const [notesDraft, setNotesDraft] = useState<string>('');
+  const [savingNotes, setSavingNotes] = useState<boolean>(false);
+  const [notesFeedback, setNotesFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
   const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
   const { authFetch } = useAuth();
@@ -235,6 +245,39 @@ export default function ReservationDetailDrawer({
     }
   };
 
+  const handleSaveSpecialRequests = async () => {
+    if (!detailData?.id || !activePropId || savingNotes) return;
+    try {
+      setSavingNotes(true);
+      setNotesFeedback(null);
+      const result = await safeFetchJson<{ data?: any }>(
+        `/api/reservations/${detailData.id}/special-requests`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: activePropId,
+            special_requests: notesDraft
+          })
+        },
+        'Gagal memperbarui catatan reservasi',
+        authFetch
+      );
+      if (result.ok) {
+        setIsEditingNotes(false);
+        setNotesFeedback({ type: 'success', text: 'Catatan berhasil disimpan.' });
+        await loadFullReservation(detailData.id);
+        onRefresh();
+      } else {
+        setNotesFeedback({ type: 'error', text: result.errorMessage || 'Gagal memperbarui catatan reservasi' });
+      }
+    } catch (err: any) {
+      setNotesFeedback({ type: 'error', text: err?.message || 'Gagal memperbarui catatan reservasi' });
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
   const handleIdentityConfirmed = async (extracted: ExtractedIdentityData) => {
     if (!detailData?.id || !activePropId) return;
     try {
@@ -269,6 +312,9 @@ export default function ReservationDetailDrawer({
   useEffect(() => {
     if (reservation?.id) {
       setDetailData(reservation);
+      setIsEditingNotes(false);
+      setNotesFeedback(null);
+      setNotesDraft(reservationSpecialRequestsText(reservation));
       loadFullReservation();
       loadFolio();
       if (reservation.room_id) {
@@ -293,19 +339,22 @@ export default function ReservationDetailDrawer({
     (data.identity_number && String(data.identity_number).trim().length > 0)
   );
   const isCheckinReady = hasPhone && hasIdentity;
-  const isOtaReservation = Boolean(
-    data.ota_source_name ||
-    String(data.booking_channel || '').toUpperCase() === 'OTA' ||
-    String(data.booking_type || '').toUpperCase() === 'OTA' ||
-    String(data.booking_source || '').toUpperCase() === 'OTA' ||
-    (data.is_manual_override && String(data.manual_override_reason || '').toLowerCase().includes('ota'))
-  );
+  const sourceLabel = formatReservationSourceLabel(data);
+  const ratePlanLabel = formatReservationRatePlanLabel(data);
+  const specialRequestsNote = reservationSpecialRequestsText(data);
+  const notesEditable = canEditReservationSpecialRequests(data.status);
 
   useEffect(() => {
     if (data?.guest_phone && !isEditingPhone) {
       setPhoneDraft(data.guest_phone);
     }
   }, [data?.guest_phone, isEditingPhone]);
+
+  useEffect(() => {
+    if (!isEditingNotes) {
+      setNotesDraft(specialRequestsNote);
+    }
+  }, [specialRequestsNote, isEditingNotes]);
 
   const totalPrice = Number(data.total_price || 0);
   const amountPaid = Number(data.amount_paid || 0);
@@ -739,7 +788,7 @@ export default function ReservationDetailDrawer({
                 Sumber &amp; Saluran
               </span>
               <div className="text-xs font-bold text-stone-900">
-                {data.ota_source_name ? `🌐 OTA: ${data.ota_source_name}` : `🚶 ${data.booking_source || data.channel || 'Walk-in'}`}
+                {sourceLabel}
               </div>
               {data.referral && (
                 <div className="text-xs text-stone-500 font-mono">
@@ -878,7 +927,7 @@ export default function ReservationDetailDrawer({
                 Rate Plan &amp; Tarif Menginap
               </span>
               <span className="text-xs font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
-                {isOtaReservation ? (data.ota_source_name || data.ota_name || 'OTA Voucher Rate') : (data.rate_plan_name_snapshot || 'Standard Rate')}
+                {ratePlanLabel}
               </span>
             </div>
 
@@ -1141,12 +1190,77 @@ export default function ReservationDetailDrawer({
           )}
 
           {/* Section 8: Catatan / Special Requests */}
-          {data.special_requests && (
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-1">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Catatan Khusus / Special Requests
-              </span>
-              <p className="text-xs text-stone-800 italic">"{data.special_requests}"</p>
+          {(notesEditable || specialRequestsNote) && (
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                  Catatan / Special Requests
+                </span>
+                {notesEditable && !isEditingNotes && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNotesDraft(specialRequestsNote);
+                      setNotesFeedback(null);
+                      setIsEditingNotes(true);
+                    }}
+                    className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                  >
+                    {specialRequestsNote ? 'Edit Catatan' : 'Tambah Catatan'}
+                  </button>
+                )}
+              </div>
+
+              {notesFeedback && (
+                <div
+                  className={`text-xs rounded-lg px-2.5 py-1.5 border ${
+                    notesFeedback.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                      : 'bg-rose-50 text-rose-800 border-rose-200'
+                  }`}
+                >
+                  {notesFeedback.text}
+                </div>
+              )}
+
+              {isEditingNotes ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={notesDraft}
+                    onChange={(e) => setNotesDraft(e.target.value)}
+                    rows={4}
+                    className="w-full text-xs px-2.5 py-2 bg-stone-50 border border-stone-300 rounded-lg text-stone-800 focus:bg-white focus:border-emerald-600 focus:outline-hidden"
+                    placeholder="Contoh: late arrival, high floor"
+                    disabled={savingNotes}
+                  />
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={savingNotes}
+                      onClick={handleSaveSpecialRequests}
+                      className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                    >
+                      {savingNotes ? 'Menyimpan...' : 'Simpan'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingNotes}
+                      onClick={() => {
+                        setIsEditingNotes(false);
+                        setNotesDraft(specialRequestsNote);
+                        setNotesFeedback(null);
+                      }}
+                      className="px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                </div>
+              ) : specialRequestsNote ? (
+                <p className="text-xs text-stone-800 whitespace-pre-wrap">{specialRequestsNote}</p>
+              ) : (
+                <p className="text-xs text-stone-500 italic">Belum ada catatan.</p>
+              )}
             </div>
           )}
         </div>
