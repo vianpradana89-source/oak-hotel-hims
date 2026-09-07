@@ -22,6 +22,15 @@ import {
 } from './quickBookingAvailability';
 import { computeQuickBookingGlobalDiscount, toBackendDiscountType } from './quickBookingBilling';
 import {
+  QUICK_BOOKING_QUOTE_NOT_READY_MESSAGE,
+  compatibleQuickBookingRatePlans,
+  isCompatibleQuickBookingRatePlan,
+  isQuickBookingQuoteReady,
+  quickBookingQuoteFingerprint,
+  resolveQuotedRoomSubtotal,
+  selectDefaultRatePlan
+} from './quickBookingRatePlans';
+import {
   bumpOvernightCheckoutIfNeeded,
   overnightNights,
   resolveOvernightStayDates
@@ -89,6 +98,8 @@ export interface RoomDraft {
   manualOverridePrice: number;
   manualOverrideReason: string;
   quoteLoading: boolean;
+  quoteOk: boolean;
+  quotedFingerprint: string;
   stayCharges: StayChargeLineItem[];
 }
 
@@ -191,6 +202,8 @@ export default function QuickBookingModal({
       manualOverridePrice: 0,
       manualOverrideReason: '',
       quoteLoading: false,
+      quoteOk: false,
+      quotedFingerprint: '',
       stayCharges: []
     };
   }, [rooms, initialDate]);
@@ -225,6 +238,8 @@ export default function QuickBookingModal({
       manualOverridePrice: 0,
       manualOverrideReason: isOta ? otaReason : '',
       quoteLoading: false,
+      quoteOk: false,
+      quotedFingerprint: '',
       stayCharges: []
     };
   }, [rooms, initialDate, channelType, selectedOtaSourceName]);
@@ -234,6 +249,7 @@ export default function QuickBookingModal({
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
   const availabilityRequestRef = useRef(0);
+  const quoteEpochRef = useRef<Record<string, number>>({});
 
   // Track previous channelType to detect user-initiated channel transitions
   const prevChannelTypeRef = useRef<'WALKIN' | 'OTA'>(channelType);
@@ -294,33 +310,7 @@ export default function QuickBookingModal({
     }
   }, [isDayUseAllowed]);
 
-  // Helper for resilient room type matching (ID, Code prefix, and Name)
-  const matchRatePlanToRoomType = useCallback((rp: any, targetTypeId: number | null): boolean => {
-    if (!rp.room_type_id) return true;
-    if (!targetTypeId) return false;
-    if (Number(rp.room_type_id) === Number(targetTypeId)) return true;
-
-    const activeType = roomTypes.find(t => Number(t.id) === Number(targetTypeId));
-    if (activeType) {
-      const activeCode = String(activeType.code || '').trim().toUpperCase();
-      const rpCode = String(rp.room_type_code || '').trim().toUpperCase();
-      if (activeCode && rpCode) {
-        if (activeCode === rpCode || activeCode.startsWith(rpCode) || rpCode.startsWith(activeCode)) {
-          return true;
-        }
-      }
-      const activeName = String(activeType.name || '').trim().toLowerCase();
-      const rpName = String(rp.room_type_name || '').trim().toLowerCase();
-      if (activeName && rpName) {
-        if (activeName.includes(rpName) || rpName.includes(activeName)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }, [roomTypes]);
-
-  // Auto-fill default rate plan if ratePlanId is missing and channel is not OTA
+  // Auto-fill default active rate plan for the exact canonical room type
   useEffect(() => {
     const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
     if (allPlans.length === 0 || channelType === 'OTA') return;
@@ -328,22 +318,27 @@ export default function QuickBookingModal({
     setRoomsList(prev => {
       let changed = false;
       const updated = prev.map(draft => {
-        if (!draft.ratePlanId && draft.roomTypeId) {
-          const isDayUse = draft.stayType === 'DAY_USE';
-          const matchPlan = allPlans.find((rp: any) =>
-            matchRatePlanToRoomType(rp, draft.roomTypeId) &&
-            (isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
-          );
-          if (matchPlan) {
+        const nextPlanId = selectDefaultRatePlan(allPlans, draft.roomTypeId, draft.stayType);
+        if (!draft.ratePlanId) {
+          if (nextPlanId) {
             changed = true;
-            return { ...draft, ratePlanId: Number(matchPlan.id) };
+            return { ...draft, ratePlanId: nextPlanId, quoteOk: false, quotedFingerprint: '' };
           }
+          return draft;
+        }
+        if (!isCompatibleQuickBookingRatePlan(
+          allPlans.find((rp: any) => Number(rp.id) === Number(draft.ratePlanId)) || {},
+          draft.roomTypeId,
+          draft.stayType
+        )) {
+          changed = true;
+          return { ...draft, ratePlanId: nextPlanId, quoteOk: false, quotedFingerprint: '' };
         }
         return draft;
       });
       return changed ? updated : prev;
     });
-  }, [internalRatePlans, ratePlans, channelType, matchRatePlanToRoomType]);
+  }, [internalRatePlans, ratePlans, channelType]);
 
   // --- UI & Submission State ---
   const [submitting, setSubmitting] = useState(false);
@@ -375,7 +370,7 @@ export default function QuickBookingModal({
 
     try {
       if (!ratePlans || ratePlans.length === 0) {
-        const res = await authenticatedFetch('/api/pricing/rate-plans?property_id=' + propertyId);
+        const res = await authenticatedFetch('/api/pricing/rate-plans?property_id=' + propertyId + '&is_active=true');
         const json = await res.json();
 
         if (res.ok) {
@@ -593,8 +588,11 @@ export default function QuickBookingModal({
   // Pricing Quotes for Each Room
   const fetchQuoteForRoom = useCallback(async (index: number, draft: RoomDraft) => {
     if (!draft.roomTypeId || !draft.checkIn || (draft.stayType !== 'DAY_USE' && !draft.checkOut)) return;
+    const requestFingerprint = quickBookingQuoteFingerprint(draft);
+    const epoch = (quoteEpochRef.current[draft.id] || 0) + 1;
+    quoteEpochRef.current[draft.id] = epoch;
     try {
-      handleUpdateRoom(index, { quoteLoading: true });
+      handleUpdateRoom(index, { quoteLoading: true, quoteOk: false });
       const res = await authenticatedFetch('/api/pricing/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -610,28 +608,59 @@ export default function QuickBookingModal({
         })
       });
       const json = await res.json();
+      if (quoteEpochRef.current[draft.id] !== epoch) return;
       if (res.ok && json.success && json.data) {
-        const total = Number(json.data.grand_total || json.data.room_subtotal || 0);
+        const roomSubtotal = resolveQuotedRoomSubtotal(json.data);
         setRoomsList(prev => {
           if (!prev[index]) return prev;
           const copy = [...prev];
           const curr = copy[index];
+          if (quickBookingQuoteFingerprint(curr) !== requestFingerprint) return prev;
           copy[index] = {
             ...curr,
             quoteLoading: false,
-            roomNightlyRate: total,
+            quoteOk: true,
+            quotedFingerprint: requestFingerprint,
+            roomNightlyRate: roomSubtotal,
             manualOverridePrice: curr.isManualOverride
               ? curr.manualOverridePrice
-              : total
+              : roomSubtotal
           };
           return copy;
         });
       } else {
-        handleUpdateRoom(index, { quoteLoading: false });
+        setRoomsList(prev => {
+          if (!prev[index]) return prev;
+          const copy = [...prev];
+          const curr = copy[index];
+          if (quickBookingQuoteFingerprint(curr) !== requestFingerprint) return prev;
+          copy[index] = {
+            ...curr,
+            quoteLoading: false,
+            quoteOk: false,
+            quotedFingerprint: '',
+            roomNightlyRate: 0
+          };
+          return copy;
+        });
       }
     } catch (err) {
       console.warn('Failed to fetch quote for room index', index, err);
-      handleUpdateRoom(index, { quoteLoading: false });
+      if (quoteEpochRef.current[draft.id] !== epoch) return;
+      setRoomsList(prev => {
+        if (!prev[index]) return prev;
+        const copy = [...prev];
+        const curr = copy[index];
+        if (quickBookingQuoteFingerprint(curr) !== requestFingerprint) return prev;
+        copy[index] = {
+          ...curr,
+          quoteLoading: false,
+          quoteOk: false,
+          quotedFingerprint: '',
+          roomNightlyRate: 0
+        };
+        return copy;
+      });
     }
   }, [propertyId]);
 
@@ -1073,6 +1102,9 @@ export default function QuickBookingModal({
       } else {
         if (r.isManualOverride && !r.manualOverrideReason.trim()) {
           issues.push(label + ': Alasan override harga manual wajib diisi');
+        }
+        if (!r.isManualOverride && !isQuickBookingQuoteReady(r)) {
+          issues.push(label + ': ' + QUICK_BOOKING_QUOTE_NOT_READY_MESSAGE);
         }
       }
       if (r.roomId && overlappingSiblingTakesRoom(roomsList, idx, r.roomId)) {
@@ -1647,12 +1679,11 @@ export default function QuickBookingModal({
                   const selectedAvailabilityType = rowServerTypes.find(
                     (rt) => Number(rt.id) === Number(roomDraft.roomTypeId)
                   );
-                  const availableRPlans = (internalRatePlans.length > 0 ? internalRatePlans : ratePlans).filter(
-                    (rp: any) => {
-                      if (!matchRatePlanToRoomType(rp, roomDraft.roomTypeId)) return false;
-                      return isDayUse ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE';
-                    }
-                  );
+                      const availableRPlans = compatibleQuickBookingRatePlans(
+                        (internalRatePlans.length > 0 ? internalRatePlans : ratePlans),
+                        roomDraft.roomTypeId,
+                        roomDraft.stayType
+                      );
 
                   return (
                     <div
@@ -1695,13 +1726,17 @@ export default function QuickBookingModal({
                                 type="button"
                                 onClick={() => {
                                   const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
-                                  const matchingPlan = allPlans.find(
-                                    (rp: any) => matchRatePlanToRoomType(rp, roomDraft.roomTypeId) && rp.rate_type !== 'DAY_USE'
+                                  const matchingPlanId = selectDefaultRatePlan(
+                                    allPlans,
+                                    roomDraft.roomTypeId,
+                                    'OVERNIGHT'
                                   );
                                   handleUpdateRoom(roomIdx, {
                                     stayType: 'OVERNIGHT',
                                     checkOut: bumpOvernightCheckoutIfNeeded(roomDraft.checkIn, roomDraft.checkOut),
-                                    ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
+                                    ratePlanId: matchingPlanId,
+                                    quoteOk: false,
+                                    quotedFingerprint: ''
                                   });
                                 }}
                                 className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
@@ -1714,13 +1749,17 @@ export default function QuickBookingModal({
                                 type="button"
                                 onClick={() => {
                                   const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
-                                  const matchingDayPlan = allPlans.find(
-                                    (rp: any) => matchRatePlanToRoomType(rp, roomDraft.roomTypeId) && rp.rate_type === 'DAY_USE'
+                                  const matchingDayPlanId = selectDefaultRatePlan(
+                                    allPlans,
+                                    roomDraft.roomTypeId,
+                                    'DAY_USE'
                                   );
                                   handleUpdateRoom(roomIdx, {
                                     stayType: 'DAY_USE',
                                     checkOut: roomDraft.checkIn,
-                                    ratePlanId: matchingDayPlan ? Number(matchingDayPlan.id) : null
+                                    ratePlanId: matchingDayPlanId,
+                                    quoteOk: false,
+                                    quotedFingerprint: ''
                                   });
                                 }}
                                 className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
@@ -1856,15 +1895,17 @@ export default function QuickBookingModal({
                               const serverTypes = rowAvailabilityTypes[roomIdx] || [];
                               const matchingRooms = eligibleRoomsForRow(roomsList, roomIdx, serverTypes, newTypeId);
                               const allPlans = internalRatePlans.length > 0 ? internalRatePlans : ratePlans;
-                              const matchingPlan = allPlans.find(
-                                (rp: any) =>
-                                  matchRatePlanToRoomType(rp, newTypeId) &&
-                                  (roomDraft.stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
+                              const matchingPlanId = selectDefaultRatePlan(
+                                allPlans,
+                                newTypeId || null,
+                                roomDraft.stayType
                               );
                               handleUpdateRoom(roomIdx, {
                                 roomTypeId: newTypeId || null,
                                 roomId: matchingRooms.length > 0 ? matchingRooms[0].id : null,
-                                ratePlanId: matchingPlan ? Number(matchingPlan.id) : null
+                                ratePlanId: matchingPlanId,
+                                quoteOk: false,
+                                quotedFingerprint: ''
                               });
                               setSelectionWarning(null);
                             }}

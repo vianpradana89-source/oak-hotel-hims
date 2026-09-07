@@ -30,6 +30,7 @@
     "test:room-overlap": "node test/room_overlap_test.js",
     "test:rm1b-canonical-identity": "node test/rm1b_canonical_identity_test.js",
     "test:pricing-rate-plans": "node test/pricing_rate_plan_foundation_test.js",
+    "test:booking-pricing-authority": "npm run build && node test/booking_pricing_authority_test.js",
     "test:calendar-pricing": "node test/calendar_quick_booking_pricing_test.js",
     "test:ktp-ocr": "node test/ktp_ocr_parser_test.js",
     "test:stay-charges": "node test/stay_charges_and_day_use_test.js",

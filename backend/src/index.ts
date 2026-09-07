@@ -80,6 +80,14 @@ import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
 import { createPricingRouter } from './domains/pricing/pricingRouter';
 import { calculatePriceQuote, createReservationRateSnapshots } from './domains/pricing/pricingService';
+import {
+  CANONICAL_PRICE_QUOTE_FAILED,
+  CanonicalPriceQuoteError,
+  applyManualOverrideToQuote,
+  commercialNetTotal,
+  resolveAuthoritativeRoomGross
+} from './domains/pricing/bookingPricingAuthority';
+import type { PriceQuoteResult } from './domains/pricing/pricingTypes';
 import { createStayChargesRouter } from './domains/stayCharges/stayChargesRouter';
 import { createTransactionsRouter } from './domains/transactions/transactionsRouter';
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
@@ -1520,95 +1528,18 @@ async function createCanonicalBooking(
         roomCategoryNameSnapshot: null,
         classificationSnapshotSource: 'CANONICAL_ROOM_MASTER',
         ratePlanId: (child.rate_plan_id || child.ratePlanId) ? Number(child.rate_plan_id || child.ratePlanId) : null,
-        discountSource: useGlobalDiscount ? 'GLOBAL_DISCOUNT' : 'RESERVATION_DISCOUNT'
+        discountSource: useGlobalDiscount ? 'GLOBAL_DISCOUNT' : 'RESERVATION_DISCOUNT',
+        submittedRoomGross: childBilling.roomGross,
+        submittedDiscountType: useGlobalDiscount ? null : (child.discount_type || child.discountType),
+        submittedDiscountValue: useGlobalDiscount ? 0 : (child.discount_value ?? child.discountValue),
+        submittedDiscountPercent: useGlobalDiscount ? 0 : (child.discount_percent ?? child.discountPercent),
+        submittedDiscountAmount: useGlobalDiscount ? 0 : (child.discount_amount ?? child.discountAmount),
+        submittedDiscountReason: useGlobalDiscount ? null : (child.discount_reason || child.discountReason || bookingPayload.discount_reason),
+        canonicalQuote: null as PriceQuoteResult | null
       });
     }
 
     let bookingGlobalDiscount: ReturnType<typeof buildBookingGlobalDiscount> | null = null;
-    if (useGlobalDiscount) {
-      try {
-        bookingGlobalDiscount = buildBookingGlobalDiscount({
-          childGrosses: normalizedChildren.map((childRow) => childRow.discountBase),
-          discountType: bookingPayload.global_discount_type ?? bookingPayload.globalDiscountType,
-          discountValue: bookingPayload.global_discount_value ?? bookingPayload.globalDiscountValue,
-          discountPercent: bookingPayload.global_discount_percent ?? bookingPayload.globalDiscountPercent,
-          discountAmount: bookingPayload.global_discount_amount ?? bookingPayload.globalDiscountAmount,
-          discountReason: bookingPayload.global_discount_reason ?? bookingPayload.globalDiscountReason
-        });
-      } catch (err: any) {
-        if (err instanceof ReservationBillingError) {
-          throw createHttpError(err.statusCode, err.message, err.code);
-        }
-        throw err;
-      }
-
-      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
-        const allocated = Number(bookingGlobalDiscount.allocations[childIndex] || 0);
-        const childRow = normalizedChildren[childIndex];
-        childRow.discountAmount = allocated;
-        childRow.discountPercent = 0;
-        childRow.discountType = bookingGlobalDiscount.discountType;
-        childRow.discountValue = allocated;
-        childRow.discountReason = bookingGlobalDiscount.reason;
-        childRow.totalPrice = Math.max(0, Number(childRow.discountBase || 0) - allocated);
-        childRow.globalDiscountAllocated = allocated;
-      }
-
-      await client.query(
-        `UPDATE bookings
-         SET global_discount_type = $1,
-             global_discount_value = $2,
-             global_discount_amount = $3,
-             global_discount_reason = $4,
-             global_discount_gross_before = $5,
-             global_discount_net_after = $6,
-             updated_at = NOW()
-         WHERE id = $7`,
-        [
-          bookingGlobalDiscount.discountType,
-          bookingGlobalDiscount.discountValue,
-          bookingGlobalDiscount.discount,
-          bookingGlobalDiscount.reason,
-          bookingGlobalDiscount.gross,
-          bookingGlobalDiscount.net,
-          Number(bookingRecord.id)
-        ]
-      );
-      bookingRecord.global_discount_type = bookingGlobalDiscount.discountType;
-      bookingRecord.global_discount_value = bookingGlobalDiscount.discountValue;
-      bookingRecord.global_discount_amount = bookingGlobalDiscount.discount;
-      bookingRecord.global_discount_reason = bookingGlobalDiscount.reason;
-      bookingRecord.global_discount_gross_before = bookingGlobalDiscount.gross;
-      bookingRecord.global_discount_net_after = bookingGlobalDiscount.net;
-    }
-
-    if (useBookingLevelPayment) {
-      const childNets = normalizedChildren.map((childRow) => (
-        Math.max(0, Number(childRow.discountBase || 0) - Number(childRow.discountAmount || 0))
-      ));
-      const paymentAllocation = allocateBookingPaymentToChildren(childNets, bookingLevelCash);
-      if (paymentAllocation.bookingCash > paymentAllocation.bookingNet) {
-        throw createHttpError(400, 'Nominal pembayaran melebihi sisa tagihan', 'OVERPAYMENT_NOT_ALLOWED');
-      }
-
-      const paymentGroupId = `QB-PAY-${bookingRecord.id}-${correlationId || Date.now()}`;
-      let evidenceAttached = false;
-      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
-        const allocated = Number(paymentAllocation.allocations[childIndex] || 0);
-        const childRow = normalizedChildren[childIndex];
-        childRow.amountPaid = allocated;
-        childRow.paymentStatus = null;
-        childRow.paymentMethod = bookingPaymentMethod || childRow.paymentMethod || 'CASH';
-        if (allocated > 0) {
-          childRow.bookingPaymentGroupId = paymentGroupId;
-          childRow.bookingPaymentReferenceCode = paymentGroupId;
-          if (!evidenceAttached) {
-            childRow.attachPaymentEvidence = true;
-            evidenceAttached = true;
-          }
-        }
-      }
-    }
 
     const roomKeyMap = new Map<string, { ident: RoomTypeIdentity; date: string; delta: number }>();
     const duplicatePairs: Array<[number, number]> = [];
@@ -1748,6 +1679,164 @@ async function createCanonicalBooking(
     if (duplicatePairs.length > 0) {
       throw createHttpError(409, `duplicate room assignment within same booking for room ${duplicatePairs[0][0] + 1} and ${duplicatePairs[0][1] + 1}`);
     }
+
+    for (const child of normalizedChildren) {
+      let quote: PriceQuoteResult | null = null;
+      try {
+        quote = await calculatePriceQuote(client, {
+          property_id: bookingPropertyId,
+          room_type_id: child.roomTypeId!,
+          rate_plan_id: child.ratePlanId || undefined,
+          check_in: child.checkIn,
+          check_out: child.checkOut,
+          stay_type: child.stayType
+        });
+        child.canonicalQuote = quote;
+      } catch (quoteErr: any) {
+        child.canonicalQuote = null;
+        if (!child.isManualOverride) {
+          throw createHttpError(
+            400,
+            quoteErr?.message || 'Tarif kamar tidak dapat dihitung. Periksa tipe kamar dan rate plan, lalu coba lagi.',
+            CANONICAL_PRICE_QUOTE_FAILED
+          );
+        }
+        console.warn('[createCanonicalBooking] Note: price quote snapshot fallback', quoteErr);
+      }
+
+      try {
+        child.roomGross = resolveAuthoritativeRoomGross({
+          isManualOverride: child.isManualOverride,
+          frontendRoomGross: child.submittedRoomGross,
+          quoteRoomSubtotal: quote?.room_subtotal,
+          quoteAvailable: Boolean(quote)
+        });
+      } catch (err: any) {
+        if (err instanceof CanonicalPriceQuoteError) {
+          throw createHttpError(err.statusCode, err.message, err.code);
+        }
+        throw err;
+      }
+      child.subtotalAmount = child.roomGross;
+      child.discountBase = Number(child.roomGross || 0) + Number(child.stayGross || 0);
+    }
+
+    normalizedChildren.sort((a, b) => a.index - b.index);
+
+    if (useGlobalDiscount) {
+      try {
+        bookingGlobalDiscount = buildBookingGlobalDiscount({
+          childGrosses: normalizedChildren.map((childRow) => childRow.discountBase),
+          discountType: bookingPayload.global_discount_type ?? bookingPayload.globalDiscountType,
+          discountValue: bookingPayload.global_discount_value ?? bookingPayload.globalDiscountValue,
+          discountPercent: bookingPayload.global_discount_percent ?? bookingPayload.globalDiscountPercent,
+          discountAmount: bookingPayload.global_discount_amount ?? bookingPayload.globalDiscountAmount,
+          discountReason: bookingPayload.global_discount_reason ?? bookingPayload.globalDiscountReason
+        });
+      } catch (err: any) {
+        if (err instanceof ReservationBillingError) {
+          throw createHttpError(err.statusCode, err.message, err.code);
+        }
+        throw err;
+      }
+
+      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
+        const allocated = Number(bookingGlobalDiscount.allocations[childIndex] || 0);
+        const childRow = normalizedChildren[childIndex];
+        childRow.discountAmount = allocated;
+        childRow.discountPercent = 0;
+        childRow.discountType = bookingGlobalDiscount.discountType;
+        childRow.discountValue = allocated;
+        childRow.discountReason = bookingGlobalDiscount.reason;
+        childRow.totalPrice = Math.max(0, Number(childRow.discountBase || 0) - allocated);
+        childRow.globalDiscountAllocated = allocated;
+      }
+
+      await client.query(
+        `UPDATE bookings
+         SET global_discount_type = $1,
+             global_discount_value = $2,
+             global_discount_amount = $3,
+             global_discount_reason = $4,
+             global_discount_gross_before = $5,
+             global_discount_net_after = $6,
+             updated_at = NOW()
+         WHERE id = $7`,
+        [
+          bookingGlobalDiscount.discountType,
+          bookingGlobalDiscount.discountValue,
+          bookingGlobalDiscount.discount,
+          bookingGlobalDiscount.reason,
+          bookingGlobalDiscount.gross,
+          bookingGlobalDiscount.net,
+          Number(bookingRecord.id)
+        ]
+      );
+      bookingRecord.global_discount_type = bookingGlobalDiscount.discountType;
+      bookingRecord.global_discount_value = bookingGlobalDiscount.discountValue;
+      bookingRecord.global_discount_amount = bookingGlobalDiscount.discount;
+      bookingRecord.global_discount_reason = bookingGlobalDiscount.reason;
+      bookingRecord.global_discount_gross_before = bookingGlobalDiscount.gross;
+      bookingRecord.global_discount_net_after = bookingGlobalDiscount.net;
+    } else {
+      for (const childRow of normalizedChildren) {
+        try {
+          const rebuilt = buildChildReservationBilling({
+            subtotalAmount: childRow.roomGross,
+            stayCharges: childRow.stayCharges,
+            discountType: childRow.submittedDiscountType,
+            discountValue: childRow.submittedDiscountValue,
+            discountPercent: childRow.submittedDiscountPercent,
+            discountAmount: childRow.submittedDiscountAmount,
+            discountReason: childRow.submittedDiscountReason,
+            amountPaid: childRow.amountPaid
+          });
+          childRow.stayGross = rebuilt.stayGross;
+          childRow.discountBase = rebuilt.discountBase;
+          childRow.discountAmount = rebuilt.discount;
+          childRow.discountPercent = rebuilt.discountPercent;
+          childRow.discountType = rebuilt.discountType;
+          childRow.discountValue = rebuilt.discountValue;
+          childRow.discountReason = rebuilt.reason;
+          childRow.totalPrice = rebuilt.netTotal;
+        } catch (err: any) {
+          if (err instanceof ReservationBillingError) {
+            throw createHttpError(err.statusCode, `reservations[${childRow.index}]: ${err.message}`, err.code);
+          }
+          throw err;
+        }
+      }
+    }
+
+    if (useBookingLevelPayment) {
+      const childNets = normalizedChildren.map((childRow) => (
+        Math.max(0, Number(childRow.discountBase || 0) - Number(childRow.discountAmount || 0))
+      ));
+      const paymentAllocation = allocateBookingPaymentToChildren(childNets, bookingLevelCash);
+      if (paymentAllocation.bookingCash > paymentAllocation.bookingNet) {
+        throw createHttpError(400, 'Nominal pembayaran melebihi sisa tagihan', 'OVERPAYMENT_NOT_ALLOWED');
+      }
+
+      const paymentGroupId = `QB-PAY-${bookingRecord.id}-${correlationId || Date.now()}`;
+      let evidenceAttached = false;
+      for (let childIndex = 0; childIndex < normalizedChildren.length; childIndex += 1) {
+        const allocated = Number(paymentAllocation.allocations[childIndex] || 0);
+        const childRow = normalizedChildren[childIndex];
+        childRow.amountPaid = allocated;
+        childRow.paymentStatus = null;
+        childRow.paymentMethod = bookingPaymentMethod || childRow.paymentMethod || 'CASH';
+        if (allocated > 0) {
+          childRow.bookingPaymentGroupId = paymentGroupId;
+          childRow.bookingPaymentReferenceCode = paymentGroupId;
+          if (!evidenceAttached) {
+            childRow.attachPaymentEvidence = true;
+            evidenceAttached = true;
+          }
+        }
+      }
+    }
+
+    normalizedChildren.sort((a, b) => a.roomId - b.roomId);
 
     const lockKeys = Array.from(roomKeyMap.values()).sort((a, b) => {
       const typeComparison = requireCanonicalRoomTypeId(a.ident, 'booking lock sort') - requireCanonicalRoomTypeId(b.ident, 'booking lock sort');
@@ -2294,39 +2383,58 @@ async function createCanonicalBooking(
       }
 
       try {
-        const quote = await calculatePriceQuote(client, {
-          property_id: bookingPropertyId,
-          room_type_id: child.roomTypeId!,
-          rate_plan_id: child.ratePlanId || undefined,
-          check_in: child.checkIn,
-          check_out: child.checkOut,
-          stay_type: child.stayType
-        });
-        if (
-          child.isManualOverride
-          || !child.ratePlanId
-          || Number(child.discountAmount || 0) > 0
-          || Number(child.roomGross ?? child.subtotalAmount ?? 0) > 0
-        ) {
-          const canonicalRoomGross = Number(child.roomGross ?? child.subtotalAmount ?? child.totalPrice ?? 0);
-          const canonicalNet = Number(child.totalPrice ?? 0);
-          quote.room_subtotal = canonicalRoomGross;
-          quote.tax_amount = child.taxAmount || 0;
-          quote.service_amount = child.serviceAmount || 0;
-          quote.grand_total = canonicalNet;
-          const nightlyShare = Math.round((canonicalRoomGross || canonicalNet) / (quote.nightly_breakdown.length || 1));
-          quote.nightly_breakdown.forEach((n, idx) => {
-            n.final_room_rate = idx === quote.nightly_breakdown.length - 1
-              ? (canonicalRoomGross || canonicalNet) - nightlyShare * (quote.nightly_breakdown.length - 1)
-              : nightlyShare;
-            n.total_amount = n.final_room_rate;
-          });
+        let quote: PriceQuoteResult | null = child.canonicalQuote || null;
+        if (child.isManualOverride && quote) {
+          quote = applyManualOverrideToQuote(
+            quote,
+            Number(child.roomGross ?? child.subtotalAmount ?? child.totalPrice ?? 0),
+            Number(child.totalPrice ?? 0),
+            child.taxAmount || 0,
+            child.serviceAmount || 0
+          );
         }
-        await createReservationRateSnapshots(client, inserted.reservation.id, bookingPropertyId, quote, {
-          isManualOverride: child.isManualOverride,
-          manualOverrideReason: child.manualOverrideReason
-        });
-      } catch (quoteErr) {
+        if (!quote) {
+          if (!child.isManualOverride) {
+            throw createHttpError(
+              400,
+              'Tarif kamar tidak dapat dihitung. Periksa tipe kamar dan rate plan, lalu coba lagi.',
+              CANONICAL_PRICE_QUOTE_FAILED
+            );
+          }
+        } else {
+          await createReservationRateSnapshots(client, inserted.reservation.id, bookingPropertyId, quote, {
+            isManualOverride: child.isManualOverride,
+            manualOverrideReason: child.manualOverrideReason
+          });
+          const netTotal = commercialNetTotal(child.discountBase, child.discountAmount);
+          await client.query(
+            `UPDATE reservations SET
+              subtotal_amount = $1,
+              tax_amount = $2,
+              service_amount = $3,
+              total_price = $4,
+              remaining_balance = GREATEST(0, $4 - COALESCE(amount_paid, 0) - COALESCE(applied_deposit, 0)),
+              is_manual_override = $5,
+              manual_override_reason = $6
+             WHERE id = $7`,
+            [
+              child.roomGross,
+              child.taxAmount || 0,
+              child.serviceAmount || 0,
+              netTotal,
+              Boolean(child.isManualOverride),
+              child.manualOverrideReason || null,
+              inserted.reservation.id
+            ]
+          );
+        }
+      } catch (quoteErr: any) {
+        if (quoteErr?.code === CANONICAL_PRICE_QUOTE_FAILED) {
+          throw quoteErr;
+        }
+        if (!child.isManualOverride) {
+          throw quoteErr;
+        }
         console.warn('[createCanonicalBooking] Note: price quote snapshot fallback', quoteErr);
       }
 

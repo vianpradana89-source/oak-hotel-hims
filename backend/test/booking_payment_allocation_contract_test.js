@@ -67,6 +67,7 @@ async function run() {
   const checkOut = '2028-06-11';
   const roomIds = [];
   const roomTypeIds = [];
+  const ratePlanIds = [];
   const bookingIds = [];
 
   const fakeReq = (payload) => ({
@@ -95,6 +96,7 @@ async function run() {
       await pool.query('DELETE FROM payment_transactions WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
       await pool.query('DELETE FROM folio_entries WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
       await pool.query('DELETE FROM reservation_rate_snapshots WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
+      await pool.query('DELETE FROM reservation_nightly_rates WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
       await pool.query('DELETE FROM reservation_guests WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
       await pool.query('DELETE FROM availability_locks WHERE reservation_id = ANY($1::int[])', [ids]).catch(() => {});
       await pool.query('DELETE FROM audit_logs WHERE entity = $1 AND record_id = ANY($2::int[])', ['RESERVATION', ids]).catch(() => {});
@@ -105,27 +107,51 @@ async function run() {
   };
 
   try {
-    for (let index = 0; index < 3; index += 1) {
+    // Canonical 1-night rate_plan.base_rate (room_types.base_rate is a 500000 decoy).
+    // Frontend subtotal_amount=1 is a decoy and must be ignored when override is OFF.
+    const insertPricedRoom = async (canonicalGross) => {
+      const index = roomIds.length;
       const typeName = `PAY Type ${suffix}-${index}`;
+      const typeCode = `PAY-${suffix}-${index}`;
       const rt = await pool.query(
         `INSERT INTO room_types (property_id, code, name, base_rate, is_active)
          VALUES ($1, $2, $3, 500000, true) RETURNING id`,
-        [propertyId, `PAY-${suffix}-${index}`, typeName]
+        [propertyId, typeCode, typeName]
       );
-      roomTypeIds.push(rt.rows[0].id);
+      const roomTypeId = rt.rows[0].id;
+      roomTypeIds.push(roomTypeId);
       const rm = await pool.query(
         `INSERT INTO rooms (property_id, room_type_id, room_number, name, status, is_active)
          VALUES ($1, $2, $3, $3, 'VACANT_CLEAN', true) RETURNING id`,
-        [propertyId, rt.rows[0].id, `PAY${index}-${String(suffix).slice(-4)}`]
+        [propertyId, roomTypeId, `PAY${index}-${String(suffix).slice(-4)}`]
       );
-      roomIds.push(rm.rows[0].id);
+      const roomId = rm.rows[0].id;
+      roomIds.push(roomId);
+      const plan = await pool.query(
+        `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate, meal_plan, rate_type, is_active, sort_order)
+         VALUES ($1, $2, $3, $4, $5, 'RO', 'OVERNIGHT', true, 0) RETURNING id`,
+        [propertyId, roomTypeId, `${typeCode}-RO`, `${typeName} RO`, canonicalGross]
+      );
+      const ratePlanId = plan.rows[0].id;
+      ratePlanIds.push(ratePlanId);
       await pool.query(
         `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
          VALUES ($1, $2, $3::date, 5, 0)
          ON CONFLICT (room_type, date) DO UPDATE SET total_rooms = 5, reserved_qty = 0`,
-        [rt.rows[0].id, typeName, checkIn]
+        [roomTypeId, typeName, checkIn]
       );
-    }
+      return { roomId, roomTypeId, ratePlanId, canonicalGross };
+    };
+
+    const p460 = await insertPricedRoom(460000);
+    const p534 = await insertPricedRoom(534000);
+    const p400 = await insertPricedRoom(400000);
+    const p600 = await insertPricedRoom(600000);
+    const p100 = await insertPricedRoom(100000);
+    const p200 = await insertPricedRoom(200000);
+    const p300 = await insertPricedRoom(300000);
+    const k600 = await insertPricedRoom(600000);
+    const k400 = await insertPricedRoom(400000);
 
     const resetAvailability = async () => {
       for (let index = 0; index < roomTypeIds.length; index += 1) {
@@ -136,15 +162,17 @@ async function run() {
       }
     };
 
-    const childPayload = (roomIndex, subtotal, extras = {}) => ({
-      room_id: roomIds[roomIndex],
-      room_type_id: roomTypeIds[roomIndex],
+    const childPayload = (priced, extras = {}) => ({
+      room_id: priced.roomId,
+      room_type_id: priced.roomTypeId,
+      rate_plan_id: priced.ratePlanId,
       check_in: checkIn,
       check_out: checkOut,
       stay_type: 'OVERNIGHT',
       guest_name: `PAY Guest ${suffix}`,
-      subtotal_amount: subtotal,
+      subtotal_amount: 1,
       total_price: 1,
+      is_manual_override: false,
       qty: 1,
       ...extras
     });
@@ -167,7 +195,7 @@ async function run() {
     const loadChildren = async (bookingId) => {
       const rows = await pool.query(
         `SELECT id, room_id, stay_sequence, total_price, subtotal_amount, discount_amount,
-                amount_paid, remaining_balance, payment_status
+                amount_paid, remaining_balance, payment_status, is_manual_override
          FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
         [bookingId]
       );
@@ -198,6 +226,8 @@ async function run() {
     };
 
     // A / G / L / M / P / Q / R — HADIRA nets after 20% global discount
+    // Canonical HADIRA: 460,000 + 534,000 = 994,000 gross; 20% = 198,800; net = 795,200
+    // Booking cash 460,000 sequential on child NET: 368,000 then 92,000
     const hadira = await createBooking(bookingPayload({
       amount_paid: 460000,
       bukti_bayar_path: '/uploads/bukti-hadira.jpg',
@@ -205,13 +235,16 @@ async function run() {
       global_discount_value: 20,
       global_discount_reason: 'Promo 20%',
       reservations: [
-        { ...childPayload(0, 460000), amount_paid: 999999, payment_status: 'PAID' },
-        childPayload(1, 534000)
+        { ...childPayload(p460), amount_paid: 999999, payment_status: 'PAID' },
+        childPayload(p534)
       ]
     }));
     expect(hadira.ok, `A/G/J HADIRA create failed ${hadira.status}: ${hadira.error?.message}`);
     const hadiraId = track(Number(hadira.result.booking.id));
     const hadiraChildren = await loadChildren(hadiraId);
+    expect(Number(hadiraChildren[0].subtotal_amount) === 460000, 'canonical: frontend subtotal 1 ignored, quote 460000 used');
+    expect(Number(hadiraChildren[1].subtotal_amount) === 534000, 'canonical: child 2 quote 534000 used');
+    expect(hadiraChildren.every((row) => row.is_manual_override === false), 'canonical override remains off');
     expect(Number(hadiraChildren[0].discount_amount) === 92000, 'G: child 1 discount is 92,000 of net not gross');
     expect(Number(hadiraChildren[1].discount_amount) === 106800, 'G: child 2 discount is 106,800');
     expect(Number(hadiraChildren[0].total_price) === 368000, 'G: child 1 net 368,000');
@@ -299,7 +332,7 @@ async function run() {
     // B — full pay two children
     const full = await createBooking(bookingPayload({
       amount_paid: 1000000,
-      reservations: [childPayload(0, 400000), childPayload(1, 600000)]
+      reservations: [childPayload(p400), childPayload(p600)]
     }));
     expect(full.ok, `B create failed ${full.status}: ${full.error?.message}`);
     const fullId = track(Number(full.result.booking.id));
@@ -314,7 +347,7 @@ async function run() {
     // C — payment 0
     const unpaid = await createBooking(bookingPayload({
       amount_paid: 0,
-      reservations: [childPayload(0, 400000), childPayload(1, 600000)]
+      reservations: [childPayload(p400), childPayload(p600)]
     }));
     expect(unpaid.ok, `C create failed ${unpaid.status}: ${unpaid.error?.message}`);
     const unpaidId = track(Number(unpaid.result.booking.id));
@@ -332,7 +365,7 @@ async function run() {
     // D
     const partialFirst = await createBooking(bookingPayload({
       amount_paid: 200000,
-      reservations: [childPayload(0, 400000), childPayload(1, 600000)]
+      reservations: [childPayload(p400), childPayload(p600)]
     }));
     expect(partialFirst.ok, `D create failed ${partialFirst.status}: ${partialFirst.error?.message}`);
     const partialFirstId = track(Number(partialFirst.result.booking.id));
@@ -348,7 +381,7 @@ async function run() {
     // E
     const exactFirst = await createBooking(bookingPayload({
       amount_paid: 400000,
-      reservations: [childPayload(0, 400000), childPayload(1, 600000)]
+      reservations: [childPayload(p400), childPayload(p600)]
     }));
     expect(exactFirst.ok, `E create failed ${exactFirst.status}: ${exactFirst.error?.message}`);
     const exactFirstId = track(Number(exactFirst.result.booking.id));
@@ -362,7 +395,7 @@ async function run() {
     // F — 3 children spanning first two and part of third
     const three = await createBooking(bookingPayload({
       amount_paid: 350000,
-      reservations: [childPayload(0, 100000), childPayload(1, 200000), childPayload(2, 300000)]
+      reservations: [childPayload(p100), childPayload(p200), childPayload(p300)]
     }));
     expect(three.ok, `F create failed ${three.status}: ${three.error?.message}`);
     const threeId = track(Number(three.result.booking.id));
@@ -384,7 +417,7 @@ async function run() {
       global_discount_type: 'PERCENTAGE',
       global_discount_value: 100,
       global_discount_reason: 'Complimentary',
-      reservations: [childPayload(0, 600000), childPayload(1, 400000)]
+      reservations: [childPayload(p600), childPayload(p400)]
     }));
     expect(complimentary.ok, `H create failed ${complimentary.status}: ${complimentary.error?.message}`);
     const complimentaryId = track(Number(complimentary.result.booking.id));
@@ -404,7 +437,7 @@ async function run() {
       global_discount_type: 'PERCENTAGE',
       global_discount_value: 100,
       global_discount_reason: 'Complimentary',
-      reservations: [childPayload(0, 300000)]
+      reservations: [childPayload(p300)]
     }));
     expect(overpay.ok === false, 'I: payment against net 0 is rejected');
     expect(overpay.status === 400, `I: status 400, got ${overpay.status}`);
@@ -416,22 +449,22 @@ async function run() {
       global_discount_type: 'PERCENTAGE',
       global_discount_value: 20,
       global_discount_reason: 'Promo 20%',
-      reservations: [childPayload(0, 460000), childPayload(1, 534000)]
+      reservations: [childPayload(p460), childPayload(p534)]
     }));
     expect(overpayPartial.error?.code === 'OVERPAYMENT_NOT_ALLOWED', 'I: cash > booking net rejected');
     console.log('  ✓ I overpayment rejected');
 
     // K — stay_sequence, not room_id
-    expect(roomIds[0] < roomIds[1], 'fixture room ids are ascending');
+    expect(k400.roomId > k600.roomId, 'K fixture: 400k room has higher room_id');
     const orderCase = await createBooking(bookingPayload({
       amount_paid: 500000,
-      reservations: [childPayload(1, 400000), childPayload(0, 600000)]
+      reservations: [childPayload(k400), childPayload(k600)]
     }));
     expect(orderCase.ok, `K create failed ${orderCase.status}: ${orderCase.error?.message}`);
     const orderId = track(Number(orderCase.result.booking.id));
     const kChildren = await loadChildren(orderId);
-    expect(Number(kChildren[0].room_id) === roomIds[1], 'K: stay_sequence 1 is higher room_id');
-    expect(Number(kChildren[1].room_id) === roomIds[0], 'K: stay_sequence 2 is lower room_id');
+    expect(Number(kChildren[0].room_id) === k400.roomId, 'K: stay_sequence 1 is higher room_id');
+    expect(Number(kChildren[1].room_id) === k600.roomId, 'K: stay_sequence 2 is lower room_id');
     expect(Number(kChildren[0].amount_paid) === 400000, 'K: first payload child filled first');
     expect(Number(kChildren[1].amount_paid) === 100000, 'K: remainder on second payload child, not smaller room_id');
     await cleanupBooking(orderId);
@@ -441,7 +474,7 @@ async function run() {
     // O — single room equivalent
     const single = await createBooking(bookingPayload({
       amount_paid: 300000,
-      reservations: [childPayload(0, 300000)]
+      reservations: [childPayload(p300)]
     }));
     expect(single.ok, `O create failed ${single.status}: ${single.error?.message}`);
     const singleId = track(Number(single.result.booking.id));
@@ -463,8 +496,13 @@ async function run() {
     }
     if (roomIds.length) {
       await pool.query('DELETE FROM availability_locks WHERE reservation_id IN (SELECT id FROM reservations WHERE room_id = ANY($1::int[]))', [roomIds]).catch(() => {});
+      await pool.query('DELETE FROM reservation_nightly_rates WHERE reservation_id IN (SELECT id FROM reservations WHERE room_id = ANY($1::int[]))', [roomIds]).catch(() => {});
       await pool.query('DELETE FROM reservations WHERE room_id = ANY($1::int[])', [roomIds]).catch(() => {});
       await pool.query('DELETE FROM rooms WHERE id = ANY($1::int[])', [roomIds]);
+    }
+    if (ratePlanIds.length) {
+      await pool.query('DELETE FROM rate_overrides WHERE rate_plan_id = ANY($1::bigint[])', [ratePlanIds]).catch(() => {});
+      await pool.query('DELETE FROM rate_plans WHERE id = ANY($1::bigint[])', [ratePlanIds]).catch(() => {});
     }
     if (roomTypeIds.length) {
       await pool.query('DELETE FROM availability_dates WHERE room_type_id = ANY($1::int[])', [roomTypeIds]).catch(() => {});

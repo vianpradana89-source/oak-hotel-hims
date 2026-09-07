@@ -36,6 +36,7 @@
     "test:attendance-schedule-gate-ui": "node test/attendance_schedule_gate_ui_test.ts",
     "test:employee-mobile-logout": "node test/employee_mobile_logout_ui_test.ts",
     "test:quick-booking-billing": "node test/quick_booking_billing_test.ts",
+    "test:quick-booking-pricing-authority": "node test/quick_booking_pricing_authority_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
