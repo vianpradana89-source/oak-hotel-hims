@@ -339,7 +339,7 @@ export function getTransactionActionMatrix(
         },
         {
           key: 'extend',
-          label: 'Extend Stay',
+          label: 'Ubah Tanggal Check-out',
           onClick: () => handlers.onExtend(reservation),
         },
         {
@@ -378,7 +378,7 @@ export function getTransactionActionMatrix(
         },
         {
           key: 'extend',
-          label: 'Extend Stay',
+          label: 'Ubah Tanggal Check-out',
           onClick: () => handlers.onExtend(reservation),
         },
       ],

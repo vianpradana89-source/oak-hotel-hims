@@ -38,6 +38,7 @@
     "test:quick-booking-billing": "node test/quick_booking_billing_test.ts",
     "test:quick-booking-pricing-authority": "node test/quick_booking_pricing_authority_test.ts",
     "test:booked-reservation-reprice": "node test/booked_reservation_reprice_ui_test.ts",
+    "test:checkout-date-unified-flow": "node test/checkout_date_unified_flow_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

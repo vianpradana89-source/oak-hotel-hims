@@ -79,6 +79,16 @@ import {
   normalizeHotelDate,
 } from './features/calendar/calendarDates';
 import { getReservationCalendarSpan } from './features/calendar/calendarReservationSpans';
+import {
+  buildCheckoutChangeSubmit,
+  canConfirmCheckoutDateChange,
+  canShowCheckoutDateChange,
+  checkoutChangeCopy,
+  CHECKED_IN_SHORTEN_BLOCKED_MESSAGE,
+  CHECKOUT_DATE_CHANGE_LABEL,
+  isCheckedInShortenBlocked,
+  resolveCheckoutChangeMode,
+} from './features/calendar/checkoutDateChange';
 import { emptyCellEffectiveMarkers, reservationMarkerId } from './features/calendar/effectiveStayMarkers';
 import {
   normalizeReservationLifecycle,
@@ -2646,7 +2656,6 @@ function AppContent() {
   const selectedBookingChannel = selectedBooking?.channel || selectedRes?.channel || '';
   const [stayChangeState, setStayChangeState] = useState<{
     open: boolean;
-    type: 'extend' | 'shorten';
     reservationId: number | null;
     newCheckOut: string;
     additionalNightRate: number;
@@ -2660,7 +2669,6 @@ function AppContent() {
     pricingSource: string;
   }>({
     open: false,
-    type: 'extend',
     reservationId: null,
     newCheckOut: '',
     additionalNightRate: 0,
@@ -2690,17 +2698,26 @@ function AppContent() {
     if (!currentCheckOut || !nextCheckOut) return 0;
     return hotelNightsBetween(currentCheckOut, nextCheckOut) ?? 0;
   })();
+  const stayChangeMode = resolveCheckoutChangeMode(stayChangeReservation?.check_out, stayChangeState.newCheckOut);
+  const stayChangeCopy = checkoutChangeCopy(stayChangeMode);
+  const stayChangeShortenBlocked = isCheckedInShortenBlocked(stayChangeReservation?.status, stayChangeMode);
+  const stayChangeCanConfirm = Boolean(
+    stayChangeReservation
+    && canConfirmCheckoutDateChange(
+      stayChangeReservation.status,
+      stayChangeReservation.check_out,
+      stayChangeState.newCheckOut
+    )
+    && (
+      !normalizeHotelDate(stayChangeReservation.check_in)
+      || (normalizeHotelDate(stayChangeState.newCheckOut) > normalizeHotelDate(stayChangeReservation.check_in))
+    )
+  );
   const canCheckIn = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
   const canCheckOut = activeReservationStatus === 'CHECKED_IN';
   const canCancel = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
   const canPay = activeReservationStatus !== 'CANCELLED';
-  const canExtend = activeReservationStatus === 'BOOKED' || activeReservationStatus === 'CHECKED_IN';
-  const canShorten = activeReservationStatus === 'BOOKED';
-
-  const addDaysToIso = (value: string | undefined, delta: number) => {
-    if (!value) return '';
-    return addHotelDays(value, delta);
-  };
+  const canChangeCheckoutDate = canShowCheckoutDateChange(activeReservationStatus);
 
   const validateStayChangeCandidate = (reservation: any, requestedCheckOut: string) => {
     const currentCheckIn = normalizeHotelDate(reservation.check_in);
@@ -2770,7 +2787,6 @@ function AppContent() {
   };
 
   const openStayChangePrompt = async (
-    type: 'extend' | 'shorten',
     reservationId: number,
     overrideNewCheckOut?: string,
     initialDto?: any
@@ -2784,32 +2800,38 @@ function AppContent() {
     }
 
     if (!candidate) {
-      console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'reservation missing before confirmation', reservationId, type });
+      console.log('RESIZE_NO_ACTIVE_STATE', { reason: 'reservation missing before confirmation', reservationId });
       return;
     }
 
     const currentCheckOut = normalizeHotelDate(candidate.check_out) || hotelDateFromInstant(new Date());
-    const suggestedCheckOut = type === 'extend' ? addDaysToIso(currentCheckOut, 1) : addDaysToIso(currentCheckOut, -1);
-    const nextCheckOut = overrideNewCheckOut || suggestedCheckOut || currentCheckOut;
+    const nextCheckOut = overrideNewCheckOut
+      ? (normalizeHotelDate(overrideNewCheckOut) || overrideNewCheckOut)
+      : currentCheckOut;
+    const openingMode = resolveCheckoutChangeMode(currentCheckOut, nextCheckOut);
 
-    const validation = validateStayChangeCandidate(candidate, nextCheckOut);
-    if (!validation.valid) {
-      console.log('RESIZE_INVALID_DATE', {
-        reservationId,
-        type,
-        requestedCheckOut: nextCheckOut,
-        originalCheckOut: currentCheckOut,
-        reason: validation.reason
-      });
-      setReservationResizePreview((prev) => {
-        const next = { ...prev };
-        delete next[String(reservationId)];
-        return next;
-      });
-      if (overrideNewCheckOut) {
-        alert(validation.reason);
-      }
+    if (isCheckedInShortenBlocked(candidate.status, openingMode)) {
+      alert(CHECKED_IN_SHORTEN_BLOCKED_MESSAGE);
       return;
+    }
+
+    if (overrideNewCheckOut) {
+      const validation = validateStayChangeCandidate(candidate, nextCheckOut);
+      if (!validation.valid) {
+        console.log('RESIZE_INVALID_DATE', {
+          reservationId,
+          requestedCheckOut: nextCheckOut,
+          originalCheckOut: currentCheckOut,
+          reason: validation.reason
+        });
+        setReservationResizePreview((prev) => {
+          const next = { ...prev };
+          delete next[String(reservationId)];
+          return next;
+        });
+        alert(validation.reason);
+        return;
+      }
     }
 
     const initialContext = computeStayChangeFinancialContext(candidate);
@@ -2817,7 +2839,6 @@ function AppContent() {
 
     setStayChangeState({
       open: true,
-      type,
       reservationId,
       newCheckOut: nextCheckOut,
       additionalNightRate: initialContext?.existingNightlyRate || 0,
@@ -2951,12 +2972,11 @@ function AppContent() {
           alert(validation.reason);
           return;
         }
-        if (String(reservation.status || '').toUpperCase() === 'CHECKED_IN' && previewCheckOut < previousCheckOut) {
-          alert('Masa inap tamu yang sudah check-in tidak dapat diperpendek melalui resize. Gunakan proses Early Checkout.');
+        if (isCheckedInShortenBlocked(reservation.status, resolveCheckoutChangeMode(previousCheckOut, previewCheckOut))) {
+          alert(CHECKED_IN_SHORTEN_BLOCKED_MESSAGE);
           return;
         }
-        const type = previewCheckOut > previousCheckOut ? 'extend' : 'shorten';
-        openStayChangePrompt(type, reservationId, previewCheckOut, reservation);
+        openStayChangePrompt(reservationId, previewCheckOut, reservation);
       } else if (reservation && previousCheckOut === previewCheckOut) {
         console.log('RESIZE_NOOP', {
           reservationId,
@@ -2991,7 +3011,6 @@ function AppContent() {
     setReservationResizePreview(reservationResizePreviewRef.current);
     setStayChangeState({
       open: false,
-      type: 'extend',
       reservationId: null,
       newCheckOut: '',
       additionalNightRate: 0,
@@ -3017,33 +3036,38 @@ function AppContent() {
     }
 
     const requestedCheckOut = stayChangeState.newCheckOut.trim();
-    const validation = validateStayChangeCandidate(reservation, requestedCheckOut);
-    if (!validation.valid) {
-      alert(validation.reason);
-      closeStayChangePrompt();
+    const submit = buildCheckoutChangeSubmit({
+      reservationId,
+      propertyId,
+      status: reservation.status,
+      currentCheckout: reservation.check_out,
+      newCheckout: requestedCheckOut,
+      additionalNightRate: stayChangeState.additionalNightRate,
+    });
+    if (submit.kind === 'noop') return;
+    if (submit.kind === 'blocked') {
+      alert(submit.reason);
       return;
     }
 
-    const payload: any = {
-      property_id: propertyId,
-      new_check_out: requestedCheckOut
-    };
-    if (stayChangeState.type === 'extend') {
-      payload.additional_night_rate = Number(stayChangeState.additionalNightRate) || 0;
+    const validation = validateStayChangeCandidate(reservation, requestedCheckOut);
+    if (!validation.valid) {
+      alert(validation.reason);
+      return;
     }
 
     setStayChangeState((prev) => ({ ...prev, submitting: true }));
 
     try {
-      const response = await authFetch(`/api/reservations/${reservationId}/${stayChangeState.type}`, {
+      const response = await authFetch(submit.url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(submit.payload)
       });
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data?.message || `Gagal ${stayChangeState.type === 'extend' ? 'memperpanjang' : 'memendekkan'} masa inap`);
+        throw new Error(data?.message || `Gagal ${submit.mode === 'extend' ? 'memperpanjang' : 'memendekkan'} masa inap`);
       }
 
       await fetchData();
@@ -3057,7 +3081,7 @@ function AppContent() {
       }
 
       closeStayChangePrompt();
-      alert(stayChangeState.type === 'extend' ? 'Perpanjangan masa inap berhasil.' : 'Pemendekan masa inap berhasil.');
+      alert(submit.mode === 'extend' ? 'Perpanjangan masa inap berhasil.' : 'Pemendekan masa inap berhasil.');
     } catch (error: any) {
       reservationResizePreviewRef.current = {
         ...reservationResizePreviewRef.current
@@ -3067,8 +3091,8 @@ function AppContent() {
       await fetchData();
       await fetchOperationsData();
       setStayChangeState((prev) => ({ ...prev, submitting: false }));
-      alert(error?.message || `Gagal melakukan ${stayChangeState.type === 'extend' ? 'perpanjangan' : 'pemendekan'} masa inap.`);
-      console.error(`${stayChangeState.type} stay failed`, error);
+      alert(error?.message || `Gagal melakukan ${submit.mode === 'extend' ? 'perpanjangan' : 'pemendekan'} masa inap.`);
+      console.error(`${submit.mode} stay failed`, error);
     }
   };
 
@@ -3088,8 +3112,7 @@ function AppContent() {
       onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin')
     },
     { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
-    { key: 'extend', label: 'Extend', enabled: canExtend, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('extend', Number(selectedRes.id), undefined, selectedRes) },
-    { key: 'shorten', label: 'Shorten', enabled: canShorten, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt('shorten', Number(selectedRes.id), undefined, selectedRes) },
+    { key: 'checkout-date', label: CHECKOUT_DATE_CHANGE_LABEL, enabled: canChangeCheckoutDate, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt(Number(selectedRes.id), undefined, selectedRes) },
     { key: 'cancel', label: 'Cancel', enabled: canCancel, disabled: false, title: undefined, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
     {
       key: 'payment',
@@ -3676,7 +3699,7 @@ function AppContent() {
             onMoveReservation={(res) => openReservationEditor(res)}
             onExtendReservation={(res) => {
               setSelectedRes(res);
-              openStayChangePrompt('extend', Number(res.id), undefined, res);
+              openStayChangePrompt(Number(res.id), undefined, res);
             }}
             onCancelReservation={(res) => handleReservationCancel(Number(res.id))}
             onViewReservationFolio={(res) => {
@@ -4244,7 +4267,7 @@ function AppContent() {
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
           onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
           onCancel={(resId) => handleReservationCancel(resId)}
-          onOpenStayChange={(res, mode) => openStayChangePrompt(mode || 'extend', Number(res.id), undefined, res)}
+          onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
           onRefresh={() => {
             fetchData();
             fetchOperationsData();
@@ -4270,7 +4293,7 @@ function AppContent() {
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
           onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
           onCancel={(resId) => handleReservationCancel(resId)}
-          onOpenStayChange={(res, mode) => openStayChangePrompt(mode || 'extend', Number(res.id), undefined, res)}
+          onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
         />
       )}
 
@@ -4295,15 +4318,18 @@ function AppContent() {
       {stayChangeState.open && (
         <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
           <div className="checkout-confirm-modal max-w-lg w-full">
-            <div className="checkout-confirm-icon">{stayChangeState.type === 'extend' ? '↗' : '↘'}</div>
+            <div className="checkout-confirm-icon">{stayChangeCopy.icon}</div>
             <h3 className="checkout-confirm-title">
-              {stayChangeState.type === 'extend' ? 'Perpanjang Masa Menginap' : 'Ubah Tanggal Check-out'}
+              {stayChangeCopy.title}
             </h3>
             <p className="checkout-confirm-text">
-              {stayChangeState.type === 'extend'
-                ? 'Konfirmasi perpanjangan malam menginap dan tentukan tarif per malam tambahan.'
-                : 'Konfirmasi perubahan tanggal check-out ke tanggal lebih awal.'}
+              {stayChangeCopy.body}
             </p>
+            {stayChangeShortenBlocked && (
+              <p className="mt-2 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {CHECKED_IN_SHORTEN_BLOCKED_MESSAGE}
+              </p>
+            )}
 
             <div className="reservation-payment-panel space-y-2.5 mt-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs text-stone-700">
               <div className="flex justify-between py-1 border-b border-stone-200">
@@ -4377,7 +4403,7 @@ function AppContent() {
                 </div>
               </div>
 
-              {stayChangeState.type === 'extend' && stayChangeNightsDelta > 0 && (
+              {stayChangeMode === 'extend' && stayChangeNightsDelta > 0 && (
                 <div className="pt-2 border-t border-stone-200 space-y-2">
                   <div>
                     <div className="flex justify-between items-center mb-1">
@@ -4435,7 +4461,7 @@ function AppContent() {
                 </div>
               )}
 
-              {stayChangeState.type === 'shorten' && stayChangeNightsDelta < 0 && (
+              {stayChangeMode === 'shorten' && stayChangeNightsDelta < 0 && !stayChangeShortenBlocked && (
                 <div className="pt-2 border-t border-stone-200 space-y-2">
                   {(() => {
                     const currentTotal = stayChangeState.currentTotalCharge;
@@ -4491,9 +4517,9 @@ function AppContent() {
                 type="button"
                 className="checkout-confirm-btn checkout-confirm-btn--primary"
                 onClick={confirmStayChange}
-                disabled={stayChangeState.submitting || stayChangeNightsDelta === 0}
+                disabled={stayChangeState.submitting || !stayChangeCanConfirm}
               >
-                {stayChangeState.submitting ? 'Memproses...' : (stayChangeState.type === 'extend' ? 'Konfirmasi Perpanjangan' : 'Konfirmasi Pemendekan')}
+                {stayChangeState.submitting ? 'Memproses...' : stayChangeCopy.confirm}
               </button>
             </div>
           </div>

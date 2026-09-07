@@ -3,6 +3,7 @@ import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
 import BookedReservationRepriceModal from './BookedReservationRepriceModal';
 import { canShowBookedRateCorrection } from './bookedReservationReprice';
+import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
@@ -22,7 +23,7 @@ interface Props {
   onCancel: (reservationId: number) => void;
   onRequestCheckoutInspection?: (reservationId: number) => void;
   onToggleRoomStatus?: (roomId: string) => void;
-  onOpenStayChange?: (reservation: any, mode?: 'extend' | 'shorten') => void;
+  onOpenStayChange?: (reservation: any) => void;
   roomStatuses?: Record<string, string>;
   propertyFeatures?: Record<string, any>;
 }
@@ -1199,23 +1200,14 @@ export default function ReservationDetailDrawer({
                   </button>
                 )}
 
-                {onOpenStayChange && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => onOpenStayChange(data, 'extend')}
-                      className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                    >
-                      Perpanjang Menginap
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenStayChange(data, 'shorten')}
-                      className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                    >
-                      Ubah Tanggal Check-out
-                    </button>
-                  </>
+                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenStayChange(data)}
+                    className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                  >
+                    {CHECKOUT_DATE_CHANGE_LABEL}
+                  </button>
                 )}
 
                 <button
@@ -1244,23 +1236,14 @@ export default function ReservationDetailDrawer({
             {/* CHECKED_IN State Actions */}
             {isCheckedIn && (
               <>
-                {onOpenStayChange && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => onOpenStayChange(data, 'extend')}
-                      className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                    >
-                      Perpanjang Menginap
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenStayChange(data, 'shorten')}
-                      className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                    >
-                      Ubah Tanggal Check-out
-                    </button>
-                  </>
+                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenStayChange(data)}
+                    className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                  >
+                    {CHECKOUT_DATE_CHANGE_LABEL}
+                  </button>
                 )}
 
                 {data.require_checkout_inspection && (!data.checkout_inspection || data.checkout_inspection.clearance_state === 'REQUESTED' || data.checkout_inspection.clearance_state === 'INSPECTING') ? (

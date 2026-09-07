@@ -1,5 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { normalizeHotelDate } from './calendarDates';
+import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
 import { useAuth } from '../auth/AuthContext';
@@ -15,7 +16,7 @@ export interface QuickReservationDetailProps {
   onCheckin?: (reservationId: number) => void;
   onCheckout?: (reservationId: number) => void;
   onCancel?: (reservationId: number) => void;
-  onOpenStayChange?: (reservation: any, mode: 'extend' | 'shorten') => void;
+  onOpenStayChange?: (reservation: any) => void;
   onRefresh?: () => void;
 }
 
@@ -614,13 +615,13 @@ export default function QuickReservationDetail({
                   )
                 )}
 
-                {onOpenStayChange && (
+                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
                   <button
                     type="button"
                     disabled={isPropertyMissing}
                     onClick={() => {
                       if (isPropertyMissing) return;
-                      onOpenStayChange(data, 'extend');
+                      onOpenStayChange(data);
                       onClose();
                     }}
                     className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors ${
@@ -629,7 +630,7 @@ export default function QuickReservationDetail({
                         : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
                     }`}
                   >
-                    Perpanjang
+                    {CHECKOUT_DATE_CHANGE_LABEL}
                   </button>
                 )}
               </>
@@ -642,7 +643,7 @@ export default function QuickReservationDetail({
             )}
 
             {/* More Actions Dropdown (⋯ Lainnya) */}
-            {(isBooked || isCheckedIn) && (
+            {isBooked && (
               <div className="relative" ref={moreActionsRef}>
                 <button
                   type="button"
@@ -663,33 +664,19 @@ export default function QuickReservationDetail({
 
                 {isMoreActionsOpen && (
                   <div className="absolute right-0 bottom-full mb-1 w-48 bg-white rounded-xl shadow-xl border border-stone-200 py-1.5 z-70 text-xs font-medium text-stone-700 animate-in fade-in zoom-in-95 duration-100">
-                    {onOpenStayChange && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsMoreActionsOpen(false);
-                            onOpenStayChange(data, 'extend');
-                            onClose();
-                          }}
-                          className="w-full text-left px-3.5 py-2 hover:bg-stone-50 text-stone-700 cursor-pointer flex items-center gap-2"
-                        >
-                          <span>↗</span>
-                          <span>Perpanjang Menginap</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsMoreActionsOpen(false);
-                            onOpenStayChange(data, 'shorten');
-                            onClose();
-                          }}
-                          className="w-full text-left px-3.5 py-2 hover:bg-stone-50 text-stone-700 cursor-pointer flex items-center gap-2"
-                        >
-                          <span>↘</span>
-                          <span>Ubah Tanggal Check-out</span>
-                        </button>
-                      </>
+                    {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsMoreActionsOpen(false);
+                          onOpenStayChange(data);
+                          onClose();
+                        }}
+                        className="w-full text-left px-3.5 py-2 hover:bg-stone-50 text-stone-700 cursor-pointer flex items-center gap-2"
+                      >
+                        <span>📅</span>
+                        <span>{CHECKOUT_DATE_CHANGE_LABEL}</span>
+                      </button>
                     )}
 
                     {isBooked && onCancel && (
