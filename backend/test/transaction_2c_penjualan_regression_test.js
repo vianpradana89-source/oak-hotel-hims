@@ -236,19 +236,19 @@ async function runTests() {
     // -------------------------------------------------------------
     // Test 7: BID Search returns all linked sales
     // -------------------------------------------------------------
-    console.log('Test 7: BID Search returns all linked sales');
+    console.log('Test 7: BID Search returns one grouped booking row');
     const searchBidRes = await getTransactions(pool, {
       property_id: propAId,
       transaction_type: 'SALE',
       search: testBid
     });
-    assert.strictEqual(searchBidRes.transactions.length, 3, 'Should find 3 charges (Room, Extra Bed, Laundry)');
-    searchBidRes.transactions.forEach((tx) => {
-      assert.strictEqual(tx.booking_bid, testBid);
-      assert.strictEqual(tx.guest_name_snapshot, 'BUDI SANTOSO');
-      assert.strictEqual(tx.room_number_snapshot, '208');
-    });
-    console.log('  PASS: BID search returned exactly the 3 linked stay sales');
+    assert.strictEqual(searchBidRes.transactions.length, 1, 'Should find one grouped BID row (Room + Extra Bed + Laundry)');
+    assert.strictEqual(searchBidRes.transactions[0].booking_bid, testBid);
+    assert.ok(searchBidRes.transactions[0].booking_bid_group, 'grouped row exposes booking_bid_group read model');
+    assert.strictEqual(searchBidRes.transactions[0].booking_bid_group.room_count, 1, 'one reservation still counts as 1 Kamar');
+    assert.strictEqual(searchBidRes.transactions[0].booking_bid_group.children.length, 1, 'extras collapse to one child room');
+    assert.strictEqual(Number(searchBidRes.transactions[0].booking_bid_group.net), 950000);
+    console.log('  PASS: BID search returned one grouped stay sale');
 
     // -------------------------------------------------------------
     // Test 8: Combined Penjualan Summary includes Room + Extra + Laundry + POS
@@ -258,11 +258,11 @@ async function runTests() {
       property_id: propAId,
       transaction_type: 'SALE'
     });
-    assert.strictEqual(fullSalesRes.transactions.length, 4, '4 sales total');
+    assert.strictEqual(fullSalesRes.transactions.length, 2, '1 grouped stay BID + 1 POS sale');
     // Expected total: 750000 + 150000 + 50000 + 90000 = 1040000
     assert.strictEqual(Number(fullSalesRes.summary.total_sale), 1040000, 'Total sale should equal sum of charges');
-    assert.strictEqual(Number(fullSalesRes.summary.count_sale), 4);
-    console.log('  PASS: Combined sales total is Rp 1.040.000 across 4 sales records');
+    assert.strictEqual(Number(fullSalesRes.summary.count_sale), 2);
+    console.log('  PASS: Combined sales total is Rp 1.040.000 across 1 booking group + 1 POS');
 
     // -------------------------------------------------------------
     // Test 9: Voided Charge generates REVERSAL and nets Penjualan economic total to correct sum
@@ -304,16 +304,22 @@ async function runTests() {
       transaction_type: 'SALE',
       operational_status: 'SELESAI'
     });
-    assert.ok(selesaiRes.transactions.length >= 1, 'Should return completed sales');
+    assert.ok(selesaiRes.transactions.some((t) => Number(t.id) === Number(posTx.id)), 'POS POSTED sale remains SELESAI');
+
+    const prosesRes = await getTransactions(pool, {
+      property_id: propAId,
+      transaction_type: 'SALE',
+      operational_status: 'PROSES'
+    });
+    assert.ok(prosesRes.transactions.some((t) => t.booking_bid === testBid), 'BOOKED stay BID group remains PROSES');
 
     const batalRes = await getTransactions(pool, {
       property_id: propAId,
       transaction_type: 'SALE',
       operational_status: 'BATAL'
     });
-    assert.ok(batalRes.transactions.length >= 1, 'Should return voided/reversed transactions');
-    assert.ok(batalRes.transactions.some((t) => t.id === projVoid.id), 'Reversal transaction must be in BATAL filter');
-    console.log('  PASS: Operational filters SELESAI and BATAL operate accurately');
+    assert.ok(!batalRes.transactions.some((t) => t.booking_bid === testBid), 'voided extra stays inside the BID group, not a peer Batal row');
+    console.log('  PASS: Operational filters work on grouped BID rows');
 
     // -------------------------------------------------------------
     // Test 11: Property Isolation

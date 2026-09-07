@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type {
   TransactionRecord,
   TransactionSummary,
@@ -10,6 +10,12 @@ import type {
   ReceivingStatus
 } from './transactionDomainTypes';
 import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass } from './transactionDomainTypes';
+import {
+  formatStayShortDate,
+  groupPenjualanSaleRows,
+  paymentStatusBadgeClass,
+  type PenjualanListItem
+} from './penjualanBidGrouping';
 import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
@@ -162,6 +168,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [softDeleteError, setSoftDeleteError] = useState<string | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState<boolean>(false);
   const [selectedTxIdForDetail, setSelectedTxIdForDetail] = useState<number | string | null>(null);
+  const [expandedBids, setExpandedBids] = useState<Record<string, boolean>>({});
 
   const currentRequestIdRef = useRef<number>(0);
 
@@ -245,6 +252,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     debouncedSearch,
     page
   ]);
+
+  useEffect(() => {
+    setExpandedBids({});
+  }, [propertyId, activeTab, operationalStatus, startDate, endDate, debouncedSearch, page]);
 
   useEffect(() => {
     if (!activeEditor) {
@@ -342,6 +353,224 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     const num = Number(val) || 0;
     const isNeg = num < 0;
     return (isNeg ? '- Rp ' : 'Rp ') + Math.abs(num).toLocaleString('id-ID');
+  };
+
+  const penjualanItems = useMemo(
+    () => (activeTab === 'SALE' && operationalStatus !== 'HAPUS' ? groupPenjualanSaleRows(transactions) : []),
+    [activeTab, operationalStatus, transactions]
+  );
+
+  const toggleBidExpand = (bid: string) => {
+    setExpandedBids((prev) => ({ ...prev, [bid]: !prev[bid] }));
+  };
+
+  const renderStayTypeBadge = (label: string) => {
+    if (!label || label === '-') {
+      return <span className="text-[11px] font-medium text-slate-400">-</span>;
+    }
+    if (label === 'MIXED') {
+      return (
+        <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border bg-slate-50 text-slate-700 border-slate-200">
+          MIXED
+        </span>
+      );
+    }
+    const stayType = label === 'DAY USE' ? 'DAY_USE' : label === 'OVERNIGHT' ? 'OVERNIGHT' : label;
+    return (
+      <span className={`inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border ${stayTypeBadgeClass(stayType)}`}>
+        {label}
+      </span>
+    );
+  };
+
+  const renderPaymentBadge = (status: string) => (
+    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${paymentStatusBadgeClass(status)}`}>
+      {status}
+    </span>
+  );
+
+  const renderOperationalBadge = (txLike: Parameters<typeof mapToOperationalStatus>[0]) => {
+    const op = mapToOperationalStatus(txLike);
+    return (
+      <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
+        {op.label}
+      </span>
+    );
+  };
+
+  const renderPenjualanItem = (item: PenjualanListItem) => {
+    if (item.kind === 'standalone') {
+      const t = item.tx;
+      const party = t.party_name || t.guest_name_snapshot || t.supplier_name || '-';
+      const paid = t.reservation_amount_paid != null ? Number(t.reservation_amount_paid) : Number(t.paid_amount || 0);
+      const remaining = t.reservation_remaining_balance != null
+        ? Number(t.reservation_remaining_balance)
+        : Number(t.outstanding_amount || 0);
+      return (
+        <tr
+          key={t.id}
+          onClick={() => openDetailDrawer(t.id)}
+          className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+        >
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+            <div className="text-[10px] text-slate-400">
+              {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+            </div>
+          </td>
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <span className="font-mono font-semibold text-slate-800">{t.transaction_no}</span>
+            {t.source_reference && (
+              <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
+            )}
+            <div className="mt-0.5">{getSourceBadge(t.source_type)}</div>
+          </td>
+          <td className="py-2.5 px-3 max-w-[180px]">
+            <div className="font-semibold text-slate-800 truncate">{party}</div>
+            <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
+          </td>
+          <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(t.amount)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(t.discount_amount)}</td>
+          <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(displayTransactionNet(t))}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(paid)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(remaining)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(t.payment_status)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
+          <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => openDetailDrawer(t.id)}
+              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+            >
+              Detail
+            </button>
+          </td>
+        </tr>
+      );
+    }
+
+    const { group } = item;
+    const t = group.primary;
+    const expanded = Boolean(expandedBids[group.bid]);
+    return (
+      <React.Fragment key={`bid:${group.bid}`}>
+        <tr
+          onClick={() => openDetailDrawer(t.id)}
+          className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+        >
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <div className="flex items-start gap-1.5">
+              <button
+                type="button"
+                aria-label={expanded ? 'Tutup kamar' : 'Lihat kamar'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleBidExpand(group.bid);
+                }}
+                className="mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                <svg className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+              <div>
+                <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                <div className="text-[10px] text-slate-400">
+                  {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              </div>
+            </div>
+          </td>
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+              {group.bid}
+            </span>
+          </td>
+          <td className="py-2.5 px-3 max-w-[200px]">
+            <div className="font-semibold text-slate-800 truncate">{group.guest_name}</div>
+            <span className="inline-flex items-center mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-800">
+              {group.room_count} Kamar
+            </span>
+          </td>
+          <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(group.stay_type_label)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.gross)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(group.discount)}</td>
+          <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(group.net)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.paid)}</td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.remaining)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(group.payment_status)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">
+            {renderOperationalBadge({
+              transaction_status: t.transaction_status,
+              transaction_type: 'SALE',
+              is_lifecycle_primary: true,
+              operational_sheet: group.operational_sheet
+            })}
+          </td>
+          <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => openDetailDrawer(t.id)}
+              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+            >
+              Detail
+            </button>
+          </td>
+        </tr>
+        {expanded && (
+          <tr className="bg-slate-50/70">
+            <td colSpan={12} className="px-4 py-2.5">
+              <div className="rounded-lg border border-slate-200 bg-white/80 overflow-hidden">
+                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
+                  Kamar yang dipesan
+                </div>
+                <table className="w-full text-[11px]">
+                  <thead className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    <tr>
+                      <th className="py-1.5 px-3 text-left">Kamar</th>
+                      <th className="py-1.5 px-3 text-left">Tipe</th>
+                      <th className="py-1.5 px-3 text-left">Check-in</th>
+                      <th className="py-1.5 px-3 text-left">Check-out</th>
+                      <th className="py-1.5 px-3 text-right">Gross</th>
+                      <th className="py-1.5 px-3 text-right">Diskon</th>
+                      <th className="py-1.5 px-3 text-right">Net</th>
+                      <th className="py-1.5 px-3 text-right">Dibayar</th>
+                      <th className="py-1.5 px-3 text-right">Sisa</th>
+                      <th className="py-1.5 px-3 text-center">Status</th>
+                      <th className="py-1.5 px-3 text-center">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {group.children.map((child) => (
+                      <tr key={child.reservation_id || child.primary_transaction_id} className="border-t border-slate-100">
+                        <td className="py-1.5 px-3 font-semibold text-slate-800 whitespace-nowrap">{child.room_number || '-'}</td>
+                        <td className="py-1.5 px-3 text-slate-700 whitespace-nowrap">{child.room_type_name || '-'}</td>
+                        <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_in)}</td>
+                        <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_out)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.gross)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(child.discount)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">{formatIdr(child.net)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.paid)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.remaining)}</td>
+                        <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
+                        <td className="py-1.5 px-3 text-center whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => openDetailDrawer(child.primary_transaction_id)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
+                          >
+                            Detail
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </td>
+          </tr>
+        )}
+      </React.Fragment>
+    );
   };
 
   const totalPages = Math.ceil(totalCount / pageSize);
@@ -964,10 +1193,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">Tanggal</th>
                         <th className="py-3 px-3">BID / No. Transaksi</th>
                         <th className="py-3 px-3">Tamu</th>
-                        <th className="py-3 px-3">Kamar / Sumber</th>
                         <th className="py-3 px-3">Tipe Stay</th>
-                        <th className="py-3 px-4">Keterangan</th>
-                        <th className="py-3 px-3 text-right">Total</th>
+                        <th className="py-3 px-3 text-right">Gross</th>
+                        <th className="py-3 px-3 text-right">Diskon</th>
+                        <th className="py-3 px-3 text-right">Net</th>
+                        <th className="py-3 px-3 text-right">Dibayar</th>
+                        <th className="py-3 px-3 text-right">Sisa</th>
                         <th className="py-3 px-2 text-center">Pembayaran</th>
                         <th className="py-3 px-2 text-center">Status</th>
                         <th className="py-3 px-3 text-center">Aksi</th>
@@ -1034,7 +1265,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 )}
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {transactions.map((t) => {
+                {activeTab === 'SALE' && operationalStatus !== 'HAPUS' && penjualanItems.map(renderPenjualanItem)}
+                {(activeTab !== 'SALE' || operationalStatus === 'HAPUS') && transactions.map((t) => {
                   const party = t.party_name || t.guest_name_snapshot || t.supplier_name || '-';
                   const op = mapToOperationalStatus(t);
 
@@ -1125,89 +1357,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         </td>
                         <td className="py-3 px-4 max-w-xs truncate text-slate-700 font-medium italic" title={t.delete_reason || ''}>
                           "{t.delete_reason || '-'}"
-                        </td>
-                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            onClick={() => openDetailDrawer(t.id)}
-                            className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-                          >
-                            Detail
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  }
-
-                  if (activeTab === 'SALE') {
-                    return (
-                      <tr
-                        key={t.id}
-                        onClick={() => openDetailDrawer(t.id)}
-                        className="hover:bg-slate-50/80 transition-colors cursor-pointer"
-                      >
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
-                          <div className="text-[10px] text-slate-400">
-                            {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          {t.booking_bid ? (
-                            <div>
-                              <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                                {t.booking_bid}
-                              </span>
-                              <div className="text-[10px] font-mono text-slate-400 mt-0.5">{t.transaction_no}</div>
-                            </div>
-                          ) : (
-                            <div>
-                              <span className="font-mono font-semibold text-slate-800">{t.transaction_no}</span>
-                              {t.source_reference && (
-                                <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 max-w-[160px] truncate">
-                          <div className="font-semibold text-slate-800 truncate">{party}</div>
-                        </td>
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="space-y-0.5">
-                            {t.room_number_snapshot ? (
-                              <div className="font-semibold text-slate-800 text-[11px]">Kamar {t.room_number_snapshot}</div>
-                            ) : (
-                              <div className="text-[11px] font-medium text-slate-600">{t.category_name}</div>
-                            )}
-                            <div>{getSourceBadge(t.source_type)}</div>
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          {formatReservationStayType(t.stay_type) === '-' ? (
-                            <span className="text-[11px] font-medium text-slate-400">-</span>
-                          ) : (
-                            <span className={`inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border ${stayTypeBadgeClass(t.stay_type)}`}>
-                              {formatReservationStayType(t.stay_type)}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 max-w-xs truncate text-slate-800" title={t.description}>
-                          {t.description}
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">
-                          <div>{formatIdr(displayTransactionNet(t))}</div>
-                          {Number(t.lifecycle_member_count || 0) > 1 && (
-                            <div className="text-[10px] font-semibold text-slate-400">{t.lifecycle_member_count} riwayat</div>
-                          )}
-                        </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            {t.payment_status}
-                          </span>
-                        </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
-                            {op.label}
-                          </span>
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           <button

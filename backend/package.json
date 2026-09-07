@@ -22,6 +22,7 @@
     "test:sale-status-isolation": "node test/transaction_sale_status_isolation_test.js",
     "test:tx986-sale-remediation": "npm run build && node test/tx986_sale_remediation_test.js",
     "test:sale-lifecycle-grouping": "npm run build && node test/sale_lifecycle_grouping_test.js",
+    "test:booking-bid-grouping": "npm run build && node test/booking_bid_grouping_test.js",
     "dry-run:tx986-sale-remediation": "node scripts/remediate_tx986_sale_projection.js",
     "test:legacy-pre-ledger-cancellation": "node test/legacy_pre_ledger_cancellation_test.js",
     "dry-run:legacy-pre-ledger-cancellation": "node scripts/legacy_pre_ledger_cancellation_dry_run.js",

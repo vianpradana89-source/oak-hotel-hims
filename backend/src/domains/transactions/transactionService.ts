@@ -36,6 +36,7 @@ import {
   presentLifecyclePrimary,
   siblingExpansionIds,
 } from './saleLifecycleGrouping';
+import { presentBidGroupedSales } from './bookingBidGrouping';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -2107,8 +2108,15 @@ export async function getTransactions(
            s.phone AS supplier_phone,
            r.booking_number,
            r.stay_type,
+           r.stay_sequence,
            r.status AS reservation_status,
            r.stay_status AS reservation_stay_status,
+           r.check_in::text AS check_in,
+           r.check_out::text AS check_out,
+           r.amount_paid AS reservation_amount_paid,
+           r.remaining_balance AS reservation_remaining_balance,
+           r.booked_room_type_name_snapshot,
+           COALESCE(rt_current.name, rt_booked.name, r.booked_room_type_name_snapshot) AS room_type_name,
            b.bid AS booking_bid,
            b.booking_status,
            b.booking_source,
@@ -2118,6 +2126,9 @@ export async function getTransactions(
     LEFT JOIN suppliers s ON s.id = t.supplier_id
     LEFT JOIN reservations r ON r.id = t.reservation_id
     LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+    LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = t.property_id
+    LEFT JOIN room_types rt_current ON rt_current.id = rm.room_type_id AND rt_current.property_id = t.property_id
+    LEFT JOIN room_types rt_booked ON rt_booked.id = r.booked_room_type_id_snapshot AND rt_booked.property_id = t.property_id
     LEFT JOIN LATERAL (
       SELECT SUM(pt.amount)::bigint AS total_paid
       FROM payment_transactions pt
@@ -2193,10 +2204,23 @@ export async function getTransactions(
     }
   }
 
+  const sortPresented = (a: any, b: any) => {
+    const dateCmp = String(b.transaction_date || '').localeCompare(String(a.transaction_date || ''));
+    if (dateCmp !== 0) return dateCmp;
+    const timeCmp = String(b.transaction_time || '').localeCompare(String(a.transaction_time || ''));
+    if (timeCmp !== 0) return timeCmp;
+    return Number(b.id) - Number(a.id);
+  };
+
+  const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(sortPresented);
+  const saleBidGrouped = String(params.transaction_type || '').toUpperCase() === 'SALE'
+    ? presentBidGroupedSales(presentedAll)
+    : null;
+  const sheetSource = saleBidGrouped || groups.map((group) => ({ operational_sheet: group.sheet }));
   const sheet_counts: TransactionSheetCounts = {
-    proses: groups.filter((group) => group.sheet === 'PROSES').length,
-    selesai: groups.filter((group) => group.sheet === 'SELESAI').length,
-    batal: groups.filter((group) => group.sheet === 'BATAL').length,
+    proses: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'PROSES').length,
+    selesai: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'SELESAI').length,
+    batal: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'BATAL').length,
     hapus: hapusCount,
   };
 
@@ -2232,25 +2256,21 @@ export async function getTransactions(
     };
   }
 
-  const visibleGroups = targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
-    ? groups.filter((group) => group.sheet === targetSheet)
-    : groups;
-
-  visibleGroups.sort((a, b) => {
-    const dateCmp = String(b.primary.transaction_date || '').localeCompare(String(a.primary.transaction_date || ''));
-    if (dateCmp !== 0) return dateCmp;
-    const timeCmp = String(b.primary.transaction_time || '').localeCompare(String(a.primary.transaction_time || ''));
-    if (timeCmp !== 0) return timeCmp;
-    return Number(b.primary.id) - Number(a.primary.id);
-  });
-
-  const presented = visibleGroups.map((group) => presentLifecyclePrimary(group));
+  const listSource = saleBidGrouped || presentedAll;
+  const presented = [...(targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
+    ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
+    : listSource)].sort(sortPresented);
   const transactions = presented.slice(offset, offset + limit);
+
+  const saleNetOf = (row: any) => {
+    if (row.booking_bid_group && row.booking_bid_group.net != null) return Number(row.booking_bid_group.net || 0);
+    return Number(row.effective_net_amount || 0);
+  };
 
   const summary: TransactionSummary = {
     total_sale: presented
       .filter((row) => String(row.transaction_type).toUpperCase() === 'SALE')
-      .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
+      .reduce((sum, row) => sum + saleNetOf(row), 0),
     total_purchase: presented
       .filter((row) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
       .reduce((sum, row) => sum + Number(row.effective_net_amount || 0), 0),
