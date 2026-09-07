@@ -104,6 +104,7 @@ import { createDepositRouter } from './domains/deposits/depositRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { getReservationEditAvailability, getBookingCreateAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
+import { BookedRepriceError, executeBookedReservationReprice, previewBookedReservationReprice } from './domains/reservations/bookedReservationRepriceService';
 import {
   ReservationBillingError,
   allocateBookingPaymentToChildren,
@@ -3596,6 +3597,59 @@ app.get('/api/reservations/:id/edit-availability', requireAuth, async (req: any,
     return res.status(err?.statusCode || 400).json({
       status: 'ERROR', code: err?.code, message: err?.message || 'Gagal memuat ketersediaan kamar untuk edit reservasi.'
     });
+  }
+});
+
+// POST /api/reservations/:id/reprice-preview — read-only BOOKED canonical rate correction
+app.post('/api/reservations/:id/reprice-preview', requireAuth, async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isInteger(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
+    }
+    const propertyId = Number(req.body?.property_id ?? req.query?.property_id);
+    const preview = await previewBookedReservationReprice(pool, reservationId, {
+      property_id: propertyId,
+      rate_plan_id: req.body?.rate_plan_id !== undefined ? req.body.rate_plan_id : undefined
+    });
+    return res.json({ status: 'SUCCESS', data: preview });
+  } catch (err: any) {
+    const statusCode = err?.statusCode || 400;
+    return res.status(statusCode).json({ status: 'ERROR', code: err.code, message: err.message || 'Gagal menghitung pratinjau koreksi tarif' });
+  }
+});
+
+// POST /api/reservations/:id/reprice — BOOKED in-place canonical rate correction (no payment)
+app.post('/api/reservations/:id/reprice', requireAuth, async (req: any, res: any) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isInteger(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
+    }
+    const propertyId = Number(req.body?.property_id);
+    const actor = req.user?.username || req.user?.name || 'PMS';
+    const result = await executeBookedReservationReprice(pool, reservationId, {
+      property_id: propertyId,
+      rate_plan_id: req.body?.rate_plan_id !== undefined ? req.body.rate_plan_id : undefined,
+      reason: req.body?.reason,
+      actor
+    });
+    broadcastEvent('ReservationUpdated', {
+      reservation_id: reservationId,
+      room_id: result.reservation.room_id,
+      guest_name: result.reservation.guest_name,
+      timestamp: new Date().toISOString()
+    });
+    return res.json({
+      status: 'SUCCESS',
+      data: {
+        reservation: withReservationHotelDates(result.reservation),
+        preview: result.preview
+      }
+    });
+  } catch (err: any) {
+    const statusCode = err instanceof BookedRepriceError ? err.statusCode : (err?.statusCode || 400);
+    return res.status(statusCode).json({ status: 'ERROR', code: err.code, message: err.message || 'Gagal mengkoreksi tarif reservasi' });
   }
 });
 

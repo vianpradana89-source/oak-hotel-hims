@@ -19,6 +19,7 @@ const VIEW_LIKE_POST = [
   /\/duplicate-check$/,
   /\/match$/,
   /\/edit-preview$/,
+  /\/reprice-preview$/,
   /\/edit-availability$/,
   /\/room-move-preview$/,
   /\/room-move-availability$/,

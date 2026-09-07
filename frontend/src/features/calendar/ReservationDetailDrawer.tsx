@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
+import BookedReservationRepriceModal from './BookedReservationRepriceModal';
+import { canShowBookedRateCorrection } from './bookedReservationReprice';
 import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
@@ -39,6 +41,7 @@ export default function ReservationDetailDrawer({
   const [loading, setLoading] = useState<boolean>(false);
   const [folioData, setFolioData] = useState<any>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isRepriceModalOpen, setIsRepriceModalOpen] = useState<boolean>(false);
   const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
   const [isAddChargeModalOpen, setIsAddChargeModalOpen] = useState<boolean>(false);
   const [activeRoomFindings, setActiveRoomFindings] = useState<any[]>([]);
@@ -1186,6 +1189,15 @@ export default function ReservationDetailDrawer({
                 >
                   Edit Reservasi
                 </button>
+                {canShowBookedRateCorrection(data) && (
+                  <button
+                    type="button"
+                    onClick={() => setIsRepriceModalOpen(true)}
+                    className="px-3 py-2 bg-white hover:bg-emerald-50 text-emerald-900 font-semibold text-xs rounded-xl border border-emerald-200 transition-colors cursor-pointer"
+                  >
+                    Koreksi Tarif
+                  </button>
+                )}
 
                 {onOpenStayChange && (
                   <>
@@ -1307,6 +1319,19 @@ export default function ReservationDetailDrawer({
           />
         )}
 
+        {isRepriceModalOpen && activePropId && (
+          <BookedReservationRepriceModal
+            isOpen={isRepriceModalOpen}
+            onClose={() => setIsRepriceModalOpen(false)}
+            reservation={data}
+            propertyId={activePropId}
+            onSuccess={() => {
+              loadFullReservation(data.id);
+              loadFolio(data.id);
+              onRefresh();
+            }}
+          />
+        )}
         {isEditModalOpen && activePropId && (
           <EditReservationModal
             isOpen={isEditModalOpen}
