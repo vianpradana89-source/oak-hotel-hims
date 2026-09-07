@@ -95,6 +95,7 @@
     "test:reservation-billing": "npm run build && node test/reservation_billing_contract_test.js",
     "test:booking-global-discount": "npm run build && node test/booking_global_discount_contract_test.js",
     "test:reservation-context-metadata": "npm run build && node test/reservation_context_metadata_test.js",
+    "test:dashboard-daily-kpi": "npm run build && node test/dashboard_daily_kpi_test.js",
     "test:booking-payment-allocation": "npm run build && node test/booking_payment_allocation_contract_test.js",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },

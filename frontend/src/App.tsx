@@ -67,7 +67,9 @@ import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
-import { buildAvailabilityRequest, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
+import { buildAvailabilityRequest, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
+import type { DailyKpiData } from './features/calendar/calendarApi';
+import { buildDailyKpiCards } from './features/calendar/dailyKpiFormat';
 import {
   addHotelDays,
   buildHotelDateWindow,
@@ -240,9 +242,9 @@ function AppContent() {
   const [roomStatuses, setRoomStatuses] = useState<Record<string, string>>({});
   const [housekeepingTasks, setHousekeepingTasks] = useState<any[]>([]);
   const [checkoutInspections, setCheckoutInspections] = useState<any[]>([]);
-  const [pendingCheckoutInspectionsCount, setPendingCheckoutInspectionsCount] = useState<number>(0);
+  const [, setPendingCheckoutInspectionsCount] = useState<number>(0);
   const [selectedCheckoutInspection, setSelectedCheckoutInspection] = useState<any | null>(null);
-  const [maintenanceTasks, setMaintenanceTasks] = useState<any[]>([]);
+  const [, setMaintenanceTasks] = useState<any[]>([]);
   const [summaryDrawerType, setSummaryDrawerType] = useState<string | null>(null);
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
@@ -365,6 +367,8 @@ function AppContent() {
   const transactionRequestVersionRef = useRef(0);
   const transactionPeriodRangeRef = useRef<{ startDate: string; endDateExclusive: string } | null>(null);
 
+  const [dailyKpis, setDailyKpis] = useState<DailyKpiData | null>(null);
+  const dailyKpiRequestVersionRef = useRef(0);
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
   const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
@@ -470,6 +474,7 @@ function AppContent() {
   const reservationResizeRef = useRef<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
   const reservationResizePreviewRef = useRef<Record<string, string>>({});
   const fetchDataRef = useRef<() => Promise<void>>(async () => undefined);
+  const loadDailyKpisRef = useRef<(targetPropId?: number | null) => Promise<void>>(async () => undefined);
   const tapechartRequestVersionRef = useRef(0);
 
   // drag preview using setDragImage + cleanup element
@@ -928,6 +933,8 @@ function AppContent() {
     };
   }, [reservations, roomStatuses, rooms, calendarSearchQuery]);
 
+  const dailyKpiCards = useMemo(() => buildDailyKpiCards(dailyKpis), [dailyKpis]);
+
   const openReservationEditor = (reservation: any) => {
     const checkIn = normalizeHotelDate(reservation.check_in);
     const checkOut = normalizeHotelDate(reservation.check_out);
@@ -1073,8 +1080,27 @@ function AppContent() {
     } catch (err) {
       console.error('Error fetching tapechart', err);
     }
+    void loadDailyKpisRef.current();
   };
   fetchDataRef.current = fetchData;
+
+  const loadDailyKpis = async (targetPropId?: number | null) => {
+    const propId = targetPropId !== undefined ? targetPropId : propertyId;
+    if (propId === null || propId === undefined) {
+      setDailyKpis(null);
+      return;
+    }
+    const requestVersion = ++dailyKpiRequestVersionRef.current;
+    try {
+      const data = await fetchDailyKpisApi(propId, undefined, authFetch);
+      if (requestVersion !== dailyKpiRequestVersionRef.current) return;
+      setDailyKpis(data);
+    } catch (err) {
+      if (requestVersion !== dailyKpiRequestVersionRef.current) return;
+      console.error('Error fetching daily KPIs', err);
+    }
+  };
+  loadDailyKpisRef.current = loadDailyKpis;
 
   useEffect(() => {
     if (selectedMenu === 'Kalender' && propertyId !== null) void fetchDataRef.current();
@@ -1124,6 +1150,7 @@ function AppContent() {
       if (financeData?.status === 'OK') setFinanceSummary(financeData.data || null);
       if (employeesData?.status === 'OK') setEmployees(employeesData.data || []);
       if (payrollData?.status === 'OK') setPayroll(payrollData.data || []);
+      void loadDailyKpisRef.current(targetPropertyId);
     } catch (error) {
       console.error('Error fetching operations tasks', error);
     }
@@ -1211,6 +1238,7 @@ function AppContent() {
       setTransactionReservations([]);
       setTransactionError(null);
       setDailyOperations(null);
+      setDailyKpis(null);
       return;
     }
     if (selectedMenu === 'Transaksi') {
@@ -2026,6 +2054,7 @@ function AppContent() {
           void fetchDataRef.current();
           void fetchTransactionReservationsRef.current();
           void fetchDailyOperationsRef.current();
+          void loadDailyKpisRef.current();
         });
       }
       es.addEventListener('RoomStatusUpdated', (ev: any) => {
@@ -2034,6 +2063,7 @@ function AppContent() {
         void fetchOperationsData();
         void fetchTransactionReservationsRef.current();
         void fetchDailyOperationsRef.current();
+        void loadDailyKpisRef.current();
       });
       es.onmessage = (m) => {
         // generic messages
@@ -3293,14 +3323,17 @@ function AppContent() {
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-8">
-                <StatCard title="Total Reservasi" value={String(calendarSummary.totalReservations)} color="hotel-stat-card--primary" onClick={() => setSummaryDrawerType('total')} />
-                <StatCard title="Booked" value={String(calendarSummary.bookedReservations)} color="hotel-stat-card--booked" onClick={() => setSummaryDrawerType('booked')} />
-                <StatCard title="Check In" value={String(calendarSummary.checkedInReservations)} color="hotel-stat-card--checkedin" onClick={() => setSummaryDrawerType('checkin')} />
-                <StatCard title="Check Out" value={String(calendarSummary.checkedOutReservations)} color="hotel-stat-card--checkout" onClick={() => setSummaryDrawerType('checkout')} />
-                <StatCard title="Kamar Kotor" value={String(calendarSummary.dirtyRooms)} color="hotel-stat-card--dirty" onClick={() => setSummaryDrawerType('dirty')} />
-                <StatCard title="Vacant Clean" value={String(calendarSummary.readyRooms)} color="hotel-stat-card--ready" onClick={() => setSummaryDrawerType('ready')} />
-                <StatCard title="Checkout Check" value={String(pendingCheckoutInspectionsCount)} color="hotel-stat-card--inspection" onClick={() => setSummaryDrawerType('inspection')} badge={pendingCheckoutInspectionsCount} />
-                <StatCard title="Maintenance" value={String(maintenanceTasks.length)} color="hotel-stat-card--maintenance" onClick={() => setSummaryDrawerType('maintenance')} badge={maintenanceTasks.length} />
+                {dailyKpiCards.map((card) => (
+                  <StatCard
+                    key={card.key}
+                    title={card.title}
+                    value={card.value}
+                    secondary={card.secondary}
+                    color={card.color}
+                    onClick={() => setSummaryDrawerType(card.drawerType)}
+                    badge={card.key === 'checkoutCheck' ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
+                  />
+                ))}
               </div>
             </div>
 
@@ -4098,21 +4131,30 @@ function AppContent() {
       <OperationalSummaryDrawer
         isOpen={summaryDrawerType !== null}
         onClose={() => setSummaryDrawerType(null)}
-        title={summaryDrawerType === 'total' ? 'Total Reservasi' : summaryDrawerType === 'booked' ? 'Booked' : summaryDrawerType === 'checkin' ? 'Check In' : summaryDrawerType === 'checkout' ? 'Check Out' : summaryDrawerType === 'dirty' ? 'Kamar Kotor' : summaryDrawerType === 'ready' ? 'Vacant Clean' : summaryDrawerType === 'inspection' ? 'Pemeriksaan Checkout' : summaryDrawerType === 'maintenance' ? 'Maintenance' : ''}
+        title={
+          summaryDrawerType === 'occupancy' ? 'Okupansi Hari Ini' :
+          summaryDrawerType === 'booked' ? 'Booked Hari Ini' :
+          summaryDrawerType === 'checkin' ? 'Check-in Hari Ini' :
+          summaryDrawerType === 'checkout' ? 'Check-out Hari Ini' :
+          summaryDrawerType === 'dirty' ? 'Kamar Kotor' :
+          summaryDrawerType === 'ready' ? 'Vacant Clean' :
+          summaryDrawerType === 'inspection' ? 'Pemeriksaan Checkout' :
+          summaryDrawerType === 'maintenance' ? 'Maintenance' : ''
+        }
         count={
-          summaryDrawerType === 'total' ? calendarSummary.totalReservations :
-          summaryDrawerType === 'booked' ? calendarSummary.bookedReservations :
-          summaryDrawerType === 'checkin' ? calendarSummary.checkedInReservations :
-          summaryDrawerType === 'checkout' ? calendarSummary.checkedOutReservations :
-          summaryDrawerType === 'dirty' ? calendarSummary.dirtyRooms :
-          summaryDrawerType === 'ready' ? calendarSummary.readyRooms :
-          summaryDrawerType === 'inspection' ? pendingCheckoutInspectionsCount :
-          summaryDrawerType === 'maintenance' ? maintenanceTasks.length : 0
+          summaryDrawerType === 'occupancy' ? (dailyKpis?.occupancy.occupied_rooms ?? 0) :
+          summaryDrawerType === 'booked' ? (dailyKpis?.booked_today.rooms ?? 0) :
+          summaryDrawerType === 'checkin' ? (dailyKpis?.check_in_today.rooms ?? 0) :
+          summaryDrawerType === 'checkout' ? (dailyKpis?.check_out_today.rooms ?? 0) :
+          summaryDrawerType === 'dirty' ? (dailyKpis?.rooms.dirty ?? 0) :
+          summaryDrawerType === 'ready' ? (dailyKpis?.rooms.vacant_clean ?? 0) :
+          summaryDrawerType === 'inspection' ? (dailyKpis?.checkout_check.pending ?? 0) :
+          summaryDrawerType === 'maintenance' ? (dailyKpis?.rooms.maintenance_ooo_oos ?? 0) : 0
         }
         countLabel={
-          summaryDrawerType === 'inspection' ? 'menunggu' :
-          summaryDrawerType === 'maintenance' ? 'task' :
-          summaryDrawerType === 'dirty' || summaryDrawerType === 'ready' ? 'kamar' : 'reservasi'
+          summaryDrawerType === 'inspection' ? 'pending' :
+          summaryDrawerType === 'booked' ? 'kamar' :
+          'kamar'
         }
         badgeColor={
           summaryDrawerType === 'inspection' ? 'amber' :
@@ -4153,30 +4195,38 @@ function AppContent() {
             </div>
           )
         ) : summaryDrawerType === 'maintenance' ? (
-          maintenanceTasks.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-400">
-              Tidak ada task maintenance aktif.
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {maintenanceTasks.map((task: any) => (
-                <div key={task.id} className="p-3 rounded-lg bg-slate-50/70 hover:bg-slate-100/90 border border-slate-200/60 text-xs transition">
-                  <div className="flex items-center justify-between">
-                    <div className="font-bold text-slate-900">Kamar {task.room_number || '-'}</div>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${task.status === 'DONE' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : task.status === 'IN_PROGRESS' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-rose-50 text-rose-700 border-rose-200'}`}>
-                      {task.status}
+          (() => {
+            const blockedRooms = rooms.filter((room: any) => {
+              const raw = String(room.operational_status || room.status || '').toUpperCase();
+              return raw === 'OUT_OF_ORDER' || raw === 'OUT_OF_SERVICE';
+            });
+            return blockedRooms.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                Tidak ada kamar OOO/OOS aktif saat ini.
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {blockedRooms.map((room: any) => (
+                  <div key={room.id} className="p-2.5 rounded-lg bg-slate-50/70 border border-slate-200/60 text-xs flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-slate-900">{room.room_number}</span>
+                      <span className="text-slate-500 ml-2">{room.room_type_name || ''}</span>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-100 text-rose-800">
+                      {String(room.operational_status || room.status || '').toUpperCase()}
                     </span>
                   </div>
-                  <div className="text-slate-500 text-[11px] mt-1">{task.issue_type}</div>
-                </div>
-              ))}
-            </div>
-          )
+                ))}
+              </div>
+            );
+          })()
         ) : summaryDrawerType === 'dirty' || summaryDrawerType === 'ready' ? (
           (() => {
             const filteredRooms = rooms.filter((room: any) => {
-              const status = roomStatuses[String(room.id)];
-              return summaryDrawerType === 'dirty' ? status === 'Kotor' : status === 'Ready';
+              const raw = String(room.operational_status || room.status || '').toUpperCase();
+              return summaryDrawerType === 'dirty'
+                ? raw === 'VACANT_DIRTY' || raw === 'OCCUPIED_DIRTY'
+                : raw === 'VACANT_CLEAN';
             });
             return filteredRooms.length === 0 ? (
               <div className="py-8 text-center text-xs text-slate-400">
@@ -4200,9 +4250,23 @@ function AppContent() {
           })()
         ) : (
           (() => {
+            if (summaryDrawerType === 'occupancy' || summaryDrawerType === 'booked' || summaryDrawerType === 'checkin' || summaryDrawerType === 'checkout') {
+              const dateLabel = dailyKpis?.business_date || '';
+              const detail =
+                summaryDrawerType === 'occupancy'
+                  ? `${dailyKpis?.occupancy.occupied_rooms ?? 0} / ${dailyKpis?.occupancy.sellable_rooms ?? 0} kamar sellable`
+                  : summaryDrawerType === 'booked'
+                    ? `${dailyKpis?.booked_today.rooms ?? 0} kamar · ${dailyKpis?.booked_today.bookings ?? 0} booking`
+                    : `${summaryDrawerType === 'checkin' ? (dailyKpis?.check_in_today.rooms ?? 0) : (dailyKpis?.check_out_today.rooms ?? 0)} kamar`;
+              return (
+                <div className="py-6 text-center text-xs text-slate-500">
+                  <div className="font-semibold text-slate-800">{detail}</div>
+                  <div className="mt-1">Tanggal hotel {dateLabel || 'hari ini'} (bukan jendela kalender).</div>
+                </div>
+              );
+            }
             const filteredReservations = reservations.filter((r: any) => {
               const status = String(r?.status || '').toUpperCase();
-              if (summaryDrawerType === 'total') return true;
               if (summaryDrawerType === 'booked') return status !== 'CHECKED_IN' && status !== 'CHECKED_OUT' && status !== 'CANCELLED';
               if (summaryDrawerType === 'checkin') return status === 'CHECKED_IN';
               if (summaryDrawerType === 'checkout') return status === 'CHECKED_OUT';
@@ -5207,7 +5271,7 @@ function AppContent() {
 
 
 
-function StatCard({ title, value, color, onClick, isActive, badge }: any) {
+function StatCard({ title, value, secondary, color, onClick, isActive, badge }: any) {
   const isClickable = typeof onClick === 'function';
   return (
     <div
@@ -5216,7 +5280,7 @@ function StatCard({ title, value, color, onClick, isActive, badge }: any) {
       onKeyDown={isClickable ? (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
-      aria-label={isClickable ? `${title}: ${value}` : undefined}
+      aria-label={isClickable ? `${title}: ${value}${secondary ? ` ${secondary}` : ''}` : undefined}
     >
       <div className="flex items-center justify-between">
         <p className="hotel-stat-label">{title}</p>
@@ -5229,6 +5293,7 @@ function StatCard({ title, value, color, onClick, isActive, badge }: any) {
         )}
       </div>
       <p className="hotel-stat-value">{value}</p>
+      {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
     </div>
   );
 }

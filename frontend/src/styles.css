@@ -711,6 +711,14 @@ body {
   font-size: 18px;
 }
 
+.hotel-stat-secondary {
+  margin: 2px 0 0;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--oak-text-secondary);
+  font-weight: 600;
+}
+
 .hotel-stat-card--primary,
 .hotel-stat-card--booked,
 .hotel-stat-card--checkedin,

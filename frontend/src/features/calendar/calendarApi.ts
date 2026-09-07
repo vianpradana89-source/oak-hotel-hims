@@ -172,3 +172,51 @@ export function parseAvailabilityKey(key: string): {
   return { roomTypeId: null, roomTypeName: identity, checkIn, checkOut };
 }
 import type { TapechartResponse } from './calendarTypes';
+
+export interface DailyKpiResponse {
+  status: string;
+  data: DailyKpiData;
+}
+
+export interface DailyKpiData {
+  property_id: number;
+  business_date: string;
+  timezone: string;
+  occupancy: {
+    occupied_rooms: number;
+    sellable_rooms: number;
+    occupancy_pct: number | null;
+    ooo_oos_rooms: number;
+  };
+  booked_today: {
+    rooms: number;
+    bookings: number;
+  };
+  check_in_today: { rooms: number };
+  check_out_today: { rooms: number };
+  rooms: {
+    dirty: number;
+    vacant_clean: number;
+    maintenance_ooo_oos: number;
+  };
+  checkout_check: { pending: number };
+}
+
+export async function fetchDailyKpis(
+  propertyId: number,
+  date: string | undefined,
+  fetchImpl: FetchLike = fetch
+): Promise<DailyKpiData> {
+  const params = new URLSearchParams({ property_id: String(propertyId) });
+  if (date) params.set('date', date);
+  const result = await safeFetchJson<DailyKpiResponse>(
+    `/api/reports/daily-kpis?${params.toString()}`,
+    undefined,
+    'Ringkasan KPI hari ini belum dapat dimuat.',
+    fetchImpl
+  );
+  if (!result.ok || !result.data?.data) {
+    throw new Error(result.errorMessage || `Daily KPI request failed (${result.status})`);
+  }
+  return result.data.data;
+}
