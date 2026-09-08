@@ -1420,6 +1420,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         </td>
                         <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
                           <div>{t.supplier_name || t.party_name || '-'}</div>
+                          <div className="text-[10px] text-slate-400 font-normal">
+                            {t.department_name_snapshot || t.department_code || ''}
+                          </div>
                           {t.supplier_phone && (
                             <div className="text-[10px] text-slate-400 font-normal">{t.supplier_phone}</div>
                           )}

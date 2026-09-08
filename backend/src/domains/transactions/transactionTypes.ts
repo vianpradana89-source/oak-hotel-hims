@@ -126,6 +126,9 @@ export interface TransactionRow {
   category_code: string;
   category_name: string;
   department_code: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
+  department_name_snapshot?: string | null;
   description: string;
   amount: string | number; // BIGINT integer IDR (Subtotal or Gross)
   discount_amount: string | number;
@@ -258,6 +261,8 @@ export interface CreatePurchaseTransactionDto {
   receiving_status?: ReceivingStatus;
   received_at?: string | null;
   department_code?: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
   description?: string | null;
   lines: TransactionLineInput[];
   discount_amount?: number;

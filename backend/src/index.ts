@@ -90,6 +90,7 @@ import {
 import type { PriceQuoteResult } from './domains/pricing/pricingTypes';
 import { createStayChargesRouter } from './domains/stayCharges/stayChargesRouter';
 import { createTransactionsRouter } from './domains/transactions/transactionsRouter';
+import { createPurchaseSettingsRouter } from './domains/transactions/purchaseSettingsRouter';
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
@@ -7321,6 +7322,7 @@ app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
+app.use('/api/settings/purchases', createPurchaseSettingsRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/access-control', createAccessControlRouter(pool));

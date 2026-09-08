@@ -47,6 +47,10 @@ import { presentedListKey, queryPresentedPage } from './transactionListQuery';
 import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
 import { generatePurchaseDescription } from './purchaseSummary';
 export { generatePurchaseDescription } from './purchaseSummary';
+import {
+  resolvePurchaseCategoryBinding,
+  resolvePurchaseDepartmentBinding,
+} from './purchaseSettingsService';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -1104,7 +1108,14 @@ export async function createPurchaseTransaction(
   }
 
   const receivingStatus = resolvePurchaseReceivingStatus(dto.receiving_status);
-  const { categoryCode, categoryName } = await resolvePurchaseCategoryForCreate(pool, propertyId, dto);
+  const category = await resolvePurchaseCategoryBinding(pool, propertyId, dto);
+  const department = await resolvePurchaseDepartmentBinding(pool, propertyId, dto);
+  const categoryCode = category.code;
+  const categoryName = category.name;
+  const purchaseCategoryId = category.id;
+  const departmentId = department.id;
+  const departmentNameSnapshot = department.name;
+  const departmentCode = department.code;
 
   const client = await pool.connect();
   try {
@@ -1164,7 +1175,6 @@ export async function createPurchaseTransaction(
 
     const txDate = dto.transaction_date || getHotelDateToday();
     const txNumber = await generateTransactionNumber(client, propertyId, txDate);
-    const departmentCode = dto.department_code || 'GENERAL';
     const receivedAt = dto.received_at ? new Date(dto.received_at).toISOString() : (receivingStatus === 'DITERIMA' ? new Date().toISOString() : null);
 
     const transactionDiscount = Math.max(0, Math.round(Number(dto.transaction_discount || dto.discount_amount || 0)));
@@ -1179,7 +1189,8 @@ export async function createPurchaseTransaction(
         amount, discount_amount, service_amount, tax_amount, rounding_amount, net_amount,
         payment_status, payment_method, transaction_status,
         supplier_id, receiving_status, received_at, verification_status,
-        notes, metadata, created_by
+        notes, metadata, created_by,
+        purchase_category_id, department_id, department_name_snapshot
       ) VALUES (
         $1, $2, $3, CURRENT_TIMESTAMP,
         'PURCHASE', 'MANUAL_PURCHASE', $4, $5,
@@ -1187,7 +1198,8 @@ export async function createPurchaseTransaction(
         0, $10, 0, 0, $11, 0,
         'UNPAID', $12, 'POSTED',
         $13, $14, $15, 'UNVERIFIED',
-        $16, $17, $18
+        $16, $17, $18,
+        $19, $20, $21
       ) RETURNING *`,
       [
         propertyId,
@@ -1207,7 +1219,10 @@ export async function createPurchaseTransaction(
         receivedAt,
         dto.notes?.trim() || null,
         JSON.stringify({ workflow: 'PURCHASE_2D', actor: dto.actor_name || 'Staff' }),
-        dto.actor_name || dto.actor_user_id || 'Staff'
+        dto.actor_name || dto.actor_user_id || 'Staff',
+        purchaseCategoryId,
+        departmentId,
+        departmentNameSnapshot
       ]
     );
 

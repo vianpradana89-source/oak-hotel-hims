@@ -26,6 +26,7 @@ import {
 } from './transactionService';
 import { getBookingSalesDetail } from './bookingSalesDetailService';
 import { resolveAuthenticatedTransactionRead, resolveAuthenticatedTransactionWrite } from './transactionReadAuth';
+import { getPurchaseFormOptions } from './purchaseSettingsService';
 import {
   TransactionFilterParams,
   TransactionType,
@@ -258,6 +259,21 @@ export function createTransactionsRouter(pool: Pool): Router {
   });
 
   /**
+   * GET /api/transactions/purchases/form-options
+   * Active purchase categories + allowed HR departments for the create form.
+   */
+  router.get('/purchases/form-options', async (req: Request, res: Response) => {
+    try {
+      const scoped = await resolveAuthenticatedTransactionRead({ req, res, pool });
+      if (!scoped) return;
+      const data = await getPurchaseFormOptions(pool, scoped.propertyId);
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({ success: false, error: err.message });
+    }
+  });
+
+  /**
    * POST /api/transactions/purchases
    * Dedicated Pembelian (Purchase) creation with multi-line items.
    */
@@ -271,6 +287,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         transaction_date: req.body.transaction_date,
         category_code: req.body.category_code,
         category_name: req.body.category_name,
+        purchase_category_id: req.body.purchase_category_id,
         supplier_id: req.body.supplier_id,
         supplier_name: req.body.supplier_name,
         supplier_phone: req.body.supplier_phone,
@@ -281,6 +298,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         receiving_status: req.body.receiving_status,
         received_at: req.body.received_at,
         department_code: req.body.department_code,
+        department_id: req.body.department_id,
         description: req.body.description,
         lines: req.body.lines || [],
         discount_amount: req.body.discount_amount,

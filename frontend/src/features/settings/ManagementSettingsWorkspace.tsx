@@ -7,6 +7,7 @@ import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
 import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
+import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
@@ -17,6 +18,7 @@ export type SettingsCategoryKey =
   | 'features'
   | 'hr'
   | 'front_office'
+  | 'transactions'
   | 'pos'
   | 'finance'
   | 'purchasing'
@@ -245,6 +247,19 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
       icon: ({ className }) => (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+      )
+    },
+    {
+      key: 'transactions',
+      label: 'Transaksi',
+      description: 'Kategori pembelian operasional dan departemen alokasi HR untuk transaksi pembelian.',
+      status: 'ACTIVE',
+      badgeLabel: 'Pembelian Operasional',
+      isImplemented: true,
+      icon: ({ className }) => (
+        <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
         </svg>
       )
     },
@@ -756,12 +771,16 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
           )}
 
+          {activeCategory === 'transactions' && (
+            <PurchaseOperationalSettingsTab propertyId={propertyId} />
+          )}
+
           {activeCategory === 'users_permissions' && (
             <RolePermissionsTab propertyId={propertyId} />
           )}
 
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'users_permissions'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'users_permissions'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

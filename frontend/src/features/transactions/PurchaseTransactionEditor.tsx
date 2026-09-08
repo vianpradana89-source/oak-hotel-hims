@@ -1,16 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import type {
   Supplier,
-  CategoryOption,
-  DepartmentOption,
   ReceivingStatus
 } from './transactionDomainTypes';
 import {
-  fetchCategoriesApi,
+  fetchPurchaseFormOptionsApi,
   createPurchaseTransactionApi,
   uploadTransactionAttachmentApi
 } from './transactionClient';
 import { SupplierSelectorModal } from './SupplierSelectorModal';
+import { canSubmitPurchaseCreate, PURCHASE_FORM_OPTIONS_ERROR } from './purchaseEditorGuard';
 
 interface PurchaseLineItem {
   id: string;
@@ -35,13 +34,13 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
   onBack,
   onSuccess
 }) => {
-  const [categories, setCategories] = useState<CategoryOption[]>([]);
-  const [departments, setDepartments] = useState<DepartmentOption[]>([]);
+  const [categories, setCategories] = useState<Array<{ id: number; code: string; name: string }>>([]);
+  const [departments, setDepartments] = useState<Array<{ id: number; code: string; name: string }>>([]);
 
   // Form State
   const [txDate, setTxDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
-  const [categoryCode, setCategoryCode] = useState<string>('PURCHASE_FOOD');
-  const [departmentCode, setDepartmentCode] = useState<string>('FNB');
+  const [categoryId, setCategoryId] = useState<number | ''>('');
+  const [departmentId, setDepartmentId] = useState<number | ''>('');
   const [sourceRef, setSourceRef] = useState<string>(''); // No Faktur / Nota
   const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
   const [showSupplierModal, setShowSupplierModal] = useState<boolean>(false);
@@ -77,33 +76,51 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
   // Status
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [optionsLoaded, setOptionsLoaded] = useState(false);
+  const [optionsFailed, setOptionsFailed] = useState(false);
+  const [optionsLoading, setOptionsLoading] = useState(false);
 
   useEffect(() => {
     loadCategories();
   }, [propertyId]);
 
   const loadCategories = async () => {
+    setOptionsLoading(true);
+    setOptionsFailed(false);
     try {
-      const data = await fetchCategoriesApi(propertyId);
-      const purchaseCats = data.categories.filter((c) => c.type === 'PURCHASE' && c.is_active !== false);
-      setCategories(purchaseCats);
+      const data = await fetchPurchaseFormOptionsApi(propertyId);
+      setCategories(data.categories);
       setDepartments(data.departments);
-      if (purchaseCats.length > 0) {
-        setCategoryCode(purchaseCats[0].code);
-        setDepartmentCode(purchaseCats[0].default_department || 'FNB');
+      setOptionsLoaded(true);
+      if (data.categories.length > 0) {
+        setCategoryId(data.categories[0].id);
+      } else {
+        setCategoryId('');
       }
-    } catch (err: any) {
-      console.error('Failed to load categories', err);
+      if (data.departments.length > 0) {
+        setDepartmentId(data.departments[0].id);
+      } else {
+        setDepartmentId('');
+      }
+    } catch {
+      setCategories([]);
+      setDepartments([]);
+      setCategoryId('');
+      setDepartmentId('');
+      setOptionsLoaded(false);
+      setOptionsFailed(true);
+      setError(PURCHASE_FORM_OPTIONS_ERROR);
+    } finally {
+      setOptionsLoading(false);
     }
   };
 
-  const handleCategoryChange = (code: string) => {
-    setCategoryCode(code);
-    const cat = categories.find((c) => c.code === code);
-    if (cat && cat.default_department) {
-      setDepartmentCode(cat.default_department);
-    }
-  };
+  const canSubmit = canSubmitPurchaseCreate({
+    optionsFailed,
+    optionsLoaded,
+    categories,
+    categoryId
+  });
 
   // Line item manipulation
   const updateLine = (id: string, field: keyof PurchaseLineItem, val: any) => {
@@ -153,6 +170,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canSubmit) {
+      setError(optionsFailed ? PURCHASE_FORM_OPTIONS_ERROR : 'Kategori pembelian wajib dipilih');
+      return;
+    }
     if (!selectedSupplier) {
       setError('Supplier / Vendor wajib dipilih');
       return;
@@ -168,14 +189,14 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
     setError(null);
 
     try {
-      const cat = categories.find((c) => c.code === categoryCode);
+      const dept = departments.find((d) => d.id === departmentId);
 
       const created = await createPurchaseTransactionApi({
         property_id: propertyId,
         transaction_date: txDate,
-        category_code: categoryCode,
-        category_name: cat?.name || categoryCode,
-        department_code: departmentCode,
+        purchase_category_id: categoryId || undefined,
+        department_id: departmentId || undefined,
+        department_code: dept?.code,
         supplier_id: selectedSupplier.id,
         source_reference: sourceRef.trim() || null,
         receiving_status: receivingStatus,
@@ -259,10 +280,20 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
           <svg className="w-5 h-5 flex-shrink-0 text-rose-600 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
           </svg>
-          <div>
-            <div className="font-bold">Gagal Menyimpan Transaksi</div>
+          <div className="flex-1">
+            <div className="font-bold">{optionsFailed ? 'Gagal Memuat Form Pembelian' : 'Gagal Menyimpan Transaksi'}</div>
             <div>{error}</div>
           </div>
+          {optionsFailed && (
+            <button
+              type="button"
+              onClick={() => { setError(null); loadCategories(); }}
+              disabled={optionsLoading}
+              className="px-3 py-1.5 text-xs font-bold bg-white border border-rose-300 rounded-lg text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+            >
+              {optionsLoading ? 'Memuat…' : 'Muat ulang'}
+            </button>
+          )}
         </div>
       )}
 
@@ -340,12 +371,15 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 Kategori Pembelian <span className="text-rose-500">*</span>
               </label>
               <select
-                value={categoryCode}
-                onChange={(e) => handleCategoryChange(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
+                value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value ? Number(e.target.value) : '')}
+                disabled={optionsFailed || optionsLoading || categories.length === 0}
+                required
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700 disabled:opacity-60"
               >
+                {categories.length === 0 && <option value="">Pilih kategori</option>}
                 {categories.map((c) => (
-                  <option key={c.code} value={c.code}>
+                  <option key={c.id} value={c.id}>
                     {c.name}
                   </option>
                 ))}
@@ -355,12 +389,13 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Departemen Alokasi</label>
               <select
-                value={departmentCode}
-                onChange={(e) => setDepartmentCode(e.target.value)}
+                value={departmentId}
+                onChange={(e) => setDepartmentId(e.target.value ? Number(e.target.value) : '')}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
               >
+                {departments.length === 0 && <option value="">Tidak ada departemen aktif</option>}
                 {departments.map((d) => (
-                  <option key={d.code} value={d.code}>
+                  <option key={d.id} value={d.id}>
                     {d.name}
                   </option>
                 ))}
@@ -698,7 +733,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
           </button>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || !canSubmit}
             className="px-6 py-2.5 bg-emerald-800 hover:bg-emerald-900 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

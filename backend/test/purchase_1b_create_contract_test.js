@@ -303,7 +303,7 @@ async function run() {
         supplier_id: supplierA.id,
         lines: [wrongTypeLine],
       }),
-      /bukan kategori pembelian/,
+      /bukan kategori pembelian|tidak valid/,
       '1B1-C. SALE category rejected'
     );
     await expectReject(
@@ -313,7 +313,7 @@ async function run() {
         supplier_id: supplierA.id,
         lines: [wrongTypeLine],
       }),
-      /bukan kategori pembelian/,
+      /bukan kategori pembelian|tidak valid/,
       '1B1-D. EXPENSE category rejected'
     );
     await expectReject(
@@ -323,7 +323,7 @@ async function run() {
         supplier_id: supplierA.id,
         lines: [wrongTypeLine],
       }),
-      /bukan kategori pembelian/,
+      /bukan kategori pembelian|tidak valid/,
       '1B1-E. INCOME category rejected'
     );
     await expectReject(

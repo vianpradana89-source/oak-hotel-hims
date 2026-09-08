@@ -79,6 +79,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/accounting/, resources: ['Laporan'] },
 
   { pattern: /^\/api\/access-control/, resources: ['Pengaturan'] },
+  { pattern: /^\/api\/settings\/purchases\/categories\/[^/]+\/(activate|deactivate)$/, resources: ['Pengaturan'], action: 'edit' },
   { pattern: /^\/api\/settings/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/front-office/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/properties\/[^/]+\/(branding|features|quick-booking-rules|day-use)/, resources: ['Pengaturan'], methods: ['POST', 'PUT', 'PATCH', 'DELETE'] },

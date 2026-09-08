@@ -102,7 +102,10 @@ export interface TransactionRecord {
   phone?: string | null;
   category_code: string;
   category_name: string;
-  department_code: DepartmentCode;
+  department_code: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
+  department_name_snapshot?: string | null;
   description: string;
   amount: number;
   discount_amount: number;

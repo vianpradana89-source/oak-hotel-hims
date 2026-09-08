@@ -4807,6 +4807,85 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // PURCHASE-1C: property-scoped purchase categories + HR department allocation.
+    // Additive only. Legacy category_code / category_name / department_code remain.
+    // ------------------------------------------------------------------
+    const purchase1cCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'purchase_1c_category_department_v1'`
+    );
+    if ((purchase1cCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE transaction_custom_categories
+          ADD COLUMN IF NOT EXISTS description TEXT,
+          ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS is_system_default BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS created_by VARCHAR(100),
+          ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100);
+
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS purchase_category_id BIGINT REFERENCES transaction_custom_categories(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES hr_departments(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS department_name_snapshot VARCHAR(100);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_purchase_category
+          ON transactions (property_id, purchase_category_id);
+        CREATE INDEX IF NOT EXISTS idx_transactions_department_id
+          ON transactions (property_id, department_id);
+
+        CREATE TABLE IF NOT EXISTS property_purchase_allowed_departments (
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          department_id INTEGER NOT NULL REFERENCES hr_departments(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (property_id, department_id)
+        );
+
+        INSERT INTO transaction_custom_categories (
+          property_id, code, name, transaction_type, department_code,
+          is_active, is_system_default, sort_order, created_at, updated_at
+        )
+        SELECT
+          p.id,
+          seed.code,
+          seed.name,
+          'PURCHASE',
+          seed.department_code,
+          TRUE,
+          TRUE,
+          seed.sort_order,
+          NOW(),
+          NOW()
+        FROM properties p
+        CROSS JOIN (
+          VALUES
+            ('SUPPLIES_PURCHASE', 'Pembelian Perlengkapan Kantor / FO', 'FRONT_OFFICE', 10),
+            ('AMENITIES_PURCHASE', 'Pembelian Amenities & Perlengkapan Kamar', 'HOUSEKEEPING', 20),
+            ('LINEN_PURCHASE', 'Pembelian Linen & Bedding', 'HOUSEKEEPING', 30),
+            ('FNB_INGREDIENTS_PURCHASE', 'Pembelian Bahan Baku Makanan & Minuman', 'FNB', 40),
+            ('MAINTENANCE_PARTS_PURCHASE', 'Pembelian Suku Cadang & Alat Perbaikan', 'MAINTENANCE', 50),
+            ('OUTSOURCED_SERVICES', 'Jasa Pihak Ketiga / Outsourcing', 'ADMIN', 60),
+            ('OTHER_PURCHASE', 'Pembelian Barang Lainnya', 'GENERAL', 70)
+        ) AS seed(code, name, department_code, sort_order)
+        ON CONFLICT (property_id, code) DO UPDATE
+          SET is_system_default = TRUE,
+              updated_at = COALESCE(transaction_custom_categories.updated_at, NOW());
+
+        UPDATE transactions t
+        SET purchase_category_id = c.id
+        FROM transaction_custom_categories c
+        WHERE t.transaction_type = 'PURCHASE'
+          AND t.purchase_category_id IS NULL
+          AND c.property_id = t.property_id
+          AND c.code = t.category_code
+          AND c.transaction_type = 'PURCHASE';
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('purchase_1c_category_department_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

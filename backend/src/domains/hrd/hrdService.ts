@@ -2707,6 +2707,17 @@ export async function hardDeleteDepartment(
     if (err.statusCode === 409) throw err;
   }
 
+  const purchaseCheck = await client.query(
+    `SELECT id FROM transactions WHERE department_id = $1 LIMIT 1`,
+    [departmentId]
+  );
+  if (purchaseCheck.rows.length > 0) {
+    throw Object.assign(
+      new Error('Departemen tidak dapat dihapus permanen karena masih dipakai riwayat transaksi pembelian. Nonaktifkan departemen alih-alih menghapusnya.'),
+      { statusCode: 409, code: 'DEPARTMENT_HAS_PURCHASES' }
+    );
+  }
+
   // Clean 1:1 department work pattern if present
   try {
     await client.query('DELETE FROM department_work_patterns WHERE department_id = $1', [departmentId]);

@@ -254,11 +254,21 @@ export async function toggleCustomCategoryApi(
 }
 
 // Transaction-2D Dedicated Creation APIs
+export async function fetchPurchaseFormOptionsApi(propertyId: number): Promise<{
+  categories: Array<{ id: number; code: string; name: string }>;
+  departments: Array<{ id: number; code: string; name: string }>;
+  empty_allow_list_means: 'ALL_ACTIVE';
+}> {
+  return await fetchJson(`${API_BASE}/purchases/form-options?property_id=${propertyId}`);
+}
+
 export async function createPurchaseTransactionApi(data: {
   property_id: number;
   transaction_date?: string;
   category_code?: string;
   category_name?: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
   department_code?: string;
   supplier_id?: number | string | null;
   supplier_name?: string | null;
@@ -489,5 +499,96 @@ export async function softDeleteTransactionApi(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
+  });
+}
+
+const PURCHASE_SETTINGS_BASE = '/api/settings/purchases';
+
+export interface PurchaseSettingsCategory {
+  id: number;
+  property_id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+  is_system_default: boolean;
+  sort_order: number;
+  referenced: boolean;
+}
+
+export interface PurchaseSettingsDepartment {
+  id: number;
+  property_id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  allowed: boolean;
+}
+
+export async function fetchPurchaseSettingsCategoriesApi(propertyId: number): Promise<PurchaseSettingsCategory[]> {
+  return await fetchJson<PurchaseSettingsCategory[]>(`${PURCHASE_SETTINGS_BASE}/categories?property_id=${propertyId}`);
+}
+
+export async function createPurchaseSettingsCategoryApi(data: {
+  property_id: number;
+  name: string;
+  description?: string | null;
+  sort_order?: number;
+}): Promise<PurchaseSettingsCategory> {
+  return await fetchJson<PurchaseSettingsCategory>(`${PURCHASE_SETTINGS_BASE}/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updatePurchaseSettingsCategoryApi(
+  id: number,
+  propertyId: number,
+  data: { name?: string; description?: string | null; sort_order?: number }
+): Promise<PurchaseSettingsCategory> {
+  return await fetchJson<PurchaseSettingsCategory>(`${PURCHASE_SETTINGS_BASE}/categories/${id}?property_id=${propertyId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...data, property_id: propertyId }),
+  });
+}
+
+export async function setPurchaseSettingsCategoryActiveApi(
+  id: number,
+  propertyId: number,
+  active: boolean
+): Promise<PurchaseSettingsCategory> {
+  const action = active ? 'activate' : 'deactivate';
+  return await fetchJson<PurchaseSettingsCategory>(`${PURCHASE_SETTINGS_BASE}/categories/${id}/${action}?property_id=${propertyId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ property_id: propertyId }),
+  });
+}
+
+export async function deletePurchaseSettingsCategoryApi(id: number, propertyId: number): Promise<{ success: true }> {
+  return await fetchJson<{ success: true }>(`${PURCHASE_SETTINGS_BASE}/categories/${id}?property_id=${propertyId}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ property_id: propertyId }),
+  });
+}
+
+export async function fetchPurchaseAllowedDepartmentsApi(propertyId: number): Promise<{
+  empty_allow_list_means: 'ALL_ACTIVE';
+  departments: PurchaseSettingsDepartment[];
+}> {
+  return await fetchJson(`${PURCHASE_SETTINGS_BASE}/allowed-departments?property_id=${propertyId}`);
+}
+
+export async function savePurchaseAllowedDepartmentsApi(
+  propertyId: number,
+  departmentIds: number[]
+): Promise<{ empty_allow_list_means: 'ALL_ACTIVE'; departments: PurchaseSettingsDepartment[] }> {
+  return await fetchJson(`${PURCHASE_SETTINGS_BASE}/allowed-departments`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ property_id: propertyId, department_ids: departmentIds }),
   });
 }
