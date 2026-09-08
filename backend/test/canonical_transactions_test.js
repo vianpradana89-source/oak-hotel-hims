@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import pkg from '../dist/index.js';
 import schemaPkg from '../dist/db/schema_v3.js';
 import { projectFolioEntryToTransaction, createManualTransaction, voidTransaction, getTransactions, getTransactionById } from '../dist/domains/transactions/transactionService.js';
+
+const require = createRequire(import.meta.url);
+const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js');
 
 const { app, pool } = pkg;
 const { initializeDatabase } = schemaPkg;
@@ -11,6 +15,9 @@ async function runTests() {
   console.log('=== RUNNING CANONICAL TRANSACTIONS INTEGRATION SUITE ===');
 
   await initializeDatabase(pool);
+
+  const saToken = await getPlatformSuperAdminToken(pool, 1);
+  const authJson = { Authorization: `Bearer ${saToken}` };
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
@@ -280,12 +287,12 @@ async function runTests() {
     }
     assert.ok(crossPropProjFailed, 'Cross-property folio projection must be strictly rejected');
 
-    const wrongPropRes = await fetch(`${baseUrl}/api/transactions/${tx1.id}?property_id=99999`);
+    const wrongPropRes = await fetch(`${baseUrl}/api/transactions/${tx1.id}?property_id=99999`, { headers: authJson });
     assert.equal(wrongPropRes.status, 404, 'Mismatched property query must return 404');
 
     // TEST 12: REST API Query & Summary Calculation
     console.log('Test 12: REST API GET /api/transactions');
-    const apiRes = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&reservation_id=${resId}`);
+    const apiRes = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&reservation_id=${resId}`, { headers: authJson });
     const apiJson = await apiRes.json();
     assert.equal(apiRes.status, 200, 'API response must be 200');
     assert.ok(apiJson.success, 'API success flag must be true');
@@ -297,7 +304,7 @@ async function runTests() {
 
     // TEST 13: Summary aggregation is independent of pagination limit
     console.log('Test 13: Summary aggregation independent of pagination');
-    const apiResLimit1 = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&limit=1`);
+    const apiResLimit1 = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&limit=1`, { headers: authJson });
     const apiJsonLimit1 = await apiResLimit1.json();
     assert.equal(apiResLimit1.status, 200);
     assert.equal(apiJsonLimit1.data.transactions.length, 1, 'Page length should be 1');

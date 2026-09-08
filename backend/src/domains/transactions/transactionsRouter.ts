@@ -24,10 +24,8 @@ import {
   TRANSACTION_CATEGORIES,
   DEPARTMENTS
 } from './transactionService';
-import {
-  getBookingSalesDetail,
-  resolveSalesReadPropertyScope
-} from './bookingSalesDetailService';
+import { getBookingSalesDetail } from './bookingSalesDetailService';
+import { resolveAuthenticatedTransactionRead } from './transactionReadAuth';
 import {
   TransactionFilterParams,
   TransactionType,
@@ -173,13 +171,11 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.get('/', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.query.property_id || (req as any).propertyId || 1);
-      if (!propertyId || isNaN(propertyId)) {
-        return res.status(400).json({ success: false, error: 'property_id is required' });
-      }
+      const scoped = await resolveAuthenticatedTransactionRead({ req, res, pool });
+      if (!scoped) return;
 
       const params: TransactionFilterParams = {
-        property_id: propertyId,
+        property_id: scoped.propertyId,
         transaction_type: req.query.transaction_type ? (String(req.query.transaction_type).toUpperCase() as TransactionType) : undefined,
         source_type: req.query.source_type ? String(req.query.source_type) : undefined,
         category_code: req.query.category_code ? String(req.query.category_code) : undefined,
@@ -220,35 +216,11 @@ export function createTransactionsRouter(pool: Pool): Router {
    * Read-only lifetime booking-level Penjualan detail.
    */
   router.get('/sales/bookings/:bookingId', async (req: Request, res: Response) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        code: 'UNAUTHORIZED',
-        error: 'Akses ditolak. Silakan login terlebih dahulu.'
-      });
-    }
-
-    let user: { id: number; property_id: number };
     try {
-      user = verifyToken(authHeader.split(' ')[1]);
-    } catch {
-      return res.status(401).json({
-        success: false,
-        code: 'INVALID_TOKEN',
-        error: 'Sesi login telah kedaluwarsa atau token tidak valid. Silakan login kembali.'
-      });
-    }
+      const scoped = await resolveAuthenticatedTransactionRead({ req, res, pool });
+      if (!scoped) return;
 
-    try {
-      const { propertyId } = await resolveSalesReadPropertyScope({
-        pool,
-        userId: Number(user.id),
-        tokenPropertyId: user.property_id,
-        requestedPropertyId: req.query.property_id
-      });
-
-      const detail = await getBookingSalesDetail(pool, propertyId, String(req.params.bookingId || ''));
+      const detail = await getBookingSalesDetail(pool, scoped.propertyId, String(req.params.bookingId || ''));
       return res.json({
         success: true,
         data: detail
@@ -268,10 +240,10 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.get('/:id', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.query.property_id || (req as any).propertyId || 1);
-      const id = req.params.id;
+      const scoped = await resolveAuthenticatedTransactionRead({ req, res, pool });
+      if (!scoped) return;
 
-      const tx = await getTransactionById(pool, propertyId, id);
+      const tx = await getTransactionById(pool, scoped.propertyId, req.params.id);
       return res.json({
         success: true,
         data: tx
@@ -279,6 +251,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 500).json({
         success: false,
+        code: err.code || 'TRANSACTION_NOT_FOUND',
         error: err.message
       });
     }

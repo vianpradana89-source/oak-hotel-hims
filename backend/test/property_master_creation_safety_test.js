@@ -5,6 +5,7 @@ const { Pool } = require('pg');
 require('dotenv').config({ path: 'e:/oak-hotel-hims/backend/.env' });
 
 const { initializeDatabase } = require('../dist/db/schema_v3');
+const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth');
 const { createPropertiesRouter } = require('../dist/domains/properties/propertiesRouter');
 const { createTransactionsRouter } = require('../dist/domains/transactions/transactionsRouter');
 
@@ -103,7 +104,10 @@ async function runTests() {
     // Test 6: Transaction workspace fetch -> property count unchanged
     // -------------------------------------------------------------
     console.log('Test 6: Transaction workspace load -> property count unchanged');
-    const txRes = await fetch(`${baseUrl}/api/transactions?property_id=1&type=SALE`);
+    const saToken = await getPlatformSuperAdminToken(pool, 1);
+    const txRes = await fetch(`${baseUrl}/api/transactions?property_id=1&type=SALE`, {
+      headers: { Authorization: `Bearer ${saToken}` }
+    });
     assert.strictEqual(txRes.status, 200);
     const countAfterTx = (await pool.query('SELECT COUNT(*)::int AS count FROM properties')).rows[0].count;
     assert.strictEqual(countAfterTx, initialCount);

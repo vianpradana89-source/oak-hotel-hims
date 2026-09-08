@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import pkg from '../dist/index.js';
 import schemaPkg from '../dist/db/schema_v3.js';
 import {
@@ -12,11 +13,16 @@ import {
 
 const { app, pool } = pkg;
 const { initializeDatabase } = schemaPkg;
+const require = createRequire(import.meta.url);
+const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js');
 
 async function runTests() {
   console.log('=== RUNNING CANONICAL POS & ROOM SALES PROJECTION INTEGRATION SUITE ===');
 
   await initializeDatabase(pool);
+
+  const saToken = await getPlatformSuperAdminToken(pool, 1);
+  const authJson = { Authorization: `Bearer ${saToken}`, 'Content-Type': 'application/json' };
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
@@ -147,7 +153,7 @@ async function runTests() {
     // 2x Nasi Goreng (90,000) + 1x Jus Alpukat (25,000) = 115,000 IDR
     const createPosRes = await fetch(`${baseUrl}/api/pos/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         reservation_id: reservationId,
@@ -189,7 +195,7 @@ async function runTests() {
     // Calling status update with PAID again
     const patchPosRes = await fetch(`${baseUrl}/api/pos/orders/${posOrderId}/status`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         status: 'PAID'
@@ -219,7 +225,7 @@ async function runTests() {
     // Create another POS order to test voiding
     const createVoidOrderRes = await fetch(`${baseUrl}/api/pos/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         table_number: 'Meja 10',
@@ -235,7 +241,7 @@ async function runTests() {
     // Void the order
     const patchVoidRes = await fetch(`${baseUrl}/api/pos/orders/${voidOrderId}/status`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         status: 'VOIDED',
@@ -271,7 +277,9 @@ async function runTests() {
 
     const salesListA = await getTransactions(pool, { property_id: propAId, transaction_type: 'SALE' });
     const activePostedSales = salesListA.transactions.filter((t) => t.transaction_status === 'POSTED');
-    assert.equal(activePostedSales.length, 2, 'Must have exactly 2 active POSTED sales (1 Room, 1 POS)');
+    assert.equal(activePostedSales.length, 1, 'Room + linked POS present as one BID group');
+    assert.ok(activePostedSales[0].booking_bid_group, 'linked POS joins booking BID context');
+    assert.equal(Number(activePostedSales[0].booking_bid_group.net), 1615000, 'grouped net is room + live POS');
 
     // ──────────────────────────────────────────────────────────────────────────
     // TEST H: Property isolation
@@ -284,6 +292,9 @@ async function runTests() {
     const salesListB = await getTransactions(pool, { property_id: propBId });
     assert.equal(salesListB.transactions.length, 0, 'Property B must have 0 transactions');
 
+    const beforeMismatchA = await getTransactions(pool, { property_id: propAId, transaction_type: 'SALE' });
+    const beforeMismatchIdsA = beforeMismatchA.transactions.map((row) => Number(row.id)).sort((a, b) => a - b);
+
     // Attempting cross-property POS projection throws 403
     await assert.rejects(
       async () => {
@@ -292,6 +303,11 @@ async function runTests() {
       /bukan milik properti/,
       'Cross-property POS order projection must be rejected with 403'
     );
+    const afterMismatchB = await getTransactions(pool, { property_id: propBId });
+    assert.equal(afterMismatchB.transactions.length, 0, 'rejected mismatch must not write a transaction to property B');
+    const afterMismatchA = await getTransactions(pool, { property_id: propAId, transaction_type: 'SALE' });
+    const afterMismatchIdsA = afterMismatchA.transactions.map((row) => Number(row.id)).sort((a, b) => a - b);
+    assert.deepEqual(afterMismatchIdsA, beforeMismatchIdsA, 'rejected mismatch must not write another property A SALE');
 
     // ──────────────────────────────────────────────────────────────────────────
     // TEST I: Manual POS / Room sales category rejected (allowManual: false)
@@ -331,7 +347,7 @@ async function runTests() {
     console.log('Test J: BIGINT IDR preserved');
     const largePosRes = await fetch(`${baseUrl}/api/pos/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         table_number: 'VIP Ballroom',

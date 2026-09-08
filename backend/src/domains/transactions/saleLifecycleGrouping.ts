@@ -254,6 +254,54 @@ export function lifecycleStatusLabel(sheet: OperationalSheet): string {
   return 'Proses';
 }
 
+export function hotelDateOf(value: unknown): string {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Jakarta',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(value);
+    const year = parts.find((part) => part.type === 'year')?.value;
+    const month = parts.find((part) => part.type === 'month')?.value;
+    const day = parts.find((part) => part.type === 'day')?.value;
+    return year && month && day ? `${year}-${month}-${day}` : '';
+  }
+  const raw = String(value);
+  const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  return iso ? iso[1] : raw.slice(0, 10);
+}
+
+/** Period inclusion uses the presented primary date only, not superseded members. */
+export function isLifecyclePrimaryInPeriod(
+  primaryDate: unknown,
+  startDate?: string | null,
+  endDate?: string | null
+): boolean {
+  if (!startDate && !endDate) return true;
+  const date = hotelDateOf(primaryDate);
+  if (!date) return false;
+  if (startDate && date < String(startDate)) return false;
+  if (endDate && date > String(endDate)) return false;
+  return true;
+}
+
+export function presentedTimeKey(value: unknown): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  return String(value || '');
+}
+
+export function comparePresentedListRows(a: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }, b: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }): number {
+  const dateCmp = hotelDateOf(b.transaction_date).localeCompare(hotelDateOf(a.transaction_date));
+  if (dateCmp !== 0) return dateCmp;
+  const timeCmp = presentedTimeKey(b.transaction_time).localeCompare(presentedTimeKey(a.transaction_time));
+  if (timeCmp !== 0) return timeCmp;
+  return Number(b.id) - Number(a.id);
+}
+
 export function presentLifecyclePrimary<T extends LifecycleMemberInput>(group: SaleLifecycleGroup<T>): T & {
   operational_sheet: OperationalSheet;
   effective_net_amount: number;

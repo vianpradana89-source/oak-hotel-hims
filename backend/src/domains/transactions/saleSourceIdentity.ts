@@ -102,3 +102,95 @@ export function isChargeToRoomDoubleRevenue(params: {
   });
   return hasEconomicSale && hasFolioSale;
 }
+
+export function isPosSourceType(sourceType: unknown): boolean {
+  return POS_SOURCES.has(normalizeSourceType(sourceType));
+}
+
+export function isPosEconomicSourceType(sourceType: unknown): boolean {
+  const source = normalizeSourceType(sourceType);
+  return source === 'POS' || source === 'POS_ORDER';
+}
+
+/**
+ * Trustworthy POS order identity only.
+ * Does not infer from amount, booking, reservation, guest, date, or folio id.
+ */
+export function explicitPosOrderIdFromFolioEntry(entry: {
+  id?: unknown;
+  pos_order_id?: unknown;
+  source_type?: unknown;
+  source_id?: unknown;
+} | null | undefined): string | null {
+  if (!entry) return null;
+  const folioId = String(entry.id ?? '').trim();
+  const directOrderId = String(entry.pos_order_id ?? '').trim();
+  if (directOrderId && directOrderId !== folioId) return directOrderId;
+  if (isPosSourceType(entry.source_type) || isPosEconomicSourceType(entry.source_type)) {
+    const sourceId = String(entry.source_id ?? '').trim();
+    if (sourceId && sourceId !== folioId) return sourceId;
+  }
+  return null;
+}
+
+export function posEconomicSourceId(params: {
+  posOrderId?: unknown;
+  sourceId?: unknown;
+  folioEntryId?: unknown;
+}): string | null {
+  return explicitPosOrderIdFromFolioEntry({
+    id: params.folioEntryId,
+    pos_order_id: params.posOrderId,
+    source_type: params.posOrderId ? 'POS' : undefined,
+    source_id: params.sourceId,
+  });
+}
+
+/**
+ * Future Charge-to-Room write guard: folio id is linkage only.
+ * If a POS economic SALE already exists, do not insert a second SALE keyed by folio_entry_id.
+ */
+export function shouldSkipFolioKeyedPosSale(params: {
+  propertyId: number;
+  chargeSourceType: unknown;
+  folioEntryId: unknown;
+  posOrderId?: unknown;
+  existingSales: Array<{ property_id?: unknown; source_type?: unknown; source_id?: unknown }>;
+}): { skip: boolean; reason: string } {
+  if (!isPosSourceType(params.chargeSourceType)) {
+    return { skip: false, reason: 'not_pos_source' };
+  }
+  const folioId = String(params.folioEntryId || '').trim();
+  const economicId = explicitPosOrderIdFromFolioEntry({
+    id: params.folioEntryId,
+    pos_order_id: params.posOrderId,
+    source_type: params.chargeSourceType,
+    source_id: params.posOrderId,
+  });
+  if (!economicId || economicId === folioId) {
+    return { skip: false, reason: 'no_distinct_pos_economic_id' };
+  }
+  const hasEconomic = params.existingSales.some((row) => (
+    Number(row.property_id) === Number(params.propertyId)
+    && isPosEconomicSourceType(row.source_type)
+    && String(row.source_id || '').trim() === economicId
+  ));
+  if (!hasEconomic) return { skip: false, reason: 'no_existing_pos_sale' };
+  return { skip: true, reason: 'pos_economic_sale_already_exists' };
+}
+
+export function isStandalonePosSale(row: { source_type?: unknown; booking_bid?: unknown }): boolean {
+  return isPosSourceType(row.source_type) && !String(row.booking_bid || '').trim();
+}
+
+export function linkedPosJoinsBooking(row: { source_type?: unknown; booking_bid?: unknown }): boolean {
+  return isPosSourceType(row.source_type) && Boolean(String(row.booking_bid || '').trim());
+}
+
+export function paidAtPosHasNoFolioOutstanding(params: {
+  paidAtPos: boolean;
+  folioRemaining: number;
+}): boolean {
+  if (!params.paidAtPos) return true;
+  return Number(params.folioRemaining || 0) <= 0;
+}

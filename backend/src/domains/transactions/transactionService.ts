@@ -33,14 +33,18 @@ import {
   buildLifecycleHistory,
   deriveReservationLinkedSaleSheet,
   groupSaleLifecycles,
+  isLifecyclePrimaryInPeriod,
   presentLifecyclePrimary,
   siblingExpansionIds,
+  comparePresentedListRows,
 } from './saleLifecycleGrouping';
 import {
   collectSaleBookingRefs,
   presentListWithSaleBidGrouping,
   type BookingReservationLifecycleRow,
 } from './bookingBidGrouping';
+import { presentedListKey, queryPresentedPage } from './transactionListQuery';
+import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -437,6 +441,29 @@ export async function projectFolioEntryToTransaction(
   const netAmt = Math.max(0, grossNet - discountAmt);
   const txDate = getHotelDateToday(entry.created_at);
 
+  const posOrderId = explicitPosOrderIdFromFolioEntry(entry);
+  if (posOrderId) {
+    const existingPos = await client.query(
+      `SELECT * FROM transactions
+       WHERE property_id = $1
+         AND source_type IN ('POS', 'POS_ORDER')
+         AND source_id = $2
+         AND reversal_of_transaction_id IS NULL
+       LIMIT 1`,
+      [propertyId, posOrderId]
+    );
+    const skip = shouldSkipFolioKeyedPosSale({
+      propertyId,
+      chargeSourceType: chargeType,
+      folioEntryId,
+      posOrderId,
+      existingSales: existingPos.rows,
+    });
+    if (skip.skip && existingPos.rows[0]) {
+      return existingPos.rows[0];
+    }
+  }
+
   const existingTx = await client.query(
     `SELECT * FROM transactions 
      WHERE property_id = $1 AND source_type = $2 AND source_id = $3 AND reversal_of_transaction_id IS NULL
@@ -585,7 +612,31 @@ export async function projectPosOrderToTransaction(
   }
 
   const order = orderRes.rows[0];
-  const propertyId = options.propertyId || order.property_id || 1;
+  const canonicalPropertyId = Number(order.property_id);
+  if (!Number.isInteger(canonicalPropertyId) || canonicalPropertyId <= 0) {
+    const err: any = new Error(`POS Order #${orderId} tidak memiliki property_id yang valid`);
+    err.statusCode = 422;
+    err.code = 'POS_ORDER_PROPERTY_REQUIRED';
+    throw err;
+  }
+
+  if (options.propertyId !== undefined && options.propertyId !== null && String(options.propertyId).trim() !== '') {
+    const requestedPropertyId = Number(options.propertyId);
+    if (!Number.isInteger(requestedPropertyId) || requestedPropertyId <= 0) {
+      const err: any = new Error('property_id is required');
+      err.statusCode = 400;
+      err.code = 'VALIDATION_ERROR';
+      throw err;
+    }
+    if (requestedPropertyId !== canonicalPropertyId) {
+      const err: any = new Error(`POS Order #${orderId} bukan milik properti #${requestedPropertyId}`);
+      err.statusCode = 403;
+      err.code = 'CROSS_PROPERTY_ORDER';
+      throw err;
+    }
+  }
+
+  const propertyId = canonicalPropertyId;
   const status = String(order.status || '').toUpperCase();
 
   if (['VOIDED', 'CANCELLED', 'REFUNDED'].includes(status)) {
@@ -2184,6 +2235,103 @@ export async function getTransactions(
     baseValues
   );
   const hapusCount = Number(hapusCountRes.rows[0]?.count_hapus || 0);
+  const unboundedAllTime = !params.start_date && !params.end_date && targetSheet !== 'HAPUS';
+  const hasSearch = Boolean(params.search && params.search.trim());
+  const usePresentedSqlPaging = targetSheet !== 'HAPUS' && (unboundedAllTime || hasSearch);
+
+  if (usePresentedSqlPaging) {
+    const pagePlan = await queryPresentedPage(pool, params, hapusCount);
+    const expandBidSales = unboundedAllTime && !hasSearch;
+    const pageBids = expandBidSales ? pagePlan.bids : [];
+    const allTimeCandidates = pagePlan.transactionIds.length === 0 && pageBids.length === 0
+      ? { rows: [] as any[] }
+      : await pool.query(
+        `${listSelectSql}
+         WHERE t.property_id = $1
+           AND t.deleted_at IS NULL
+           AND (
+             t.id = ANY($2::bigint[])
+             OR (
+               $3::text[] <> '{}'
+               AND t.transaction_type = 'SALE'
+               AND b.bid = ANY($3::text[])
+             )
+           )
+         ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC`,
+        [propertyId, pagePlan.transactionIds.length > 0 ? pagePlan.transactionIds : [0], pageBids]
+      );
+    const candidates = allTimeCandidates.rows;
+    const candidateIds = new Set(candidates.map((row: any) => Number(row.id)));
+    let scopedRows = candidates;
+    const expansion = siblingExpansionIds(candidates);
+    if (candidates.length > 0) {
+      const siblingRes = await pool.query(
+        `${listSelectSql}
+         WHERE t.property_id = $1
+           AND t.deleted_at IS NULL
+           AND (
+             t.id = ANY($2::bigint[])
+             OR t.reversal_of_transaction_id = ANY($2::bigint[])
+             OR t.id = ANY($3::bigint[])
+             OR t.reversal_of_transaction_id = ANY($3::bigint[])
+             OR ($4::text[] <> '{}' AND t.correction_group_id = ANY($4::text[]))
+             OR t.metadata->>'restored_from_transaction_id' = ANY($5::text[])
+             OR t.metadata->>'reversal_transaction_id' = ANY($5::text[])
+           )`,
+        [
+          propertyId,
+          expansion.ids,
+          expansion.parentIds.length > 0 ? expansion.parentIds : [0],
+          expansion.groupIds,
+          expansion.ids.map(String),
+        ]
+      );
+      const byId = new Map<number, any>();
+      for (const row of [...candidates, ...siblingRes.rows]) {
+        byId.set(Number(row.id), row);
+      }
+      scopedRows = [...byId.values()];
+    }
+    const groups = groupSaleLifecycles(scopedRows).filter((group) => {
+      if (!isLifecyclePrimaryInPeriod(group.primary.transaction_date, params.start_date, params.end_date)) {
+        return false;
+      }
+      if (params.transaction_status) {
+        const wanted = String(params.transaction_status).toUpperCase();
+        if (String(group.primary.transaction_status || '').toUpperCase() !== wanted) return false;
+      }
+      return group.members.some((member) => candidateIds.has(Number(member.id)));
+    });
+    const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
+    const listType = String(params.transaction_type || '').toUpperCase();
+    const saleBidGrouped = listType === 'SALE' || listType === ''
+      ? presentListWithSaleBidGrouping(presentedAll, {
+          lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll),
+        })
+      : null;
+    const listSource = saleBidGrouped || presentedAll;
+    const pageKeySet = new Set(pagePlan.keys);
+    const sheetFiltered = targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
+      ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
+      : listSource;
+    const presented = sheetFiltered
+      .filter((row: any) => pageKeySet.has(presentedListKey(row, propertyId)))
+      .sort(comparePresentedListRows);
+    return {
+      transactions: presented,
+      total_count: pagePlan.total_count,
+      summary: pagePlan.summary,
+      sheet_counts: pagePlan.sheet_counts,
+      limit,
+      offset,
+      list_fetch_stats: {
+        mode: unboundedAllTime ? 'ALL_TIME' : 'PERIOD',
+        fetched_transaction_rows: scopedRows.length,
+        presented_total: pagePlan.total_count,
+        presented_page: presented.length,
+      },
+    };
+  }
 
   const candidateRes = await pool.query(
     `${listSelectSql}
@@ -2226,9 +2374,13 @@ export async function getTransactions(
     scopedRows = [...byId.values()];
   }
 
-  const groups = groupSaleLifecycles(scopedRows).filter((group) =>
-    group.members.some((member) => candidateIds.has(Number(member.id)))
-  );
+  const groups = groupSaleLifecycles(scopedRows).filter((group) => {
+    if (!isLifecyclePrimaryInPeriod(group.primary.transaction_date, params.start_date, params.end_date)) {
+      return false;
+    }
+    if (unboundedAllTime) return true;
+    return group.members.some((member) => candidateIds.has(Number(member.id)));
+  });
 
   if (params.transaction_status) {
     const wanted = String(params.transaction_status).toUpperCase();
@@ -2239,15 +2391,7 @@ export async function getTransactions(
     }
   }
 
-  const sortPresented = (a: any, b: any) => {
-    const dateCmp = String(b.transaction_date || '').localeCompare(String(a.transaction_date || ''));
-    if (dateCmp !== 0) return dateCmp;
-    const timeCmp = String(b.transaction_time || '').localeCompare(String(a.transaction_time || ''));
-    if (timeCmp !== 0) return timeCmp;
-    return Number(b.id) - Number(a.id);
-  };
-
-  const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(sortPresented);
+  const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
   const listType = String(params.transaction_type || '').toUpperCase();
   const saleBidGrouped = listType === 'SALE' || listType === ''
     ? presentListWithSaleBidGrouping(presentedAll, {
@@ -2291,13 +2435,19 @@ export async function getTransactions(
       sheet_counts,
       limit,
       offset,
+      list_fetch_stats: {
+        mode: 'HAPUS',
+        fetched_transaction_rows: transactions.length,
+        presented_total: hapusCount,
+        presented_page: transactions.length,
+      },
     };
   }
 
   const listSource = saleBidGrouped || presentedAll;
   const presented = [...(targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
     ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
-    : listSource)].sort(sortPresented);
+    : listSource)].sort(comparePresentedListRows);
   const transactions = presented.slice(offset, offset + limit);
 
   const saleNetOf = (row: any) => {
@@ -2331,6 +2481,12 @@ export async function getTransactions(
     sheet_counts,
     limit,
     offset,
+    list_fetch_stats: {
+      mode: 'PERIOD',
+      fetched_transaction_rows: scopedRows.length,
+      presented_total: presented.length,
+      presented_page: transactions.length,
+    },
   };
 }
 

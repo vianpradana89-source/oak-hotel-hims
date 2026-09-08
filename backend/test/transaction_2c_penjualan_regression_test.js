@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import pkg from '../dist/index.js';
 import schemaPkg from '../dist/db/schema_v3.js';
 import {
@@ -9,6 +10,9 @@ import {
   getTransactions
 } from '../dist/domains/transactions/transactionService.js';
 
+const require = createRequire(import.meta.url);
+const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js');
+
 const { app, pool } = pkg;
 const { initializeDatabase } = schemaPkg;
 
@@ -16,6 +20,9 @@ async function runTests() {
   console.log('=== RUNNING TRANSACTION-2C PENJUALAN MERGE REGRESSION SUITE ===');
 
   await initializeDatabase(pool);
+
+  const saToken = await getPlatformSuperAdminToken(pool, 1);
+  const authJson = { Authorization: `Bearer ${saToken}`, 'Content-Type': 'application/json' };
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
@@ -188,7 +195,7 @@ async function runTests() {
     console.log('Test 5: POS Completed Order -> exactly 1 SALE in Penjualan');
     const createPosRes = await fetch(`${baseUrl}/api/pos/orders`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authJson,
       body: JSON.stringify({
         property_id: propAId,
         table_number: 'Meja 01',
@@ -362,7 +369,7 @@ async function runTests() {
     // Test 13: HTTP REST API GET /api/transactions returns expected Penjualan schema
     // -------------------------------------------------------------
     console.log('Test 13: HTTP REST API GET /api/transactions returns expected Penjualan schema');
-    const httpRes = await fetch(`${baseUrl}/api/transactions?property_id=${propAId}&transaction_type=SALE`);
+    const httpRes = await fetch(`${baseUrl}/api/transactions?property_id=${propAId}&transaction_type=SALE`, { headers: authJson });
     assert.strictEqual(httpRes.status, 200);
     const httpData = await httpRes.json();
     assert.ok(httpData.success);

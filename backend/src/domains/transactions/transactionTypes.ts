@@ -399,6 +399,13 @@ export interface TransactionSheetCounts {
   hapus?: number;
 }
 
+export interface TransactionListFetchStats {
+  mode: 'PERIOD' | 'ALL_TIME' | 'HAPUS';
+  fetched_transaction_rows: number;
+  presented_total: number;
+  presented_page: number;
+}
+
 export interface TransactionQueryResult {
   transactions: TransactionRow[];
   total_count: number;
@@ -406,6 +413,7 @@ export interface TransactionQueryResult {
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;
+  list_fetch_stats?: TransactionListFetchStats;
 }
 
 export interface UpdateReceivingStatusDto {

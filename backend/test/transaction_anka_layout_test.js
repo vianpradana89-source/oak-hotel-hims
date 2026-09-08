@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import pkg from '../dist/index.js';
 import schemaPkg from '../dist/db/schema_v3.js';
 import {
@@ -10,6 +11,9 @@ import {
   getTransactionById
 } from '../dist/domains/transactions/transactionService.js';
 
+const require = createRequire(import.meta.url);
+const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js');
+
 const { app, pool } = pkg;
 const { initializeDatabase } = schemaPkg;
 
@@ -17,6 +21,9 @@ async function runTests() {
   console.log('=== RUNNING TRANSACTION-2B ANKA LAYOUT & FILTER REGRESSION SUITE ===\n');
 
   await initializeDatabase(pool);
+
+  const saToken = await getPlatformSuperAdminToken(pool, 1);
+  const authJson = { Authorization: `Bearer ${saToken}` };
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
@@ -97,7 +104,7 @@ async function runTests() {
     cleanupIds.reservations.push(resId);
 
     // 1. Setup Transactions across different dates & statuses for testing
-    // Tx A: Today SALE (POSTED, PAID -> SELESAI)
+    // Tx A: Today SALE linked to BOOKED reservation (PAID must still be PROSES)
     const txToday = await createManualTransaction(pool, {
       property_id: propertyId,
       transaction_type: 'SALE',
@@ -142,6 +149,37 @@ async function runTests() {
     });
     cleanupIds.transactions.push(txLastMonth.id);
     await pool.query('UPDATE transactions SET transaction_date = $1, transaction_status = $2 WHERE id = $3', [lastMonthStart, 'VOIDED', txLastMonth.id]);
+
+    // Tx E: CHECKED_OUT stay SALE => SELESAI (payment_status must not decide the sheet)
+    const bOutRes = await pool.query(
+      `INSERT INTO bookings (bid, property_id, guest_name_snapshot, booking_status)
+       VALUES ($1, $2, $3, 'ACTIVE') RETURNING id`,
+      [`BID-ANKA-OUT-${uniqueSuffix}`, propertyId, `Tamu Checkout ${uniqueSuffix}`]
+    );
+    const bookingOutId = Number(bOutRes.rows[0].id);
+    cleanupIds.bookings.push(bookingOutId);
+    const rOutRes = await pool.query(
+      `INSERT INTO reservations (booking_id, booking_number, stay_sequence, guest_name, total_price, amount_paid, remaining_balance, payment_status, status, check_in, check_out, stay_type)
+       VALUES ($1, $2, 1, $3, 1500000, 1500000, 0, 'PAID', 'CHECKED_OUT', '2026-08-01', '2026-08-03', 'OVERNIGHT') RETURNING id`,
+      [bookingOutId, `RES-ANKA-OUT-${uniqueSuffix}`, `Tamu Checkout ${uniqueSuffix}`]
+    );
+    const resOutId = Number(rOutRes.rows[0].id);
+    cleanupIds.reservations.push(resOutId);
+    const txCheckedOut = await createManualTransaction(pool, {
+      property_id: propertyId,
+      transaction_type: 'SALE',
+      category_code: 'OTHER_SALES',
+      department_code: 'FRONT_OFFICE',
+      party_name: `Tamu Checkout ${uniqueSuffix}`,
+      description: 'Penjualan tamu sudah checkout',
+      amount: 1500000,
+      payment_method: 'CASH',
+      actor_name: 'Tester',
+      reservation_id: resOutId,
+      booking_id: bookingOutId
+    });
+    cleanupIds.transactions.push(txCheckedOut.id);
+    await pool.query('UPDATE transactions SET transaction_date = $1, payment_status = $2 WHERE id = $3', [todayStr, 'PAID', txCheckedOut.id]);
 
     // Tx D: Property 2 Transaction (Isolation test)
     const txProp2 = await createManualTransaction(pool, {
@@ -242,27 +280,29 @@ async function runTests() {
     assert.ok(resGuestSearch.transactions.some((t) => t.id === txToday.id), 'Guest name search must find transaction');
     console.log('  PASS: Guest name search returns matching transactions');
 
-    // TEST 9: Operational status - PROSES mapping
+    // TEST 9: Operational status - PROSES mapping (reservation lifecycle, not payment)
     console.log('Test 9: Level 4 - PROSES operational status mapping');
     const resProses = await getTransactions(pool, {
       property_id: propertyId,
       operational_status: 'PROSES'
     });
-    assert.ok(resProses.transactions.some((t) => t.id === txYesterday.id), 'UNPAID transaction must be in PROSES');
-    assert.ok(!resProses.transactions.some((t) => t.id === txToday.id), 'PAID transaction must not be in PROSES');
+    assert.ok(resProses.transactions.some((t) => t.id === txYesterday.id), 'in-progress PURCHASE must be in PROSES');
+    assert.ok(resProses.transactions.some((t) => t.id === txToday.id), 'BOOKED stay SALE must be in PROSES even if PAID');
+    assert.ok(!resProses.transactions.some((t) => t.id === txCheckedOut.id), 'CHECKED_OUT stay SALE must not be in PROSES');
     assert.ok(!resProses.transactions.some((t) => t.id === txLastMonth.id), 'VOIDED transaction must not be in PROSES');
-    console.log('  PASS: PROSES status returns pending/unpaid transactions');
+    console.log('  PASS: PROSES status follows reservation/purchase lifecycle, not payment_status');
 
-    // TEST 10: Operational status - SELESAI mapping
+    // TEST 10: Operational status - SELESAI mapping (checkout/complete, not payment)
     console.log('Test 10: Level 4 - SELESAI operational status mapping');
     const resSelesai = await getTransactions(pool, {
       property_id: propertyId,
       operational_status: 'SELESAI'
     });
-    assert.ok(resSelesai.transactions.some((t) => t.id === txToday.id), 'PAID transaction must be in SELESAI');
-    assert.ok(!resSelesai.transactions.some((t) => t.id === txYesterday.id), 'UNPAID transaction must not be in SELESAI');
+    assert.ok(resSelesai.transactions.some((t) => t.id === txCheckedOut.id), 'CHECKED_OUT stay SALE must be in SELESAI');
+    assert.ok(!resSelesai.transactions.some((t) => t.id === txToday.id), 'BOOKED stay SALE must not be SELESAI even if PAID');
+    assert.ok(!resSelesai.transactions.some((t) => t.id === txYesterday.id), 'in-progress PURCHASE must not be in SELESAI');
     assert.ok(!resSelesai.transactions.some((t) => t.id === txLastMonth.id), 'VOIDED transaction must not be in SELESAI');
-    console.log('  PASS: SELESAI status returns completed/paid transactions');
+    console.log('  PASS: SELESAI status is checkout/complete, not payment_status');
 
     // TEST 11: Operational status - BATAL mapping
     console.log('Test 11: Level 4 - BATAL operational status mapping');
@@ -271,19 +311,19 @@ async function runTests() {
       operational_status: 'BATAL'
     });
     assert.ok(resBatal.transactions.some((t) => t.id === txLastMonth.id), 'VOIDED transaction must be in BATAL');
-    assert.ok(!resBatal.transactions.some((t) => t.id === txToday.id), 'PAID transaction must not be in BATAL');
-    assert.ok(!resBatal.transactions.some((t) => t.id === txYesterday.id), 'UNPAID transaction must not be in BATAL');
+    assert.ok(!resBatal.transactions.some((t) => t.id === txToday.id), 'BOOKED stay SALE must not be in BATAL');
+    assert.ok(!resBatal.transactions.some((t) => t.id === txYesterday.id), 'in-progress PURCHASE must not be in BATAL');
     console.log('  PASS: BATAL status returns voided/cancelled transactions');
 
     // TEST 12: Combined filter (Type + Period + BID + Status)
-    console.log('Test 12: Combined filter (SALE + Hari Ini + BID + SELESAI)');
+    console.log('Test 12: Combined filter (SALE + Hari Ini + BID + PROSES)');
     const resCombined = await getTransactions(pool, {
       property_id: propertyId,
       transaction_type: 'SALE',
       start_date: todayStr,
       end_date: todayStr,
       search: testBID,
-      operational_status: 'SELESAI'
+      operational_status: 'PROSES'
     });
     assert.equal(resCombined.transactions.length, 1, 'Combined filter should return exactly 1 matching transaction');
     assert.equal(resCombined.transactions[0].id, txToday.id);
@@ -299,7 +339,7 @@ async function runTests() {
 
     // TEST 14: HTTP endpoint API query verification
     console.log('Test 14: HTTP endpoint query parsing & response');
-    const httpRes = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&operational_status=SELESAI&search=${encodeURIComponent(testBID)}`);
+    const httpRes = await fetch(`${baseUrl}/api/transactions?property_id=${propertyId}&operational_status=PROSES&search=${encodeURIComponent(testBID)}`, { headers: authJson });
     const httpJson = await httpRes.json();
     assert.equal(httpRes.status, 200);
     assert.ok(httpJson.success);
