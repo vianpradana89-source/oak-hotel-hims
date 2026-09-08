@@ -7,7 +7,11 @@ export type OperationalSheet = 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
 /** Canonical Purchase operational workflow (PURCHASE-2A1). BATAL is not stored here. */
 export type PurchaseWorkflowStatus = 'PROSES' | 'SELESAI';
 
+/** Canonical Expense operational workflow (EXPENSE-1B). BATAL is not stored here. */
+export type ExpenseWorkflowStatus = 'PROSES' | 'SELESAI';
+
 export const PURCHASE_WORKFLOW_STATUSES: readonly PurchaseWorkflowStatus[] = ['PROSES', 'SELESAI'];
+export const EXPENSE_WORKFLOW_STATUSES: readonly ExpenseWorkflowStatus[] = ['PROSES', 'SELESAI'];
 
 /**
  * SQL CASE branches for PURCHASE sheet after terminal financial statuses are handled.
@@ -17,6 +21,15 @@ export const PURCHASE_WORKFLOW_SHEET_SQL = `
   WHEN UPPER(t.transaction_type) = 'PURCHASE'
     AND UPPER(COALESCE(t.purchase_workflow_status, 'PROSES')) = 'SELESAI' THEN 'SELESAI'
   WHEN UPPER(t.transaction_type) = 'PURCHASE' THEN 'PROSES'`;
+
+/**
+ * SQL CASE branches for EXPENSE sheet after terminal financial statuses are handled.
+ * Must stay in lockstep with deriveOperationalSheet() expense branch (EXPENSE-1B).
+ */
+export const EXPENSE_WORKFLOW_SHEET_SQL = `
+  WHEN UPPER(t.transaction_type) = 'EXPENSE'
+    AND UPPER(COALESCE(t.expense_workflow_status, 'PROSES')) = 'SELESAI' THEN 'SELESAI'
+  WHEN UPPER(t.transaction_type) = 'EXPENSE' THEN 'PROSES'`;
 
 /**
  * ============================================================================
@@ -173,6 +186,12 @@ export interface TransactionRow {
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
   purchase_workflow_status?: PurchaseWorkflowStatus | null;
+  /** EXPENSE-1B: recipient bank snapshot (manual per-transaction, independent of Supplier Master) */
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
+  /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
+  expense_workflow_status?: ExpenseWorkflowStatus | null;
   verification_status: VerificationStatus;
   verified_by_user_id?: string | null;
   verified_by_name_snapshot?: string | null;
@@ -316,6 +335,10 @@ export interface CreateExpenseTransactionDto {
   notes?: string | null;
   actor_name?: string | null;
   actor_user_id?: string | null;
+  /** EXPENSE-1B: manual recipient bank snapshot */
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
 }
 
 export interface CreateIncomeTransactionDto {

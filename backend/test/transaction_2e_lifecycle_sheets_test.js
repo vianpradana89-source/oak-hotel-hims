@@ -438,8 +438,8 @@ async function runTests() {
       actor_name: 'Finance Officer'
     });
     const txE2 = await getTransactionById(pool, propertyId, e2.id);
-    assert.strictEqual(txE2.operational_sheet, 'SELESAI', 'Scenario 18: Expense POSTED -> SELESAI');
-    console.log('[PASS] Scenario 18: Expense POSTED -> SELESAI');
+    assert.strictEqual(txE2.operational_sheet, 'PROSES', 'Scenario 18: Expense POSTED -> PROSES (workflow pending verification)');
+    console.log('[PASS] Scenario 18: Expense POSTED -> PROSES');
 
     // Scenario 19: Pengeluaran VOIDED -> BATAL
     const e3 = await createExpenseTransaction(pool, {
@@ -464,12 +464,12 @@ async function runTests() {
         property_id, transaction_no, transaction_date, transaction_time, transaction_type,
         source_type, party_name, category_code, category_name, department_code, description,
         amount, discount_amount, service_amount, tax_amount, net_amount,
-        payment_status, transaction_status, verification_status
+        payment_status, transaction_status, verification_status, expense_workflow_status
       ) VALUES (
         $1, 'TX-E-DRAFT-DEL', CURRENT_DATE, NOW(), 'EXPENSE',
         'MANUAL', 'Toko ATK', 'OFFICE_SUPPLIES', 'Office Supplies', 'ADMIN', 'Draft Pengeluaran Salah',
         75000, 0, 0, 0, 75000,
-        'UNPAID', 'DRAFT', 'UNVERIFIED'
+        'UNPAID', 'DRAFT', 'UNVERIFIED', NULL
       ) RETURNING id
     `, [propertyId]);
     const txE4Id = Number(e4Res.rows[0].id);

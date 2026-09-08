@@ -153,6 +153,7 @@ export function deriveOperationalSheet(row: {
   transaction_status: string;
   receiving_status?: string | null;
   purchase_workflow_status?: string | null;
+  expense_workflow_status?: string | null;
   deleted_at?: string | null;
   source_type?: string | null;
   reservation_id?: unknown;
@@ -177,7 +178,14 @@ export function deriveOperationalSheet(row: {
       ? 'SELESAI'
       : 'PROSES';
   }
-  // For EXPENSE, INCOME, SALE:
+  // EXPENSE-1B: Expense workflow status takes precedence for EXPENSE type.
+  if (type === 'EXPENSE') {
+    if (row.expense_workflow_status === 'SELESAI') {
+      return 'SELESAI';
+    }
+    return 'PROSES';
+  }
+  // For INCOME, SALE:
   if (status === 'POSTED') {
     return 'SELESAI';
   }
@@ -1453,7 +1461,9 @@ export async function createExpenseTransaction(
         amount, discount_amount, service_amount, tax_amount, rounding_amount, net_amount,
         payment_status, payment_method, transaction_status,
         supplier_id, receiving_status, received_at, verification_status,
-        notes, metadata, created_by
+        notes, metadata, created_by,
+        recipient_bank_name, recipient_bank_account, recipient_bank_holder,
+        expense_workflow_status
       ) VALUES (
         $1, $2, $3, CURRENT_TIMESTAMP,
         'EXPENSE', 'MANUAL_EXPENSE', $4, $5,
@@ -1461,7 +1471,9 @@ export async function createExpenseTransaction(
         $10, 0, 0, 0, 0, $10,
         $11, $12, 'POSTED',
         $13, NULL, NULL, 'UNVERIFIED',
-        $14, $15, $16
+        $14, $15, $16,
+        $17, $18, $19,
+        'PROSES'
       ) RETURNING *`,
       [
         propertyId,
@@ -1479,7 +1491,10 @@ export async function createExpenseTransaction(
         supplierId,
         dto.notes?.trim() || null,
         JSON.stringify({ workflow: 'EXPENSE_2D', actor: dto.actor_name || 'Staff' }),
-        dto.actor_name || dto.actor_user_id || 'Staff'
+        dto.actor_name || dto.actor_user_id || 'Staff',
+        dto.recipient_bank_name?.trim() || null,
+        dto.recipient_bank_account?.trim() || null,
+        dto.recipient_bank_holder?.trim() || null,
       ]
     );
 
@@ -1720,7 +1735,7 @@ export async function verifyTransaction(
   }
 
   const txCheck = await pool.query(
-    `SELECT id, transaction_no, verification_status FROM transactions WHERE id = $1 AND property_id = $2`,
+    `SELECT id, transaction_no, verification_status, transaction_type FROM transactions WHERE id = $1 AND property_id = $2`,
     [id, propertyId]
   );
   if ((txCheck.rowCount ?? 0) === 0) {
@@ -1731,12 +1746,17 @@ export async function verifyTransaction(
 
   const updateRes = await pool.query(
     `UPDATE transactions
-     SET verification_status = $1,
+     SET verification_status = $1::varchar,
          verified_by_user_id = $2,
          verified_by_name_snapshot = $3,
          verified_at = NOW(),
          verification_note = $4,
-         updated_at = NOW()
+         updated_at = NOW(),
+         expense_workflow_status = CASE
+           WHEN $1::varchar = 'VERIFIED' AND transaction_type = 'EXPENSE' THEN 'SELESAI'
+           WHEN transaction_type = 'EXPENSE' AND $1::varchar IN ('UNVERIFIED', 'REJECTED') THEN 'PROSES'
+           ELSE expense_workflow_status
+         END
      WHERE id = $5 AND property_id = $6
      RETURNING *`,
     [
@@ -1748,6 +1768,10 @@ export async function verifyTransaction(
       propertyId
     ]
   );
+
+  if ((updateRes.rowCount ?? 0) === 0) {
+    throw new Error(`Transaksi #${id} tidak ditemukan atau tidak dapat diubah`);
+  }
 
   // Audit log
   await pool.query(

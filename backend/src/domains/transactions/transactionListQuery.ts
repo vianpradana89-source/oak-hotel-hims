@@ -5,7 +5,7 @@ import type {
   TransactionSheetCounts,
   TransactionSummary,
 } from './transactionTypes';
-import { PURCHASE_WORKFLOW_SHEET_SQL } from './transactionTypes';
+import { PURCHASE_WORKFLOW_SHEET_SQL, EXPENSE_WORKFLOW_SHEET_SQL } from './transactionTypes';
 
 export interface TransactionListFetchStats {
   mode: 'PERIOD' | 'ALL_TIME' | 'HAPUS';
@@ -61,6 +61,7 @@ const STANDALONE_SHEET_SQL = `CASE
       OR UPPER(COALESCE(r.stay_status, '')) IN ('RESERVED', 'BOOKED', 'CHECKED_IN')
     ) THEN 'PROSES'
   ${PURCHASE_WORKFLOW_SHEET_SQL}
+  ${EXPENSE_WORKFLOW_SHEET_SQL}
   WHEN UPPER(t.transaction_status) = 'POSTED' THEN 'SELESAI'
   ELSE 'PROSES'
 END`;

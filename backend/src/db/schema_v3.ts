@@ -3352,6 +3352,57 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // EXPENSE-1B: Recipient snapshot fields + expense workflow status.
+    const expense1bCheck = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'expense_1b_recipient_snapshot_v1'"
+    );
+    if ((expense1bCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS recipient_bank_name VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS recipient_bank_account VARCHAR(100) DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS recipient_bank_holder VARCHAR(150) DEFAULT NULL;
+
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS expense_workflow_status VARCHAR(50) DEFAULT NULL;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'chk_transactions_expense_workflow_status'
+          ) THEN
+            ALTER TABLE transactions
+              ADD CONSTRAINT chk_transactions_expense_workflow_status
+              CHECK (
+                expense_workflow_status IS NULL
+                OR expense_workflow_status IN ('PROSES', 'SELESAI')
+              );
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_expense_workflow
+          ON transactions (property_id, transaction_type, expense_workflow_status)
+          WHERE transaction_type = 'EXPENSE';
+
+        -- Backfill existing EXPENSE rows based on verification state.
+        -- Verified expenses -> SELESAI; all others -> PROSES.
+        UPDATE transactions
+        SET expense_workflow_status =
+          CASE
+            WHEN UPPER(COALESCE(verification_status, '')) = 'VERIFIED'
+              THEN 'SELESAI'
+            ELSE 'PROSES'
+          END
+        WHERE UPPER(transaction_type) = 'EXPENSE'
+          AND expense_workflow_status IS NULL;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('expense_1b_recipient_snapshot_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     // FOLIO PROPERTY ID BACKFILL & NOT NULL NORMALIZATION
     const folioPropCheck = await auditMigrationClient.query(
       "SELECT 1 FROM schema_migrations WHERE version = 'folio_entries_property_id_backfill_and_not_null_v1'"
