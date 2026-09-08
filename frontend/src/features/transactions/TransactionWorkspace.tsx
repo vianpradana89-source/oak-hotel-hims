@@ -161,6 +161,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [bankCopied, setBankCopied] = useState<string | null>(null);
   const [bankToastMessage, setBankToastMessage] = useState<string | null>(null);
   const [activeBankTrigger, setActiveBankTrigger] = useState<HTMLButtonElement | null>(null);
+  const [bankPopoverPinned, setBankPopoverPinned] = useState<boolean>(false);
+  // Ref tracks current pinned state for use inside async callbacks
+  // Synchronized synchronously in closeBankPopover and handleBankPopoverToggle
+  // so that already-queued timers see the updated state immediately,
+  // without waiting for the next React render.
+  const bankPopoverPinnedRef = useRef<boolean>(false);
   const bankPopoverRef = useRef<HTMLDivElement>(null);
   const bankHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bankToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -369,6 +375,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const closeBankPopover = () => {
     clearBankHoverTimer();
     setActiveBankTrigger(null);
+    bankPopoverPinnedRef.current = false;
+    setBankPopoverPinned(false);
     setBankPopoverOpen(false);
     setBankPopoverTx(null);
   };
@@ -377,20 +385,34 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     e.stopPropagation();
     clearBankHoverTimer();
     if (bankPopoverTx?.id === tx.id && bankPopoverOpen) {
-      closeBankPopover();
+      // Clicking same trigger while unpinned → pin (don't close)
+      // Clicking same trigger while pinned → close
+      if (bankPopoverPinned) {
+        closeBankPopover();
+      } else {
+        bankPopoverPinnedRef.current = true;
+        setBankPopoverPinned(true);
+      }
       return;
     }
     setActiveBankTrigger(e.currentTarget);
     setBankPopoverTx(tx);
     setBankPopoverOpen(true);
+    // Click always pins so backdrop appears and stays open
+    bankPopoverPinnedRef.current = true;
+    setBankPopoverPinned(true);
   };
 
   // Desktop hover intent: open after brief delay; moving into popover cancels close
   const handleBankTriggerMouseEnter = (tx: TransactionRecord, e: React.MouseEvent<HTMLButtonElement>) => {
     if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      // Pinned popover is isolated — hover on other rows must not mutate it
+      if (bankPopoverPinnedRef.current) return;
       clearBankHoverTimer();
       const triggerEl = e.currentTarget;
       bankHoverTimerRef.current = setTimeout(() => {
+        // Re-check pinned state inside stale-closure-safe callback
+        if (bankPopoverPinnedRef.current) return;
         setActiveBankTrigger(triggerEl);
         setBankPopoverTx(tx);
         setBankPopoverOpen(true);
@@ -400,6 +422,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const handleBankTriggerMouseLeave = () => {
     if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      // Pinned popover is immune to mouse leave
+      if (bankPopoverPinnedRef.current) return;
       clearBankHoverTimer();
       bankHoverTimerRef.current = setTimeout(() => {
         if (bankPopoverRef.current && !bankPopoverRef.current.matches(':hover')) {
@@ -412,7 +436,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   // Keyboard accessibility: focus on trigger opens popover
   const handleBankTriggerFocus = (tx: TransactionRecord, e: React.FocusEvent<HTMLButtonElement>) => {
     if (e.target === e.currentTarget) {
+      // Pinned popover is isolated from focus on other triggers
+      if (bankPopoverPinnedRef.current) return;
       clearBankHoverTimer();
+      // Focus = hover mode, no pin
       setActiveBankTrigger(e.currentTarget);
       setBankPopoverTx(tx);
       setBankPopoverOpen(true);
@@ -425,6 +452,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const handleBankPopoverMouseLeave = () => {
     if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      // Pinned popover is immune to mouse leave
+      if (bankPopoverPinnedRef.current) return;
       clearBankHoverTimer();
       bankHoverTimerRef.current = setTimeout(() => {
         closeBankPopover();
@@ -2228,12 +2257,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       {/* PURCHASE-2C: Supplier Bank Quick Info Popover */}
       {bankPopoverOpen && bankPopoverTx && (
         <>
-          {/* Backdrop */}
-           <div
-             className="fixed inset-0 z-40"
-             onClick={() => closeBankPopover()}
-             aria-hidden="true"
-           />
+          {/* Backdrop - only for pinned/click mode, not hover mode */}
+          {bankPopoverPinned && (
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => closeBankPopover()}
+              aria-hidden="true"
+            />
+          )}
           {/* Popover */}
           <div
             ref={bankPopoverRef}
