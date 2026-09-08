@@ -59,6 +59,19 @@ async function runTests() {
     });
     tracked.suppliers.push(Number(supplier.id));
 
+    await pool.query(
+      `INSERT INTO transaction_custom_categories (
+         property_id, code, name, transaction_type, department_code, is_active
+       ) VALUES
+         ($1, 'RAW_MATERIAL', 'Raw Material', 'PURCHASE', 'FNB', TRUE),
+         ($1, 'OFFICE_SUPPLIES', 'Office Supplies', 'PURCHASE', 'ADMIN', TRUE),
+         ($1, 'LINEN', 'Linen', 'PURCHASE', 'HOUSEKEEPING', TRUE),
+         ($1, 'MAINTENANCE_SUPPLIES', 'Maintenance Supplies', 'PURCHASE', 'MAINTENANCE', TRUE),
+         ($1, 'FNB_BEVERAGE', 'F&B Beverage', 'PURCHASE', 'FNB', TRUE)
+       ON CONFLICT (property_id, code) DO NOTHING`,
+      [propertyId]
+    );
+
     // ==========================================
     // DOMAIN 1: PENJUALAN (SALE)
     // Allowed sheets: PROSES, SELESAI, BATAL (No Hapus)
@@ -242,7 +255,7 @@ async function runTests() {
     const p7 = await createPurchaseTransaction(pool, {
       property_id: propertyId,
       supplier_id: supplier.id,
-      category_code: 'CLEANING_SUPPLIES',
+      category_code: 'AMENITIES_PURCHASE',
       department_code: 'HOUSEKEEPING',
       description: 'Beli Deterjen & Sabun',
       lines: [{ description: 'Deterjen Liquid 20L', quantity: 1, unit: 'dirigen', unit_price: 250000 }],

@@ -25,7 +25,7 @@ import {
   DEPARTMENTS
 } from './transactionService';
 import { getBookingSalesDetail } from './bookingSalesDetailService';
-import { resolveAuthenticatedTransactionRead } from './transactionReadAuth';
+import { resolveAuthenticatedTransactionRead, resolveAuthenticatedTransactionWrite } from './transactionReadAuth';
 import {
   TransactionFilterParams,
   TransactionType,
@@ -263,10 +263,14 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.post('/purchases', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId || 1);
+      const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+      if (!scoped) return;
+
       const created = await createPurchaseTransaction(pool, {
-        property_id: propertyId,
+        property_id: scoped.propertyId,
         transaction_date: req.body.transaction_date,
+        category_code: req.body.category_code,
+        category_name: req.body.category_name,
         supplier_id: req.body.supplier_id,
         supplier_name: req.body.supplier_name,
         supplier_phone: req.body.supplier_phone,
@@ -279,13 +283,15 @@ export function createTransactionsRouter(pool: Pool): Router {
         department_code: req.body.department_code,
         description: req.body.description,
         lines: req.body.lines || [],
+        discount_amount: req.body.discount_amount,
         transaction_discount: req.body.transaction_discount,
         rounding_amount: req.body.rounding_amount,
         payment_method: req.body.payment_method,
         paid_amount: req.body.paid_amount,
+        is_immediately_paid: req.body.is_immediately_paid,
         notes: req.body.notes,
-        actor_name: req.body.actor_name || (req as any).user?.name || 'Staff',
-        actor_user_id: req.body.actor_user_id || (req as any).user?.id || null
+        actor_name: req.body.actor_name || scoped.user.full_name || scoped.user.username || 'Staff',
+        actor_user_id: req.body.actor_user_id || String(scoped.user.id)
       });
 
       return res.status(201).json({

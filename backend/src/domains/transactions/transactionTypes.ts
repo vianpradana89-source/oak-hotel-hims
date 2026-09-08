@@ -258,13 +258,14 @@ export interface CreatePurchaseTransactionDto {
   receiving_status?: ReceivingStatus;
   received_at?: string | null;
   department_code?: string;
-  description: string;
+  description?: string | null;
   lines: TransactionLineInput[];
   discount_amount?: number;
   transaction_discount?: number; // IDR
   rounding_amount?: number; // IDR
   payment_method?: string | null;
   paid_amount?: number; // IDR paid immediately
+  is_immediately_paid?: boolean;
   transaction_status?: TransactionStatus;
   notes?: string | null;
   actor_name?: string | null;

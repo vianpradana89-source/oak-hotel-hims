@@ -45,6 +45,8 @@ import {
 } from './bookingBidGrouping';
 import { presentedListKey, queryPresentedPage } from './transactionListQuery';
 import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
+import { generatePurchaseDescription } from './purchaseSummary';
+export { generatePurchaseDescription } from './purchaseSummary';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -162,6 +164,71 @@ export function deriveOperationalSheet(row: {
     return 'SELESAI';
   }
   return 'PROSES';
+}
+
+const PURCHASE_RECEIVING_STATUSES: ReceivingStatus[] = [
+  'BELUM_DITERIMA',
+  'DITERIMA_SEBAGIAN',
+  'DITERIMA',
+];
+
+function purchaseValidationError(message: string): Error {
+  const err: any = new Error(message);
+  err.statusCode = 400;
+  err.code = 'VALIDATION_ERROR';
+  return err;
+}
+
+export function resolvePurchaseReceivingStatus(raw: unknown): ReceivingStatus {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return 'BELUM_DITERIMA';
+  }
+  const status = String(raw).trim();
+  if (!PURCHASE_RECEIVING_STATUSES.includes(status as ReceivingStatus)) {
+    throw purchaseValidationError(`Status penerimaan '${status}' tidak valid`);
+  }
+  return status as ReceivingStatus;
+}
+
+export async function resolvePurchaseCategoryForCreate(
+  poolOrClient: Pool | PoolClient,
+  propertyId: number,
+  dto: { category_code?: string | null; category_name?: string | null }
+): Promise<{ categoryCode: string; categoryName: string }> {
+  const categoryCode = String(dto.category_code || '').trim() || 'SUPPLIES_PURCHASE';
+
+  const system = TRANSACTION_CATEGORIES[categoryCode];
+  if (system) {
+    if (system.type !== 'PURCHASE') {
+      throw purchaseValidationError(`Kategori '${categoryCode}' bukan kategori pembelian`);
+    }
+    return {
+      categoryCode,
+      categoryName: String(dto.category_name || '').trim() || system.name,
+    };
+  }
+
+  const custom = await poolOrClient.query(
+    `SELECT name, transaction_type, is_active
+     FROM transaction_custom_categories
+     WHERE property_id = $1 AND code = $2`,
+    [propertyId, categoryCode]
+  );
+  if ((custom.rowCount ?? 0) > 0) {
+    const row = custom.rows[0];
+    if (String(row.transaction_type || '').toUpperCase() !== 'PURCHASE') {
+      throw purchaseValidationError(`Kategori '${categoryCode}' bukan kategori pembelian`);
+    }
+    if (row.is_active === false) {
+      throw purchaseValidationError(`Kategori pembelian '${categoryCode}' tidak valid`);
+    }
+    return {
+      categoryCode,
+      categoryName: String(dto.category_name || '').trim() || String(row.name || categoryCode),
+    };
+  }
+
+  throw purchaseValidationError(`Kategori pembelian '${categoryCode}' tidak valid`);
 }
 
 export async function getCategoryMeta(
@@ -1010,12 +1077,6 @@ export async function createPurchaseTransaction(
     throw err;
   }
 
-  if (!dto.description || !dto.description.trim()) {
-    const err: any = new Error('Keterangan / Judul pembelian wajib diisi');
-    err.statusCode = 400;
-    throw err;
-  }
-
   if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
     const err: any = new Error('Minimal harus ada 1 item produk pesanan pada pembelian');
     err.statusCode = 400;
@@ -1041,6 +1102,9 @@ export async function createPurchaseTransaction(
       throw new Error(`Baris item ke-${i + 1}: Diskon item harus berupa integer IDR >= 0`);
     }
   }
+
+  const receivingStatus = resolvePurchaseReceivingStatus(dto.receiving_status);
+  const { categoryCode, categoryName } = await resolvePurchaseCategoryForCreate(pool, propertyId, dto);
 
   const client = await pool.connect();
   try {
@@ -1082,17 +1146,25 @@ export async function createPurchaseTransaction(
         `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL`,
         [supplierId, propertyId]
       );
-      if ((supCheck.rowCount ?? 0) > 0) {
-        supplierName = supCheck.rows[0].name;
+      if ((supCheck.rowCount ?? 0) === 0) {
+        const err: any = new Error(`Supplier #${supplierId} bukan milik properti #${propertyId}`);
+        err.statusCode = 403;
+        err.code = 'CROSS_PROPERTY_SUPPLIER';
+        throw err;
       }
+      supplierName = supCheck.rows[0].name;
     }
+
+    const lineDescriptions = dto.lines.map((line) => line.description_snapshot || line.description || '');
+    const description = String(dto.description || '').trim()
+      || generatePurchaseDescription({
+        lineDescriptions,
+        supplierName,
+      });
 
     const txDate = dto.transaction_date || getHotelDateToday();
     const txNumber = await generateTransactionNumber(client, propertyId, txDate);
-    const categoryCode = dto.category_code || 'SUPPLIES_PURCHASE';
-    const categoryName = dto.category_name || 'Pembelian Barang / Stok';
     const departmentCode = dto.department_code || 'GENERAL';
-    const receivingStatus: ReceivingStatus = dto.receiving_status || 'BELUM_DITERIMA';
     const receivedAt = dto.received_at ? new Date(dto.received_at).toISOString() : (receivingStatus === 'DITERIMA' ? new Date().toISOString() : null);
 
     const transactionDiscount = Math.max(0, Math.round(Number(dto.transaction_discount || dto.discount_amount || 0)));
@@ -1126,7 +1198,7 @@ export async function createPurchaseTransaction(
         categoryCode,
         categoryName,
         departmentCode,
-        dto.description.trim(),
+        description,
         transactionDiscount,
         roundingAmount,
         dto.payment_method || null,
@@ -1189,8 +1261,15 @@ export async function createPurchaseTransaction(
     const finalTx = recomputeRes.rows[0];
     const finalNetAmount = Number(finalTx.net_amount || 0);
 
-    // 4. Handle Settlement Payment if paid_amount was specified
-    const paidAmount = Math.max(0, Math.round(Number(dto.paid_amount || 0)));
+    // 4. Settlement only — never a second PURCHASE/EXPENSE.
+    const paidAmountRaw = dto.paid_amount;
+    const hasPaidAmount = paidAmountRaw !== undefined && paidAmountRaw !== null && String(paidAmountRaw) !== '';
+    let paidAmount = hasPaidAmount ? Math.max(0, Math.round(Number(paidAmountRaw) || 0)) : 0;
+    if (dto.is_immediately_paid === false && !hasPaidAmount) {
+      paidAmount = 0;
+    } else if (dto.is_immediately_paid === true && !hasPaidAmount) {
+      paidAmount = Math.max(0, finalNetAmount);
+    }
     let paymentStatus = 'UNPAID';
 
     if (paidAmount > 0) {
@@ -1652,8 +1731,10 @@ export async function updatePurchaseReceivingStatus(
 ): Promise<TransactionRow> {
   const propertyId = Number(dto.property_id);
   const status = dto.receiving_status;
-  if (!['BELUM_DITERIMA', 'DITERIMA_SEBAGIAN', 'DITERIMA'].includes(status)) {
-    throw new Error(`Status penerimaan '${status}' tidak valid`);
+  if (!PURCHASE_RECEIVING_STATUSES.includes(status)) {
+    const err: any = new Error(`Status penerimaan '${status}' tidak valid`);
+    err.statusCode = 400;
+    throw err;
   }
 
   const txCheck = await pool.query(
