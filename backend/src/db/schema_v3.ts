@@ -4886,6 +4886,46 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // PURCHASE-1D: property-scoped purchase field policy (REQUIRED/OPTIONAL/HIDDEN).
+    // Additive only. No historical rewrite. Missing rows => code defaults.
+    // ------------------------------------------------------------------
+    const purchase1dCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'purchase_1d_field_policy_v1'`
+    );
+    if ((purchase1dCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS property_purchase_field_rules (
+          id SERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+          field_key VARCHAR(64) NOT NULL,
+          field_mode VARCHAR(16) NOT NULL DEFAULT 'OPTIONAL',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_by VARCHAR(100),
+          updated_by VARCHAR(100),
+          CONSTRAINT uq_property_purchase_field_rules UNIQUE (property_id, field_key),
+          CONSTRAINT chk_property_purchase_field_mode
+            CHECK (field_mode IN ('REQUIRED', 'OPTIONAL', 'HIDDEN'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_property_purchase_field_rules_lookup
+          ON property_purchase_field_rules (property_id);
+
+        CREATE TABLE IF NOT EXISTS property_purchase_settings (
+          property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+          default_purchase_category_id BIGINT REFERENCES transaction_custom_categories(id) ON DELETE SET NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_by VARCHAR(100),
+          updated_by VARCHAR(100)
+        );
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('purchase_1d_field_policy_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

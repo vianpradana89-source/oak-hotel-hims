@@ -13,6 +13,7 @@ import type {
   TransactionLineInput,
   BookingSalesDetail
 } from './transactionDomainTypes';
+import type { FieldMode, PurchaseFieldKey, PurchaseFieldPolicy } from './purchaseFieldPolicy';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 const API_BASE = '/api/transactions';
@@ -258,6 +259,7 @@ export async function fetchPurchaseFormOptionsApi(propertyId: number): Promise<{
   categories: Array<{ id: number; code: string; name: string }>;
   departments: Array<{ id: number; code: string; name: string }>;
   empty_allow_list_means: 'ALL_ACTIVE';
+  field_policy?: PurchaseFieldPolicy;
 }> {
   return await fetchJson(`${API_BASE}/purchases/form-options?property_id=${propertyId}`);
 }
@@ -590,5 +592,23 @@ export async function savePurchaseAllowedDepartmentsApi(
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ property_id: propertyId, department_ids: departmentIds }),
+  });
+}
+
+export async function fetchPurchaseFieldRulesApi(propertyId: number): Promise<PurchaseFieldPolicy> {
+  return await fetchJson<PurchaseFieldPolicy>(`${PURCHASE_SETTINGS_BASE}/field-rules?property_id=${propertyId}`);
+}
+
+export async function savePurchaseFieldRulesApi(
+  propertyId: number,
+  data: {
+    rules: Partial<Record<PurchaseFieldKey, FieldMode>>;
+    default_purchase_category_id?: number | null;
+  }
+): Promise<PurchaseFieldPolicy> {
+  return await fetchJson<PurchaseFieldPolicy>(`${PURCHASE_SETTINGS_BASE}/field-rules`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ property_id: propertyId, ...data }),
   });
 }

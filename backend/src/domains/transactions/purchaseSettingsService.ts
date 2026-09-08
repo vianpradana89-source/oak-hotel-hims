@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { getEffectivePurchaseFieldPolicy } from './purchaseFieldRulesService';
 
 export const SYSTEM_PURCHASE_CATEGORY_SEEDS = [
   { code: 'SUPPLIES_PURCHASE', name: 'Pembelian Perlengkapan Kantor / FO', department_code: 'FRONT_OFFICE', sort_order: 10 },
@@ -422,13 +423,16 @@ export async function getPurchaseFormOptions(
   categories: Array<{ id: number; code: string; name: string }>;
   departments: Array<{ id: number; code: string; name: string }>;
   empty_allow_list_means: 'ALL_ACTIVE';
+  field_policy: Awaited<ReturnType<typeof getEffectivePurchaseFieldPolicy>>;
 }> {
   const categories = await listPurchaseCategories(pool, propertyId, { activeOnly: true });
   const departments = await listAllowedActivePurchaseDepartments(pool, propertyId);
+  const field_policy = await getEffectivePurchaseFieldPolicy(pool, propertyId);
   return {
     categories: categories.map((row) => ({ id: row.id, code: row.code, name: row.name })),
     departments,
     empty_allow_list_means: 'ALL_ACTIVE',
+    field_policy,
   };
 }
 

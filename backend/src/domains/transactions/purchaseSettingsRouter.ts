@@ -11,6 +11,10 @@ import {
   setPurchaseCategoryActive,
   updatePurchaseCategory,
 } from './purchaseSettingsService';
+import {
+  getEffectivePurchaseFieldPolicy,
+  savePurchaseFieldRules,
+} from './purchaseFieldRulesService';
 
 export function createPurchaseSettingsRouter(pool: Pool): Router {
   const router = Router();
@@ -147,6 +151,35 @@ export function createPurchaseSettingsRouter(pool: Pool): Router {
       return res.status(err.statusCode || 400).json({ success: false, code: err.code, error: err.message });
     }
   });
+
+  router.get('/field-rules', async (req: Request, res: Response) => {
+    try {
+      const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+      if (!scoped) return;
+      const data = await getEffectivePurchaseFieldPolicy(pool, scoped.propertyId);
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({ success: false, code: err.code, error: err.message });
+    }
+  });
+
+  const saveFieldRules = async (req: Request, res: Response) => {
+    try {
+      const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+      if (!scoped) return;
+      const data = await savePurchaseFieldRules(pool, scoped.propertyId, {
+        rules: req.body.rules,
+        default_purchase_category_id: req.body.default_purchase_category_id,
+        actor_name: req.body.actor_name || scoped.user.full_name || scoped.user.username || 'Staff',
+      });
+      return res.json({ success: true, data });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({ success: false, code: err.code, error: err.message });
+    }
+  };
+
+  router.put('/field-rules', saveFieldRules);
+  router.patch('/field-rules', saveFieldRules);
 
   return router;
 }

@@ -10,6 +10,15 @@ import {
 } from './transactionClient';
 import { SupplierSelectorModal } from './SupplierSelectorModal';
 import { canSubmitPurchaseCreate, PURCHASE_FORM_OPTIONS_ERROR } from './purchaseEditorGuard';
+import {
+  getPurchaseFieldMode,
+  isPurchaseFieldRequired,
+  isPurchaseFieldVisible,
+  isPurchaseLineUnitRequired,
+  isPurchaseLineUnitVisible,
+  isPurchasePayNowDetailVisible,
+  type PurchaseFieldPolicy,
+} from './purchaseFieldPolicy';
 
 interface PurchaseLineItem {
   id: string;
@@ -66,7 +75,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
 
   // Settlement Option
   const [isImmediatelyPaid, setIsImmediatelyPaid] = useState<boolean>(true);
-  const [paymentMethod, setPaymentMethod] = useState<string>('CASH');
+  const [paymentMethod, setPaymentMethod] = useState<string>('');
   const [paidAmount, setPaidAmount] = useState<number | string>('');
 
   // Upload Evidence
@@ -79,6 +88,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [optionsFailed, setOptionsFailed] = useState(false);
   const [optionsLoading, setOptionsLoading] = useState(false);
+  const [fieldPolicy, setFieldPolicy] = useState<PurchaseFieldPolicy | null>(null);
 
   useEffect(() => {
     loadCategories();
@@ -91,22 +101,33 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
       const data = await fetchPurchaseFormOptionsApi(propertyId);
       setCategories(data.categories);
       setDepartments(data.departments);
+      setFieldPolicy(data.field_policy || null);
       setOptionsLoaded(true);
-      if (data.categories.length > 0) {
+      const categoryHidden = getPurchaseFieldMode(data.field_policy, 'category') === 'HIDDEN';
+      const departmentHidden = getPurchaseFieldMode(data.field_policy, 'department') === 'HIDDEN';
+      if (categoryHidden) {
+        setCategoryId('');
+      } else if (data.categories.length > 0) {
         setCategoryId(data.categories[0].id);
       } else {
         setCategoryId('');
       }
-      if (data.departments.length > 0) {
+      if (departmentHidden) {
+        setDepartmentId('');
+      } else if (data.departments.length > 0) {
         setDepartmentId(data.departments[0].id);
       } else {
         setDepartmentId('');
+      }
+      if (getPurchaseFieldMode(data.field_policy, 'payment_status') === 'HIDDEN') {
+        setIsImmediatelyPaid(false);
       }
     } catch {
       setCategories([]);
       setDepartments([]);
       setCategoryId('');
       setDepartmentId('');
+      setFieldPolicy(null);
       setOptionsLoaded(false);
       setOptionsFailed(true);
       setError(PURCHASE_FORM_OPTIONS_ERROR);
@@ -119,8 +140,11 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
     optionsFailed,
     optionsLoaded,
     categories,
-    categoryId
+    categoryId,
+    fieldPolicy
   });
+  const vis = (key: Parameters<typeof isPurchaseFieldVisible>[1]) => isPurchaseFieldVisible(fieldPolicy, key);
+  const req = (key: Parameters<typeof isPurchaseFieldRequired>[1]) => isPurchaseFieldRequired(fieldPolicy, key);
 
   // Line item manipulation
   const updateLine = (id: string, field: keyof PurchaseLineItem, val: any) => {
@@ -145,7 +169,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
         id: `item-${Date.now()}`,
         description_snapshot: '',
         quantity: 1,
-        unit: 'pcs',
+        unit: '',
         unit_price: 0,
         discount_amount: 0,
         line_total: 0
@@ -174,8 +198,20 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
       setError(optionsFailed ? PURCHASE_FORM_OPTIONS_ERROR : 'Kategori pembelian wajib dipilih');
       return;
     }
-    if (!selectedSupplier) {
+    if (isPurchaseFieldRequired(fieldPolicy, 'supplier') && !selectedSupplier) {
       setError('Supplier / Vendor wajib dipilih');
+      return;
+    }
+    if (isPurchaseFieldRequired(fieldPolicy, 'department') && !departmentId) {
+      setError('Departemen alokasi wajib dipilih');
+      return;
+    }
+    if (isPurchaseFieldRequired(fieldPolicy, 'invoice_reference') && !sourceRef.trim()) {
+      setError('No. faktur supplier wajib diisi');
+      return;
+    }
+    if (isPurchaseFieldRequired(fieldPolicy, 'notes') && !notes.trim()) {
+      setError('Catatan pembelian wajib diisi');
       return;
     }
 
@@ -184,40 +220,56 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
       setError('Minimal satu rincian item pembelian harus diisi');
       return;
     }
+    if (validLines.some((l) => !String(l.unit || '').trim())) {
+      setError('Satuan item wajib diisi');
+      return;
+    }
+    const paymentHidden = !isPurchaseFieldVisible(fieldPolicy, 'payment_status');
+    const payNow = paymentHidden ? false : isImmediatelyPaid;
+    if (payNow && !String(paymentMethod || '').trim()) {
+      setError('Metode pembayaran wajib dipilih');
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
 
     try {
       const dept = departments.find((d) => d.id === departmentId);
+      const categoryHidden = !isPurchaseFieldVisible(fieldPolicy, 'category');
+      const departmentHidden = !isPurchaseFieldVisible(fieldPolicy, 'department');
+      const supplierHidden = !isPurchaseFieldVisible(fieldPolicy, 'supplier');
+      const payNowDetailsVisible = isPurchasePayNowDetailVisible(fieldPolicy);
 
       const created = await createPurchaseTransactionApi({
         property_id: propertyId,
         transaction_date: txDate,
-        purchase_category_id: categoryId || undefined,
-        department_id: departmentId || undefined,
-        department_code: dept?.code,
-        supplier_id: selectedSupplier.id,
-        source_reference: sourceRef.trim() || null,
-        receiving_status: receivingStatus,
-        discount_amount: numOverallDiscount,
+        purchase_category_id: categoryHidden ? undefined : (categoryId || undefined),
+        department_id: departmentHidden ? undefined : (departmentId || undefined),
+        department_code: departmentHidden ? undefined : dept?.code,
+        supplier_id: supplierHidden ? undefined : selectedSupplier?.id,
+        source_reference: isPurchaseFieldVisible(fieldPolicy, 'invoice_reference') ? (sourceRef.trim() || null) : null,
+        receiving_status: isPurchaseFieldVisible(fieldPolicy, 'receiving_status') ? receivingStatus : undefined,
+        discount_amount: isPurchaseFieldVisible(fieldPolicy, 'transaction_discount') ? numOverallDiscount : 0,
         rounding_amount: numRounding,
         lines: validLines.map((l) => ({
           description_snapshot: l.description_snapshot.trim(),
           quantity: Number(l.quantity) || 1,
-          unit: l.unit.trim() || 'pcs',
+          unit: String(l.unit || '').trim(),
           unit_price: Math.round(Number(l.unit_price) || 0),
-          discount_amount: Math.round(Number(l.discount_amount) || 0)
+          discount_amount: isPurchaseFieldVisible(fieldPolicy, 'line_discount')
+            ? Math.round(Number(l.discount_amount) || 0)
+            : 0
         })),
-        is_immediately_paid: isImmediatelyPaid,
-        payment_method: isImmediatelyPaid ? paymentMethod : undefined,
-        paid_amount: isImmediatelyPaid ? effectivePaid : undefined,
-        notes: notes.trim() || null,
+        is_immediately_paid: payNow,
+        payment_method: payNow && payNowDetailsVisible ? paymentMethod.trim() : undefined,
+        paid_amount: payNow && payNowDetailsVisible ? effectivePaid : undefined,
+        notes: isPurchaseFieldVisible(fieldPolicy, 'notes') ? (notes.trim() || null) : null,
         actor_name: actorName
       });
 
-      // Upload Evidence Attachments
-      if (invoiceFile) {
+      const uploadErrors: string[] = [];
+      if (invoiceFile && isPurchaseFieldVisible(fieldPolicy, 'receipt_attachment')) {
         try {
           await uploadTransactionAttachmentApi(
             created.id,
@@ -226,12 +278,12 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
             'RECEIPT',
             actorName
           );
-        } catch (_e) {
-          console.error('Failed to upload invoice file', _e);
+        } catch (err: any) {
+          uploadErrors.push(err.message || 'Gagal mengunggah bukti nota / struk');
         }
       }
 
-      if (paymentProofFile && isImmediatelyPaid) {
+      if (paymentProofFile && payNow && isPurchaseFieldVisible(fieldPolicy, 'payment_evidence')) {
         try {
           await uploadTransactionAttachmentApi(
             created.id,
@@ -240,9 +292,16 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
             'PAYMENT_PROOF',
             actorName
           );
-        } catch (_e) {
-          console.error('Failed to upload payment proof', _e);
+        } catch (err: any) {
+          uploadErrors.push(err.message || 'Gagal mengunggah bukti pembayaran');
         }
+      }
+
+      if (uploadErrors.length > 0) {
+        setError(`Transaksi tersimpan, tetapi lampiran gagal: ${uploadErrors.join('; ')}`);
+        setSubmitting(false);
+        onSuccess(created.id);
+        return;
       }
 
       onSuccess(created.id);
@@ -309,9 +368,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* Supplier Picker */}
-            <div className="md:col-span-2">
+            {vis('supplier') && (
+            <div className={vis('supplier') ? 'md:col-span-2' : ''}>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Supplier / Vendor <span className="text-rose-500">*</span>
+                Supplier / Vendor {req('supplier') && <span className="text-rose-500">*</span>}
               </label>
               {selectedSupplier ? (
                 <div className="p-3 bg-emerald-50/60 border border-emerald-300 rounded-xl flex items-center justify-between">
@@ -349,6 +409,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 </button>
               )}
             </div>
+            )}
 
             {/* Tanggal */}
             <div>
@@ -366,15 +427,16 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+            {vis('category') && (
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Kategori Pembelian <span className="text-rose-500">*</span>
+                Kategori Pembelian {req('category') && <span className="text-rose-500">*</span>}
               </label>
               <select
                 value={categoryId}
                 onChange={(e) => setCategoryId(e.target.value ? Number(e.target.value) : '')}
                 disabled={optionsFailed || optionsLoading || categories.length === 0}
-                required
+                required={req('category')}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700 disabled:opacity-60"
               >
                 {categories.length === 0 && <option value="">Pilih kategori</option>}
@@ -385,12 +447,17 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 ))}
               </select>
             </div>
+            )}
 
+            {vis('department') && (
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Departemen Alokasi</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Departemen Alokasi {req('department') && <span className="text-rose-500">*</span>}
+              </label>
               <select
                 value={departmentId}
                 onChange={(e) => setDepartmentId(e.target.value ? Number(e.target.value) : '')}
+                required={req('department')}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none font-semibold text-slate-700"
               >
                 {departments.length === 0 && <option value="">Tidak ada departemen aktif</option>}
@@ -401,17 +468,23 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 ))}
               </select>
             </div>
+            )}
 
+            {vis('invoice_reference') && (
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">No. Faktur / Nota Supplier</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                No. Faktur / Nota Supplier {req('invoice_reference') && <span className="text-rose-500">*</span>}
+              </label>
               <input
                 type="text"
                 placeholder="INV-2026-XXXX / Nota #123"
                 value={sourceRef}
                 onChange={(e) => setSourceRef(e.target.value)}
+                required={req('invoice_reference')}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
               />
             </div>
+            )}
           </div>
         </div>
 
@@ -442,9 +515,9 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-400 uppercase bg-slate-50">
                   <th className="py-2.5 px-3 min-w-[220px]">Nama Barang / Deskripsi</th>
                   <th className="py-2.5 px-2 w-24">Jumlah (Qty)</th>
-                  <th className="py-2.5 px-2 w-24">Satuan</th>
+                  {isPurchaseLineUnitVisible() && <th className="py-2.5 px-2 w-24">Satuan {isPurchaseLineUnitRequired() && <span className="text-rose-500">*</span>}</th>}
                   <th className="py-2.5 px-2 w-36 text-right">Harga Satuan (Rp)</th>
-                  <th className="py-2.5 px-2 w-28 text-right">Diskon (Rp)</th>
+                  {vis('line_discount') && <th className="py-2.5 px-2 w-28 text-right">Diskon (Rp) {req('line_discount') && <span className="text-rose-500">*</span>}</th>}
                   <th className="py-2.5 px-3 w-36 text-right">Total (Rp)</th>
                   <th className="py-2.5 px-2 w-10 text-center"></th>
                 </tr>
@@ -473,15 +546,18 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                         className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-emerald-600 outline-none text-xs font-mono font-bold"
                       />
                     </td>
+                    {isPurchaseLineUnitVisible() && (
                     <td className="py-2 px-2">
                       <input
                         type="text"
-                        placeholder="kg / pcs"
+                        placeholder="kg / karung / liter"
+                        required={isPurchaseLineUnitRequired()}
                         value={item.unit}
                         onChange={(e) => updateLine(item.id, 'unit', e.target.value)}
                         className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-emerald-600 outline-none text-xs"
                       />
                     </td>
+                    )}
                     <td className="py-2 px-2">
                       <input
                         type="number"
@@ -493,16 +569,19 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                         className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-emerald-600 outline-none text-xs text-right font-mono font-bold"
                       />
                     </td>
+                    {vis('line_discount') && (
                     <td className="py-2 px-2">
                       <input
                         type="number"
                         min="0"
                         step="1"
+                        required={req('line_discount')}
                         value={item.discount_amount}
                         onChange={(e) => updateLine(item.id, 'discount_amount', e.target.value)}
                         className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:border-emerald-600 outline-none text-xs text-right font-mono"
                       />
                     </td>
+                    )}
                     <td className="py-2 px-3 text-right font-mono font-bold text-slate-800">
                       Rp {item.line_total.toLocaleString('id-ID')}
                     </td>
@@ -527,9 +606,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
           {/* Subtotals and Grand Total Math */}
           <div className="pt-4 border-t border-slate-100 flex flex-col md:flex-row justify-between items-start gap-4">
             <div className="w-full md:w-1/2 space-y-3">
+              {vis('receiving_status') && (
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Status Penerimaan Fisik Barang
+                  Status Penerimaan Fisik Barang {req('receiving_status') && <span className="text-rose-500">*</span>}
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
@@ -567,17 +647,23 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                   </button>
                 </div>
               </div>
+              )}
 
+              {vis('notes') && (
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Catatan Tambahan</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Catatan Tambahan {req('notes') && <span className="text-rose-500">*</span>}
+                </label>
                 <textarea
                   rows={2}
                   placeholder="Catatan pengiriman, no PO, kondisi barang..."
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
+                  required={req('notes')}
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
                 />
               </div>
+              )}
             </div>
 
             {/* Calculations Box */}
@@ -586,17 +672,20 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 <span>Subtotal Barang:</span>
                 <span className="font-mono font-bold">Rp {linesSubtotal.toLocaleString('id-ID')}</span>
               </div>
+              {vis('transaction_discount') && (
               <div className="flex justify-between items-center text-slate-600">
-                <span>Diskon Tambahan (Rp):</span>
+                <span>Diskon Tambahan (Rp) {req('transaction_discount') && <span className="text-rose-500">*</span>}</span>
                 <input
                   type="number"
                   min="0"
                   step="1"
+                  required={req('transaction_discount')}
                   value={overallDiscount}
                   onChange={(e) => setOverallDiscount(e.target.value)}
                   className="w-28 px-2 py-1 text-right bg-white border border-slate-200 rounded-lg text-xs font-mono font-bold"
                 />
               </div>
+              )}
               <div className="flex justify-between items-center text-slate-600">
                 <span>Pembulatan (+/- Rp):</span>
                 <input
@@ -618,12 +707,13 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
         </div>
 
         {/* Section 3: Pembayaran & Settlement */}
+        {vis('payment_status') && (
         <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
           <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 border-b border-slate-100 pb-3">
             <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
             </svg>
-            3. Status Pelunasan Pembayaran
+            3. Status Pelunasan Pembayaran {req('payment_status') && <span className="text-rose-500">*</span>}
           </h3>
 
           <div className="space-y-4">
@@ -650,7 +740,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
               </label>
             </div>
 
-            {isImmediatelyPaid && (
+            {isImmediatelyPaid && isPurchasePayNowDetailVisible(fieldPolicy) && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-slate-50 rounded-xl border border-slate-200 animate-in fade-in">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -659,8 +749,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                   <select
                     value={paymentMethod}
                     onChange={(e) => setPaymentMethod(e.target.value)}
+                    required
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:border-emerald-600 outline-none font-semibold text-slate-700"
                   >
+                    <option value="">Pilih metode pembayaran</option>
                     <option value="CASH">Tunai (Cash / Kasir)</option>
                     <option value="TRANSFER">Transfer Bank</option>
                     <option value="QRIS">QRIS</option>
@@ -669,12 +761,13 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Nominal Dibayarkan (Rp)
+                    Nominal Dibayarkan (Rp) {req('paid_amount') && <span className="text-rose-500">*</span>}
                   </label>
                   <input
                     type="number"
                     min="1"
                     step="1"
+                    required={req('paid_amount')}
                     placeholder={`Default lunas: ${grandTotal}`}
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(e.target.value)}
@@ -685,8 +778,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
             )}
           </div>
         </div>
+        )}
 
         {/* Section 4: File Evidence & Bukti Lampiran */}
+        {(vis('receipt_attachment') || vis('payment_evidence')) && (
         <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
           <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 border-b border-slate-100 pb-3">
             <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -696,9 +791,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
           </h3>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {vis('receipt_attachment') && (
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Bukti Nota / Struk Pembelian (Wajib)
+                Bukti Nota / Struk Pembelian {req('receipt_attachment') && <span className="text-rose-500">*</span>}
               </label>
               <input
                 type="file"
@@ -707,10 +803,12 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"
               />
             </div>
+            )}
 
+            {vis('payment_evidence') && (
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Bukti Pembayaran / Transfer Bank (Opsional)
+                Bukti Pembayaran / Transfer Bank {req('payment_evidence') && <span className="text-rose-500">*</span>}
               </label>
               <input
                 type="file"
@@ -719,8 +817,10 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
                 className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"
               />
             </div>
+            )}
           </div>
         </div>
+        )}
 
         {/* Submit Bar */}
         <div className="flex items-center justify-end gap-3 pt-4">
@@ -745,6 +845,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
       </form>
 
       {/* Supplier Modal */}
+      {vis('supplier') && (
       <SupplierSelectorModal
         isOpen={showSupplierModal}
         propertyId={propertyId}
@@ -753,6 +854,7 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
         onSelect={(sup) => setSelectedSupplier(sup)}
         onClose={() => setShowSupplierModal(false)}
       />
+      )}
     </div>
   );
 };

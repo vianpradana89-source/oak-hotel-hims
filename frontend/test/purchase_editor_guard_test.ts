@@ -3,6 +3,7 @@ import {
   canSubmitPurchaseCreate,
   PURCHASE_FORM_OPTIONS_ERROR,
 } from '../src/features/transactions/purchaseEditorGuard.ts';
+import { DEFAULT_PURCHASE_FIELD_MODES } from '../src/features/transactions/purchaseFieldPolicy.ts';
 
 let assertions = 0;
 function check(condition: unknown, message: string) {
@@ -79,6 +80,38 @@ check(
     categoryId: 11,
   }) === true,
   'N. save enabled with valid canonical category'
+);
+
+check(
+  canSubmitPurchaseCreate({
+    optionsFailed: false,
+    optionsLoaded: true,
+    categories: [],
+    categoryId: '',
+    fieldPolicy: {
+      property_id: 1,
+      fields: [],
+      modes: { ...DEFAULT_PURCHASE_FIELD_MODES, category: 'HIDDEN' },
+      default_purchase_category_id: 11,
+    },
+  }) === true,
+  '1D. save enabled when category is HIDDEN'
+);
+
+check(
+  canSubmitPurchaseCreate({
+    optionsFailed: true,
+    optionsLoaded: false,
+    categories: [],
+    categoryId: '',
+    fieldPolicy: {
+      property_id: 1,
+      fields: [],
+      modes: { ...DEFAULT_PURCHASE_FIELD_MODES, category: 'HIDDEN' },
+      default_purchase_category_id: 11,
+    },
+  }) === false,
+  'AO. options load failure still fail-closed even if category HIDDEN'
 );
 
 console.log(`PASS | PURCHASE-1C1 editor guard | ${assertions} assertions`);

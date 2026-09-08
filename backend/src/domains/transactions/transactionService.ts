@@ -51,6 +51,7 @@ import {
   resolvePurchaseCategoryBinding,
   resolvePurchaseDepartmentBinding,
 } from './purchaseSettingsService';
+import { preparePurchaseCreateDto } from './purchaseFieldRulesService';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -1087,6 +1088,8 @@ export async function createPurchaseTransaction(
     throw err;
   }
 
+  dto = await preparePurchaseCreateDto(pool, dto);
+
   for (let i = 0; i < dto.lines.length; i++) {
     const line = dto.lines[i];
     const desc = (line.description_snapshot || line.description || '').trim();
@@ -1249,7 +1252,7 @@ export async function createPurchaseTransaction(
           line.product_id || null,
           desc,
           Number(line.quantity),
-          line.unit?.trim() || 'pcs',
+          String(line.unit || '').trim(),
           Math.round(Number(line.unit_price)),
           Math.max(0, Math.round(Number(line.discount_amount || 0))),
           i + 1
@@ -1288,6 +1291,10 @@ export async function createPurchaseTransaction(
     let paymentStatus = 'UNPAID';
 
     if (paidAmount > 0) {
+      const settleMethod = String(dto.payment_method || '').trim();
+      if (!settleMethod) {
+        throw purchaseValidationError('Metode pembayaran wajib dipilih');
+      }
       await client.query(
         `INSERT INTO payment_transactions (
           property_id, transaction_id, transaction_type, amount, payment_method,
@@ -1299,7 +1306,7 @@ export async function createPurchaseTransaction(
           propertyId,
           txId,
           paidAmount,
-          dto.payment_method || 'CASH',
+          settleMethod,
           dto.source_reference || `PURCHASE-SETTLE-${txNumber}`,
           dto.actor_name || 'Staff'
         ]

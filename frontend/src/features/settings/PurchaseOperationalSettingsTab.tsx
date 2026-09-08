@@ -4,19 +4,32 @@ import {
   createPurchaseSettingsCategoryApi,
   deletePurchaseSettingsCategoryApi,
   fetchPurchaseAllowedDepartmentsApi,
+  fetchPurchaseFieldRulesApi,
   fetchPurchaseSettingsCategoriesApi,
   savePurchaseAllowedDepartmentsApi,
+  savePurchaseFieldRulesApi,
   setPurchaseSettingsCategoryActiveApi,
   updatePurchaseSettingsCategoryApi,
   type PurchaseSettingsCategory,
   type PurchaseSettingsDepartment,
 } from '../transactions/transactionClient';
+import {
+  DEFAULT_PURCHASE_FIELD_MODES,
+  type FieldMode,
+  type PurchaseFieldKey,
+  type PurchaseFieldPolicy,
+} from '../transactions/purchaseFieldPolicy';
 
 interface PurchaseOperationalSettingsTabProps {
   propertyId: number;
 }
 
 const CATEGORY_MENU_WIDTH = 160;
+const MODE_OPTIONS: { value: FieldMode; label: string }[] = [
+  { value: 'REQUIRED', label: 'Wajib' },
+  { value: 'OPTIONAL', label: 'Opsional' },
+  { value: 'HIDDEN', label: 'Sembunyikan' },
+];
 
 function placeCategoryActionMenu(
   anchor: HTMLElement,
@@ -49,6 +62,10 @@ export const PurchaseOperationalSettingsTab: React.FC<PurchaseOperationalSetting
   const [departments, setDepartments] = useState<PurchaseSettingsDepartment[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingDepts, setSavingDepts] = useState(false);
+  const [savingFields, setSavingFields] = useState(false);
+  const [fieldPolicy, setFieldPolicy] = useState<PurchaseFieldPolicy | null>(null);
+  const [fieldModes, setFieldModes] = useState<Record<PurchaseFieldKey, FieldMode>>({ ...DEFAULT_PURCHASE_FIELD_MODES });
+  const [defaultCategoryId, setDefaultCategoryId] = useState<number | ''>('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -73,12 +90,16 @@ export const PurchaseOperationalSettingsTab: React.FC<PurchaseOperationalSetting
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cats, deptData] = await Promise.all([
+      const [cats, deptData, policy] = await Promise.all([
         fetchPurchaseSettingsCategoriesApi(propertyId),
         fetchPurchaseAllowedDepartmentsApi(propertyId),
+        fetchPurchaseFieldRulesApi(propertyId),
       ]);
       setCategories(cats);
       setDepartments(deptData.departments);
+      setFieldPolicy(policy);
+      setFieldModes({ ...DEFAULT_PURCHASE_FIELD_MODES, ...policy.modes });
+      setDefaultCategoryId(policy.default_purchase_category_id || '');
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message || 'Gagal memuat pengaturan pembelian' });
     } finally {
@@ -205,6 +226,24 @@ export const PurchaseOperationalSettingsTab: React.FC<PurchaseOperationalSetting
     }
   };
 
+  const handleSaveFieldRules = async () => {
+    setSavingFields(true);
+    try {
+      const saved = await savePurchaseFieldRulesApi(propertyId, {
+        rules: fieldModes,
+        default_purchase_category_id: defaultCategoryId === '' ? null : Number(defaultCategoryId),
+      });
+      setFieldPolicy(saved);
+      setFieldModes({ ...DEFAULT_PURCHASE_FIELD_MODES, ...saved.modes });
+      setDefaultCategoryId(saved.default_purchase_category_id || '');
+      setFeedback({ type: 'success', message: 'Konfigurasi field pembelian disimpan' });
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message || 'Gagal menyimpan konfigurasi field' });
+    } finally {
+      setSavingFields(false);
+    }
+  };
+
   const allowListConfigured = departments.some((row) => row.allowed);
 
   return (
@@ -212,7 +251,7 @@ export const PurchaseOperationalSettingsTab: React.FC<PurchaseOperationalSetting
       <div>
         <h2 className="text-base font-bold text-neutral-900">Pembelian Operasional</h2>
         <p className="text-[11px] text-neutral-500 mt-0.5">
-          Kategori pembelian properti dan departemen HR untuk alokasi transaksi pembelian.
+          Kategori, departemen alokasi, dan mode field form pembelian (Wajib / Opsional / Sembunyikan).
         </p>
       </div>
 
@@ -415,6 +454,78 @@ export const PurchaseOperationalSettingsTab: React.FC<PurchaseOperationalSetting
             );
           })}
         </div>
+      </section>
+
+      <section className="bg-white border border-neutral-200/90 rounded-2xl shadow-xs p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="font-bold text-sm text-neutral-900">Konfigurasi Field Pembelian</h3>
+            <p className="text-[11px] text-neutral-500 mt-0.5">
+              Atur field form pembelian baru: Wajib, Opsional, atau Sembunyikan. Transaksi lama tidak diubah.
+              Satuan item hanya Wajib. Jika Pembayaran tampil, metode harus Wajib dan nominal tidak boleh disembunyikan.
+              Jika Pembayaran disembunyikan, metode harus Sembunyikan dan nominal tidak boleh Wajib.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleSaveFieldRules}
+            disabled={savingFields || loading}
+            className="px-3 py-1.5 text-xs font-bold rounded-lg bg-[#1b4332] text-white disabled:opacity-50 shrink-0"
+          >
+            {savingFields ? 'Menyimpan…' : 'Simpan Field'}
+          </button>
+        </div>
+
+        {fieldModes.category === 'HIDDEN' && (
+          <div>
+            <label className="block text-[11px] font-semibold text-neutral-700 mb-1">
+              Kategori default (wajib jika Kategori disembunyikan)
+            </label>
+            <select
+              value={defaultCategoryId}
+              onChange={(e) => setDefaultCategoryId(e.target.value ? Number(e.target.value) : '')}
+              className="w-full max-w-md px-2.5 py-1.5 text-xs bg-[#faf9f6] border border-neutral-200 rounded-lg outline-none focus:border-emerald-700"
+            >
+              <option value="">Pilih kategori default</option>
+              {categories.filter((cat) => cat.is_active).map((cat) => (
+                <option key={cat.id} value={cat.id}>{cat.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <table className="w-full text-xs table-fixed">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wide text-neutral-400 border-b border-neutral-200">
+              <th className="py-1.5 pr-2 font-semibold">Field</th>
+              <th className="py-1.5 font-semibold w-40">Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(fieldPolicy?.fields || []).map((field) => {
+              const allowed = field.allowed_modes.length ? field.allowed_modes : MODE_OPTIONS.map((row) => row.value);
+              return (
+                <tr key={field.field_key} className="border-b border-neutral-100 last:border-0">
+                  <td className="py-1.5 pr-2 font-medium text-neutral-800">{field.label}</td>
+                  <td className="py-1.5">
+                    <select
+                      value={fieldModes[field.field_key]}
+                      onChange={(e) => {
+                        const next = e.target.value as FieldMode;
+                        setFieldModes((prev) => ({ ...prev, [field.field_key]: next }));
+                      }}
+                      className="w-full px-2 py-1 text-xs bg-[#faf9f6] border border-neutral-200 rounded-lg outline-none focus:border-emerald-700"
+                    >
+                      {MODE_OPTIONS.filter((opt) => allowed.includes(opt.value)).map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </section>
     </div>
   );
