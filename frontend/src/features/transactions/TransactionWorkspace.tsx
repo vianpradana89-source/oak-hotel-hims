@@ -23,6 +23,7 @@ import { resolvePenjualanMainRowDetailTarget } from './penjualanDetailTarget';
 import {
   fetchTransactionsApi,
   fetchCategoriesApi,
+  fetchTransactionDetailApi,
   softDeleteTransactionApi,
   updatePurchaseLifecycleApi
 } from './transactionClient';
@@ -151,6 +152,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [selectedBookingIdForDetail, setSelectedBookingIdForDetail] = useState<number | string | null>(null);
   const [expandedBids, setExpandedBids] = useState<Record<string, boolean>>({});
 
+  // PURCHASE-2B: expandable operational detail row
+  const [expandedPurchaseIds, setExpandedPurchaseIds] = useState<Set<number | string>>(new Set());
+  const [purchaseDetailCache, setPurchaseDetailCache] = useState<Map<number | string, TransactionRecord>>(new Map());
+  const [purchaseLoadingIds, setPurchaseLoadingIds] = useState<Set<number | string>>(new Set());
+  const [purchaseExpandErrors, setPurchaseExpandErrors] = useState<Map<number | string, string>>(new Map());
+
   // PURCHASE-2A3: inline lifecycle control per-cell loading state
   const [lifecycleSaving, setLifecycleSaving] = useState<Record<string, boolean>>({});
 
@@ -256,6 +263,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   useEffect(() => {
     setExpandedBids({});
+    setExpandedPurchaseIds(new Set());
+    setPurchaseDetailCache(new Map());
+    setPurchaseLoadingIds(new Set());
+    setPurchaseExpandErrors(new Map());
   }, [propertyId, activeTab, operationalStatus, startDate, endDate, debouncedSearch, page]);
 
   useEffect(() => {
@@ -597,6 +608,92 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const toggleBidExpand = (bid: string) => {
     setExpandedBids((prev) => ({ ...prev, [bid]: !prev[bid] }));
+  };
+
+  // PURCHASE-2B: toggle purchase row expansion with lazy load
+  const togglePurchaseExpand = async (txId: number | string) => {
+    const isExpanded = expandedPurchaseIds.has(txId);
+
+    if (isExpanded) {
+      setExpandedPurchaseIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    } else {
+      setExpandedPurchaseIds((prev) => {
+        const next = new Set(prev);
+        next.add(txId);
+        return next;
+      });
+      setPurchaseExpandErrors((prev) => {
+        const next = new Map(prev);
+        next.delete(txId);
+        return next;
+      });
+
+      if (!purchaseDetailCache.has(txId) && !purchaseLoadingIds.has(txId)) {
+        setPurchaseLoadingIds((prev) => {
+          const next = new Set(prev);
+          next.add(txId);
+          return next;
+        });
+        try {
+          const detail = await fetchTransactionDetailApi(txId, propertyId);
+          setPurchaseDetailCache((prev) => {
+            const next = new Map(prev);
+            next.set(txId, detail);
+            return next;
+          });
+        } catch (err: any) {
+          setPurchaseExpandErrors((prev) => {
+            const next = new Map(prev);
+            next.set(txId, err.message || 'Gagal memuat detail');
+            return next;
+          });
+        } finally {
+          setPurchaseLoadingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(txId);
+            return next;
+          });
+        }
+      }
+    }
+  };
+
+  // PURCHASE-2B: retry detail fetch while keeping row expanded
+  const retryPurchaseExpand = async (txId: number | string) => {
+    setPurchaseExpandErrors((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setPurchaseLoadingIds((prev) => {
+      const next = new Set(prev);
+      next.add(txId);
+      return next;
+    });
+    try {
+      const detail = await fetchTransactionDetailApi(txId, propertyId);
+      setPurchaseDetailCache((prev) => {
+        const next = new Map(prev);
+        next.set(txId, detail);
+        return next;
+      });
+    } catch (err: any) {
+      setPurchaseExpandErrors((prev) => {
+        const next = new Map(prev);
+        next.set(txId, err.message || 'Gagal memuat detail');
+        return next;
+      });
+    } finally {
+      setPurchaseLoadingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    }
   };
 
   const renderStayTypeBadge = (label: string) => {
@@ -1601,18 +1698,41 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   }
 
                   if (activeTab === 'PURCHASE') {
+                    const isExpanded = expandedPurchaseIds.has(t.id);
+                    const detail = purchaseDetailCache.get(t.id);
+                    const isLoading = purchaseLoadingIds.has(t.id);
+                    const error = purchaseExpandErrors.get(t.id);
+
                     return (
-                      <tr
-                        key={t.id}
-                        onClick={() => openDetailDrawer(t.id)}
-                        className="hover:bg-slate-50/80 transition-colors cursor-pointer"
-                      >
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
-                          <div className="text-[10px] text-slate-400">
-                            {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-                          </div>
-                        </td>
+                      <React.Fragment key={t.id}>
+                        <tr
+                          onClick={() => openDetailDrawer(t.id)}
+                          className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+                        >
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                aria-label={isExpanded ? 'Tutup detail pembelian' : 'Lihat detail pembelian'}
+                                aria-expanded={isExpanded}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  togglePurchaseExpand(t.id);
+                                }}
+                                className="mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded text-slate-500 hover:bg-slate-100 cursor-pointer transition-colors"
+                              >
+                                <svg className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                </svg>
+                              </button>
+                              <div>
+                                <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                                <div className="text-[10px] text-slate-400">
+                                  {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
                         <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
                           {t.transaction_no}
                         </td>
@@ -1742,17 +1862,117 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 Hapus
                               </button>
                             )}
-                            {t.transaction_status === 'POSTED' && (
-                              <button
-                                onClick={() => openVoidModal(t)}
-                                className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              >
-                                Void
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
+                             {t.transaction_status === 'POSTED' && (
+                               <button
+                                 onClick={() => openVoidModal(t)}
+                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                               >
+                                 Void
+                               </button>
+                             )}
+                           </div>
+                         </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr className="bg-slate-50/60">
+                            <td colSpan={9} className="px-4 py-3">
+                              <div className="rounded-lg border border-slate-200 bg-white/90 overflow-hidden">
+                                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
+                                  Rincian Item Pembelian
+                                </div>
+                                {isLoading ? (
+                                  <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                    Memuat detail...
+                                  </div>
+                                 ) : error ? (
+                                   <div className="px-4 py-4">
+                                     <div className="text-sm text-rose-600 mb-2">Gagal memuat detail pembelian.</div>
+                                     <button
+                                       type="button"
+                                       onClick={(e) => {
+                                         e.stopPropagation();
+                                         retryPurchaseExpand(t.id);
+                                       }}
+                                       className="text-xs text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
+                                     >
+                                       Coba lagi
+                                     </button>
+                                   </div>
+                                 ) : detail ? (
+                                   <>
+                                     {detail.lines && detail.lines.length > 0 ? (
+                                       <div className="overflow-x-auto">
+                                         <table className="w-full text-[11px]">
+                                           <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                                             <tr>
+                                               <th className="py-2 px-3 text-left">Item / Deskripsi</th>
+                                               <th className="py-2 px-3 text-right">Qty</th>
+                                               <th className="py-2 px-3 text-left">Satuan</th>
+                                               <th className="py-2 px-3 text-right">Harga Satuan</th>
+                                               <th className="py-2 px-3 text-right">Diskon</th>
+                                               <th className="py-2 px-3 text-right">Subtotal</th>
+                                             </tr>
+                                           </thead>
+                                           <tbody className="divide-y divide-slate-100">
+                                             {detail.lines.map((line, idx) => (
+                                               <tr key={line.id || idx}>
+                                                 <td className="py-2 px-3 text-slate-700">{line.description_snapshot}</td>
+                                                 <td className="py-2 px-3 text-right font-mono">{Number(line.quantity)}</td>
+                                                 <td className="py-2 px-3 text-slate-500">{line.unit}</td>
+                                                 <td className="py-2 px-3 text-right font-mono">{formatIdr(Number(line.unit_price))}</td>
+                                                 <td className="py-2 px-3 text-right font-mono text-slate-500">{formatIdr(Number(line.discount_amount))}</td>
+                                                 <td className="py-2 px-3 text-right font-mono font-semibold text-slate-800">{formatIdr(Number(line.line_total))}</td>
+                                               </tr>
+                                             ))}
+                                           </tbody>
+                                         </table>
+                                       </div>
+                                     ) : (
+                                       <div className="px-4 py-4 text-center text-sm text-slate-500">
+                                         Tidak ada rincian item.
+                                       </div>
+                                     )}
+                                     <div className="px-4 py-3 border-t border-slate-200 bg-slate-50/30 space-y-1 text-xs">
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Gross / Nilai Bruto:</span>
+                                         <span className="font-mono font-semibold">{formatIdr(detail.amount)}</span>
+                                       </div>
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Diskon Transaksi:</span>
+                                         <span className="font-mono">{formatIdr(detail.discount_amount)}</span>
+                                       </div>
+                                       <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
+                                         <span className="text-slate-700">Net / Total Tagihan:</span>
+                                         <span className="font-mono text-emerald-700">{formatIdr(detail.net_amount)}</span>
+                                       </div>
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Penerimaan:</span>
+                                         <span className="font-mono">{detail.receiving_status || '-'}</span>
+                                       </div>
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Referensi:</span>
+                                         <span className="font-mono">{detail.source_reference || '-'}</span>
+                                       </div>
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Departemen:</span>
+                                         <span className="font-mono">{detail.department_name_snapshot || detail.department_code || '-'}</span>
+                                       </div>
+                                       <div className="flex justify-between">
+                                         <span className="text-slate-500">Kategori:</span>
+                                         <span className="font-mono">{detail.category_name || detail.category_code || '-'}</span>
+                                       </div>
+                                     </div>
+                                   </>
+                                 ) : (
+                                   <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                     Memuat detail...
+                                   </div>
+                                 )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     );
                   }
 
