@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
   formatReservationStayType,
-  stayTypeBadgeClass
+  stayTypeBadgeClass,
+  getPurchaseReceivingClass,
+  getPurchaseWorkflowClass
 } from './transactionDomainTypes';
 import type {
   TransactionRecord,
@@ -12,11 +14,10 @@ import type {
 } from './transactionDomainTypes';
 import {
   fetchTransactionDetailApi,
-  verifyTransactionApi,
-  updatePurchaseReceivingStatusApi,
   uploadTransactionAttachmentApi,
   deleteTransactionAttachmentApi,
-  settleTransactionPaymentApi
+  settleTransactionPaymentApi,
+  updatePurchaseLifecycleApi
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
@@ -128,6 +129,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   // Receiving Status Form State
   const [isUpdatingReceiving, setIsUpdatingReceiving] = useState(false);
 
+  // Workflow Status Form State
+  const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
+
   // Attachment Upload
   const [uploadingPurpose, setUploadingPurpose] = useState<AttachmentPurpose>('RECEIPT');
   const [isUploading, setIsUploading] = useState(false);
@@ -205,10 +209,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     if (!tx) return;
     setIsVerifying(true);
     try {
-      await verifyTransactionApi(tx.id, {
+      await updatePurchaseLifecycleApi(tx.id, {
         property_id: propertyId,
+        action: 'SET_VERIFICATION',
         verification_status: verifyStatusChoice,
-        verification_note: verifyNote.trim() || undefined,
+        reason: verifyNote.trim() || undefined,
         actor_user_id: currentUserId || undefined,
         actor_name: currentStaffName
       });
@@ -227,7 +232,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     if (!tx || isUpdatingReceiving) return;
     setIsUpdatingReceiving(true);
     try {
-      await updatePurchaseReceivingStatusApi(tx.id, propertyId, {
+      await updatePurchaseLifecycleApi(tx.id, {
+        property_id: propertyId,
+        action: 'SET_RECEIVING',
         receiving_status: newStatus,
         actor_name: currentStaffName
       });
@@ -237,6 +244,25 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
       alert(err.message || 'Gagal memperbarui status penerimaan');
     } finally {
       setIsUpdatingReceiving(false);
+    }
+  };
+
+  const handleWorkflowChange = async (newWorkflow: string) => {
+    if (!tx || isUpdatingWorkflow) return;
+    setIsUpdatingWorkflow(true);
+    try {
+      await updatePurchaseLifecycleApi(tx.id, {
+        property_id: propertyId,
+        action: 'SET_WORKFLOW',
+        workflow_status: newWorkflow,
+        actor_name: currentStaffName
+      });
+      await loadDetail();
+      if (onTransactionUpdated) onTransactionUpdated();
+    } catch (err: any) {
+      alert(err.message || 'Gagal memperbarui status alur');
+    } finally {
+      setIsUpdatingWorkflow(false);
     }
   };
 
@@ -403,7 +429,8 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <button
                       type="button"
                       onClick={() => setShowVerifyModal(true)}
-                      className="text-[10px] text-slate-600 underline hover:text-emerald-800 font-semibold cursor-pointer ml-1"
+                      disabled={tx.operational_sheet === 'BATAL' || tx.operational_sheet === 'HAPUS'}
+                      className="text-[10px] text-slate-600 underline hover:text-emerald-800 font-semibold cursor-pointer ml-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
                     >
                       Ubah
                     </button>
@@ -411,19 +438,52 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 </div>
 
                 {tx.transaction_type === 'PURCHASE' && (
-                  <div>
-                    <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Fisik</span>
-                    <select
-                      value={tx.receiving_status || 'BELUM_DITERIMA'}
-                      onChange={(e) => handleReceivingChange(e.target.value as ReceivingStatus)}
-                      disabled={isUpdatingReceiving}
-                      className="mt-1 text-xs font-bold bg-white border border-slate-200 rounded-lg px-2 py-0.5 text-slate-800 outline-none"
-                    >
-                      <option value="BELUM_DITERIMA">Belum Diterima</option>
-                      <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                      <option value="DITERIMA">Diterima Lengkap</option>
-                    </select>
-                  </div>
+                  <>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Fisik</span>
+                      {(() => {
+                        const rc = getPurchaseReceivingClass(tx.receiving_status || 'BELUM_DITERIMA');
+                        return (
+                          <select
+                            value={tx.receiving_status || 'BELUM_DITERIMA'}
+                            onChange={(e) => handleReceivingChange(e.target.value as ReceivingStatus)}
+                            disabled={isUpdatingReceiving || tx.operational_sheet === 'BATAL' || tx.operational_sheet === 'HAPUS'}
+                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${rc.bg} ${rc.border} ${rc.text} border hover:bg-opacity-80 disabled:opacity-60`}
+                          >
+                            <option value="BELUM_DITERIMA">Belum Diterima</option>
+                            <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
+                            <option value="DITERIMA">Diterima</option>
+                            <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
+                          </select>
+                        );
+                      })()}
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Status Alur</span>
+                      {(() => {
+                        const ws = tx.operational_sheet || 'PROSES';
+                        const wc = getPurchaseWorkflowClass(ws);
+                        if (ws === 'BATAL' || ws === 'HAPUS') {
+                          return (
+                            <span className={`inline-flex items-center text-xs font-bold mt-1 ${wc.bg} ${wc.border} ${wc.text} border rounded-md px-2 py-0.5 cursor-default`}>
+                              {ws === 'BATAL' ? 'Batal' : 'Dihapus'}
+                            </span>
+                          );
+                        }
+                        return (
+                          <select
+                            value={ws}
+                            onChange={(e) => handleWorkflowChange(e.target.value)}
+                            disabled={isUpdatingWorkflow}
+                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${wc.bg} ${wc.border} ${wc.text} border hover:bg-opacity-80 disabled:opacity-60`}
+                          >
+                            <option value="PROSES">Proses</option>
+                            <option value="SELESAI">Selesai</option>
+                          </select>
+                        );
+                      })()}
+                    </div>
+                  </>
                 )}
               </div>
 
