@@ -6,8 +6,7 @@ import type {
   CategoryOption,
   DepartmentOption,
   OperationalStatus,
-  VerificationStatus,
-  ReceivingStatus
+  VerificationStatus
 } from './transactionDomainTypes';
 import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass } from './transactionDomainTypes';
 import {
@@ -21,7 +20,13 @@ import {
 } from './penjualanBidGrouping';
 import { getPenjualanPeriodPresetRange } from './transactionPeriodHelpers';
 import { resolvePenjualanMainRowDetailTarget } from './penjualanDetailTarget';
-import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
+import {
+  fetchTransactionsApi,
+  fetchCategoriesApi,
+  softDeleteTransactionApi,
+  updatePurchaseLifecycleApi
+} from './transactionClient';
+import type { PurchaseLifecycleAction } from './transactionDomainTypes';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
 import { BookingSalesDetailDrawer } from './BookingSalesDetailDrawer';
@@ -145,6 +150,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [bookingDetailOpen, setBookingDetailOpen] = useState<boolean>(false);
   const [selectedBookingIdForDetail, setSelectedBookingIdForDetail] = useState<number | string | null>(null);
   const [expandedBids, setExpandedBids] = useState<Record<string, boolean>>({});
+
+  // PURCHASE-2A3: inline lifecycle control per-cell loading state
+  const [lifecycleSaving, setLifecycleSaving] = useState<Record<string, boolean>>({});
 
   const currentRequestIdRef = useRef<number>(0);
 
@@ -296,6 +304,47 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setDeleteReason('');
     setSoftDeleteError(null);
     setSoftDeleteModalOpen(true);
+  };
+
+  // PURCHASE-2A3: inline lifecycle mutation handler with per-cell loading state
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+
+  const handlePurchaseLifecycleMutation = async (
+    tx: TransactionRecord,
+    action: PurchaseLifecycleAction,
+    value: string
+  ) => {
+    const key = `${String(tx.id)}:${action}`;
+    setLifecycleSaving(prev => ({ ...prev, [key]: true }));
+    setLifecycleError(null);
+    try {
+      const payload: {
+        property_id: number;
+        action: PurchaseLifecycleAction;
+        receiving_status?: string | null;
+        verification_status?: string | null;
+        workflow_status?: string | null;
+      } = { property_id: propertyId, action };
+      if (action === 'SET_RECEIVING') {
+        payload.receiving_status = value;
+      } else if (action === 'SET_VERIFICATION') {
+        payload.verification_status = value;
+      } else if (action === 'SET_WORKFLOW') {
+        payload.workflow_status = value;
+      }
+      await updatePurchaseLifecycleApi(tx.id, payload);
+      await loadTransactions();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
+      setLifecycleError(msg);
+      console.error(`PURCHASE-2A3: ${action} failed:`, err);
+    } finally {
+      setLifecycleSaving(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
   };
 
   const handleConfirmSoftDelete = async () => {
@@ -1333,28 +1382,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     );
                   };
 
-                  const renderReceivingBadge = (rStatus?: ReceivingStatus | string | null) => {
-                    if (rStatus === 'DITERIMA') {
-                      return (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          Diterima
-                        </span>
-                      );
-                    }
-                    if (rStatus === 'DITERIMA_SEBAGIAN') {
-                      return (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                          Sebagian
-                        </span>
-                      );
-                    }
-                    return (
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-50 text-slate-600 border border-slate-200">
-                        Belum
-                      </span>
-                    );
-                  };
-
                   if (operationalStatus === 'HAPUS' || t.deleted_at) {
                     return (
                       <tr
@@ -1427,8 +1454,21 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             <div className="text-[10px] text-slate-400 font-normal">{t.supplier_phone}</div>
                           )}
                         </td>
-                        <td className="py-3 px-3 text-center whitespace-nowrap">
-                          {renderReceivingBadge(t.receiving_status)}
+                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          <select
+                            value={t.receiving_status || 'BELUM_DITERIMA'}
+                            onChange={async (e) => {
+                              e.stopPropagation();
+                              await handlePurchaseLifecycleMutation(t, 'SET_RECEIVING', e.target.value);
+                            }}
+                            disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                            className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
+                          >
+                            <option value="BELUM_DITERIMA">Belum Diterima</option>
+                            <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
+                            <option value="DITERIMA">Diterima</option>
+                            <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
+                          </select>
                         </td>
                         <td className="py-3 px-4 max-w-xs truncate text-slate-800">
                           <div>{t.description}</div>
@@ -1439,13 +1479,44 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
                           {formatIdr(displayTransactionNet(t))}
                         </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          {renderVerificationBadge(t.verification_status)}
+                        <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          <select
+                            value={t.verification_status || 'UNVERIFIED'}
+                            onChange={async (e) => {
+                              e.stopPropagation();
+                              await handlePurchaseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
+                            }}
+                            disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                            className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
+                          >
+                            <option value="UNVERIFIED">Belum Terverifikasi</option>
+                            <option value="VERIFIED">Terverifikasi</option>
+                            <option value="REJECTED">Ditolak</option>
+                          </select>
                         </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
-                            {op.label}
-                          </span>
+                        <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          {t.operational_sheet === 'BATAL' ? (
+                            <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 cursor-default">
+                              Batal
+                            </span>
+                          ) : t.operational_sheet === 'HAPUS' ? (
+                            <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 border border-slate-300 cursor-default">
+                              Dihapus
+                            </span>
+                          ) : (
+                            <select
+                              value={t.operational_sheet || 'PROSES'}
+                              onChange={async (e) => {
+                                e.stopPropagation();
+                                await handlePurchaseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
+                              }}
+                              disabled={lifecycleSaving[`${String(t.id)}:SET_WORKFLOW`]}
+                              className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
+                            >
+                              <option value="PROSES">Proses</option>
+                              <option value="SELESAI">Selesai</option>
+                            </select>
+                          )}
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-center gap-1">
@@ -1739,16 +1810,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           <div className="text-[10px] font-semibold text-slate-400">{t.lifecycle_member_count} riwayat</div>
                         )}
                       </td>
-                      <td className="py-3 px-2 text-center whitespace-nowrap">
-                        {renderVerificationBadge(t.verification_status)}
-                      </td>
-                      <td className="py-3 px-2 text-center whitespace-nowrap">
-                        <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
-                          {op.label}
-                        </span>
-                      </td>
+                        <td className="py-3 px-2 text-center whitespace-nowrap">
+                          {renderVerificationBadge(t.verification_status)}
+                        </td>
+                        <td className="py-3 px-2 text-center whitespace-nowrap">
+                          <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
+                            {op.label}
+                          </span>
+                        </td>
                       <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-center gap-1">
+                          <div className="flex items-center justify-center gap-1">
                           <button
                             onClick={() => openWorkspaceRowDetail(t)}
                             className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
@@ -1886,6 +1957,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               {softDeleteError && (
                 <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-semibold">
                   {softDeleteError}
+                </div>
+              )}
+
+              {lifecycleError && activeTab === 'PURCHASE' && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-semibold">
+                  {lifecycleError}
                 </div>
               )}
             </div>

@@ -41,7 +41,7 @@
     "test:booked-reservation-reprice": "node test/booked_reservation_reprice_ui_test.ts",
     "test:checkout-date-unified-flow": "node test/checkout_date_unified_flow_test.ts",
     "test:reservation-context-metadata": "node test/reservation_context_metadata_test.ts",
-    "test:dashboard-daily-kpi": "node test/dashboard_daily_kpi_test.ts",
+    "test:purchase-lifecycle": "node test/purchase_lifecycle_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

@@ -5,6 +5,9 @@ export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 export type DepartmentCode = 'FRONT_OFFICE' | 'HOUSEKEEPING' | 'FNB' | 'MAINTENANCE' | 'ADMIN' | 'HRD' | 'GENERAL';
 
+/** PURCHASE-2A3: canonical lifecycle action for inline purchase controls. */
+export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+
 export type SupplierEntityType = 'SUPPLIER' | 'VENDOR' | 'BOTH';
 export type SupplierStatus = 'ACTIVE' | 'INACTIVE' | 'BLACKLISTED';
 

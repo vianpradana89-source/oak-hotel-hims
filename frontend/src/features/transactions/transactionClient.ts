@@ -504,6 +504,27 @@ export async function softDeleteTransactionApi(
   });
 }
 
+export async function updatePurchaseLifecycleApi(
+  id: number | string,
+  data: {
+    property_id: number;
+    action: 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+    receiving_status?: string | null;
+    received_at?: string | null;
+    verification_status?: string | null;
+    workflow_status?: string | null;
+    reason?: string | null;
+    actor_name?: string | null;
+    actor_user_id?: string | null;
+  }
+): Promise<TransactionRecord> {
+  return await fetchJson<TransactionRecord>(`${API_BASE}/purchases/${id}/lifecycle`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+}
+
 const PURCHASE_SETTINGS_BASE = '/api/settings/purchases';
 
 export interface PurchaseSettingsCategory {
