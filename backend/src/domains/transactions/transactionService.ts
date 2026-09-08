@@ -2321,8 +2321,11 @@ export async function getTransactions(
 
   const listSelectSql = `
     SELECT t.*,
-           s.name AS supplier_name,
-           s.phone AS supplier_phone,
+            s.name AS supplier_name,
+            s.phone AS supplier_phone,
+            s.bank_name AS supplier_bank_name,
+            s.bank_account AS supplier_bank_account,
+            s.bank_holder AS supplier_bank_holder,
            r.booking_number,
            r.stay_type,
            r.stay_sequence,

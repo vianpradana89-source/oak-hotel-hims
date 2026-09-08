@@ -168,6 +168,7 @@ export interface TransactionRow {
   supplier_phone?: string | null;
   supplier_bank_name?: string | null;
   supplier_bank_account?: string | null;
+  supplier_bank_holder?: string | null;
   supplier_address?: string | null;
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;

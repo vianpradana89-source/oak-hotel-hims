@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import type {
   TransactionRecord,
   TransactionSummary,
@@ -153,6 +153,17 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // PURCHASE-2A3: inline lifecycle control per-cell loading state
   const [lifecycleSaving, setLifecycleSaving] = useState<Record<string, boolean>>({});
+
+  // PURCHASE-2C: supplier bank quick-info popover
+  const [bankPopoverOpen, setBankPopoverOpen] = useState<boolean>(false);
+  const [bankPopoverTx, setBankPopoverTx] = useState<TransactionRecord | null>(null);
+  const [bankPopoverPos, setBankPopoverPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [bankCopied, setBankCopied] = useState<string | null>(null);
+  const [bankToastMessage, setBankToastMessage] = useState<string | null>(null);
+  const [activeBankTrigger, setActiveBankTrigger] = useState<HTMLButtonElement | null>(null);
+  const bankPopoverRef = useRef<HTMLDivElement>(null);
+  const bankHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bankToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentRequestIdRef = useRef<number>(0);
 
@@ -346,6 +357,137 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       });
     }
   };
+
+  // PURCHASE-2C: supplier bank quick-info popover
+  const clearBankHoverTimer = () => {
+    if (bankHoverTimerRef.current) {
+      clearTimeout(bankHoverTimerRef.current);
+      bankHoverTimerRef.current = null;
+    }
+  };
+
+  const closeBankPopover = () => {
+    clearBankHoverTimer();
+    setActiveBankTrigger(null);
+    setBankPopoverOpen(false);
+    setBankPopoverTx(null);
+  };
+
+  const handleBankPopoverToggle = (tx: TransactionRecord, e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    clearBankHoverTimer();
+    if (bankPopoverTx?.id === tx.id && bankPopoverOpen) {
+      closeBankPopover();
+      return;
+    }
+    setActiveBankTrigger(e.currentTarget);
+    setBankPopoverTx(tx);
+    setBankPopoverOpen(true);
+  };
+
+  // Desktop hover intent: open after brief delay; moving into popover cancels close
+  const handleBankTriggerMouseEnter = (tx: TransactionRecord, e: React.MouseEvent<HTMLButtonElement>) => {
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      clearBankHoverTimer();
+      const triggerEl = e.currentTarget;
+      bankHoverTimerRef.current = setTimeout(() => {
+        setActiveBankTrigger(triggerEl);
+        setBankPopoverTx(tx);
+        setBankPopoverOpen(true);
+      }, 120);
+    }
+  };
+
+  const handleBankTriggerMouseLeave = () => {
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      clearBankHoverTimer();
+      bankHoverTimerRef.current = setTimeout(() => {
+        if (bankPopoverRef.current && !bankPopoverRef.current.matches(':hover')) {
+          closeBankPopover();
+        }
+      }, 200);
+    }
+  };
+
+  // Keyboard accessibility: focus on trigger opens popover
+  const handleBankTriggerFocus = (tx: TransactionRecord, e: React.FocusEvent<HTMLButtonElement>) => {
+    if (e.target === e.currentTarget) {
+      clearBankHoverTimer();
+      setActiveBankTrigger(e.currentTarget);
+      setBankPopoverTx(tx);
+      setBankPopoverOpen(true);
+    }
+  };
+
+  const handleBankPopoverMouseEnter = () => {
+    clearBankHoverTimer();
+  };
+
+  const handleBankPopoverMouseLeave = () => {
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      clearBankHoverTimer();
+      bankHoverTimerRef.current = setTimeout(() => {
+        closeBankPopover();
+      }, 200);
+    }
+  };
+
+  const handleCopyBankAccount = async (txId: string | number, account: string) => {
+    try {
+      await navigator.clipboard.writeText(account);
+      setBankCopied(String(txId));
+      setBankToastMessage('No. rekening disalin');
+      if (bankToastTimerRef.current) clearTimeout(bankToastTimerRef.current);
+      bankToastTimerRef.current = setTimeout(() => {
+        setBankToastMessage(null);
+        setBankCopied(null);
+      }, 2000);
+    } catch { /* ignore */ }
+  };
+
+  // Close bank popover on outside click or Escape
+  useEffect(() => {
+    if (!bankPopoverOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeBankPopover();
+      }
+    };
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (
+        bankPopoverRef.current && !bankPopoverRef.current.contains(target) &&
+        activeBankTrigger && !activeBankTrigger.contains(target)
+      ) {
+        closeBankPopover();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [bankPopoverOpen, activeBankTrigger]);
+
+  // PURCHASE-2C: position bank popover near active trigger
+  useLayoutEffect(() => {
+    if (!bankPopoverOpen || !activeBankTrigger) return;
+    const rect = activeBankTrigger.getBoundingClientRect();
+    const cardWidth = 320;
+    const padding = 16;
+    const spaceBelow = window.innerHeight - rect.bottom - padding;
+    const spaceAbove = rect.top - padding;
+    let top = rect.bottom + 8;
+    let left = Math.max(padding, Math.min(rect.left, window.innerWidth - cardWidth - padding));
+    if (spaceBelow >= 200) {
+      top = rect.bottom + 8;
+    } else if (spaceAbove >= 200) {
+      top = rect.top - 200 - 8;
+    }
+    top = Math.min(top, window.innerHeight - 200 - padding);
+    setBankPopoverPos({ top, left });
+  }, [bankPopoverOpen, activeBankTrigger]);
 
   const handleConfirmSoftDelete = async () => {
     if (!selectedTxForSoftDelete) return;
@@ -1291,9 +1433,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">Tanggal</th>
                         <th className="py-3 px-3">No. Transaksi</th>
                         <th className="py-3 px-3">Supplier Vendor</th>
-                        <th className="py-3 px-3 text-center">Penerimaan</th>
                         <th className="py-3 px-4">Keterangan</th>
                         <th className="py-3 px-3 text-right">Total Tagihan</th>
+                        <th className="py-3 px-3 text-center">Penerimaan</th>
                         <th className="py-3 px-2 text-center">Verifikasi</th>
                         <th className="py-3 px-2 text-center">Status</th>
                         <th className="py-3 px-3 text-center">Aksi</th>
@@ -1453,6 +1595,32 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           {t.supplier_phone && (
                             <div className="text-[10px] text-slate-400 font-normal">{t.supplier_phone}</div>
                           )}
+                          {t.supplier_bank_name && t.supplier_bank_account && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleBankPopoverToggle(t, e)}
+                              onMouseEnter={(e) => handleBankTriggerMouseEnter(t, e)}
+                              onMouseLeave={handleBankTriggerMouseLeave}
+                              onFocus={(e) => handleBankTriggerFocus(t, e)}
+                              onBlur={() => clearBankHoverTimer()}
+                              className="mt-1 inline-flex items-center gap-1 text-[10px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded px-1 py-0.5 transition-colors cursor-pointer"
+                              title="Lihat info bank supplier"
+                            >
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <span>Bank</span>
+                            </button>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 max-w-xs truncate text-slate-800">
+                          <div>{t.description}</div>
+                          {t.source_reference && (
+                            <div className="text-[10px] font-mono text-slate-400">Faktur: {t.source_reference}</div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
+                          {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {(() => {
@@ -1474,15 +1642,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               </select>
                             );
                           })()}
-                        </td>
-                        <td className="py-3 px-4 max-w-xs truncate text-slate-800">
-                          <div>{t.description}</div>
-                          {t.source_reference && (
-                            <div className="text-[10px] font-mono text-slate-400">Faktur: {t.source_reference}</div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
-                          {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {(() => {
@@ -2066,6 +2225,87 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           loadTransactions();
         }}
       />
+      {/* PURCHASE-2C: Supplier Bank Quick Info Popover */}
+      {bankPopoverOpen && bankPopoverTx && (
+        <>
+          {/* Backdrop */}
+           <div
+             className="fixed inset-0 z-40"
+             onClick={() => closeBankPopover()}
+             aria-hidden="true"
+           />
+          {/* Popover */}
+          <div
+            ref={bankPopoverRef}
+            style={{ position: 'fixed', top: `${bankPopoverPos.top}px`, left: `${bankPopoverPos.left}px`, zIndex: 60 }}
+            role="dialog"
+            aria-label="Info Bank Supplier"
+            className="bg-white rounded-xl shadow-2xl border border-stone-200 w-[320px] p-4 animate-in fade-in zoom-in-95 duration-150"
+            onMouseEnter={handleBankPopoverMouseEnter}
+            onMouseLeave={handleBankPopoverMouseLeave}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wide">Info Bank Supplier</h3>
+              <button
+                type="button"
+                onClick={() => closeBankPopover()}
+                className="text-stone-400 hover:text-stone-600 transition-colors cursor-pointer"
+                aria-label="Tutup"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="space-y-2">
+              {bankPopoverTx.supplier_bank_name && (
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-medium">Nama Bank</span>
+                  <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.supplier_bank_name}</span>
+                </div>
+              )}
+              {bankPopoverTx.supplier_bank_account && (
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-medium">No. Rekening</span>
+                  <div className="flex items-center justify-between gap-2 mt-0.5">
+                    <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.supplier_bank_account}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); handleCopyBankAccount(bankPopoverTx.id, bankPopoverTx.supplier_bank_account!); }}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                        bankCopied === String(bankPopoverTx.id)
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      }`}
+                    >
+                      Salin
+                    </button>
+                  </div>
+                </div>
+              )}
+              {bankPopoverTx.supplier_bank_holder && (
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-medium">Atas Nama</span>
+                  <span className="text-sm text-stone-700">{bankPopoverTx.supplier_bank_holder}</span>
+                </div>
+              )}
+            </div>
+            <p className="text-[10px] text-stone-400 mt-3 pt-2 border-t border-stone-100">
+              Klik di luar untuk menutup
+            </p>
+          </div>
+        </>
+      )}
+      {/* PURCHASE-2C: Copy success toast */}
+      {bankToastMessage && (
+        <div
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg shadow-lg animate-in fade-in zoom-in-95 duration-150"
+          role="status"
+          aria-live="polite"
+        >
+          {bankToastMessage}
+        </div>
+      )}
     </div>
   );
 };
