@@ -511,6 +511,55 @@ export function isReportingEligible(sheet: OperationalSheet): boolean {
   return sheet === 'SELESAI';
 }
 
+/**
+ * Purchase lifecycle color helpers for inline inline controls.
+ */
+
+export interface PurchasePillClass {
+  bg: string;
+  border: string;
+  text: string;
+}
+
+export function getPurchaseReceivingClass(status: string): PurchasePillClass {
+  switch (status) {
+    case 'DITERIMA':
+    case 'DITERIMA_LENGKAP':
+      return { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700' };
+    case 'DITERIMA_SEBAGIAN':
+      return { bg: 'bg-sky-50', border: 'border-sky-300', text: 'text-sky-700' };
+    case 'BELUM_DITERIMA':
+    default:
+      return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
+  }
+}
+
+export function getPurchaseVerificationClass(status: string): PurchasePillClass {
+  switch (status) {
+    case 'VERIFIED':
+      return { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700' };
+    case 'REJECTED':
+      return { bg: 'bg-rose-50', border: 'border-rose-300', text: 'text-rose-700' };
+    case 'UNVERIFIED':
+    default:
+      return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
+  }
+}
+
+export function getPurchaseWorkflowClass(status: string): PurchasePillClass {
+  switch (status) {
+    case 'SELESAI':
+      return { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700' };
+    case 'BATAL':
+      return { bg: 'bg-rose-50', border: 'border-rose-300', text: 'text-rose-700' };
+    case 'HAPUS':
+      return { bg: 'bg-slate-100', border: 'border-slate-300', text: 'text-slate-500' };
+    case 'PROSES':
+    default:
+      return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
+  }
+}
+
 export type BookingSaleSourceCategory =
   | 'ROOM'
   | 'STAY_EXTRA'

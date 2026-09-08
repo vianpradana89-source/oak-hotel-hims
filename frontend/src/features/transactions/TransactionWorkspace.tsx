@@ -8,7 +8,7 @@ import type {
   OperationalStatus,
   VerificationStatus
 } from './transactionDomainTypes';
-import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass } from './transactionDomainTypes';
+import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass, getPurchaseReceivingClass, getPurchaseVerificationClass, getPurchaseWorkflowClass } from './transactionDomainTypes';
 import {
   flattenAllTabRows,
   formatStayShortDate,
@@ -1455,20 +1455,25 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <select
-                            value={t.receiving_status || 'BELUM_DITERIMA'}
-                            onChange={async (e) => {
-                              e.stopPropagation();
-                              await handlePurchaseLifecycleMutation(t, 'SET_RECEIVING', e.target.value);
-                            }}
-                            disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
-                            className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
-                          >
-                            <option value="BELUM_DITERIMA">Belum Diterima</option>
-                            <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                            <option value="DITERIMA">Diterima</option>
-                            <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
-                          </select>
+                          {(() => {
+                            const rc = getPurchaseReceivingClass(t.receiving_status || 'BELUM_DITERIMA');
+                            return (
+                              <select
+                                value={t.receiving_status || 'BELUM_DITERIMA'}
+                                onChange={async (e) => {
+                                  e.stopPropagation();
+                                  await handlePurchaseLifecycleMutation(t, 'SET_RECEIVING', e.target.value);
+                                }}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${rc.bg} ${rc.border} ${rc.text} hover:bg-opacity-80`}
+                              >
+                                <option value="BELUM_DITERIMA">Belum Diterima</option>
+                                <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
+                                <option value="DITERIMA">Diterima</option>
+                                <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
+                              </select>
+                            );
+                          })()}
                         </td>
                         <td className="py-3 px-4 max-w-xs truncate text-slate-800">
                           <div>{t.description}</div>
@@ -1480,43 +1485,58 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           {formatIdr(displayTransactionNet(t))}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <select
-                            value={t.verification_status || 'UNVERIFIED'}
-                            onChange={async (e) => {
-                              e.stopPropagation();
-                              await handlePurchaseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
-                            }}
-                            disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
-                            className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
-                          >
-                            <option value="UNVERIFIED">Belum Terverifikasi</option>
-                            <option value="VERIFIED">Terverifikasi</option>
-                            <option value="REJECTED">Ditolak</option>
-                          </select>
+                          {(() => {
+                            const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
+                            return (
+                              <select
+                                value={t.verification_status || 'UNVERIFIED'}
+                                onChange={async (e) => {
+                                  e.stopPropagation();
+                                  await handlePurchaseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
+                                }}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
+                              >
+                                <option value="UNVERIFIED">Belum Terverifikasi</option>
+                                <option value="VERIFIED">Terverifikasi</option>
+                                <option value="REJECTED">Ditolak</option>
+                              </select>
+                            );
+                          })()}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          {t.operational_sheet === 'BATAL' ? (
-                            <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 cursor-default">
-                              Batal
-                            </span>
-                          ) : t.operational_sheet === 'HAPUS' ? (
-                            <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 border border-slate-300 cursor-default">
-                              Dihapus
-                            </span>
-                          ) : (
-                            <select
-                              value={t.operational_sheet || 'PROSES'}
-                              onChange={async (e) => {
-                                e.stopPropagation();
-                                await handlePurchaseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
-                              }}
-                              disabled={lifecycleSaving[`${String(t.id)}:SET_WORKFLOW`]}
-                              className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
-                            >
-                              <option value="PROSES">Proses</option>
-                              <option value="SELESAI">Selesai</option>
-                            </select>
-                          )}
+                          {(() => {
+                            const ws = t.operational_sheet || 'PROSES';
+                            const wc = getPurchaseWorkflowClass(ws);
+                            if (ws === 'BATAL') {
+                              return (
+                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                  Batal
+                                </span>
+                              );
+                            }
+                            if (ws === 'HAPUS') {
+                              return (
+                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                  Dihapus
+                                </span>
+                              );
+                            }
+                            return (
+                              <select
+                                value={ws}
+                                onChange={async (e) => {
+                                  e.stopPropagation();
+                                  await handlePurchaseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
+                                }}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_WORKFLOW`]}
+                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
+                              >
+                                <option value="PROSES">Proses</option>
+                                <option value="SELESAI">Selesai</option>
+                              </select>
+                            );
+                          })()}
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-center gap-1">

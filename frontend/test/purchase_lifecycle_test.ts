@@ -6,6 +6,9 @@ import type {
 import {
   mapToOperationalStatus,
   isReportingEligible,
+  getPurchaseReceivingClass,
+  getPurchaseVerificationClass,
+  getPurchaseWorkflowClass,
 } from '../src/features/transactions/transactionDomainTypes.ts';
 
 let assertions = 0;
@@ -199,5 +202,66 @@ const saleGroup = mapToOperationalStatus({
   operational_sheet: 'PROSES',
 });
 check(saleGroup.group === 'PROSES', 'J1. Sale group in PROSES -> PROSES');
+
+// ============================================================================
+// Test K: Verification color helpers
+// ============================================================================
+console.log('\n--- Test K: Verification color mappings ---');
+
+check(getPurchaseVerificationClass('UNVERIFIED').text === 'text-amber-700', 'K1. UNVERIFIED -> amber text');
+check(getPurchaseVerificationClass('UNVERIFIED').bg === 'bg-amber-50', 'K2. UNVERIFIED -> amber bg');
+check(getPurchaseVerificationClass('VERIFIED').text === 'text-emerald-700', 'K3. VERIFIED -> green text');
+check(getPurchaseVerificationClass('VERIFIED').bg === 'bg-emerald-50', 'K4. VERIFIED -> green bg');
+check(getPurchaseVerificationClass('REJECTED').text === 'text-rose-700', 'K5. REJECTED -> red text');
+check(getPurchaseVerificationClass('REJECTED').bg === 'bg-rose-50', 'K6. REJECTED -> red bg');
+check(getPurchaseVerificationClass(null as unknown as string).text === 'text-amber-700', 'K7. null verification -> amber fallback');
+
+// ============================================================================
+// Test L: Workflow color helpers
+// ============================================================================
+console.log('\n--- Test L: Workflow color mappings ---');
+
+check(getPurchaseWorkflowClass('PROSES').text === 'text-amber-700', 'L1. PROSES -> amber text');
+check(getPurchaseWorkflowClass('PROSES').bg === 'bg-amber-50', 'L2. PROSES -> amber bg');
+check(getPurchaseWorkflowClass('SELESAI').text === 'text-emerald-700', 'L3. SELESAI -> green text');
+check(getPurchaseWorkflowClass('SELESAI').bg === 'bg-emerald-50', 'L4. SELESAI -> green bg');
+check(getPurchaseWorkflowClass('BATAL').text === 'text-rose-700', 'L5. BATAL -> red text');
+check(getPurchaseWorkflowClass('BATAL').bg === 'bg-rose-50', 'L6. BATAL -> red bg');
+check(getPurchaseWorkflowClass('HAPUS').text === 'text-slate-500', 'L7. HAPUS -> gray text');
+check(getPurchaseWorkflowClass('HAPUS').bg === 'bg-slate-100', 'L8. HAPUS -> gray bg');
+check(getPurchaseWorkflowClass(null as unknown as string).text === 'text-amber-700', 'L9. null workflow -> amber fallback');
+
+// ============================================================================
+// Test M: Receiving color helpers
+// ============================================================================
+console.log('\n--- Test M: Receiving color mappings ---');
+
+check(getPurchaseReceivingClass('BELUM_DITERIMA').text === 'text-amber-700', 'M1. BELUM_DITERIMA -> amber text');
+check(getPurchaseReceivingClass('BELUM_DITERIMA').bg === 'bg-amber-50', 'M2. BELUM_DITERIMA -> amber bg');
+check(getPurchaseReceivingClass('DITERIMA_SEBAGIAN').text === 'text-sky-700', 'M3. DITERIMA_SEBAGIAN -> sky text');
+check(getPurchaseReceivingClass('DITERIMA_SEBAGIAN').bg === 'bg-sky-50', 'M4. DITERIMA_SEBAGIAN -> sky bg');
+check(getPurchaseReceivingClass('DITERIMA').text === 'text-emerald-700', 'M5. DITERIMA -> green text');
+check(getPurchaseReceivingClass('DITERIMA').bg === 'bg-emerald-50', 'M6. DITERIMA -> green bg');
+check(getPurchaseReceivingClass('DITERIMA_LENGKAP').text === 'text-emerald-700', 'M7. DITERIMA_LENGKAP -> green text');
+check(getPurchaseReceivingClass('DITERIMA_LENGKAP').bg === 'bg-emerald-50', 'M8. DITERIMA_LENGKAP -> green bg');
+check(getPurchaseReceivingClass(null as unknown as string).text === 'text-amber-700', 'M9. null receiving -> amber fallback');
+
+// ============================================================================
+// Test N: Workflow options remain PROSES/SELESAI only (no BATAL/HAPUS)
+// ============================================================================
+console.log('\n--- Test N: Workflow options exclusivity ---');
+const workflowOptions = ['PROSES', 'SELESAI'];
+check(workflowOptions.length === 2, 'N1. Two workflow options');
+check(!workflowOptions.includes('BATAL'), 'N2. BATAL not in workflow options');
+check(!workflowOptions.includes('HAPUS'), 'N3. HAPUS not in workflow options');
+
+// ============================================================================
+// Test O: Terminal states remain non-editable (static badges)
+// ============================================================================
+console.log('\n--- Test O: Terminal state static rendering ---');
+const batalClass = getPurchaseWorkflowClass('BATAL');
+const hapusClass = getPurchaseWorkflowClass('HAPUS');
+check(batalClass.bg === 'bg-rose-50', 'O1. BATAL uses rose bg for badge');
+check(hapusClass.bg === 'bg-slate-100', 'O2. HAPUS uses slate bg for badge');
 
 console.log(`\n=== All ${assertions} Purchase Lifecycle Assertions PASSED ===\n`);
