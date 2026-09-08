@@ -23,6 +23,9 @@ import {
   SoftDeleteTransactionDto,
   OperationalSheet,
   PurchaseWorkflowStatus,
+  PurchaseLifecycleAction,
+  PurchaseLifecycleDto,
+  PurchaseLifecycleAuditPayload,
   TransactionSheetCounts,
   TransactionQueryResult,
   TransactionFilterParams,
@@ -1193,6 +1196,14 @@ export async function createPurchaseTransaction(
     const txNumber = await generateTransactionNumber(client, propertyId, txDate);
     const receivedAt = dto.received_at ? new Date(dto.received_at).toISOString() : (receivingStatus === 'DITERIMA' ? new Date().toISOString() : null);
 
+    // PURCHASE-2A1: respect explicit workflow/verification on creation; fall back to safe defaults.
+    const purchaseWorkflowStatus = dto.purchase_workflow_status
+      ? (['PROSES', 'SELESAI'].includes(dto.purchase_workflow_status) ? dto.purchase_workflow_status : 'PROSES')
+      : 'PROSES';
+    const verificationStatus = dto.verification_status && ['UNVERIFIED', 'VERIFIED', 'REJECTED'].includes(dto.verification_status)
+      ? dto.verification_status
+      : 'UNVERIFIED';
+
     const transactionDiscount = Math.max(0, Math.round(Number(dto.transaction_discount || dto.discount_amount || 0)));
     const roundingAmount = Math.round(Number(dto.rounding_amount || 0));
 
@@ -1214,10 +1225,10 @@ export async function createPurchaseTransaction(
         $6, $7, $8, $9,
         0, $10, 0, 0, $11, 0,
         'UNPAID', $12, 'POSTED',
-        $13, $14, $15, 'UNVERIFIED',
-        'PROSES',
-        $16, $17, $18,
-        $19, $20, $21
+        $13, $14, $15, $16,
+        $17,
+        $18, $19, $20,
+        $21, $22, $23
       ) RETURNING *`,
       [
         propertyId,
@@ -1235,6 +1246,8 @@ export async function createPurchaseTransaction(
         supplierId,
         receivingStatus,
         receivedAt,
+        verificationStatus,
+        purchaseWorkflowStatus,
         dto.notes?.trim() || null,
         JSON.stringify({ workflow: 'PURCHASE_2D', actor: dto.actor_name || 'Staff' }),
         dto.actor_name || dto.actor_user_id || 'Staff',
@@ -3179,6 +3192,277 @@ export async function softDeleteTransaction(
       ...updatedRow,
       operational_sheet: 'HAPUS'
     };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
+// ===========================================================================
+// PURCHASE-2A2: Atomic Purchase Lifecycle Service
+// ===========================================================================
+
+/** Rows locked by FOR UPDATE; used as input to the lifecycle executor. */
+interface LockedPurchaseRow {
+  id: number;
+  transaction_no: string;
+  transaction_type: string;
+  transaction_status: string;
+  receiving_status: string | null;
+  verification_status: string | null;
+  purchase_workflow_status: string | null;
+  verified_by_user_id: string | null;
+  verified_by_name_snapshot: string | null;
+  verified_at: string | null;
+  received_at: string | null;
+}
+
+async function fetchLockedPurchase(
+  client: any,
+  propertyId: number,
+  id: number | string
+): Promise<LockedPurchaseRow> {
+  const res = await client.query(
+    `SELECT id, transaction_no, transaction_type, transaction_status,
+            receiving_status, verification_status, purchase_workflow_status,
+            verified_by_user_id, verified_by_name_snapshot, verified_at, received_at
+     FROM transactions
+     WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+    [id, propertyId]
+  );
+  if ((res.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+  const row = res.rows[0];
+  if (String(row.transaction_type || '').toUpperCase() !== 'PURCHASE') {
+    const err: any = new Error(`Transaksi #${id} bukan tipe PURCHASE`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return row;
+}
+
+function assertNonTerminal(transactionStatus: string): void {
+  const status = String(transactionStatus || '').toUpperCase();
+  if (['VOIDED', 'REVERSED', 'CANCELLED'].includes(status)) {
+    const err: any = new Error(`Transaksi dengan status ${status} bersifat terminal dan tidak dapat diubah melalui lifecycle.`);
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
+function buildAuditPayload(
+  txId: number,
+  propertyId: number,
+  action: PurchaseLifecycleAction,
+  previous: LockedPurchaseRow,
+  next: {
+    receiving_status: string | null;
+    verification_status: string | null;
+    purchase_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  },
+  autoRules: { verified_forced_workflow_complete: boolean; workflow_process_forced_unverify: boolean },
+  reason: string | null,
+  actor: string | null
+): PurchaseLifecycleAuditPayload {
+  return {
+    transaction_id: Number(txId),
+    property_id: Number(propertyId),
+    action,
+    previous: {
+      receiving_status: previous.receiving_status,
+      verification_status: previous.verification_status,
+      purchase_workflow_status: previous.purchase_workflow_status,
+      verified_by_user_id: previous.verified_by_user_id,
+      verified_by_name_snapshot: previous.verified_by_name_snapshot,
+      verified_at: previous.verified_at,
+    },
+    next,
+    auto_rules: autoRules,
+    reason,
+    actor,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
+ * executePurchaseLifecycle - atomic, row-locked, single DB transaction per action.
+ * Drives SET_RECEIVING, SET_VERIFICATION, SET_WORKFLOW with required auto-rules:
+ *   - VERIFIED => purchase_workflow_status = SELESAI
+ *   - PROSES   => verification_status = UNVERIFIED (verifier fields cleared)
+ */
+export async function executePurchaseLifecycle(
+  pool: Pool,
+  id: number | string,
+  dto: PurchaseLifecycleDto
+): Promise<any> {
+  const propertyId = Number(dto.property_id);
+  const action = dto.action;
+  const reason = dto.reason ? String(dto.reason).trim() : null;
+  const actor = String(dto.actor_name || '').trim() || null;
+  const actorUserId = dto.actor_user_id || null;
+
+  if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+    const err: any = new Error('property_id wajib diisi dan harus valid');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!action) {
+    const err: any = new Error('action wajib diisi');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const actionUpper = String(action).toUpperCase();
+  if (
+    actionUpper !== 'SET_RECEIVING' &&
+    actionUpper !== 'SET_VERIFICATION' &&
+    actionUpper !== 'SET_WORKFLOW'
+  ) {
+    const err: any = new Error(`Action '${action}' tidak valid untuk PURCHASE lifecycle`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const prev = await fetchLockedPurchase(client, propertyId, id);
+    assertNonTerminal(prev.transaction_status);
+
+    let newReceiving: string | null = prev.receiving_status;
+    let newVerification: string | null = prev.verification_status;
+    let newWorkflow: string | null = prev.purchase_workflow_status;
+    let newVerifiedByUserId: string | null = prev.verified_by_user_id;
+    let newVerifiedByName: string | null = prev.verified_by_name_snapshot;
+    let newVerifiedAt: string | null = prev.verified_at;
+    let newReceivedAt: string | null = prev.received_at;
+
+    const autoRules = {
+      verified_forced_workflow_complete: false,
+      workflow_process_forced_unverify: false,
+    };
+
+    if (actionUpper === 'SET_RECEIVING') {
+      const status = dto.receiving_status;
+      if (!status || !PURCHASE_RECEIVING_STATUSES.includes(status as ReceivingStatus)) {
+        const err: any = new Error(`receiving_status '${status}' tidak valid`);
+        err.statusCode = 400;
+        throw err;
+      }
+      newReceiving = status;
+      if (status === 'BELUM_DITERIMA') {
+        newReceivedAt = null;
+      } else {
+        newReceivedAt = dto.received_at
+          ? new Date(dto.received_at).toISOString()
+          : (prev.received_at || new Date().toISOString());
+      }
+    } else if (actionUpper === 'SET_VERIFICATION') {
+      const v = dto.verification_status;
+      if (!v || !['UNVERIFIED', 'VERIFIED', 'REJECTED'].includes(v)) {
+        const err: any = new Error(`verification_status '${v}' tidak valid`);
+        err.statusCode = 400;
+        throw err;
+      }
+      newVerification = v;
+      if (v === 'VERIFIED') {
+        newVerifiedByUserId = actorUserId;
+        newVerifiedByName = actor;
+        newVerifiedAt = new Date().toISOString();
+        newWorkflow = 'SELESAI';
+        autoRules.verified_forced_workflow_complete = true;
+      } else if (v === 'UNVERIFIED') {
+        newVerifiedByUserId = null;
+        newVerifiedByName = null;
+        newVerifiedAt = null;
+      }
+    } else if (actionUpper === 'SET_WORKFLOW') {
+      const w = dto.workflow_status;
+      if (!w || !['PROSES', 'SELESAI'].includes(w)) {
+        const err: any = new Error(`workflow_status '${w}' tidak valid`);
+        err.statusCode = 400;
+        throw err;
+      }
+      newWorkflow = w;
+      if (w === 'PROSES') {
+        newVerification = 'UNVERIFIED';
+        newVerifiedByUserId = null;
+        newVerifiedByName = null;
+        newVerifiedAt = null;
+        autoRules.workflow_process_forced_unverify = true;
+      }
+    }
+
+    await client.query(
+      `UPDATE transactions
+       SET receiving_status = $1,
+           received_at = $2,
+           verification_status = $3,
+           verified_by_user_id = $4,
+           verified_by_name_snapshot = $5,
+           verified_at = $6,
+           purchase_workflow_status = $7,
+           updated_at = NOW()
+       WHERE id = $8 AND property_id = $9`,
+      [
+        newReceiving,
+        newReceivedAt,
+        newVerification,
+        newVerifiedByUserId,
+        newVerifiedByName,
+        newVerifiedAt,
+        newWorkflow,
+        id,
+        propertyId,
+      ]
+    );
+
+    const payload = buildAuditPayload(
+      Number(id),
+      propertyId,
+      actionUpper as PurchaseLifecycleAction,
+      prev,
+      {
+        receiving_status: newReceiving,
+        verification_status: newVerification,
+        purchase_workflow_status: newWorkflow,
+        verified_by_user_id: newVerifiedByUserId,
+        verified_by_name_snapshot: newVerifiedByName,
+        verified_at: newVerifiedAt,
+      },
+      autoRules,
+      reason,
+      actor
+    );
+
+    await client.query(
+      `INSERT INTO audit_logs (
+         module, action, entity, record_id, new_value, property_id, timestamp
+       ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        'TRANSACTIONS',
+        'PURCHASE_LIFECYCLE_UPDATED',
+        'transactions',
+        String(id),
+        JSON.stringify(payload),
+        propertyId,
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return await getTransactionById(pool, propertyId, id);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

@@ -289,6 +289,10 @@ export interface CreatePurchaseTransactionDto {
   paid_amount?: number; // IDR paid immediately
   is_immediately_paid?: boolean;
   transaction_status?: TransactionStatus;
+  /** PURCHASE-2A1/2A2: explicit initial workflow (defaults PROSES). */
+  purchase_workflow_status?: PurchaseWorkflowStatus | null;
+  /** PURCHASE-2A1/2A2: explicit initial verification (defaults UNVERIFIED). */
+  verification_status?: VerificationStatus | null;
   notes?: string | null;
   actor_name?: string | null;
   actor_user_id?: string | null;
@@ -461,4 +465,53 @@ export interface SoftDeleteTransactionDto {
   delete_reason: string;
   actor_name?: string | null;
   actor_user_id?: string | null;
+}
+
+/** PURCHASE-2A2: canonical purchase lifecycle action enum. */
+export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+
+export interface PurchaseLifecycleDto {
+  property_id: number;
+  action: PurchaseLifecycleAction;
+  /** Receiving action only. */
+  receiving_status?: ReceivingStatus | null;
+  /** Receiving action optional override for received_at. */
+  received_at?: string | null;
+  /** Verification action only. */
+  verification_status?: VerificationStatus | null;
+  /** Workflow action only. */
+  workflow_status?: PurchaseWorkflowStatus | null;
+  reason?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}
+
+/** Payload emitted inside audit_logs.new_value for PURCHASE_LIFECYCLE_UPDATED. */
+export interface PurchaseLifecycleAuditPayload {
+  transaction_id: number;
+  property_id: number;
+  action: PurchaseLifecycleAction;
+  previous: {
+    receiving_status: string | null;
+    verification_status: string | null;
+    purchase_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  };
+  next: {
+    receiving_status: string | null;
+    verification_status: string | null;
+    purchase_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  };
+  auto_rules: {
+    verified_forced_workflow_complete: boolean;
+    workflow_process_forced_unverify: boolean;
+  };
+  reason: string | null;
+  actor: string | null;
+  timestamp: string;
 }

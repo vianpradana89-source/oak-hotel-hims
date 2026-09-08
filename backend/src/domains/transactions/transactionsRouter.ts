@@ -12,6 +12,7 @@ import {
   createIncomeTransaction,
   verifyTransaction,
   updatePurchaseReceivingStatus,
+  executePurchaseLifecycle,
   settleTransactionPayment,
   getCustomCategories,
   createCustomCategory,
@@ -407,17 +408,37 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.post('/:id/verify', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId || 1);
+      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
       const id = req.params.id;
       const { verification_status, verification_note, actor_name, actor_user_id } = req.body;
 
-      const updated = await verifyTransaction(pool, id, {
-        property_id: propertyId,
-        verification_status,
-        verification_note,
-        actor_name: actor_name || (req as any).user?.name || 'Supervisor',
-        actor_user_id: actor_user_id || (req as any).user?.id || null
-      });
+      // For PURCHASE, route through unified lifecycle to enforce auto-rules (VERIFIED => SELESAI).
+      // For non-PURCHASE, retain legacy verify path without workflow side-effects.
+      const txCheck = await getTransactionById(pool, propertyId, id).catch(() => null);
+      const isPurchase = txCheck?.transaction_type === 'PURCHASE';
+
+      let updated: any;
+      if (isPurchase) {
+        updated = await executePurchaseLifecycle(pool, id, {
+          property_id: propertyId,
+          action: 'SET_VERIFICATION',
+          verification_status,
+          reason: verification_note ? String(verification_note).trim() : null,
+          actor_name: actor_name || (req as any).user?.name || 'Supervisor',
+          actor_user_id: actor_user_id || (req as any).user?.id || null,
+        });
+      } else {
+        updated = await verifyTransaction(pool, id, {
+          property_id: propertyId,
+          verification_status,
+          verification_note,
+          actor_name: actor_name || (req as any).user?.name || 'Supervisor',
+          actor_user_id: actor_user_id || (req as any).user?.id || null
+        });
+      }
 
       return res.json({
         success: true,
@@ -438,21 +459,105 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.patch('/:id/receiving', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId || 1);
+      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
       const id = req.params.id;
       const { receiving_status, received_at, actor_name, actor_user_id } = req.body;
 
-      const updated = await updatePurchaseReceivingStatus(pool, id, {
+      // For PURCHASE, route through unified lifecycle so workflow/receiving remain decoupled.
+      // For non-PURCHASE, reject since receiving_status is purchase-specific.
+      const txCheck = await getTransactionById(pool, propertyId, id).catch(() => null);
+      const isPurchase = txCheck?.transaction_type === 'PURCHASE';
+
+      let updated: any;
+      if (!isPurchase) {
+        const err: any = new Error(`Status penerimaan barang hanya berlaku untuk transaksi Pembelian (PURCHASE)`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      updated = await executePurchaseLifecycle(pool, id, {
         property_id: propertyId,
+        action: 'SET_RECEIVING',
         receiving_status,
         received_at,
         actor_name: actor_name || (req as any).user?.name || 'Staff',
-        actor_user_id: actor_user_id || (req as any).user?.id || null
+        actor_user_id: actor_user_id || (req as any).user?.id || null,
       });
 
       return res.json({
         success: true,
         message: `Status penerimaan berhasil diubah menjadi ${receiving_status}`,
+        data: updated
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({
+        success: false,
+        error: err.message
+      });
+    }
+  });
+
+  /**
+   * PATCH /api/transactions/purchases/:id/lifecycle
+   * Canonical purchase lifecycle endpoint (PURCHASE-2A2).
+   * Atomic, row-locked mutation with server-driven auto-rules.
+   */
+  router.patch('/purchases/:id/lifecycle', async (req: Request, res: Response) => {
+    try {
+      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
+      const id = req.params.id;
+      const action = req.body?.action;
+      const receivingStatus = req.body?.receiving_status;
+      const verificationStatus = req.body?.verification_status;
+      const workflowStatus = req.body?.workflow_status;
+      const reason = req.body?.reason ? String(req.body.reason).trim() : null;
+      const actorName = req.body?.actor_name || (req as any).user?.name || null;
+      const actorUserId = req.body?.actor_user_id || (req as any).user?.id || null;
+
+      if (!action) {
+        return res.status(400).json({ success: false, error: 'action wajib diisi' });
+      }
+
+      // Hardened property scoping: ordinary user must own property; super-admin can cross-scope.
+      let scopedPropertyId = propertyId;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        let user: { id: number; property_id: number };
+        try {
+          user = verifyToken(authHeader.split(' ')[1]);
+          const isSuperAdmin = await isPlatformSuperAdmin(pool, user.id);
+          if (!isSuperAdmin && Number(user.property_id) !== scopedPropertyId) {
+            return res.status(403).json({
+              success: false,
+              error: `Akses ditolak. Anda tidak memiliki izin untuk mengubah lifecycle transaksi property ${scopedPropertyId}.`
+            });
+          }
+        } catch {
+          // No token or invalid token: fall through to property_id validation below.
+        }
+      }
+
+      const updated = await executePurchaseLifecycle(pool, id, {
+        property_id: scopedPropertyId,
+        action,
+        receiving_status: receivingStatus,
+        received_at: req.body?.received_at || null,
+        verification_status: verificationStatus,
+        workflow_status: workflowStatus,
+        reason,
+        actor_name: actorName,
+        actor_user_id: actorUserId,
+      });
+
+      return res.json({
+        success: true,
+        message: `Lifecycle transaksi berhasil diperbarui: ${action}`,
         data: updated
       });
     } catch (err: any) {
@@ -727,7 +832,10 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.post('/:id/void', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId || 1);
+      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
       const id = req.params.id;
       const { reason, actor_name, actor_user_id } = req.body;
 
@@ -756,7 +864,10 @@ export function createTransactionsRouter(pool: Pool): Router {
    */
   router.post('/:id/soft-delete', async (req: Request, res: Response) => {
     try {
-      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId || 1);
+      const propertyId = Number(req.body.property_id || req.query.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
       const id = req.params.id;
       const { delete_reason, actor_name, actor_user_id } = req.body;
 
