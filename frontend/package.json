@@ -28,6 +28,7 @@
     "test:calendar-day-use-span": "node test/calendar_day_use_span_test.ts",
     "test:calendar-effective-markers": "node test/calendar_effective_marker_test.ts",
     "test:authenticated-transport": "node test/authenticated_transport_test.ts",
+    "test:stay-charges-api": "node test/stay_charges_api_test.ts",
     "test:hr2d1b-mobile-identity": "node test/employee_mobile_identity_test.ts",
     "test:secure-private-image": "node test/secure_private_image_test.ts",
     "test:attendance-camera": "node test/attendance_camera_test.ts",

@@ -12,6 +12,7 @@ import {
   updateStayChargeRule,
   deleteStayChargeRule
 } from '../stayCharges/stayChargesApi';
+import { toStayChargeEditForm } from '../stayCharges/stayChargeFieldMap';
 
 interface Props {
   propertyId: number;
@@ -125,23 +126,7 @@ export default function LayananTambahanView({ propertyId, onChanged }: Props) {
   };
 
   const handleEdit = (rule: StayChargeRule) => {
-    setEditingRule({
-      id: rule.id,
-      property_id: rule.property_id,
-      charge_type: rule.charge_type,
-      code: rule.code,
-      name: rule.name,
-      description: rule.description || '',
-      calculation_type: rule.calculation_type || 'FIXED',
-      default_amount: Number(rule.default_amount || 0),
-      percentage_of_rate: Number(rule.percentage_of_rate || 0),
-      min_hours: rule.min_hours || 0,
-      max_hours: rule.max_hours || 0,
-      is_taxable: rule.is_taxable,
-      is_service_chargeable: rule.is_service_chargeable,
-      is_active: rule.is_active,
-      display_order: rule.display_order
-    });
+    setEditingRule(toStayChargeEditForm(rule));
     setErrorMsg(null);
     setSuccessMsg(null);
   };

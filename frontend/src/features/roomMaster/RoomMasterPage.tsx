@@ -6,6 +6,7 @@ import PhysicalRoomsView from './PhysicalRoomsView';
 import RatePlansView from './RatePlansView';
 import RateCalendarView from './RateCalendarView';
 import LayananTambahanView from './LayananTambahanView';
+import { EmptyState } from './roomMasterUi';
 import type { ActiveRoomReservation, PhysicalRoom, RoomCategory, RoomType } from './roomMasterTypes';
 import './roomMaster.css';
 
@@ -239,9 +240,14 @@ export default function RoomMasterPage({ propertyId, onViewReservation, initialT
           onChanged={handleChanged}
           onOpenRatePlans={() => setTab('rate-plans')}
         />
+      ) : !propertyId ? (
+        <EmptyState
+          title="Properti belum dipilih"
+          hint="Pilih properti aktif sebelum mengelola Layanan Tambahan. Sistem tidak memakai properti cadangan."
+        />
       ) : (
         <LayananTambahanView
-          propertyId={propertyId || 1}
+          propertyId={propertyId}
           onChanged={handleChanged}
         />
       )}

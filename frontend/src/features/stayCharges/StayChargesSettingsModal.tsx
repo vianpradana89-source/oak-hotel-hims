@@ -12,6 +12,7 @@ import {
   updateStayChargeRule,
   deleteStayChargeRule
 } from './stayChargesApi';
+import { toStayChargeEditForm } from './stayChargeFieldMap';
 
 interface Props {
   propertyId: number;
@@ -513,7 +514,7 @@ export default function StayChargesSettingsModal({ propertyId, isOpen, onClose }
                           <td className="py-2.5 px-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               <button
-                                onClick={() => setEditingRule(rule)}
+                                onClick={() => setEditingRule(toStayChargeEditForm(rule))}
                                 className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded font-semibold text-[11px] transition-colors"
                               >
                                 Edit

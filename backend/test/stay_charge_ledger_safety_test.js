@@ -13,6 +13,33 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'oak_hotel_db'
 });
 
+async function superAdminAuthHeaders(propertyId = 1) {
+  const { generateToken } = require('../dist/domains/auth/authService');
+  const saRes = await pool.query(`
+    SELECT u.id, u.username, u.full_name, u.email, r.id AS role_id, r.name AS role
+    FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'Super Admin' AND r.property_id IS NULL AND r.is_system_role = TRUE
+    LIMIT 1
+  `);
+  if (!saRes.rows[0]) throw new Error('Platform Super Admin not found');
+  const sa = saRes.rows[0];
+  const token = generateToken({
+    id: sa.id,
+    username: sa.username,
+    full_name: sa.full_name,
+    email: sa.email || 'sa@test.local',
+    role_id: sa.role_id,
+    role: sa.role,
+    property_id: propertyId,
+    access_type: 'PMS_STAFF',
+    scope: 'FULL'
+  });
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`
+  };
+}
+
 async function runTest() {
   console.log('--- STARTING STAY CHARGE FINANCIAL LEDGER SAFETY AUDIT & VOID/REVERSAL TEST (STAY-CHARGE-1A) ---');
   const client = await pool.connect();
@@ -106,17 +133,19 @@ async function runTest() {
     await new Promise((resolve) => server.listen(0, resolve));
     const port = server.address().port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    const authHeaders = await superAdminAuthHeaders(1);
 
     try {
       // 2. Create standard booking fixture
       console.log('2. Creating base reservation fixture...');
       const bookingRes = await fetch(`${baseUrl}/api/bookings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           guest_name: 'Safety Audit Guest 1',
           guest_phone: '081299990001',
+          has_valid_identity: true,
           reservations: [{
             room_id: cleanupIds.roomId,
             guest_name: 'Safety Audit Guest 1',
@@ -144,7 +173,7 @@ async function runTest() {
       console.log('3. Testing Folio Charge Posting & Base/Tax/Service Snapshots...');
       const postChargeRes = await fetch(`${baseUrl}/api/stay-charges/post-charge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -180,7 +209,7 @@ async function runTest() {
       console.log('4. Testing Immutable Voiding (Net Zero Reversal Entry & Original Row Preservation)...');
       const voidRes = await fetch(`${baseUrl}/api/stay-charges/void-entry/${postedEntry.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -226,7 +255,7 @@ async function runTest() {
       console.log('5. Testing Double-Void rejection (409 Conflict)...');
       const doubleVoidRes = await fetch(`${baseUrl}/api/stay-charges/void-entry/${postedEntry.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -241,7 +270,7 @@ async function runTest() {
       // Post a damage charge: 500,000 base + 50,000 tax + 25,000 service = 575,000 total
       const postDamageRes = await fetch(`${baseUrl}/api/stay-charges/post-charge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -260,7 +289,7 @@ async function runTest() {
       // Perform correction: adjust price down to 300,000 (Subtotal: 300k, Tax: 30k, Service: 15k, Total: 345k)
       const correctRes = await fetch(`${baseUrl}/api/stay-charges/correct-entry/${damageEntry.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -312,7 +341,7 @@ async function runTest() {
       console.log('7. Testing Cross-Property Security Guardrail (403 Forbidden)...');
       const crossPropVoidRes = await fetch(`${baseUrl}/api/stay-charges/void-entry/${corrReplacement.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 999, // Mismatched property
           reservation_id: resId,
@@ -327,7 +356,7 @@ async function runTest() {
       // Empty reason
       const emptyReasonRes = await fetch(`${baseUrl}/api/stay-charges/void-entry/${corrReplacement.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -339,7 +368,7 @@ async function runTest() {
       // Attempt to void a REVERSAL row
       const voidRevRes = await fetch(`${baseUrl}/api/stay-charges/void-entry/${corrReversal.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,
@@ -351,7 +380,7 @@ async function runTest() {
       // Negative unit price
       const negPriceRes = await fetch(`${baseUrl}/api/stay-charges/correct-entry/${corrReplacement.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resId,

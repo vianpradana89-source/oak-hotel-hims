@@ -7,8 +7,17 @@ import type {
   CorrectFolioEntryDto
 } from './stayChargesTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  normalizeStayChargeRule,
+  parseStayChargeResponse,
+  toStayChargeWritePayload
+} from './stayChargeFieldMap';
 
 const API_BASE = '/api/stay-charges';
+
+function unwrapRule(json: any): StayChargeRule {
+  return normalizeStayChargeRule(json?.data || json);
+}
 
 export async function fetchStayChargeRules(
   propertyId: number,
@@ -21,11 +30,9 @@ export async function fetchStayChargeRules(
   });
 
   const res = await authenticatedFetch(`${API_BASE}/rules?${params.toString()}`);
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal memuat aturan stay charge');
-  }
-  return Array.isArray(json) ? json : (json.data || []);
+  const json = await parseStayChargeResponse(res, 'Gagal memuat aturan stay charge');
+  const rows = Array.isArray(json) ? json : (json?.data || []);
+  return rows.map(normalizeStayChargeRule);
 }
 
 export async function createStayChargeRule(
@@ -34,13 +41,10 @@ export async function createStayChargeRule(
   const res = await authenticatedFetch(`${API_BASE}/rules`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(dto)
+    body: JSON.stringify(toStayChargeWritePayload(dto))
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal membuat aturan stay charge');
-  }
-  return json.data || json;
+  const json = await parseStayChargeResponse(res, 'Gagal membuat aturan stay charge');
+  return unwrapRule(json);
 }
 
 export async function updateStayChargeRule(
@@ -48,15 +52,12 @@ export async function updateStayChargeRule(
   dto: UpdateStayChargeRuleDto
 ): Promise<StayChargeRule> {
   const res = await authenticatedFetch(`${API_BASE}/rules/${id}`, {
-    method: 'PUT',
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(dto)
+    body: JSON.stringify(toStayChargeWritePayload(dto))
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal memperbarui aturan stay charge');
-  }
-  return json.data || json;
+  const json = await parseStayChargeResponse(res, 'Gagal memperbarui aturan stay charge');
+  return unwrapRule(json);
 }
 
 export async function deleteStayChargeRule(
@@ -71,11 +72,8 @@ export async function deleteStayChargeRule(
   const res = await authenticatedFetch(`${API_BASE}/rules/${id}?${params.toString()}`, {
     method: 'DELETE'
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal menghapus aturan stay charge');
-  }
-  return json.data || json;
+  const json = await parseStayChargeResponse(res, 'Gagal menghapus aturan stay charge');
+  return json?.data || json;
 }
 
 export async function postStayChargeToFolio(
@@ -86,10 +84,7 @@ export async function postStayChargeToFolio(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal memposting biaya ke folio');
-  }
+  const json = await parseStayChargeResponse(res, 'Gagal memposting biaya ke folio');
   return json.data || json;
 }
 
@@ -102,10 +97,7 @@ export async function voidFolioEntry(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...dto, reason: dto.void_reason })
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal membatalkan entry folio');
-  }
+  const json = await parseStayChargeResponse(res, 'Gagal membatalkan entry folio');
   return json.data || json;
 }
 
@@ -123,9 +115,6 @@ export async function correctFolioEntry(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto)
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.message || 'Gagal mengoreksi entry folio');
-  }
+  const json = await parseStayChargeResponse(res, 'Gagal mengoreksi entry folio');
   return json.data || json;
 }

@@ -5,6 +5,7 @@ const http = require('http');
 const { once } = require('events');
 const { app, pool } = require('../dist/index');
 const { initializeDatabase } = require('../dist/db/schema_v3');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 let server;
 let baseUrl;
@@ -277,6 +278,24 @@ async function runTests() {
 
   // 6. POST /api/stay-charges/post-charge with mismatching property_id
   {
+    const saRes = await pool.query(`
+      SELECT u.id, u.username, u.full_name, u.email, r.id AS role_id, r.name AS role
+      FROM users u JOIN roles r ON r.id = u.role_id
+      WHERE r.name = 'Super Admin' AND r.property_id IS NULL AND r.is_system_role = TRUE
+      LIMIT 1
+    `);
+    const sa = saRes.rows[0];
+    const saToken = generateToken({
+      id: sa.id,
+      username: sa.username,
+      full_name: sa.full_name,
+      email: sa.email || 'sa@test.local',
+      role_id: sa.role_id,
+      role: sa.role,
+      property_id: propIdA,
+      access_type: 'PMS_STAFF',
+      scope: 'FULL'
+    });
     const res = await api('POST', '/api/stay-charges/post-charge', {
       property_id: propIdB,
       reservation_id: resIdA,
@@ -284,7 +303,7 @@ async function runTests() {
       custom_description: 'Cross Property Laundry',
       unit_price: 50000,
       quantity: 1
-    });
+    }, { Authorization: `Bearer ${saToken}` });
     expect(res.status === 403, `POST /api/stay-charges/post-charge cross-property returns 403 (got ${res.status})`);
   }
 

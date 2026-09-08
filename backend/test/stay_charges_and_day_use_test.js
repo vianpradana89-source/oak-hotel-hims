@@ -13,6 +13,33 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'oak_hotel_db'
 });
 
+async function superAdminAuthHeaders(propertyId = 1) {
+  const { generateToken } = require('../dist/domains/auth/authService');
+  const saRes = await pool.query(`
+    SELECT u.id, u.username, u.full_name, u.email, r.id AS role_id, r.name AS role
+    FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'Super Admin' AND r.property_id IS NULL AND r.is_system_role = TRUE
+    LIMIT 1
+  `);
+  if (!saRes.rows[0]) throw new Error('Platform Super Admin not found');
+  const sa = saRes.rows[0];
+  const token = generateToken({
+    id: sa.id,
+    username: sa.username,
+    full_name: sa.full_name,
+    email: sa.email || 'sa@test.local',
+    role_id: sa.role_id,
+    role: sa.role,
+    property_id: propertyId,
+    access_type: 'PMS_STAFF',
+    scope: 'FULL'
+  });
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`
+  };
+}
+
 async function runTest() {
   console.log('--- STARTING STAY CHARGES & DAY USE FOUNDATION TEST (STAY-CHARGE-1) ---');
   const client = await pool.connect();
@@ -163,17 +190,19 @@ async function runTest() {
     await new Promise((resolve) => server.listen(0, resolve));
     const port = server.address().port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    const authHeaders = await superAdminAuthHeaders(1);
 
     try {
       // Create Day Use Booking A: 2026-11-20 09:00 - 13:00 on Room 888
       console.log('6. Testing Day Use booking creation & overlap detection...');
       const bookingResA = await fetch(`${baseUrl}/api/bookings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           guest_name: 'Transit Guest A',
           guest_phone: '081234567890',
+          has_valid_identity: true,
           reservations: [{
             room_id: cleanupIds.roomId,
             guest_name: 'Transit Guest A',
@@ -219,11 +248,12 @@ async function runTest() {
       // Test Collision: Overlapping Booking B (11:00 - 15:00) on same Room 888 -> Must FAIL
       const bookingResB = await fetch(`${baseUrl}/api/bookings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           guest_name: 'Transit Guest B (Overlapping)',
           guest_phone: '081234567891',
+          has_valid_identity: true,
           reservations: [{
             room_id: cleanupIds.roomId,
             guest_name: 'Transit Guest B',
@@ -243,11 +273,12 @@ async function runTest() {
       // Test Collision: Turnaround buffer check (13:30 - 17:30 is within 60 min of 13:00) -> Must FAIL
       const bookingResC = await fetch(`${baseUrl}/api/bookings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           guest_name: 'Transit Guest C (Within Buffer)',
           guest_phone: '081234567892',
+          has_valid_identity: true,
           reservations: [{
             room_id: cleanupIds.roomId,
             guest_name: 'Transit Guest C',
@@ -267,11 +298,12 @@ async function runTest() {
       // Test Valid Non-colliding Booking D: 14:30 - 18:30 on same Room 888 (13:00 + 60m buffer = 14:00 clean) -> Must SUCCEED
       const bookingResD = await fetch(`${baseUrl}/api/bookings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           guest_name: 'Transit Guest D (After Buffer)',
           guest_phone: '081234567893',
+          has_valid_identity: true,
           reservations: [{
             room_id: cleanupIds.roomId,
             guest_name: 'Transit Guest D',
@@ -299,7 +331,7 @@ async function runTest() {
       console.log('7. Testing Stay Charge posting to Folio...');
       const postChargeRes = await fetch(`${baseUrl}/api/stay-charges/post-charge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resIdA,
@@ -328,7 +360,7 @@ async function runTest() {
       // Post Penalty charge
       const postPenaltyRes = await fetch(`${baseUrl}/api/stay-charges/post-charge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           reservation_id: resIdA,
@@ -349,7 +381,7 @@ async function runTest() {
       const totalBeforeVoid = Number(updatedResA.rows[0].total_price);
       const voidRes = await fetch(`${baseUrl}/api/stay-charges/void-entry`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           folio_entry_id: postedEntry.id,
@@ -368,7 +400,7 @@ async function runTest() {
       // Verify double-void is rejected
       const doubleVoidRes = await fetch(`${baseUrl}/api/stay-charges/void-entry`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           property_id: 1,
           folio_entry_id: postedEntry.id,
@@ -387,7 +419,7 @@ async function runTest() {
       // Perform checkout
       const checkoutRes = await fetch(`${baseUrl}/api/reservations/${resIdD}/checkout`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({ property_id: 1, skip_inspection: true })
       });
       assert.strictEqual(checkoutRes.status, 200, 'Day Use checkout should succeed');

@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { getPropertyPricingSettings } from '../pricing/pricingService';
 import type {
+  ChargeMethod,
   CreateStayChargeRuleDto,
   PostStayChargeDto,
   StayChargeRule,
@@ -11,6 +12,69 @@ import type {
 } from './stayChargesTypes';
 import { projectFolioEntryToTransaction } from '../transactions/transactionService';
 import { shouldApplyPostedCommercialDiscount } from '../reservations/reservationBilling';
+
+const VALID_CHARGE_TYPES = new Set<StayChargeType>([
+  'EXTRA_BED',
+  'EXTRA_PERSON',
+  'EARLY_CHECKIN',
+  'LATE_CHECKOUT',
+  'PENALTY'
+]);
+
+const CALC_TO_METHOD: Record<string, ChargeMethod> = {
+  FIXED: 'FIXED_AMOUNT',
+  FIXED_AMOUNT: 'FIXED_AMOUNT',
+  PERCENT_ROOM_RATE: 'PERCENTAGE_OF_NIGHTLY_RATE',
+  PERCENTAGE_OF_NIGHTLY_RATE: 'PERCENTAGE_OF_NIGHTLY_RATE',
+  FULL_NIGHT_RATE: 'FULL_NIGHT',
+  FULL_NIGHT: 'FULL_NIGHT',
+  FREE: 'FREE',
+  MANUAL: 'MANUAL'
+};
+
+function domainError(statusCode: number, code: string, message: string): Error {
+  return Object.assign(new Error(message), { statusCode, code });
+}
+
+export function normalizeStayChargeWriteDto<T extends CreateStayChargeRuleDto | UpdateStayChargeRuleDto>(
+  raw: T
+): T {
+  const dto: any = { ...raw };
+  if (dto.charge_method === undefined && dto.calculation_type !== undefined) {
+    dto.charge_method = CALC_TO_METHOD[String(dto.calculation_type).trim().toUpperCase()];
+  } else if (dto.charge_method !== undefined) {
+    dto.charge_method = CALC_TO_METHOD[String(dto.charge_method).trim().toUpperCase()] || dto.charge_method;
+  }
+  if (dto.percentage_rate === undefined && dto.percentage_of_rate !== undefined) {
+    dto.percentage_rate = dto.percentage_of_rate;
+  }
+  if (dto.taxable === undefined && dto.is_taxable !== undefined) {
+    dto.taxable = dto.is_taxable;
+  }
+  if (dto.service_chargeable === undefined && dto.is_service_chargeable !== undefined) {
+    dto.service_chargeable = dto.is_service_chargeable;
+  }
+  if (dto.sort_order === undefined && dto.display_order !== undefined) {
+    dto.sort_order = dto.display_order;
+  }
+  return dto;
+}
+
+function assertValidChargeType(value: unknown): StayChargeType {
+  const chargeType = String(value || '').trim().toUpperCase() as StayChargeType;
+  if (!VALID_CHARGE_TYPES.has(chargeType)) {
+    throw domainError(400, 'VALIDATION_ERROR', 'Jenis layanan / denda tidak valid');
+  }
+  return chargeType;
+}
+
+function assertValidChargeMethod(value: unknown): ChargeMethod {
+  const method = CALC_TO_METHOD[String(value || '').trim().toUpperCase()];
+  if (!method) {
+    throw domainError(400, 'VALIDATION_ERROR', 'Metode perhitungan tidak valid');
+  }
+  return method;
+}
 
 // ============================================================================
 // AUDIT LOGGING HELPER
@@ -87,11 +151,15 @@ export async function getStayChargeRuleById(
   id: number
 ): Promise<StayChargeRule | null> {
   const res = await client.query(
-    'SELECT * FROM stay_charge_rules WHERE id = $1 AND property_id = $2',
-    [id, propertyId]
+    'SELECT * FROM stay_charge_rules WHERE id = $1',
+    [id]
   );
   if (res.rowCount === 0) return null;
-  return mapRowToStayChargeRule(res.rows[0]);
+  const row = res.rows[0];
+  if (Number(row.property_id) !== propertyId) {
+    throw domainError(403, 'CROSS_PROPERTY_ACCESS', 'Cross-property access is not allowed');
+  }
+  return mapRowToStayChargeRule(row);
 }
 
 export async function createStayChargeRule(
@@ -100,11 +168,14 @@ export async function createStayChargeRule(
   dto: CreateStayChargeRuleDto,
   actor: string = 'SYSTEM'
 ): Promise<StayChargeRule> {
+  dto = normalizeStayChargeWriteDto(dto);
   const code = (dto.code || '').trim().toUpperCase();
   const name = (dto.name || '').trim();
+  const chargeType = assertValidChargeType(dto.charge_type);
+  const chargeMethod = assertValidChargeMethod(dto.charge_method || 'FIXED_AMOUNT');
 
-  if (!code) throw new Error('Kode aturan biaya wajib diisi');
-  if (!name) throw new Error('Nama aturan biaya wajib diisi');
+  if (!code) throw domainError(400, 'VALIDATION_ERROR', 'Kode aturan biaya wajib diisi');
+  if (!name) throw domainError(400, 'VALIDATION_ERROR', 'Nama aturan biaya wajib diisi');
 
   // Check unique active code within property
   const dupCheck = await client.query(
@@ -132,11 +203,11 @@ export async function createStayChargeRule(
     ) RETURNING *`,
     [
       propertyId,
-      dto.charge_type,
+      chargeType,
       code,
       name,
       dto.description || null,
-      dto.charge_method || 'FIXED_AMOUNT',
+      chargeMethod,
       Number(dto.default_amount || 0),
       Number(dto.percentage_rate || 0),
       dto.cutoff_time || null,
@@ -172,14 +243,15 @@ export async function updateStayChargeRule(
   dto: UpdateStayChargeRuleDto,
   actor: string = 'SYSTEM'
 ): Promise<StayChargeRule> {
+  dto = normalizeStayChargeWriteDto(dto);
   const existing = await getStayChargeRuleById(client, propertyId, id);
   if (!existing) {
-    throw new Error(`Aturan biaya #${id} tidak ditemukan`);
+    throw domainError(404, 'NOT_FOUND', `Aturan biaya #${id} tidak ditemukan`);
   }
 
   if (dto.code !== undefined) {
     const newCode = dto.code.trim().toUpperCase();
-    if (!newCode) throw new Error('Kode aturan tidak boleh kosong');
+    if (!newCode) throw domainError(400, 'VALIDATION_ERROR', 'Kode aturan tidak boleh kosong');
     if (newCode !== existing.code) {
       const dupCheck = await client.query(
         `SELECT id FROM stay_charge_rules
@@ -187,41 +259,49 @@ export async function updateStayChargeRule(
         [propertyId, newCode, id]
       );
       if ((dupCheck.rowCount ?? 0) > 0) {
-        throw new Error(`Kode aturan '${newCode}' sudah digunakan`);
+        throw domainError(400, 'VALIDATION_ERROR', `Kode aturan '${newCode}' sudah digunakan`);
       }
     }
   }
 
   const updatedCode = dto.code !== undefined ? dto.code.trim().toUpperCase() : existing.code;
   const updatedName = dto.name !== undefined ? dto.name.trim() : existing.name;
-  if (!updatedName) throw new Error('Nama aturan tidak boleh kosong');
+  if (!updatedName) throw domainError(400, 'VALIDATION_ERROR', 'Nama aturan tidak boleh kosong');
+  const updatedChargeType = dto.charge_type !== undefined
+    ? assertValidChargeType(dto.charge_type)
+    : existing.charge_type;
+  const updatedChargeMethod = dto.charge_method !== undefined
+    ? assertValidChargeMethod(dto.charge_method)
+    : existing.charge_method;
 
   const res = await client.query(
     `UPDATE stay_charge_rules SET
       code = $1,
       name = $2,
       description = $3,
-      charge_method = $4,
-      default_amount = $5,
-      percentage_rate = $6,
-      cutoff_time = $7,
-      taxable = $8,
-      service_chargeable = $9,
-      requires_note = $10,
-      requires_photo = $11,
-      requires_supervisor_approval = $12,
-      approval_threshold = $13,
-      is_active = $14,
-      sort_order = $15,
-      updated_by = $16,
+      charge_type = $4,
+      charge_method = $5,
+      default_amount = $6,
+      percentage_rate = $7,
+      cutoff_time = $8,
+      taxable = $9,
+      service_chargeable = $10,
+      requires_note = $11,
+      requires_photo = $12,
+      requires_supervisor_approval = $13,
+      approval_threshold = $14,
+      is_active = $15,
+      sort_order = $16,
+      updated_by = $17,
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = $17 AND property_id = $18
+    WHERE id = $18 AND property_id = $19
     RETURNING *`,
     [
       updatedCode,
       updatedName,
       dto.description !== undefined ? dto.description : existing.description,
-      dto.charge_method !== undefined ? dto.charge_method : existing.charge_method,
+      updatedChargeType,
+      updatedChargeMethod,
       dto.default_amount !== undefined ? Number(dto.default_amount) : existing.default_amount,
       dto.percentage_rate !== undefined ? Number(dto.percentage_rate) : existing.percentage_rate,
       dto.cutoff_time !== undefined ? dto.cutoff_time : existing.cutoff_time,
@@ -261,7 +341,7 @@ export async function deleteStayChargeRule(
 ): Promise<{ deleted: boolean; archived: boolean; message: string }> {
   const existing = await getStayChargeRuleById(client, propertyId, id);
   if (!existing) {
-    throw new Error(`Aturan biaya #${id} tidak ditemukan`);
+    throw domainError(404, 'NOT_FOUND', `Aturan biaya #${id} tidak ditemukan`);
   }
 
   // Check if referenced in folio_entries

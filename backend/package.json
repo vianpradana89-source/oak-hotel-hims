@@ -36,6 +36,7 @@
     "test:ktp-ocr": "node test/ktp_ocr_parser_test.js",
     "test:stay-charges": "node test/stay_charges_and_day_use_test.js",
     "test:stay-charge-safety": "node test/stay_charge_ledger_safety_test.js",
+    "test:stay-charge-edit": "npm run build && node test/stay_charge_edit_contract_test.js",
     "test:meal-plans": "node test/pricing_meal_plan_master_test.js",
     "test:c3b1-canonical-writes": "node test/c3b1_canonical_writes_test.js",
     "test:c3b2-remaining-identity": "node test/c3b2_remaining_identity_test.js",

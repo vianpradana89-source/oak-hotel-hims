@@ -23,6 +23,7 @@ export interface StayChargeRule {
   is_active: boolean;
   is_archived: boolean;
   display_order: number;
+  sort_order?: number;
   created_at: string;
   updated_at: string;
 }
@@ -42,6 +43,11 @@ export interface CreateStayChargeRuleDto {
   is_service_chargeable?: boolean;
   is_active?: boolean;
   display_order?: number;
+  charge_method?: string;
+  percentage_rate?: number | null;
+  taxable?: boolean;
+  service_chargeable?: boolean;
+  sort_order?: number;
 }
 
 export interface UpdateStayChargeRuleDto {
@@ -59,6 +65,11 @@ export interface UpdateStayChargeRuleDto {
   is_service_chargeable?: boolean;
   is_active?: boolean;
   display_order?: number;
+  charge_method?: string;
+  percentage_rate?: number | null;
+  taxable?: boolean;
+  service_chargeable?: boolean;
+  sort_order?: number;
 }
 
 export interface PostStayChargeDto {

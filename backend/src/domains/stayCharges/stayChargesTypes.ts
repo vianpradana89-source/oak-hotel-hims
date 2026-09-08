@@ -45,9 +45,15 @@ export interface CreateStayChargeRuleDto {
   approval_threshold?: number;
   is_active?: boolean;
   sort_order?: number;
+  calculation_type?: string;
+  percentage_of_rate?: number;
+  is_taxable?: boolean;
+  is_service_chargeable?: boolean;
+  display_order?: number;
 }
 
 export interface UpdateStayChargeRuleDto {
+  charge_type?: StayChargeType;
   code?: string;
   name?: string;
   description?: string | null;
@@ -63,6 +69,11 @@ export interface UpdateStayChargeRuleDto {
   approval_threshold?: number;
   is_active?: boolean;
   sort_order?: number;
+  calculation_type?: string;
+  percentage_of_rate?: number;
+  is_taxable?: boolean;
+  is_service_chargeable?: boolean;
+  display_order?: number;
 }
 
 export interface PostStayChargeDto {
