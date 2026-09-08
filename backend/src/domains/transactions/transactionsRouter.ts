@@ -25,6 +25,10 @@ import {
   DEPARTMENTS
 } from './transactionService';
 import {
+  getBookingSalesDetail,
+  resolveSalesReadPropertyScope
+} from './bookingSalesDetailService';
+import {
   TransactionFilterParams,
   TransactionType,
   TransactionStatus,
@@ -206,6 +210,53 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 500).json({
         success: false,
+        error: err.message
+      });
+    }
+  });
+
+  /**
+   * GET /api/transactions/sales/bookings/:bookingId
+   * Read-only lifetime booking-level Penjualan detail.
+   */
+  router.get('/sales/bookings/:bookingId', async (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        code: 'UNAUTHORIZED',
+        error: 'Akses ditolak. Silakan login terlebih dahulu.'
+      });
+    }
+
+    let user: { id: number; property_id: number };
+    try {
+      user = verifyToken(authHeader.split(' ')[1]);
+    } catch {
+      return res.status(401).json({
+        success: false,
+        code: 'INVALID_TOKEN',
+        error: 'Sesi login telah kedaluwarsa atau token tidak valid. Silakan login kembali.'
+      });
+    }
+
+    try {
+      const { propertyId } = await resolveSalesReadPropertyScope({
+        pool,
+        userId: Number(user.id),
+        tokenPropertyId: user.property_id,
+        requestedPropertyId: req.query.property_id
+      });
+
+      const detail = await getBookingSalesDetail(pool, propertyId, String(req.params.bookingId || ''));
+      return res.json({
+        success: true,
+        data: detail
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 500).json({
+        success: false,
+        code: err.code || 'BOOKING_SALES_DETAIL_ERROR',
         error: err.message
       });
     }

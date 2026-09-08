@@ -103,6 +103,47 @@ expect(bidRow.booking_bid_group.paid === 460000, 'M. paid unique by reservation'
 expect(posRow && !posRow.booking_bid_group, 'H. POS stays standalone');
 expect(isStandalonePenjualanSale(pos) === true, 'H. POS detected as standalone');
 
+const linkedPos = sale({
+  id: 11,
+  reservation_id: 101,
+  stay_sequence: 1,
+  source_type: 'POS',
+  booking_id: 10,
+  booking_bid: 'LWG-260907-79W91XS8',
+  room_number_snapshot: '101',
+  room_type_name: 'DELUXE KING',
+  amount: 150000,
+  net_amount: 150000,
+  effective_net_amount: 150000,
+  reservation_amount_paid: 368000,
+  reservation_remaining_balance: 0,
+  payment_status: 'PAID',
+  operational_sheet: 'SELESAI',
+});
+expect(isStandalonePenjualanSale(linkedPos) === false, 'P. linked POS with BID is not standalone');
+const linkedGrouped = presentBidGroupedSales([room101, room204, linkedPos, pos]);
+expect(linkedGrouped.length === 2, 'P/Q. linked POS joins BID; walk-in POS stays standalone');
+const linkedBid = linkedGrouped.find((row) => row.booking_bid_group);
+expect(linkedBid.booking_bid_group.room_count === 2, 'P. linked POS does not add a fake room');
+expect(linkedBid.booking_bid_group.children.find((child) => child.reservation_id === 101).gross === 610000, 'P. linked POS rolls into reservation child');
+expect(linkedBid.booking_bid_group.booking_id === 10, 'P. grouped payload exposes booking_id');
+
+const linkedNoRoom = sale({
+  id: 12,
+  reservation_id: null,
+  source_type: 'POS_ORDER',
+  booking_id: 10,
+  booking_bid: 'LWG-260907-79W91XS8',
+  amount: 25000,
+  net_amount: 25000,
+  effective_net_amount: 25000,
+  payment_status: 'PAID',
+  paid_amount: 25000,
+});
+const noRoomGroup = presentBidGroupedSales([room101, linkedNoRoom])[0].booking_bid_group;
+expect(noRoomGroup.room_count === 1, 'P. BID-linked POS without reservation is not a fake room');
+expect(noRoomGroup.net === 393000, 'P. unattached linked POS still contributes to group net');
+
 const core = presentBidGroupedSales([room101, room204])[0].booking_bid_group;
 expect(core.gross === 994000, 'C. gross 994000');
 expect(core.discount === 198800, 'C. discount 198800');

@@ -23,6 +23,7 @@ export interface PenjualanBidChild {
 
 export interface PenjualanBidGroupPayload {
   bid: string;
+  booking_id: number | string | null;
   guest_name: string;
   room_count: number;
   stay_type_label: string;
@@ -54,9 +55,12 @@ export function canonicalBookingBid(row: { booking_bid?: unknown }): string | nu
   return bid || null;
 }
 
+/**
+ * Standalone if there is no booking BID.
+ * POS / POS_ORDER with a BID join the booking group (future linked outlet sales).
+ * POS / POS_ORDER without a BID stay standalone — never invent a fake BID.
+ */
 export function isStandalonePenjualanSale(row: { source_type?: unknown; booking_bid?: unknown }): boolean {
-  const source = String(row.source_type || '').trim().toUpperCase();
-  if (source === 'POS' || source === 'POS_ORDER') return true;
   return !canonicalBookingBid(row);
 }
 
@@ -108,6 +112,21 @@ function childKey(row: any): string {
   const reservationId = Number(row.reservation_id);
   if (Number.isInteger(reservationId) && reservationId > 0) return `r:${reservationId}`;
   return `t:${row.id}`;
+}
+
+function hasReservationChild(row: any): boolean {
+  const reservationId = Number(row.reservation_id);
+  return Number.isInteger(reservationId) && reservationId > 0;
+}
+
+function canonicalBookingId(rows: any[]): number | string | null {
+  for (const row of rows) {
+    if (row.booking_id == null || row.booking_id === '') continue;
+    const numeric = Number(row.booking_id);
+    if (Number.isInteger(numeric) && numeric > 0) return numeric;
+    return row.booking_id;
+  }
+  return null;
 }
 
 function reservationPaid(row: any): number {
@@ -163,9 +182,31 @@ function buildChild(reservationId: number | null, members: any[]): PenjualanBidC
   };
 }
 
+function unattachedFinancial(rows: any[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {
+  return rows.reduce(
+    (acc, row) => {
+      const gross = roundIdr(row.amount);
+      const discount = roundIdr(row.discount_amount);
+      const net = saleNet(row);
+      const paid = reservationPaid(row);
+      const remaining = reservationRemaining(row, net, paid);
+      return {
+        gross: acc.gross + gross,
+        discount: acc.discount + discount,
+        net: acc.net + net,
+        paid: acc.paid + paid,
+        remaining: acc.remaining + remaining,
+      };
+    },
+    { gross: 0, discount: 0, net: 0, paid: 0, remaining: 0 }
+  );
+}
+
 function buildGroup(bid: string, members: any[]): PenjualanBidGroupPayload & { primary: any; members: any[] } {
+  const reservationMembers = members.filter(hasReservationChild);
+  const unattachedMembers = members.filter((row) => !hasReservationChild(row));
   const byChild = new Map<string, any[]>();
-  for (const row of members) {
+  for (const row of reservationMembers) {
     const key = childKey(row);
     const list = byChild.get(key) || [];
     list.push(row);
@@ -184,14 +225,16 @@ function buildGroup(bid: string, members: any[]): PenjualanBidGroupPayload & { p
       return Number(a.reservation_id || 0) - Number(b.reservation_id || 0);
     });
 
-  const gross = children.reduce((sum, child) => sum + child.gross, 0);
-  const discount = children.reduce((sum, child) => sum + child.discount, 0);
-  const net = children.reduce((sum, child) => sum + child.net, 0);
-  const paid = children.reduce((sum, child) => sum + child.paid, 0);
-  const remaining = children.reduce((sum, child) => sum + child.remaining, 0);
+  const unattached = unattachedFinancial(unattachedMembers);
+  const gross = children.reduce((sum, child) => sum + child.gross, 0) + unattached.gross;
+  const discount = children.reduce((sum, child) => sum + child.discount, 0) + unattached.discount;
+  const net = children.reduce((sum, child) => sum + child.net, 0) + unattached.net;
+  const paid = children.reduce((sum, child) => sum + child.paid, 0) + unattached.paid;
+  const remaining = children.reduce((sum, child) => sum + child.remaining, 0) + unattached.remaining;
 
   return {
     bid,
+    booking_id: canonicalBookingId(members),
     guest_name: String(members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
     room_count: children.length,
     stay_type_label: stayTypeLabel(children.map((child) => child.stay_type)),

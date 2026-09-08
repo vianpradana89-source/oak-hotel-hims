@@ -16,9 +16,11 @@ import {
   paymentStatusBadgeClass,
   type PenjualanListItem
 } from './penjualanBidGrouping';
+import { resolvePenjualanMainRowDetailTarget } from './penjualanDetailTarget';
 import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
+import { BookingSalesDetailDrawer } from './BookingSalesDetailDrawer';
 import { PurchaseTransactionEditor } from './PurchaseTransactionEditor';
 import { ExpenseTransactionEditor } from './ExpenseTransactionEditor';
 import { IncomeTransactionEditor } from './IncomeTransactionEditor';
@@ -168,6 +170,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [softDeleteError, setSoftDeleteError] = useState<string | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState<boolean>(false);
   const [selectedTxIdForDetail, setSelectedTxIdForDetail] = useState<number | string | null>(null);
+  const [bookingDetailOpen, setBookingDetailOpen] = useState<boolean>(false);
+  const [selectedBookingIdForDetail, setSelectedBookingIdForDetail] = useState<number | string | null>(null);
   const [expandedBids, setExpandedBids] = useState<Record<string, boolean>>({});
 
   const currentRequestIdRef = useRef<number>(0);
@@ -288,8 +292,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   };
 
   const openDetailDrawer = (txId: number | string) => {
+    setBookingDetailOpen(false);
+    setSelectedBookingIdForDetail(null);
     setSelectedTxIdForDetail(txId);
     setDetailDrawerOpen(true);
+  };
+
+  const openBookingSalesDetail = (bookingId: number | string) => {
+    setDetailDrawerOpen(false);
+    setSelectedTxIdForDetail(null);
+    setSelectedBookingIdForDetail(bookingId);
+    setBookingDetailOpen(true);
+  };
+
+  const openPenjualanItemDetail = (item: PenjualanListItem) => {
+    const target = resolvePenjualanMainRowDetailTarget(item);
+    if (target.kind === 'booking') {
+      openBookingSalesDetail(target.bookingId);
+      return;
+    }
+    openDetailDrawer(target.transactionId);
   };
 
   const openVoidModal = (tx: TransactionRecord) => {
@@ -409,7 +431,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       return (
         <tr
           key={t.id}
-          onClick={() => openDetailDrawer(t.id)}
+          onClick={() => openPenjualanItemDetail(item)}
           className="hover:bg-slate-50/80 transition-colors cursor-pointer"
         >
           <td className="py-2.5 px-3 whitespace-nowrap">
@@ -439,7 +461,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
             <button
-              onClick={() => openDetailDrawer(t.id)}
+              onClick={() => openPenjualanItemDetail(item)}
               className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
             >
               Detail
@@ -455,7 +477,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     return (
       <React.Fragment key={`bid:${group.bid}`}>
         <tr
-          onClick={() => openDetailDrawer(t.id)}
+          onClick={() => openPenjualanItemDetail(item)}
           className="hover:bg-slate-50/80 transition-colors cursor-pointer"
         >
           <td className="py-2.5 px-3 whitespace-nowrap">
@@ -509,7 +531,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           </td>
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
             <button
-              onClick={() => openDetailDrawer(t.id)}
+              onClick={() => openPenjualanItemDetail(item)}
               className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
             >
               Detail
@@ -1826,6 +1848,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           </div>
         </div>
       )}
+
+      <BookingSalesDetailDrawer
+        isOpen={bookingDetailOpen}
+        bookingId={selectedBookingIdForDetail}
+        propertyId={propertyId}
+        onClose={() => {
+          setBookingDetailOpen(false);
+          setSelectedBookingIdForDetail(null);
+        }}
+      />
 
       {/* Detail Drawer */}
       <TransactionDetailDrawer

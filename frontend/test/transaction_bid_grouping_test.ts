@@ -180,6 +180,35 @@ const withPos = groupPenjualanSaleRows([room101, room204, posSale]);
 check(withPos.length === 2, 'H. POS remains a peer standalone row');
 check(withPos.some((item) => item.kind === 'standalone' && item.tx.id === 9), 'H. POS sale is not forced into the BID group');
 
+const linkedPos = sale({
+  id: 11,
+  reservation_id: 101,
+  stay_sequence: 1,
+  source_type: 'POS',
+  booking_id: 10,
+  booking_bid: 'LWG-260907-79W91XS8',
+  room_number_snapshot: '101',
+  room_type_name: 'DELUXE KING',
+  amount: 150000,
+  net_amount: 150000,
+  effective_net_amount: 150000,
+  reservation_amount_paid: 368000,
+  reservation_remaining_balance: 0,
+  payment_status: 'PAID',
+  operational_sheet: 'SELESAI'
+});
+check(isStandalonePenjualanSale(linkedPos) === false, 'P. linked POS with BID is not standalone');
+const linkedGrouped = groupPenjualanSaleRows([room101, room204, linkedPos, posSale]);
+check(linkedGrouped.length === 2, 'P/Q. linked POS joins BID; walk-in POS stays standalone');
+const linkedBid = linkedGrouped.find((item) => item.kind === 'bid_group');
+check(linkedBid?.kind === 'bid_group' && linkedBid.group.room_count === 2, 'P. linked POS does not add a fake room');
+check(
+  linkedBid?.kind === 'bid_group'
+    && linkedBid.group.children.find((child) => child.reservation_id === 101)?.gross === 610000,
+  'P. linked POS rolls into reservation child'
+);
+check(linkedBid?.kind === 'bid_group' && linkedBid.group.booking_id === 10, 'P. grouped payload exposes booking_id');
+
 const searchRows = groupPenjualanSaleRows([room101, room204]);
 check(searchRows.length === 1, 'I. search by BID returns one group');
 

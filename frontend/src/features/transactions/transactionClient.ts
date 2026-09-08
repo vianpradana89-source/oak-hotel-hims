@@ -10,7 +10,8 @@ import type {
   AttachmentPurpose,
   Supplier,
   CustomCategory,
-  TransactionLineInput
+  TransactionLineInput,
+  BookingSalesDetail
 } from './transactionDomainTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
@@ -80,6 +81,14 @@ export async function fetchTransactionDetailApi(
   propertyId: number
 ): Promise<TransactionRecord> {
   return await fetchJson<TransactionRecord>(`${API_BASE}/${id}?property_id=${propertyId}`);
+}
+
+export async function fetchBookingSalesDetailApi(
+  bookingId: number | string,
+  propertyId: number
+): Promise<BookingSalesDetail> {
+  const encoded = encodeURIComponent(String(bookingId));
+  return await fetchJson<BookingSalesDetail>(`${API_BASE}/sales/bookings/${encoded}?property_id=${propertyId}`);
 }
 
 export async function fetchCategoriesApi(propertyId: number = 1): Promise<{

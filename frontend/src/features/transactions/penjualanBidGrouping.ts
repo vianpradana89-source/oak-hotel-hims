@@ -24,6 +24,7 @@ export interface PenjualanBidChild {
 
 export interface PenjualanBidGroup {
   bid: string;
+  booking_id: number | string | null;
   guest_name: string;
   room_count: number;
   stay_type_label: string;
@@ -61,9 +62,12 @@ export function canonicalBookingBid(tx: Pick<TransactionRecord, 'booking_bid'>):
   return bid || null;
 }
 
+/**
+ * Standalone if there is no booking BID.
+ * POS / POS_ORDER with a BID join the booking group (future linked outlet sales).
+ * POS / POS_ORDER without a BID stay standalone — never invent a fake BID.
+ */
 export function isStandalonePenjualanSale(tx: Pick<TransactionRecord, 'source_type' | 'booking_bid'>): boolean {
-  const source = String(tx.source_type || '').trim().toUpperCase();
-  if (source === 'POS' || source === 'POS_ORDER') return true;
   return !canonicalBookingBid(tx);
 }
 
@@ -101,6 +105,21 @@ function childKey(tx: TransactionRecord): string {
   const reservationId = Number(tx.reservation_id);
   if (Number.isInteger(reservationId) && reservationId > 0) return `r:${reservationId}`;
   return `t:${tx.id}`;
+}
+
+function hasReservationChild(tx: TransactionRecord): boolean {
+  const reservationId = Number(tx.reservation_id);
+  return Number.isInteger(reservationId) && reservationId > 0;
+}
+
+function canonicalBookingId(rows: TransactionRecord[]): number | string | null {
+  for (const row of rows) {
+    if (row.booking_id == null || row.booking_id === '') continue;
+    const numeric = Number(row.booking_id);
+    if (Number.isInteger(numeric) && numeric > 0) return numeric;
+    return row.booking_id;
+  }
+  return null;
 }
 
 function reservationPaid(tx: TransactionRecord): number {
@@ -155,9 +174,31 @@ function buildChild(reservationId: number | null, members: TransactionRecord[]):
   };
 }
 
+function unattachedFinancial(rows: TransactionRecord[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {
+  return rows.reduce(
+    (acc, tx) => {
+      const gross = roundIdr(tx.amount);
+      const discount = roundIdr(tx.discount_amount);
+      const net = saleNet(tx);
+      const paid = reservationPaid(tx);
+      const remaining = reservationRemaining(tx, net, paid);
+      return {
+        gross: acc.gross + gross,
+        discount: acc.discount + discount,
+        net: acc.net + net,
+        paid: acc.paid + paid,
+        remaining: acc.remaining + remaining
+      };
+    },
+    { gross: 0, discount: 0, net: 0, paid: 0, remaining: 0 }
+  );
+}
+
 function buildGroup(bid: string, members: TransactionRecord[]): PenjualanBidGroup {
+  const reservationMembers = members.filter(hasReservationChild);
+  const unattachedMembers = members.filter((tx) => !hasReservationChild(tx));
   const byChild = new Map<string, TransactionRecord[]>();
-  for (const tx of members) {
+  for (const tx of reservationMembers) {
     const key = childKey(tx);
     const list = byChild.get(key) || [];
     list.push(tx);
@@ -176,14 +217,16 @@ function buildGroup(bid: string, members: TransactionRecord[]): PenjualanBidGrou
       return Number(a.reservation_id || 0) - Number(b.reservation_id || 0);
     });
 
-  const gross = children.reduce((sum, child) => sum + child.gross, 0);
-  const discount = children.reduce((sum, child) => sum + child.discount, 0);
-  const net = children.reduce((sum, child) => sum + child.net, 0);
-  const paid = children.reduce((sum, child) => sum + child.paid, 0);
-  const remaining = children.reduce((sum, child) => sum + child.remaining, 0);
+  const unattached = unattachedFinancial(unattachedMembers);
+  const gross = children.reduce((sum, child) => sum + child.gross, 0) + unattached.gross;
+  const discount = children.reduce((sum, child) => sum + child.discount, 0) + unattached.discount;
+  const net = children.reduce((sum, child) => sum + child.net, 0) + unattached.net;
+  const paid = children.reduce((sum, child) => sum + child.paid, 0) + unattached.paid;
+  const remaining = children.reduce((sum, child) => sum + child.remaining, 0) + unattached.remaining;
 
   return {
     bid,
+    booking_id: canonicalBookingId(members),
     guest_name: String(members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
     room_count: children.length,
     stay_type_label: stayTypeLabel(children.map((child) => child.stay_type)),
@@ -220,6 +263,7 @@ export function groupPenjualanSaleRows(rows: TransactionRecord[]): PenjualanList
         kind: 'bid_group',
         group: {
           bid: payload.bid,
+          booking_id: payload.booking_id ?? row.booking_id ?? null,
           guest_name: payload.guest_name,
           room_count: payload.room_count,
           stay_type_label: payload.stay_type_label,

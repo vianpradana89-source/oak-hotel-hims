@@ -161,6 +161,7 @@ export interface TransactionRecord {
   operational_sheet?: OperationalSheet;
   booking_bid_group?: {
     bid: string;
+    booking_id?: number | string | null;
     guest_name: string;
     room_count: number;
     stay_type_label: string;
@@ -500,4 +501,77 @@ export function mapToOperationalStatus(tx: {
  */
 export function isReportingEligible(sheet: OperationalSheet): boolean {
   return sheet === 'SELESAI';
+}
+
+export type BookingSaleSourceCategory =
+  | 'ROOM'
+  | 'STAY_EXTRA'
+  | 'LAUNDRY'
+  | 'POS'
+  | 'PENALTY'
+  | 'OTHER_OUTLET'
+  | 'OTHER';
+
+export interface BookingSalesDetail {
+  context_label: 'Seluruh Booking';
+  scope: 'LIFETIME_BOOKING';
+  booking: {
+    booking_id: number;
+    bid: string;
+    property_id: number;
+    guest_name: string;
+    booker_name: string | null;
+    booking_source: string | null;
+    booking_channel: string | null;
+    booking_status: string | null;
+    check_in: string | null;
+    check_out: string | null;
+    room_count: number;
+  };
+  financial: {
+    scope: 'LIFETIME_BOOKING';
+    gross: number;
+    discount: number;
+    net: number;
+    paid: number;
+    remaining: number;
+    payment_status: string;
+  };
+  source_breakdown: Array<{
+    category: BookingSaleSourceCategory;
+    source_type: string;
+    gross: number;
+    discount: number;
+    net: number;
+    transaction_count: number;
+  }>;
+  children: Array<{
+    reservation_id: number;
+    room_id: number | null;
+    room_number: string;
+    room_type_name: string;
+    stay_sequence: number | null;
+    stay_type: string | null;
+    check_in: string | null;
+    check_out: string | null;
+    reservation_status: string | null;
+    operational_sheet: OperationalSheet;
+    payment_status: string;
+    gross: number;
+    discount: number;
+    net: number;
+    paid: number;
+    remaining: number;
+  }>;
+  payments: Array<{
+    payment_id: number;
+    reservation_id: number | null;
+    transaction_id: number | string | null;
+    method: string | null;
+    amount: number;
+    status: string;
+    paid_at: string | null;
+    reference: string | null;
+    evidence_reference: string | null;
+  }>;
 }
