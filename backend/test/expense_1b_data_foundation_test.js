@@ -716,6 +716,74 @@ async function runTests() {
 
     console.log(`  [PASS] Assertions ${assertions - 6 + 1}-${assertions} passed\n`);
 
+    // =====================================================================
+    // SCENARIO 25: Lifecycle operational_sheet consistency with expense_workflow_status
+    // =====================================================================
+    console.log('--- Scenario 25: Lifecycle operational_sheet consistency ---');
+
+    const { deriveLifecycleSheet } = await import('../dist/domains/transactions/saleLifecycleGrouping.js');
+
+    // EXPENSE POSTED + UNVERIFIED + expense_workflow_status=PROSES => PROSES
+    const expenseProses = deriveLifecycleSheet({
+      transaction_type: 'EXPENSE',
+      transaction_status: 'POSTED',
+      expense_workflow_status: 'PROSES',
+      deleted_at: null
+    });
+    check(expenseProses === 'PROSES',
+      '25a. EXPENSE POSTED + workflow=PROSES => lifecycle.sheet = PROSES');
+
+    // EXPENSE POSTED + VERIFIED + expense_workflow_status=SELESAI => SELESAI
+    const expenseSelesai = deriveLifecycleSheet({
+      transaction_type: 'EXPENSE',
+      transaction_status: 'POSTED',
+      expense_workflow_status: 'SELESAI',
+      deleted_at: null
+    });
+    check(expenseSelesai === 'SELESAI',
+      '25b. EXPENSE POSTED + workflow=SELESAI => lifecycle.sheet = SELESAI');
+
+    // EXPENSE VOIDED => BATAL
+    const expenseBatal = deriveLifecycleSheet({
+      transaction_type: 'EXPENSE',
+      transaction_status: 'VOIDED',
+      expense_workflow_status: 'SELESAI',
+      deleted_at: null
+    });
+    check(expenseBatal === 'BATAL',
+      '25c. EXPENSE VOIDED => lifecycle.sheet = BATAL (terminal overrides workflow)');
+
+    // EXPENSE soft deleted => HAPUS
+    const expenseHapus = deriveLifecycleSheet({
+      transaction_type: 'EXPENSE',
+      transaction_status: 'POSTED',
+      expense_workflow_status: 'SELESAI',
+      deleted_at: new Date().toISOString()
+    });
+    check(expenseHapus === 'HAPUS',
+      '25d. EXPENSE deleted => lifecycle.sheet = HAPUS');
+
+    // INCOME POSTED => SELESAI (generic behavior preserved)
+    const incomeSelesai = deriveLifecycleSheet({
+      transaction_type: 'INCOME',
+      transaction_status: 'POSTED',
+      deleted_at: null
+    });
+    check(incomeSelesai === 'SELESAI',
+      '25e. INCOME POSTED => lifecycle.sheet = SELESAI (generic)');
+
+    // PURCHASE POSTED + workflow=PROSES => PROSES
+    const purchaseProses = deriveLifecycleSheet({
+      transaction_type: 'PURCHASE',
+      transaction_status: 'POSTED',
+      purchase_workflow_status: 'PROSES',
+      deleted_at: null
+    });
+    check(purchaseProses === 'PROSES',
+      '25f. PURCHASE POSTED + workflow=PROSES => lifecycle.sheet = PROSES');
+
+    console.log(`  [PASS] Assertions ${assertions - 6 + 1}-${assertions} passed\n`);
+
     console.log(`\n=== All ${assertions} EXPENSE-1B Data Foundation Assertions PASSED ===\n`);
 
   } catch (err) {

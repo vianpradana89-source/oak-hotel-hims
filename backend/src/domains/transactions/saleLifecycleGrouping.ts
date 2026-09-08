@@ -20,6 +20,8 @@ export interface LifecycleMemberInput {
   receiving_status?: string | null;
   /** PURCHASE-2A1 canonical operational workflow (PROSES/SELESAI). */
   purchase_workflow_status?: string | null;
+  /** EXPENSE-1B canonical operational workflow (PROSES/SELESAI). */
+  expense_workflow_status?: string | null;
   deleted_at?: string | null;
   metadata?: Record<string, unknown> | null;
   reservation_status?: string | null;
@@ -244,6 +246,11 @@ export function deriveLifecycleSheet(row: LifecycleMemberInput): OperationalShee
     // PURCHASE-2A1: must match deriveOperationalSheet + PURCHASE_WORKFLOW_SHEET_SQL.
     // Receiving / verification do not directly drive the sheet.
     const workflow = upper(row.purchase_workflow_status) || 'PROSES';
+    return workflow === 'SELESAI' ? 'SELESAI' : 'PROSES';
+  }
+  if (type === 'EXPENSE') {
+    // EXPENSE-1B: must match deriveOperationalSheet + EXPENSE_WORKFLOW_SHEET_SQL.
+    const workflow = upper(row.expense_workflow_status) || 'PROSES';
     return workflow === 'SELESAI' ? 'SELESAI' : 'PROSES';
   }
   if (status === 'POSTED') return 'SELESAI';
