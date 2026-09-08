@@ -22,6 +22,7 @@ import {
   SettleTransactionPaymentDto,
   SoftDeleteTransactionDto,
   OperationalSheet,
+  PurchaseWorkflowStatus,
   TransactionSheetCounts,
   TransactionQueryResult,
   TransactionFilterParams,
@@ -105,12 +106,14 @@ export const DEPARTMENTS: { code: DepartmentCode; name: string }[] = [
 ];
 
 /**
- * Authoritative Operational Lifecycle Sheet Derivation (TRANSACTION-2E).
+ * Authoritative Operational Lifecycle Sheet Derivation (TRANSACTION-2E + PURCHASE-2A1).
  * Priority Rule:
  * 1. deleted_at -> HAPUS
  * 2. transaction_status in (CANCELLED, VOIDED, REVERSED) -> BATAL
- * 3. Fully completed -> SELESAI (PURCHASE: receiving_status=DITERIMA, others: transaction_status=POSTED)
- * 4. In-progress / Draft / Pending -> PROSES
+ * 3. PURCHASE: purchase_workflow_status SELESAI -> SELESAI (NULL fail-safe = PROSES)
+ *    Receiving / verification do NOT directly determine the purchase sheet after 2A1.
+ * 4. Fully completed non-purchase -> SELESAI (transaction_status=POSTED)
+ * 5. In-progress / Draft / Pending -> PROSES
  */
 const TERMINAL_TX_STATUSES = ['VOIDED', 'CANCELLED', 'REVERSED'] as const;
 
@@ -134,10 +137,19 @@ export function resolveOriginalFolioEntryId(entry: {
   return null;
 }
 
+export function resolvePurchaseWorkflowStatus(
+  value: unknown
+): PurchaseWorkflowStatus {
+  const raw = String(value || '').trim().toUpperCase();
+  if (raw === 'SELESAI') return 'SELESAI';
+  return 'PROSES';
+}
+
 export function deriveOperationalSheet(row: {
   transaction_type: string;
   transaction_status: string;
   receiving_status?: string | null;
+  purchase_workflow_status?: string | null;
   deleted_at?: string | null;
   source_type?: string | null;
   reservation_id?: unknown;
@@ -158,11 +170,9 @@ export function deriveOperationalSheet(row: {
   }
   const type = String(row.transaction_type || '').toUpperCase();
   if (type === 'PURCHASE') {
-    const recStatus = String(row.receiving_status || '').toUpperCase();
-    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(recStatus)) {
-      return 'SELESAI';
-    }
-    return 'PROSES';
+    return resolvePurchaseWorkflowStatus(row.purchase_workflow_status) === 'SELESAI'
+      ? 'SELESAI'
+      : 'PROSES';
   }
   // For EXPENSE, INCOME, SALE:
   if (status === 'POSTED') {
@@ -983,6 +993,7 @@ export async function createManualTransaction(
         amount, discount_amount, service_amount, tax_amount, net_amount,
         payment_status, payment_method, transaction_status,
         booking_id, reservation_id, supplier_id, phone,
+        purchase_workflow_status,
         notes, metadata, created_by
       ) VALUES (
         $1, $2, $3, CURRENT_TIMESTAMP,
@@ -991,7 +1002,8 @@ export async function createManualTransaction(
         $12, 0, 0, 0, $12,
         'PAID', $13, 'POSTED',
         $14, $15, $16, $17,
-        $18, $19, $20
+        $18,
+        $19, $20, $21
       ) RETURNING *`,
       [
         propertyId,
@@ -1011,6 +1023,7 @@ export async function createManualTransaction(
         dto.reservation_id || null,
         dto.supplier_id || null,
         dto.phone || null,
+        String(dto.transaction_type).toUpperCase() === 'PURCHASE' ? 'PROSES' : null,
         dto.notes ? dto.notes.trim() : null,
         JSON.stringify({ manual_entry: true, actor_name: dto.actor_name || 'Staff' }),
         dto.actor_name || dto.actor_user_id || 'Staff'
@@ -1192,6 +1205,7 @@ export async function createPurchaseTransaction(
         amount, discount_amount, service_amount, tax_amount, rounding_amount, net_amount,
         payment_status, payment_method, transaction_status,
         supplier_id, receiving_status, received_at, verification_status,
+        purchase_workflow_status,
         notes, metadata, created_by,
         purchase_category_id, department_id, department_name_snapshot
       ) VALUES (
@@ -1201,6 +1215,7 @@ export async function createPurchaseTransaction(
         0, $10, 0, 0, $11, 0,
         'UNPAID', $12, 'POSTED',
         $13, $14, $15, 'UNVERIFIED',
+        'PROSES',
         $16, $17, $18,
         $19, $20, $21
       ) RETURNING *`,

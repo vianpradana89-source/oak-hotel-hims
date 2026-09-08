@@ -18,6 +18,8 @@ export interface LifecycleMemberInput {
   reversal_of_transaction_id?: number | string | null;
   correction_group_id?: string | null;
   receiving_status?: string | null;
+  /** PURCHASE-2A1 canonical operational workflow (PROSES/SELESAI). */
+  purchase_workflow_status?: string | null;
   deleted_at?: string | null;
   metadata?: Record<string, unknown> | null;
   reservation_status?: string | null;
@@ -239,9 +241,10 @@ export function deriveLifecycleSheet(row: LifecycleMemberInput): OperationalShee
   if (TERMINAL.has(status)) return 'BATAL';
   const type = upper(row.transaction_type);
   if (type === 'PURCHASE') {
-    const receiving = upper(row.receiving_status);
-    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(receiving)) return 'SELESAI';
-    return 'PROSES';
+    // PURCHASE-2A1: must match deriveOperationalSheet + PURCHASE_WORKFLOW_SHEET_SQL.
+    // Receiving / verification do not directly drive the sheet.
+    const workflow = upper(row.purchase_workflow_status) || 'PROSES';
+    return workflow === 'SELESAI' ? 'SELESAI' : 'PROSES';
   }
   if (status === 'POSTED') return 'SELESAI';
   return 'PROSES';

@@ -218,7 +218,8 @@ async function runTests() {
     assert.strictEqual(txP4.operational_sheet, 'PROSES', 'Scenario 8: Purchase POSTED + DITERIMA_SEBAGIAN -> PROSES');
     console.log('[PASS] Scenario 8: Purchase POSTED + DITERIMA_SEBAGIAN -> PROSES');
 
-    // Scenario 9: Pembelian DRAFT with DITERIMA -> SELESAI
+    // Scenario 9: New Purchase create with DITERIMA receiving still starts PROSES (PURCHASE-2A1).
+    // Workflow SELESAI (not receiving alone) drives the Selesai sheet.
     const p5 = await createPurchaseTransaction(pool, {
       property_id: propertyId,
       supplier_id: supplier.id,
@@ -230,11 +231,19 @@ async function runTests() {
       actor_name: 'Purchaser'
     });
     await pool.query("UPDATE transactions SET transaction_status = 'DRAFT' WHERE id = $1", [p5.id]);
+    const txP5Create = await getTransactionById(pool, propertyId, p5.id);
+    assert.strictEqual(txP5Create.receiving_status, 'DITERIMA');
+    assert.strictEqual(txP5Create.purchase_workflow_status, 'PROSES', 'Scenario 9a: create defaults purchase_workflow_status=PROSES');
+    assert.strictEqual(txP5Create.operational_sheet, 'PROSES', 'Scenario 9a: receiving DITERIMA alone does not force SELESAI');
+    await pool.query(
+      "UPDATE transactions SET purchase_workflow_status = 'SELESAI' WHERE id = $1 AND property_id = $2",
+      [p5.id, propertyId]
+    );
     const txP5 = await getTransactionById(pool, propertyId, p5.id);
-    assert.strictEqual(txP5.operational_sheet, 'SELESAI', 'Scenario 9: Purchase DRAFT + DITERIMA -> SELESAI');
-    console.log('[PASS] Scenario 9: Purchase DRAFT + DITERIMA -> SELESAI');
+    assert.strictEqual(txP5.operational_sheet, 'SELESAI', 'Scenario 9b: Purchase workflow SELESAI -> SELESAI sheet');
+    console.log('[PASS] Scenario 9: Purchase workflow SELESAI drives sheet (receiving no longer sole driver)');
 
-    // Scenario 10: Pembelian POSTED with DITERIMA and UNPAID -> SELESAI (Receiving drives operational completion, payment does not block Selesai)
+    // Scenario 10: Pembelian POSTED + DITERIMA + UNPAID stays PROSES until workflow SELESAI
     const p6 = await createPurchaseTransaction(pool, {
       property_id: propertyId,
       supplier_id: supplier.id,
@@ -245,13 +254,20 @@ async function runTests() {
       receiving_status: 'DITERIMA',
       actor_name: 'Purchaser'
     });
+    const txP6Create = await getTransactionById(pool, propertyId, p6.id);
+    assert.strictEqual(txP6Create.payment_status, 'UNPAID');
+    assert.strictEqual(txP6Create.receiving_status, 'DITERIMA');
+    assert.strictEqual(txP6Create.operational_sheet, 'PROSES', 'Scenario 10a: POSTED+DITERIMA+UNPAID create stays PROSES');
+    await pool.query(
+      "UPDATE transactions SET purchase_workflow_status = 'SELESAI' WHERE id = $1 AND property_id = $2",
+      [p6.id, propertyId]
+    );
     const txP6 = await getTransactionById(pool, propertyId, p6.id);
     assert.strictEqual(txP6.payment_status, 'UNPAID');
-    assert.strictEqual(txP6.receiving_status, 'DITERIMA');
-    assert.strictEqual(txP6.operational_sheet, 'SELESAI', 'Scenario 10: Purchase POSTED + DITERIMA + UNPAID -> SELESAI');
-    console.log('[PASS] Scenario 10: Purchase POSTED + DITERIMA + UNPAID -> SELESAI (Receiving drives completion)');
+    assert.strictEqual(txP6.operational_sheet, 'SELESAI', 'Scenario 10b: workflow SELESAI + UNPAID -> SELESAI (payment does not block)');
+    console.log('[PASS] Scenario 10: Purchase workflow SELESAI + UNPAID -> SELESAI (payment does not block)');
 
-    // Scenario 11: Pembelian POSTED with DITERIMA and PAID -> SELESAI
+    // Scenario 11: Pembelian POSTED + DITERIMA + PAID -> SELESAI only after workflow SELESAI
     const p7 = await createPurchaseTransaction(pool, {
       property_id: propertyId,
       supplier_id: supplier.id,
@@ -268,10 +284,18 @@ async function runTests() {
       payment_method: 'BANK_TRANSFER',
       actor_name: 'Finance'
     });
+    const txP7Paid = await getTransactionById(pool, propertyId, p7.id);
+    assert.strictEqual(txP7Paid.payment_status, 'PAID');
+    assert.strictEqual(txP7Paid.operational_sheet, 'PROSES', 'Scenario 11a: PAID + DITERIMA alone stays PROSES');
+    await pool.query(
+      "UPDATE transactions SET purchase_workflow_status = 'SELESAI' WHERE id = $1 AND property_id = $2",
+      [p7.id, propertyId]
+    );
     const txP7 = await getTransactionById(pool, propertyId, p7.id);
     assert.strictEqual(txP7.payment_status, 'PAID');
-    assert.strictEqual(txP7.operational_sheet, 'SELESAI', 'Scenario 11: Purchase POSTED + DITERIMA + PAID -> SELESAI');
-    console.log('[PASS] Scenario 11: Purchase POSTED + DITERIMA + PAID -> SELESAI');
+    assert.strictEqual(txP7.transaction_status, 'POSTED');
+    assert.strictEqual(txP7.operational_sheet, 'SELESAI', 'Scenario 11b: workflow SELESAI + PAID -> SELESAI');
+    console.log('[PASS] Scenario 11: Purchase workflow SELESAI + PAID -> SELESAI');
 
     // Scenario 12: Pembelian VOIDED with BELUM_DITERIMA -> BATAL
     const p8 = await createPurchaseTransaction(pool, {
@@ -292,7 +316,7 @@ async function runTests() {
     assert.strictEqual(txP8.operational_sheet, 'BATAL', 'Scenario 12: Purchase VOIDED + BELUM_DITERIMA -> BATAL');
     console.log('[PASS] Scenario 12: Purchase VOIDED + BELUM_DITERIMA -> BATAL');
 
-    // Scenario 13: Pembelian VOIDED with DITERIMA -> BATAL (Void/Cancel strictly overrides received)
+    // Scenario 13: Pembelian VOIDED with workflow SELESAI -> BATAL (Void overrides workflow)
     const p9 = await createPurchaseTransaction(pool, {
       property_id: propertyId,
       supplier_id: supplier.id,
@@ -303,15 +327,20 @@ async function runTests() {
       receiving_status: 'DITERIMA',
       actor_name: 'Purchaser'
     });
+    await pool.query(
+      "UPDATE transactions SET purchase_workflow_status = 'SELESAI' WHERE id = $1 AND property_id = $2",
+      [p9.id, propertyId]
+    );
     await voidTransaction(pool, propertyId, p9.id, {
       reason: 'Retur total karena rusak',
       actor_name: 'Manager'
     });
     const txP9 = await getTransactionById(pool, propertyId, p9.id);
     assert.strictEqual(txP9.receiving_status, 'DITERIMA');
+    assert.strictEqual(txP9.purchase_workflow_status, 'SELESAI');
     assert.strictEqual(txP9.transaction_status, 'VOIDED');
-    assert.strictEqual(txP9.operational_sheet, 'BATAL', 'Scenario 13: Purchase VOIDED + DITERIMA -> BATAL');
-    console.log('[PASS] Scenario 13: Purchase VOIDED + DITERIMA -> BATAL (Cancel overrides received)');
+    assert.strictEqual(txP9.operational_sheet, 'BATAL', 'Scenario 13: Purchase VOIDED + workflow SELESAI -> BATAL');
+    console.log('[PASS] Scenario 13: Purchase VOIDED + workflow SELESAI -> BATAL (Cancel overrides workflow)');
 
     // Scenario 14: Pembelian CANCELLED -> BATAL
     const p10Res = await pool.query(`

@@ -4,22 +4,38 @@ export type TransactionStatus = 'POSTED' | 'VOIDED' | 'REVERSED' | 'CORRECTED' |
 
 export type OperationalSheet = 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
 
+/** Canonical Purchase operational workflow (PURCHASE-2A1). BATAL is not stored here. */
+export type PurchaseWorkflowStatus = 'PROSES' | 'SELESAI';
+
+export const PURCHASE_WORKFLOW_STATUSES: readonly PurchaseWorkflowStatus[] = ['PROSES', 'SELESAI'];
+
+/**
+ * SQL CASE branches for PURCHASE sheet after terminal financial statuses are handled.
+ * Must stay in lockstep with deriveOperationalSheet() purchase branch.
+ */
+export const PURCHASE_WORKFLOW_SHEET_SQL = `
+  WHEN UPPER(t.transaction_type) = 'PURCHASE'
+    AND UPPER(COALESCE(t.purchase_workflow_status, 'PROSES')) = 'SELESAI' THEN 'SELESAI'
+  WHEN UPPER(t.transaction_type) = 'PURCHASE' THEN 'PROSES'`;
+
 /**
  * ============================================================================
- * REPORTING ELIGIBILITY CONTRACT (TRANSACTION-2E FREEZE)
+ * REPORTING ELIGIBILITY CONTRACT (TRANSACTION-2E + PURCHASE-2A1)
  * ============================================================================
  * 
  * Reporting eligibility is STRICTLY DERIVED from the operational lifecycle sheet:
- * - PROSES  -> reporting_eligible = false (WIP, draft, unreceived/partial purchases)
- * - SELESAI -> reporting_eligible = true  (Finalized/posted revenue & expense; fully received purchases)
+ * - PROSES  -> reporting_eligible = false (WIP, draft, incomplete purchases)
+ * - SELESAI -> reporting_eligible = true  (Finalized/posted revenue & expense; purchase workflow SELESAI)
  * - BATAL   -> reporting_eligible = false (Voided/cancelled/reversed transactions excluded from active performance)
  * - HAPUS   -> reporting_eligible = false (Soft-deleted drafts strictly excluded)
  * 
- * PURCHASE REPORTING CONTRACT:
- * - BELUM_DITERIMA     -> PROSES  -> reporting_eligible = false
- * - DITERIMA_SEBAGIAN  -> PROSES  -> reporting_eligible = false
- * - DITERIMA (LENGKAP) -> SELESAI -> reporting_eligible = true
- * - DITERIMA + UNPAID  -> SELESAI -> reporting_eligible = true (receiving drives operational recognition, NOT payment)
+ * PURCHASE SHEET CONTRACT (PURCHASE-2A1):
+ * - purchase_workflow_status = PROSES  -> PROSES  (NULL fail-safe = PROSES)
+ * - purchase_workflow_status = SELESAI -> SELESAI
+ * - terminal transaction_status (VOIDED/CANCELLED/REVERSED) -> BATAL (wins over workflow SELESAI)
+ * - deleted_at set -> HAPUS
+ * Receiving / verification do not directly determine the sheet after 2A1.
+ * Historical backfill mapped fully-received purchases to SELESAI once; new creates start as PROSES.
  * 
  * Future Reporting Domain must dynamically query canonical data using this rule.
  * DO NOT create duplicate reporting tables (e.g., sales_report_transactions).
@@ -155,6 +171,7 @@ export interface TransactionRow {
   supplier_address?: string | null;
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
+  purchase_workflow_status?: PurchaseWorkflowStatus | null;
   verification_status: VerificationStatus;
   verified_by_user_id?: string | null;
   verified_by_name_snapshot?: string | null;

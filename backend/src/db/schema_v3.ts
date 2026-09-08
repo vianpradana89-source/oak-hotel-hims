@@ -3307,6 +3307,51 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // PURCHASE-2A1: Canonical purchase operational workflow status (PROSES/SELESAI).
+    // BATAL remains terminal transaction_status (VOIDED/CANCELLED/REVERSED), not stored here.
+    const purchase2a1Check = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'purchase_2a1_workflow_status_v1'"
+    );
+    if ((purchase2a1Check.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS purchase_workflow_status VARCHAR(20) DEFAULT NULL;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'chk_transactions_purchase_workflow_status'
+          ) THEN
+            ALTER TABLE transactions
+              ADD CONSTRAINT chk_transactions_purchase_workflow_status
+              CHECK (
+                purchase_workflow_status IS NULL
+                OR purchase_workflow_status IN ('PROSES', 'SELESAI')
+              );
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_purchase_workflow
+          ON transactions (property_id, transaction_type, purchase_workflow_status)
+          WHERE transaction_type = 'PURCHASE';
+
+        -- Preserve historical Purchase tab placement: fully received => SELESAI, else PROSES.
+        -- Only fill NULL rows; never overwrite a manually set workflow value on re-run.
+        UPDATE transactions
+        SET purchase_workflow_status = CASE
+          WHEN UPPER(COALESCE(receiving_status, '')) IN ('DITERIMA', 'DITERIMA_LENGKAP') THEN 'SELESAI'
+          ELSE 'PROSES'
+        END
+        WHERE transaction_type = 'PURCHASE'
+          AND purchase_workflow_status IS NULL;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('purchase_2a1_workflow_status_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     // FOLIO PROPERTY ID BACKFILL & NOT NULL NORMALIZATION
     const folioPropCheck = await auditMigrationClient.query(
       "SELECT 1 FROM schema_migrations WHERE version = 'folio_entries_property_id_backfill_and_not_null_v1'"

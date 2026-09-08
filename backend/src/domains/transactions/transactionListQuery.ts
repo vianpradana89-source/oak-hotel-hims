@@ -5,6 +5,7 @@ import type {
   TransactionSheetCounts,
   TransactionSummary,
 } from './transactionTypes';
+import { PURCHASE_WORKFLOW_SHEET_SQL } from './transactionTypes';
 
 export interface TransactionListFetchStats {
   mode: 'PERIOD' | 'ALL_TIME' | 'HAPUS';
@@ -59,9 +60,7 @@ const STANDALONE_SHEET_SQL = `CASE
       UPPER(COALESCE(r.status, '')) IN ('BOOKED', 'CHECKED_IN')
       OR UPPER(COALESCE(r.stay_status, '')) IN ('RESERVED', 'BOOKED', 'CHECKED_IN')
     ) THEN 'PROSES'
-  WHEN UPPER(t.transaction_type) = 'PURCHASE'
-    AND UPPER(COALESCE(t.receiving_status, '')) IN ('DITERIMA', 'DITERIMA_LENGKAP') THEN 'SELESAI'
-  WHEN UPPER(t.transaction_type) = 'PURCHASE' THEN 'PROSES'
+  ${PURCHASE_WORKFLOW_SHEET_SQL}
   WHEN UPPER(t.transaction_status) = 'POSTED' THEN 'SELESAI'
   ELSE 'PROSES'
 END`;
@@ -180,6 +179,7 @@ export async function queryPresentedPage(
         t.transaction_time,
         t.transaction_status,
         t.receiving_status,
+        t.purchase_workflow_status,
         t.source_type,
         t.net_amount,
         t.correction_group_id,
