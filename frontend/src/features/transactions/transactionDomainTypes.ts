@@ -165,6 +165,8 @@ export interface TransactionRecord {
     guest_name: string;
     room_count: number;
     stay_type_label: string;
+    totals_scope?: 'PERIOD_ACTIVITY';
+    member_transaction_ids?: number[];
     gross: number;
     discount: number;
     net: number;

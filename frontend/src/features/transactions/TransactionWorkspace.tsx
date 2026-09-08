@@ -11,11 +11,15 @@ import type {
 } from './transactionDomainTypes';
 import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass } from './transactionDomainTypes';
 import {
+  flattenAllTabRows,
   formatStayShortDate,
+  groupAllTabRows,
   groupPenjualanSaleRows,
   paymentStatusBadgeClass,
+  shouldShowListSettlementAmounts,
   type PenjualanListItem
 } from './penjualanBidGrouping';
+import { getPenjualanPeriodPresetRange } from './transactionPeriodHelpers';
 import { resolvePenjualanMainRowDetailTarget } from './penjualanDetailTarget';
 import { fetchTransactionsApi, fetchCategoriesApi, softDeleteTransactionApi } from './transactionClient';
 import { VoidTransactionModal } from './VoidTransactionModal';
@@ -58,38 +62,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   onNavigateToReservation,
   onOpenQuickBooking
 }) => {
-  const formatIsoDate = (d: Date) => {
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
-  const getDatePresetRange = (preset: 'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time') => {
-    const now = new Date();
-    if (preset === 'today') {
-      const todayStr = formatIsoDate(now);
-      return { start: todayStr, end: todayStr };
-    }
-    if (preset === 'yesterday') {
-      const y = new Date(now);
-      y.setDate(y.getDate() - 1);
-      const yStr = formatIsoDate(y);
-      return { start: yStr, end: yStr };
-    }
-    if (preset === 'this_month') {
-      const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
-      const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      return { start: formatIsoDate(firstDay), end: formatIsoDate(lastDay) };
-    }
-    if (preset === 'last_month') {
-      const firstDay = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const lastDay = new Date(now.getFullYear(), now.getMonth(), 0);
-      return { start: formatIsoDate(firstDay), end: formatIsoDate(lastDay) };
-    }
-    return { start: '', end: '' };
-  };
-
   // Editor View Mode (null = table view, 'PURCHASE' | 'EXPENSE' | 'INCOME' = dedicated full editors)
   const [activeEditor, setActiveEditor] = useState<'PURCHASE' | 'EXPENSE' | 'INCOME' | null>(null);
 
@@ -99,8 +71,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // LEVEL 2 — DATE PERIOD
   const [datePreset, setDatePreset] = useState<'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time' | 'custom'>('today');
-  const [startDate, setStartDate] = useState<string>(() => getDatePresetRange('today').start);
-  const [endDate, setEndDate] = useState<string>(() => getDatePresetRange('today').end);
+  const [startDate, setStartDate] = useState<string>(() => getPenjualanPeriodPresetRange('today').start);
+  const [endDate, setEndDate] = useState<string>(() => getPenjualanPeriodPresetRange('today').end);
   const [showCustomDatePicker, setShowCustomDatePicker] = useState<boolean>(false);
 
   // LEVEL 3 — SEARCH & FILTERS
@@ -190,7 +162,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const handleDatePresetChange = (preset: 'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time') => {
     setDatePreset(preset);
     setShowCustomDatePicker(false);
-    const range = getDatePresetRange(preset);
+    const range = getPenjualanPeriodPresetRange(preset);
     setStartDate(range.start);
     setEndDate(range.end);
     setPage(1);
@@ -382,6 +354,27 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     [activeTab, operationalStatus, transactions]
   );
 
+  const workspaceRows = useMemo(() => {
+    if (activeTab === 'ALL' && operationalStatus !== 'HAPUS') {
+      return flattenAllTabRows(groupAllTabRows(transactions));
+    }
+    return transactions;
+  }, [activeTab, operationalStatus, transactions]);
+
+  const periodListHint = 'Nilai pada daftar mengikuti periode yang dipilih. Detail menampilkan seluruh booking.';
+  const settlementListHint = 'Pelunasan booking ditampilkan di Detail, bukan sebagai sisa periode.';
+
+  const openWorkspaceRowDetail = (t: TransactionRecord) => {
+    if (t.booking_bid_group) {
+      const bookingId = t.booking_bid_group.booking_id ?? t.booking_id ?? t.booking_bid_group.bid;
+      if (bookingId) {
+        openBookingSalesDetail(bookingId);
+        return;
+      }
+    }
+    openDetailDrawer(t.id);
+  };
+
   const toggleBidExpand = (bid: string) => {
     setExpandedBids((prev) => ({ ...prev, [bid]: !prev[bid] }));
   };
@@ -510,16 +503,25 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           </td>
           <td className="py-2.5 px-3 max-w-[200px]">
             <div className="font-semibold text-slate-800 truncate">{group.guest_name}</div>
-            <span className="inline-flex items-center mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-800">
-              {group.room_count} Kamar
+            <span
+              className="inline-flex items-center mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-800"
+              title={periodListHint}
+            >
+              {group.room_count} kamar aktivitas
             </span>
           </td>
           <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(group.stay_type_label)}</td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.gross)}</td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(group.discount)}</td>
-          <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(group.net)}</td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.paid)}</td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.remaining)}</td>
+          <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap" title={periodListHint}>
+            {formatIdr(group.net)}
+          </td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
+            {shouldShowListSettlementAmounts(item) ? formatIdr(group.paid) : '—'}
+          </td>
+          <td className="py-2.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
+            {shouldShowListSettlementAmounts(item) ? formatIdr(group.remaining) : '—'}
+          </td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(group.payment_status)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">
             {renderOperationalBadge({
@@ -543,7 +545,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <td colSpan={12} className="px-4 py-2.5">
               <div className="rounded-lg border border-slate-200 bg-white/80 overflow-hidden">
                 <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
-                  Kamar yang dipesan
+                  Kamar aktivitas periode
                 </div>
                 <table className="w-full text-[11px]">
                   <thead className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
@@ -571,8 +573,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.gross)}</td>
                         <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(child.discount)}</td>
                         <td className="py-1.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">{formatIdr(child.net)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.paid)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.remaining)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
+                        <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
                         <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
                         <td className="py-1.5 px-3 text-center whitespace-nowrap">
                           <button
@@ -945,6 +947,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               >
                 Kustom...
               </button>
+              {(activeTab === 'SALE' || activeTab === 'ALL') && (
+                <span
+                  className="ml-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-md"
+                  title={periodListHint}
+                >
+                  Aktivitas Periode
+                </span>
+              )}
             </div>
 
             <div className="text-xs text-slate-500 font-medium">
@@ -1216,11 +1226,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">BID / No. Transaksi</th>
                         <th className="py-3 px-3">Tamu</th>
                         <th className="py-3 px-3">Tipe Stay</th>
-                        <th className="py-3 px-3 text-right">Gross</th>
-                        <th className="py-3 px-3 text-right">Diskon</th>
-                        <th className="py-3 px-3 text-right">Net</th>
-                        <th className="py-3 px-3 text-right">Dibayar</th>
-                        <th className="py-3 px-3 text-right">Sisa</th>
+                        <th className="py-3 px-3 text-right" title={periodListHint}>Gross</th>
+                        <th className="py-3 px-3 text-right" title={periodListHint}>Diskon</th>
+                        <th className="py-3 px-3 text-right" title={periodListHint}>Net</th>
+                        <th className="py-3 px-3 text-right" title={settlementListHint}>Dibayar</th>
+                        <th className="py-3 px-3 text-right" title={settlementListHint}>Sisa</th>
                         <th className="py-3 px-2 text-center">Pembayaran</th>
                         <th className="py-3 px-2 text-center">Status</th>
                         <th className="py-3 px-3 text-center">Aksi</th>
@@ -1288,7 +1298,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {activeTab === 'SALE' && operationalStatus !== 'HAPUS' && penjualanItems.map(renderPenjualanItem)}
-                {(activeTab !== 'SALE' || operationalStatus === 'HAPUS') && transactions.map((t) => {
+                {(activeTab !== 'SALE' || operationalStatus === 'HAPUS') && workspaceRows.map((t) => {
                   const party = t.party_name || t.guest_name_snapshot || t.supplier_name || '-';
                   const op = mapToOperationalStatus(t);
 
@@ -1604,10 +1614,70 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   }
 
                   // ALL Tab Row
+                  if (t.booking_bid_group) {
+                    const group = t.booking_bid_group;
+                    return (
+                      <tr
+                        key={`all-bid:${group.bid}`}
+                        onClick={() => openWorkspaceRowDetail(t)}
+                        className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+                      >
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                          <div className="text-[10px] text-slate-400" title={periodListHint}>Aktivitas Periode</div>
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            {group.bid}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded border bg-emerald-50 text-emerald-700 border-emerald-200">
+                            Penjualan
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 font-medium text-slate-800 truncate max-w-[140px]">
+                          <div className="truncate">{group.guest_name}</div>
+                          <span className="text-[10px] font-bold text-emerald-800">
+                            {group.room_count} kamar aktivitas
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-700 truncate max-w-[120px]">
+                          <span className="text-[11px] font-medium text-slate-700">{t.category_name || 'Penjualan'}</span>
+                        </td>
+                        <td className="py-3 px-4 max-w-xs truncate text-slate-800">
+                          <div title={periodListHint}>Aktivitas periode</div>
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-bold whitespace-nowrap text-emerald-700" title={periodListHint}>
+                          {formatIdr(group.net)}
+                        </td>
+                        <td className="py-3 px-2 text-center whitespace-nowrap">
+                          {renderVerificationBadge(t.verification_status)}
+                        </td>
+                        <td className="py-3 px-2 text-center whitespace-nowrap">
+                          {renderOperationalBadge({
+                            transaction_status: t.transaction_status,
+                            transaction_type: 'SALE',
+                            is_lifecycle_primary: true,
+                            operational_sheet: group.operational_sheet
+                          })}
+                        </td>
+                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => openWorkspaceRowDetail(t)}
+                            className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                          >
+                            Detail
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  }
+
                   return (
                     <tr
                       key={t.id}
-                      onClick={() => openDetailDrawer(t.id)}
+                      onClick={() => openWorkspaceRowDetail(t)}
                       className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                     >
                       <td className="py-3 px-3 whitespace-nowrap">
@@ -1677,7 +1747,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-center gap-1">
                           <button
-                            onClick={() => openDetailDrawer(t.id)}
+                            onClick={() => openWorkspaceRowDetail(t)}
                             className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
                           >
                             Detail

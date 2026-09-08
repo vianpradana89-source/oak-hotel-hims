@@ -5,6 +5,7 @@ import {
   getFirstDateOfPreviousMonth,
   formatDateIndonesian,
   getTransactionPeriodRange,
+  getPenjualanPeriodPresetRange,
   calculatePeriodCounters,
   filterTransactionsByStatus,
   filterTransactionsBySearch,
@@ -243,5 +244,19 @@ const stayFormat = formatStayPeriodDisplay('2026-08-27', '2026-08-28');
 check(stayFormat.includes('1 mlm'), 'Q1. 1-night stay formatted correctly with 1 mlm');
 const stay3Format = formatStayPeriodDisplay('2026-08-27', '2026-08-30');
 check(stay3Format.includes('3 mlm'), 'Q2. 3-night stay formatted correctly with 3 mlm');
+
+console.log('\n--- Test S: Penjualan hotel-date presets ---');
+const jakartaMidnight = getPenjualanPeriodPresetRange('today', new Date('2026-09-07T17:00:00.000Z'));
+check(jakartaMidnight.start === '2026-09-08' && jakartaMidnight.end === '2026-09-08', 'S1. Hari Ini uses Asia/Jakarta business date');
+const beforeMidnight = getPenjualanPeriodPresetRange('today', new Date('2026-09-07T16:59:00.000Z'));
+check(beforeMidnight.start === '2026-09-07' && beforeMidnight.end === '2026-09-07', 'S2. before Jakarta midnight stays previous hotel date');
+const yesterdayPreset = getPenjualanPeriodPresetRange('yesterday', new Date('2026-09-07T17:00:00.000Z'));
+check(yesterdayPreset.start === '2026-09-07' && yesterdayPreset.end === '2026-09-07', 'S3. Kemarin is previous hotel date');
+const monthPreset = getPenjualanPeriodPresetRange('this_month', new Date('2026-09-07T17:00:00.000Z'));
+check(monthPreset.start === '2026-09-01' && monthPreset.end === '2026-09-30', 'S4. Bulan Ini is inclusive hotel month');
+const lastMonthPreset = getPenjualanPeriodPresetRange('last_month', new Date('2026-09-07T17:00:00.000Z'));
+check(lastMonthPreset.start === '2026-08-01' && lastMonthPreset.end === '2026-08-31', 'S5. Bulan Lalu is previous hotel month');
+const allTimePreset = getPenjualanPeriodPresetRange('all_time');
+check(allTimePreset.start === '' && allTimePreset.end === '', 'S6. All Time sends empty inclusive dates');
 
 console.log(`\n=== All ${assertions} Transaksi UX Assertions PASSED ===\n`);

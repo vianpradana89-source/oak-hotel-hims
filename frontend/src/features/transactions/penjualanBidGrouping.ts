@@ -2,6 +2,7 @@ import type { OperationalSheet, TransactionRecord } from './transactionDomainTyp
 import { formatReservationStayType, mapToOperationalStatus } from './transactionDomainTypes.ts';
 
 export type PenjualanPaymentStatus = 'PAID' | 'PARTIAL' | 'UNPAID';
+export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
 
 export interface PenjualanBidChild {
   reservation_id: number | null;
@@ -28,6 +29,8 @@ export interface PenjualanBidGroup {
   guest_name: string;
   room_count: number;
   stay_type_label: string;
+  totals_scope: PenjualanTotalsScope;
+  member_transaction_ids: number[];
   gross: number;
   discount: number;
   net: number;
@@ -43,6 +46,10 @@ export interface PenjualanBidGroup {
 export type PenjualanListItem =
   | { kind: 'standalone'; tx: TransactionRecord }
   | { kind: 'bid_group'; group: PenjualanBidGroup };
+
+export type AllTabListItem =
+  | PenjualanListItem
+  | { kind: 'other'; tx: TransactionRecord };
 
 export function roundIdr(value: unknown): number {
   const amount = Number(value);
@@ -78,10 +85,105 @@ export function derivePaymentStatus(paid: number, remaining: number, net: number
   return remaining <= 0 ? 'PAID' : 'UNPAID';
 }
 
+/** Booking settlement badge. Does not compare lifetime paid/remaining to period net. */
+export function deriveBookingPaymentStatus(paid: number, remaining: number): PenjualanPaymentStatus {
+  if (remaining <= 0) return 'PAID';
+  if (paid > 0) return 'PARTIAL';
+  return 'UNPAID';
+}
+
+export function isPeriodActivityGroup(group: Pick<PenjualanBidGroup, 'totals_scope'>): boolean {
+  return group.totals_scope === 'PERIOD_ACTIVITY';
+}
+
+export function shouldShowListSettlementAmounts(item: Pick<PenjualanListItem, 'kind'>): boolean {
+  return item.kind === 'standalone';
+}
+
+function normalizePaymentStatus(value: unknown): PenjualanPaymentStatus | null {
+  const raw = String(value || '').toUpperCase();
+  if (raw === 'PAID' || raw === 'PARTIAL' || raw === 'UNPAID') return raw;
+  return null;
+}
+
 export function deriveGroupOperationalSheet(sheets: OperationalSheet[]): OperationalSheet {
   if (sheets.length > 0 && sheets.every((sheet) => sheet === 'BATAL')) return 'BATAL';
   if (sheets.length > 0 && sheets.every((sheet) => sheet === 'SELESAI')) return 'SELESAI';
   return 'PROSES';
+}
+
+export interface BookingReservationLifecycleRow {
+  property_id?: number;
+  booking_id?: number | string | null;
+  booking_bid?: string | null;
+  reservation_id: number;
+  reservation_status?: string | null;
+  reservation_stay_status?: string | null;
+  stay_status?: string | null;
+}
+
+export interface BidGroupingOptions {
+  lifecycleReservations?: BookingReservationLifecycleRow[];
+}
+
+/** Stay-child sheet from reservation lifecycle. Paid/unpaid is ignored. */
+export function reservationLifecycleSheet(row: BookingReservationLifecycleRow): OperationalSheet {
+  const reservationStatus = String(row.reservation_status || '').trim().toUpperCase();
+  const stayStatus = String(row.reservation_stay_status || row.stay_status || '').trim().toUpperCase();
+  if (reservationStatus === 'CANCELLED' || stayStatus === 'CANCELLED') return 'BATAL';
+  if (reservationStatus === 'CHECKED_OUT' || stayStatus === 'CHECKED_OUT') return 'SELESAI';
+  if (
+    reservationStatus === 'BOOKED'
+    || reservationStatus === 'CHECKED_IN'
+    || stayStatus === 'RESERVED'
+    || stayStatus === 'CHECKED_IN'
+    || stayStatus === 'BOOKED'
+  ) {
+    return 'PROSES';
+  }
+  return 'PROSES';
+}
+
+function lifecycleStorageKeys(row: {
+  property_id?: unknown;
+  booking_id?: unknown;
+  booking_bid?: unknown;
+}): string[] {
+  const propertyId = Number(row.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) return [];
+  const keys: string[] = [];
+  const bookingId = Number(row.booking_id);
+  if (Number.isInteger(bookingId) && bookingId > 0) keys.push(`${propertyId}:${bookingId}`);
+  const bid = String(row.booking_bid || '').trim();
+  if (bid) keys.push(`${propertyId}:bid:${bid}`);
+  return keys;
+}
+
+export function indexBookingLifecycleSheets(
+  reservations: BookingReservationLifecycleRow[] | undefined
+): Map<string, OperationalSheet[]> {
+  const map = new Map<string, OperationalSheet[]>();
+  if (!reservations || reservations.length === 0) return map;
+  for (const row of reservations) {
+    const sheet = reservationLifecycleSheet(row);
+    for (const key of lifecycleStorageKeys(row)) {
+      const list = map.get(key) || [];
+      list.push(sheet);
+      map.set(key, list);
+    }
+  }
+  return map;
+}
+
+function lookupBookingLifecycleSheets(
+  lifecycleSheets: Map<string, OperationalSheet[]>,
+  row: { property_id?: unknown; booking_id?: unknown; booking_bid?: unknown }
+): OperationalSheet[] {
+  for (const key of lifecycleStorageKeys(row)) {
+    const sheets = lifecycleSheets.get(key);
+    if (sheets && sheets.length > 0) return sheets;
+  }
+  return [];
 }
 
 export function stayTypeLabel(stayTypes: Array<string | null | undefined>): string {
@@ -168,7 +270,7 @@ function buildChild(reservationId: number | null, members: TransactionRecord[]):
     net,
     paid,
     remaining,
-    payment_status: derivePaymentStatus(paid, remaining, net),
+    payment_status: deriveBookingPaymentStatus(paid, remaining),
     reservation_status: primary.reservation_status || null,
     operational_sheet: operationalSheetOf(primary)
   };
@@ -194,7 +296,11 @@ function unattachedFinancial(rows: TransactionRecord[]): { gross: number; discou
   );
 }
 
-function buildGroup(bid: string, members: TransactionRecord[]): PenjualanBidGroup {
+function buildGroup(
+  bid: string,
+  members: TransactionRecord[],
+  lifecycleSheets: Map<string, OperationalSheet[]>
+): PenjualanBidGroup {
   const reservationMembers = members.filter(hasReservationChild);
   const unattachedMembers = members.filter((tx) => !hasReservationChild(tx));
   const byChild = new Map<string, TransactionRecord[]>();
@@ -223,27 +329,46 @@ function buildGroup(bid: string, members: TransactionRecord[]): PenjualanBidGrou
   const net = children.reduce((sum, child) => sum + child.net, 0) + unattached.net;
   const paid = children.reduce((sum, child) => sum + child.paid, 0) + unattached.paid;
   const remaining = children.reduce((sum, child) => sum + child.remaining, 0) + unattached.remaining;
+  const bookingId = canonicalBookingId(members);
+  const lifetimeSheets = lookupBookingLifecycleSheets(lifecycleSheets, {
+    property_id: members[0].property_id,
+    booking_id: bookingId,
+    booking_bid: bid
+  });
+  const periodSheets = [
+    ...children.map((child) => child.operational_sheet),
+    ...unattachedMembers.map((tx) => operationalSheetOf(tx)),
+  ];
+  const statusSheets = lifetimeSheets.length > 0
+    ? lifetimeSheets
+    : (periodSheets.length > 0 ? periodSheets : members.map((tx) => operationalSheetOf(tx)));
 
   return {
     bid,
-    booking_id: canonicalBookingId(members),
+    booking_id: bookingId,
     guest_name: String(members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
     room_count: children.length,
     stay_type_label: stayTypeLabel(children.map((child) => child.stay_type)),
+    totals_scope: 'PERIOD_ACTIVITY',
+    member_transaction_ids: members.map((tx) => Number(tx.id)),
     gross,
     discount,
     net,
     paid,
     remaining,
-    payment_status: derivePaymentStatus(paid, remaining, net),
-    operational_sheet: deriveGroupOperationalSheet(children.map((child) => child.operational_sheet)),
+    payment_status: deriveBookingPaymentStatus(paid, remaining),
+    operational_sheet: deriveGroupOperationalSheet(statusSheets),
     children,
     primary: members[0],
     members
   };
 }
 
-export function groupPenjualanSaleRows(rows: TransactionRecord[]): PenjualanListItem[] {
+export function groupPenjualanSaleRows(
+  rows: TransactionRecord[],
+  options?: BidGroupingOptions
+): PenjualanListItem[] {
+  const lifecycleSheets = indexBookingLifecycleSheets(options?.lifecycleReservations);
   const items: PenjualanListItem[] = [];
   const bidIndex = new Map<string, number>();
 
@@ -257,8 +382,10 @@ export function groupPenjualanSaleRows(rows: TransactionRecord[]): PenjualanList
       items.push({ kind: 'standalone', tx: row });
       continue;
     }
-    if (row.booking_bid_group && Array.isArray(row.booking_bid_group.children) && row.booking_bid_group.children.length > 0) {
+    if (row.booking_bid_group && String(row.booking_bid_group.bid || '').trim()) {
       const payload = row.booking_bid_group;
+      const paid = roundIdr(payload.paid);
+      const remaining = roundIdr(payload.remaining);
       items.push({
         kind: 'bid_group',
         group: {
@@ -267,16 +394,23 @@ export function groupPenjualanSaleRows(rows: TransactionRecord[]): PenjualanList
           guest_name: payload.guest_name,
           room_count: payload.room_count,
           stay_type_label: payload.stay_type_label,
+          totals_scope: 'PERIOD_ACTIVITY',
+          member_transaction_ids: Array.isArray(payload.member_transaction_ids)
+            ? payload.member_transaction_ids.map(Number)
+            : [Number(row.id)],
           gross: roundIdr(payload.gross),
           discount: roundIdr(payload.discount),
           net: roundIdr(payload.net),
-          paid: roundIdr(payload.paid),
-          remaining: roundIdr(payload.remaining),
-          payment_status: derivePaymentStatus(roundIdr(payload.paid), roundIdr(payload.remaining), roundIdr(payload.net)),
+          paid,
+          remaining,
+          payment_status:
+            normalizePaymentStatus(payload.payment_status) || deriveBookingPaymentStatus(paid, remaining),
           operational_sheet: payload.operational_sheet,
-          children: payload.children.map((child) => ({
+          children: (payload.children || []).map((child) => ({
             ...child,
-            payment_status: derivePaymentStatus(roundIdr(child.paid), roundIdr(child.remaining), roundIdr(child.net)),
+            payment_status:
+              normalizePaymentStatus(child.payment_status)
+              || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
             stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence)
           })),
           primary: row,
@@ -289,15 +423,97 @@ export function groupPenjualanSaleRows(rows: TransactionRecord[]): PenjualanList
     const existing = bidIndex.get(storageKey);
     if (existing === undefined) {
       bidIndex.set(storageKey, items.length);
-      items.push({ kind: 'bid_group', group: buildGroup(bid, [row]) });
+      items.push({ kind: 'bid_group', group: buildGroup(bid, [row], lifecycleSheets) });
     } else {
       const item = items[existing];
       if (item.kind !== 'bid_group') continue;
-      item.group = buildGroup(bid, [...item.group.members, row]);
+      item.group = buildGroup(bid, [...item.group.members, row], lifecycleSheets);
     }
   }
 
   return items;
+}
+
+function saleGroupKey(tx: Pick<TransactionRecord, 'property_id' | 'booking_bid'> & { booking_bid_group?: { bid?: string } }): string | null {
+  const bid = String(tx.booking_bid_group?.bid || tx.booking_bid || '').trim();
+  if (!bid) return null;
+  const propertyId = Number(tx.property_id);
+  return Number.isInteger(propertyId) && propertyId > 0 ? `${propertyId}:${bid}` : bid;
+}
+
+/**
+ * ALL-tab presenter: only SALE uses BID grouping. Other types stay standalone.
+ */
+export function groupAllTabRows(rows: TransactionRecord[], options?: BidGroupingOptions): AllTabListItem[] {
+  const saleRows = rows.filter((row) => String(row.transaction_type || '').toUpperCase() === 'SALE');
+  const groupedSales = groupPenjualanSaleRows(saleRows, options);
+  const itemBySaleId = new Map<number, PenjualanListItem>();
+
+  for (const item of groupedSales) {
+    if (item.kind === 'standalone') {
+      itemBySaleId.set(Number(item.tx.id), item);
+      continue;
+    }
+    const ids = item.group.member_transaction_ids.length > 0
+      ? item.group.member_transaction_ids
+      : [Number(item.group.primary.id)];
+    for (const id of ids) {
+      if (Number.isInteger(id) && id > 0) itemBySaleId.set(id, item);
+    }
+    itemBySaleId.set(Number(item.group.primary.id), item);
+  }
+
+  const seenGroup = new Set<string>();
+  const result: AllTabListItem[] = [];
+  for (const row of rows) {
+    if (String(row.transaction_type || '').toUpperCase() !== 'SALE') {
+      result.push({ kind: 'other', tx: row });
+      continue;
+    }
+    const item = itemBySaleId.get(Number(row.id));
+    if (!item) {
+      result.push({ kind: 'standalone', tx: row });
+      continue;
+    }
+    if (item.kind === 'bid_group') {
+      const key = saleGroupKey(item.group.primary) || `${item.group.bid}`;
+      if (seenGroup.has(key)) continue;
+      seenGroup.add(key);
+      result.push(item);
+      continue;
+    }
+    result.push(item);
+  }
+  return result;
+}
+
+export function flattenAllTabRows(items: AllTabListItem[]): TransactionRecord[] {
+  return items.map((item) => {
+    if (item.kind !== 'bid_group') return item.tx;
+    const { group } = item;
+    return {
+      ...group.primary,
+      operational_sheet: group.operational_sheet,
+      payment_status: group.payment_status,
+      booking_bid_group: {
+        bid: group.bid,
+        booking_id: group.booking_id,
+        guest_name: group.guest_name,
+        room_count: group.room_count,
+        stay_type_label: group.stay_type_label,
+        totals_scope: group.totals_scope,
+        member_transaction_ids: group.member_transaction_ids,
+        gross: group.gross,
+        discount: group.discount,
+        net: group.net,
+        paid: group.paid,
+        remaining: group.remaining,
+        payment_status: group.payment_status,
+        operational_sheet: group.operational_sheet,
+        children: group.children
+      }
+    };
+  });
 }
 
 export function formatStayShortDate(value: string | null | undefined): string {

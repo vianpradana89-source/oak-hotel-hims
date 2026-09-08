@@ -176,6 +176,27 @@ export function getTransactionPeriodRange(
   return null;
 }
 
+export type PenjualanDatePreset = 'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time';
+
+/**
+ * Inclusive start/end for Penjualan period presets, using canonical hotel business date
+ * (Asia/Jakarta). All Time sends empty dates so the list stays unscoped.
+ */
+export function getPenjualanPeriodPresetRange(
+  preset: PenjualanDatePreset,
+  now: Date = new Date()
+): { start: string; end: string } {
+  if (preset === 'all_time') return { start: '', end: '' };
+  const today = hotelDateFromInstant(now);
+  if (!today) return { start: '', end: '' };
+  const range = getTransactionPeriodRange(preset, today);
+  if (!range) return { start: '', end: '' };
+  return {
+    start: range.startDate,
+    end: addHotelDays(range.endDateExclusive, -1),
+  };
+}
+
 /**
  * Normalizes raw reservation status to one of standard canonical statuses.
  */
