@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   formatReservationStayType,
   stayTypeBadgeClass,
@@ -136,6 +136,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const [uploadingPurpose, setUploadingPurpose] = useState<AttachmentPurpose>('RECEIPT');
   const [isUploading, setIsUploading] = useState(false);
 
+  // PURCHASE-2C3: Copy toast for bank account
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const copyToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (isOpen && transactionId) {
       loadDetail();
@@ -146,6 +150,24 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
       setError(null);
     }
   }, [isOpen, transactionId, propertyId]);
+
+  // PURCHASE-2C3: Cleanup copy toast timer on unmount or drawer close
+  useEffect(() => {
+    if (!isOpen) {
+      if (copyToastTimerRef.current) {
+        clearTimeout(copyToastTimerRef.current);
+        copyToastTimerRef.current = null;
+      }
+      setCopyToast(null);
+    }
+
+    return () => {
+      if (copyToastTimerRef.current) {
+        clearTimeout(copyToastTimerRef.current);
+        copyToastTimerRef.current = null;
+      }
+    };
+  }, [isOpen]);
 
   const loadDetail = async () => {
     if (!transactionId) return;
@@ -173,6 +195,27 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     const num = Number(val) || 0;
     const isNeg = num < 0;
     return (isNeg ? '- Rp ' : 'Rp ') + Math.abs(num).toLocaleString('id-ID');
+  };
+
+  // PURCHASE-2C3: Attachment purpose display label
+  const formatAttachmentPurpose = (purpose: string | undefined | null): string => {
+    const map: Record<string, string> = {
+      RECEIPT: 'Bukti Nota / Struk',
+      PAYMENT_PROOF: 'Bukti Bayar / Transfer',
+      INVOICE: 'Invoice',
+      OTHER: 'Lainnya',
+    };
+    return map[purpose ?? ''] || purpose || 'BUKTI';
+  };
+
+  // PURCHASE-2C3: Copy bank account with toast
+  const handleCopyBankAccount = async (account: string) => {
+    try {
+      await navigator.clipboard.writeText(account);
+      setCopyToast('No. rekening disalin');
+      if (copyToastTimerRef.current) clearTimeout(copyToastTimerRef.current);
+      copyToastTimerRef.current = setTimeout(() => setCopyToast(null), 2000);
+    } catch { /* ignore clipboard failure */ }
   };
 
   const handleSettleSubmit = async (e: React.FormEvent) => {
@@ -523,6 +566,37 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     Referensi / Faktur: <span className="font-mono font-bold">{tx.source_reference}</span>
                   </div>
                 )}
+                {/* PURCHASE-2C3: Supplier Bank Information */}
+                {(tx.supplier_bank_name || tx.supplier_bank_account || tx.supplier_bank_holder) && (
+                  <div className="pt-2 border-t border-slate-100 space-y-1">
+                    {tx.supplier_bank_name && (
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Bank: </span>
+                        <span className="text-slate-800 font-semibold text-xs">{tx.supplier_bank_name}</span>
+                      </div>
+                    )}
+                    {tx.supplier_bank_account && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 text-[11px]">No. Rekening: </span>
+                        <span className="font-mono font-bold text-xs text-slate-900">{tx.supplier_bank_account}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyBankAccount(tx.supplier_bank_account!)}
+                          className="ml-auto text-[10px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded px-1.5 py-0.5 transition-colors cursor-pointer font-medium"
+                          title="Salin no. rekening"
+                        >
+                          Salin
+                        </button>
+                      </div>
+                    )}
+                    {tx.supplier_bank_holder && (
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Atas Nama: </span>
+                        <span className="text-slate-700 text-xs">{tx.supplier_bank_holder}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {tx.booking_bid && (
                   <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                     <span className="text-slate-500">Terkait Reservasi BID:</span>
@@ -864,7 +938,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                         <div key={att.id} className="p-3 bg-white border border-slate-200 rounded-xl space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
-                              {att.attachment_purpose || 'BUKTI'}
+                              {formatAttachmentPurpose(att.attachment_purpose)}
                             </span>
                             {!isVerified && (
                               <button
@@ -897,6 +971,17 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
             </>
           ) : null}
         </div>
+
+        {/* PURCHASE-2C3: Copy success toast */}
+        {copyToast && (
+          <div
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg shadow-lg animate-in fade-in zoom-in-95 duration-150"
+            role="status"
+            aria-live="polite"
+          >
+            {copyToast}
+          </div>
+        )}
 
         {/* Footer Actions */}
         <div className="p-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between shrink-0">
