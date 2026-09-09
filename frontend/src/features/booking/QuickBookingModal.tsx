@@ -156,6 +156,9 @@ export default function QuickBookingModal({
   const [globalDiscountValue, setGlobalDiscountValue] = useState<number>(0);
   const [globalDiscountReason, setGlobalDiscountReason] = useState('');
 
+  // --- Payment-intent guard: distinguishes "default 0" from "user intentionally chose 0" ---
+  const isPaymentTouchedRef = useRef(false);
+
   // --- Front Office Dynamic Property Rules & Day Use Presets ---
   const [propertyRules, setPropertyRules] = useState<{ WALK_IN: Record<string, string>; OTA: Record<string, string> }>({ WALK_IN: {}, OTA: {} });
   const [dayUseDurationsList, setDayUseDurationsList] = useState<any[]>([]);
@@ -440,6 +443,7 @@ export default function QuickBookingModal({
     setExtractedKtpData(null);
     setPaymentMethod('CASH');
     setAmountPaid(0);
+    isPaymentTouchedRef.current = false;
     setBuktiBayarFile(null);
     setBuktiBayarPath(null);
     setSpecialRequests('');
@@ -725,12 +729,29 @@ export default function QuickBookingModal({
   const grandTotal = Math.max(0, grossBookingTotal - globalDiscountAmount);
   const remainingBill = Math.max(0, grandTotal - amountPaid);
 
-  // Auto-sync amountPaid when grandTotal changes if it was full or 0
+  // Auto-sync amountPaid when grandTotal changes if it was full or 0.
+  // For OTA: default = Hotel Collect (zero payment) unless user explicitly records payment.
   useEffect(() => {
+    const isOta = channelType === 'OTA';
+    // When switching to OTA without touching payment, default to zero (Hotel Collect)
+    if (isOta && !isPaymentTouchedRef.current) {
+      if (amountPaid !== 0) {
+        setAmountPaid(0);
+      }
+      return;
+    }
+    // For any explicit payment (positive or zero), only clamp overpayment
+    if (isPaymentTouchedRef.current) {
+      if (amountPaid > grandTotal) {
+        setAmountPaid(grandTotal);
+      }
+      return;
+    }
+    // Default behavior (WALK-IN/DIRECT): auto-fill or clamp
     if (amountPaid === 0 || amountPaid > grandTotal) {
       setAmountPaid(grandTotal);
     }
-  }, [grandTotal]);
+  }, [grandTotal, channelType]);
 
   // CRM guest selection
   const handleSelectGuest = (guest: Guest) => {
@@ -1070,9 +1091,16 @@ export default function QuickBookingModal({
       }
     }
 
-    // Payment Proof Gate
-    if ((getFieldMode('payment_evidence') === 'REQUIRED' || amountPaid > 0) && !buktiBayarFile && !buktiBayarPath && amountPaid > 0) {
-      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0');
+    // Payment Proof Gate — must align with backend canonical rule:
+    // backend rejects only when: evidence REQUIRED AND amountPaid > 0 AND paymentMethod != CASH AND no evidence
+    // WALK-IN/DIRECT: user is expected to pay at counter, so evidence follows amount paid + non-cash path
+    // OTA: pay-at-hotel (Hotel Collect) is a valid pattern — amountPaid=0 must NOT require evidence
+    const _evidenceRuleMode = getFieldMode('payment_evidence');
+    const _isEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
+      && amountPaid > 0
+      && String(paymentMethod).toUpperCase() !== 'CASH';
+    if (_isEvidenceRequired && !buktiBayarFile && !buktiBayarPath) {
+      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0 (non-tunai)');
     }
 
     // Multi-room Validation
@@ -2395,7 +2423,7 @@ export default function QuickBookingModal({
                       </label>
                       <button
                         type="button"
-                        onClick={() => setAmountPaid(grandTotal)}
+                        onClick={() => { isPaymentTouchedRef.current = true; setAmountPaid(grandTotal); }}
                         className="text-[10px] font-bold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 cursor-pointer transition-colors"
                       >
                         Bayar Pas / Lunas (Rp {grandTotal.toLocaleString('id-ID')})
@@ -2407,18 +2435,31 @@ export default function QuickBookingModal({
                       min="0"
                       step="1000"
                       value={amountPaid}
-                      onChange={e => setAmountPaid(Number(e.target.value))}
+                      onChange={e => { isPaymentTouchedRef.current = true; setAmountPaid(Number(e.target.value)); }}
                       className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none font-mono font-bold text-emerald-950"
                     />
                   </div>
 
                   <div className="sm:col-span-2">
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Upload Bukti Pembayaran <span className="text-rose-500">*</span>
-                    </label>
+                    {(() => {
+                      const _evMode = getFieldMode('payment_evidence');
+                      const _evRequired = _evMode === 'REQUIRED'
+                        && amountPaid > 0
+                        && String(paymentMethod).toUpperCase() !== 'CASH';
+                      return (
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Upload Bukti Pembayaran{' '}
+                          {_evRequired ? (
+                            <span className="text-rose-500">*</span>
+                          ) : (
+                            <span className="text-stone-400 font-normal">(opsional)</span>
+                          )}
+                        </label>
+                      );
+                    })()}
                     <input
                       type="file"
-                      required={amountPaid > 0}
+                      required={false}
                       accept="image/jpeg,image/png,application/pdf"
                       onChange={handleBuktiBayarChange}
                       className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl outline-none file:mr-3 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-700 cursor-pointer"
