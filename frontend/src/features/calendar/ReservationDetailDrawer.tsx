@@ -304,6 +304,7 @@ export default function ReservationDetailDrawer({
             currentPrimaryGuestName: primaryGuestName,
             currentPrimaryGuestNik: primaryGuestNik
           });
+          setIsIdentityModalOpen(false);
           return;
         }
       }
