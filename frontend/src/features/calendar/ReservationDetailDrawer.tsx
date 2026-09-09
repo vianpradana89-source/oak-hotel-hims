@@ -294,9 +294,16 @@ export default function ReservationDetailDrawer({
       const primaryGuestName = detailData.primary_guest?.primary_guest_name || null;
       const primaryGuestNik = detailData.primary_guest?.primary_guest_identity_number || null;
 
-      if (primaryGuestId && extracted.identity_number && primaryGuestNik) {
+      const hasPrimaryGuest = Boolean(primaryGuestId);
+      const hasScannedNik = Boolean(extracted.identity_number);
+
+      if (hasPrimaryGuest && hasScannedNik) {
         const normalizeNik = (n: string) => String(n).replace(/\D/g, '');
-        if (normalizeNik(extracted.identity_number) !== normalizeNik(primaryGuestNik)) {
+        const nikDiffers =
+          !primaryGuestNik ||
+          normalizeNik(extracted.identity_number) !== normalizeNik(primaryGuestNik);
+
+        if (nikDiffers) {
           // MISMATCH DETECTED — store full scanned data for safe confirm later
           setKtpMismatchState({
             scannedData: extracted,
