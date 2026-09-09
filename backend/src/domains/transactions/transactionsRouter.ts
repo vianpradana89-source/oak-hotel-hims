@@ -23,7 +23,8 @@ import {
   addTransactionAttachment,
   deleteTransactionAttachment,
   TRANSACTION_CATEGORIES,
-  DEPARTMENTS
+  DEPARTMENTS,
+  executeExpenseLifecycle,
 } from './transactionService';
 import { getBookingSalesDetail } from './bookingSalesDetailService';
 import { resolveAuthenticatedTransactionRead, resolveAuthenticatedTransactionWrite } from './transactionReadAuth';
@@ -567,6 +568,51 @@ export function createTransactionsRouter(pool: Pool): Router {
       });
     }
   });
+
+  /**
+    * PATCH /api/transactions/expenses/:id/lifecycle
+    * Canonical expense lifecycle endpoint (EXPENSE-1C).
+    * Atomic, row-locked mutation with server-driven auto-rules.
+    */
+   router.patch('/expenses/:id/lifecycle', async (req: Request, res: Response) => {
+     try {
+       const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+       if (!scoped) return;
+
+       const id = req.params.id;
+       const action = req.body?.action;
+       const verificationStatus = req.body?.verification_status;
+       const workflowStatus = req.body?.workflow_status;
+       const reason = req.body?.reason ? String(req.body.reason).trim() : null;
+       const actorName = req.body?.actor_name || scoped.user?.full_name || scoped.user?.username || null;
+       const actorUserId = req.body?.actor_user_id || String(scoped.user?.id) || null;
+
+       if (!action) {
+         return res.status(400).json({ success: false, error: 'action wajib diisi' });
+       }
+
+       const updated = await executeExpenseLifecycle(pool, id, {
+         property_id: scoped.propertyId,
+         action,
+         verification_status: verificationStatus,
+         workflow_status: workflowStatus,
+         reason,
+         actor_name: actorName,
+         actor_user_id: actorUserId,
+       });
+
+       return res.json({
+         success: true,
+         message: `Lifecycle transaksi berhasil diperbarui: ${action}`,
+         data: updated
+       });
+     } catch (err: any) {
+       return res.status(err.statusCode || 400).json({
+         success: false,
+         error: err.message
+       });
+     }
+   });
 
   /**
    * POST /api/transactions/:id/settle

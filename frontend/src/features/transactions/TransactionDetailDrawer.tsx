@@ -17,7 +17,9 @@ import {
   uploadTransactionAttachmentApi,
   deleteTransactionAttachmentApi,
   settleTransactionPaymentApi,
-  updatePurchaseLifecycleApi
+  updatePurchaseLifecycleApi,
+  updateExpenseLifecycleApi,
+  verifyTransactionApi,
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
@@ -252,13 +254,16 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     if (!tx) return;
     setIsVerifying(true);
     try {
-      await updatePurchaseLifecycleApi(tx.id, {
+      // BLOCKER 3 FIX: route through canonical verifyTransaction API for all types.
+      // EXPENSE and PURCHASE also accept the expense/lifecycle endpoint, but VERIFIED
+      // status must obey the same verification contract (verified_at / verified_by
+      // / audit semantics).
+      await verifyTransactionApi(tx.id, {
         property_id: propertyId,
-        action: 'SET_VERIFICATION',
         verification_status: verifyStatusChoice,
-        reason: verifyNote.trim() || undefined,
+        verification_note: verifyNote.trim() || undefined,
         actor_user_id: currentUserId || undefined,
-        actor_name: currentStaffName
+        actor_name: currentStaffName,
       });
       setShowVerifyModal(false);
       setVerifyNote('');
@@ -294,12 +299,26 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     if (!tx || isUpdatingWorkflow) return;
     setIsUpdatingWorkflow(true);
     try {
-      await updatePurchaseLifecycleApi(tx.id, {
-        property_id: propertyId,
-        action: 'SET_WORKFLOW',
-        workflow_status: newWorkflow,
-        actor_name: currentStaffName
-      });
+      // BLOCKER 3 FIX: route only for types that support lifecycle workflow mutations.
+      // Only EXPENSE and PURCHASE have workflow_status columns; other types (SALE, INCOME)
+      // must not fall through to purchase endpoint.
+      if (tx.transaction_type === 'EXPENSE') {
+        await updateExpenseLifecycleApi(tx.id, {
+          property_id: propertyId,
+          action: 'SET_WORKFLOW',
+          workflow_status: newWorkflow,
+          actor_name: currentStaffName
+        });
+      } else if (tx.transaction_type === 'PURCHASE') {
+        await updatePurchaseLifecycleApi(tx.id, {
+          property_id: propertyId,
+          action: 'SET_WORKFLOW',
+          workflow_status: newWorkflow,
+          actor_name: currentStaffName
+        });
+      } else {
+        return; // No workflow mutation for other transaction types
+      }
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {

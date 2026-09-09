@@ -1721,7 +1721,73 @@ export async function createIncomeTransaction(
 }
 
 /**
+ * INTERNAL: Canonical verification mutation — SINGLE source of truth for all verification writes.
+ * Used by both verifyTransaction() and executeExpenseLifecycle(... SET_VERIFICATION ...).
+ * Ensures a single verification contract: verified_at, verified_by, verification_note.
+ * Accepts either a PoolClient (within a transaction) or a Pool (standalone query).
+ * Does NOT write audit logs or modify expense_workflow_status — callers handle those.
+ * Returns the actual updated row via RETURNING * for canonical state verification.
+ *
+ * CRITICAL CONTRACT (from baseline commit 18d7856):
+ *   verified_by_user_id = actorUserId  (ALWAYS, not just VERIFIED)
+ *   verified_by_name_snapshot = actorName  (ALWAYS, not just VERIFIED)
+ *   verified_at = NOW()  (ALWAYS, for all statuses)
+ * Do NOT clear verified_by fields on UNVERIFIED/REJECTED in generic path.
+ */
+async function applyCanonicalVerificationMutation(
+  db: PoolClient | Pool,
+  id: number | string,
+  propertyId: number,
+  newStatus: VerificationStatus,
+  actorUserId: string | null,
+  actorName: string | null,
+  verificationNote: string | null,
+  prevRow: { verification_status: string | null; transaction_type: string }
+): Promise<any> {
+  if (!['UNVERIFIED', 'VERIFIED', 'REJECTED'].includes(newStatus)) {
+    throw new Error(`Status verifikasi '${newStatus}' tidak valid`);
+  }
+
+  const prevStatus = prevRow.verification_status;
+
+  // Baseline contract: actor fields are ALWAYS written, regardless of target status.
+  // This matches the committed EXPENSE-1B generic behavior exactly.
+  const verifiedByUserId = actorUserId;
+  const verifiedByName = actorName;
+
+  // Use PostgreSQL NOW() directly in SQL — never reconstruct timestamps client-side.
+  const updateRes = await db.query(
+    `UPDATE transactions
+     SET verification_status = $1::varchar,
+         verified_by_user_id = $2,
+         verified_by_name_snapshot = $3,
+         verified_at = NOW(),
+         verification_note = $4,
+         updated_at = NOW()
+     WHERE id = $5 AND property_id = $6
+     RETURNING *`,
+    [
+      newStatus,
+      verifiedByUserId,
+      verifiedByName,
+      verificationNote,
+      id,
+      propertyId,
+    ]
+  );
+
+  if ((updateRes.rowCount ?? 0) === 0) {
+    throw new Error(`Transaksi #${id} tidak ditemukan atau tidak dapat diubah`);
+  }
+
+  return updateRes.rows[0];
+}
+
+/**
  * TRANSACTION-2D: Verification Workflow.
+ * Uses applyCanonicalVerificationMutation as the single canonical verification write path.
+ * Preserves the committed EXPENSE-1B audit contract (TRANSACTION_VERIFIED action).
+ * ATOMIC: All operations run within a single BEGIN/COMMIT transaction.
  */
 export async function verifyTransaction(
   pool: Pool,
@@ -1734,65 +1800,72 @@ export async function verifyTransaction(
     throw new Error(`Status verifikasi '${status}' tidak valid`);
   }
 
-  const txCheck = await pool.query(
-    `SELECT id, transaction_no, verification_status, transaction_type FROM transactions WHERE id = $1 AND property_id = $2`,
-    [id, propertyId]
-  );
-  if ((txCheck.rowCount ?? 0) === 0) {
-    throw new Error(`Transaksi #${id} tidak ditemukan`);
-  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  const prevStatus = txCheck.rows[0].verification_status;
+    // Row-level lock for atomicity
+    const txCheck = await client.query(
+      `SELECT id, transaction_no, verification_status, transaction_type FROM transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+      [id, propertyId]
+    );
+    if ((txCheck.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+      err.statusCode = 404;
+      throw err;
+    }
 
-  const updateRes = await pool.query(
-    `UPDATE transactions
-     SET verification_status = $1::varchar,
-         verified_by_user_id = $2,
-         verified_by_name_snapshot = $3,
-         verified_at = NOW(),
-         verification_note = $4,
-         updated_at = NOW(),
-         expense_workflow_status = CASE
-           WHEN $1::varchar = 'VERIFIED' AND transaction_type = 'EXPENSE' THEN 'SELESAI'
-           WHEN transaction_type = 'EXPENSE' AND $1::varchar IN ('UNVERIFIED', 'REJECTED') THEN 'PROSES'
-           ELSE expense_workflow_status
-         END
-     WHERE id = $5 AND property_id = $6
-     RETURNING *`,
-    [
-      status,
+    const prevRow = txCheck.rows[0];
+    const prevStatus = prevRow.verification_status;
+
+    // Delegate canonical verification mutation to the shared helper (same client).
+    const canonicalRow = await applyCanonicalVerificationMutation(
+      client,
+      id,
+      propertyId,
+      status as VerificationStatus,
       dto.actor_user_id || null,
       dto.actor_name || 'Supervisor',
       dto.verification_note?.trim() || null,
-      id,
-      propertyId
-    ]
-  );
+      prevRow
+    );
 
-  if ((updateRes.rowCount ?? 0) === 0) {
-    throw new Error(`Transaksi #${id} tidak ditemukan atau tidak dapat diubah`);
+    // Expense-specific workflow auto-transition: VERIFIED => SELESAI, UNVERIFIED/REJECTED => PROSES
+    if (prevRow.transaction_type.toUpperCase() === 'EXPENSE') {
+      const newWorkflow = status === 'VERIFIED' ? 'SELESAI' : 'PROSES';
+      await client.query(
+        `UPDATE transactions SET expense_workflow_status = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3`,
+        [newWorkflow, id, propertyId]
+      );
+    }
+
+    // Audit log — TRANSACTION_VERIFIED action (preserved from committed contract)
+    await client.query(
+      `INSERT INTO audit_logs (
+        module, action, entity, record_id, new_value, property_id
+      ) VALUES (
+        'TRANSACTIONS', 'TRANSACTION_VERIFIED', 'transactions', $1, $2, $3
+      )`,
+      [
+        String(id),
+        JSON.stringify({
+          previous_status: prevStatus,
+          new_status: status,
+          verified_by: dto.actor_name || 'Supervisor',
+          note: dto.verification_note
+        }),
+        propertyId
+      ]
+    );
+
+    await client.query('COMMIT');
+    return await getTransactionById(pool, propertyId, id);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-
-  // Audit log
-  await pool.query(
-    `INSERT INTO audit_logs (
-      module, action, entity, record_id, new_value, property_id
-    ) VALUES (
-      'TRANSACTIONS', 'TRANSACTION_VERIFIED', 'transactions', $1, $2, $3
-    )`,
-    [
-      String(id),
-      JSON.stringify({
-        previous_status: prevStatus,
-        new_status: status,
-        verified_by: dto.actor_name || 'Supervisor',
-        note: dto.verification_note
-      }),
-      propertyId
-    ]
-  );
-
-  return await getTransactionById(pool, propertyId, id);
 }
 
 /**
@@ -3480,6 +3553,261 @@ export async function executePurchaseLifecycle(
       [
         'TRANSACTIONS',
         'PURCHASE_LIFECYCLE_UPDATED',
+        'transactions',
+        String(id),
+        JSON.stringify(payload),
+        propertyId,
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return await getTransactionById(pool, propertyId, id);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ===========================================================================
+// EXPENSE-1C: Expense lifecycle (SET_VERIFICATION / SET_WORKFLOW)
+// ===========================================================================
+
+interface LockedExpenseRow {
+  id: number;
+  transaction_no: string;
+  transaction_type: string;
+  transaction_status: string;
+  verification_status: string | null;
+  expense_workflow_status: string | null;
+  verified_by_user_id: string | null;
+  verified_by_name_snapshot: string | null;
+  verified_at: string | null;
+  deleted_at: string | null;
+}
+
+async function fetchLockedExpense(
+  client: any,
+  propertyId: number,
+  id: number | string
+): Promise<LockedExpenseRow> {
+  const res = await client.query(
+    `SELECT id, transaction_no, transaction_type, transaction_status,
+            verification_status, expense_workflow_status,
+            verified_by_user_id, verified_by_name_snapshot, verified_at, deleted_at
+     FROM transactions
+     WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+    [id, propertyId]
+  );
+  if ((res.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+  const row = res.rows[0];
+  if (String(row.transaction_type || '').toUpperCase() !== 'EXPENSE') {
+    const err: any = new Error(`Transaksi #${id} bukan tipe EXPENSE`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return row;
+}
+
+function buildExpenseAuditPayload(
+  txId: number,
+  propertyId: number,
+  action: string,
+  previous: LockedExpenseRow,
+  next: {
+    verification_status: string | null;
+    expense_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  },
+  autoRules: { verified_forced_workflow_complete: boolean; workflow_process_forced_unverify: boolean },
+  reason: string | null,
+  actor: string | null
+): any {
+  return {
+    transaction_id: Number(txId),
+    property_id: Number(propertyId),
+    action,
+    previous: {
+      verification_status: previous.verification_status,
+      expense_workflow_status: previous.expense_workflow_status,
+      verified_by_user_id: previous.verified_by_user_id,
+      verified_by_name_snapshot: previous.verified_by_name_snapshot,
+      verified_at: previous.verified_at,
+    },
+    next,
+    auto_rules: autoRules,
+    reason,
+    actor,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
+ * executeExpenseLifecycle - atomic, row-locked mutation for EXPENSE transactions.
+ * Actions:
+ *   SET_VERIFICATION: UNVERIFIED/VERIFIED/REJECTED
+ *     VERIFIED => expense_workflow_status = SELESAI, stamps verifier fields
+ *     UNVERIFIED => clears verifier fields
+ *     REJECTED => clears verifier fields, workflow stays PROSES
+ *   SET_WORKFLOW: PROSES/SELESAI
+ *     PROSES => forces verification_status = UNVERIFIED, clears verifier fields
+ *     SELESAI => no change to verification_status
+ */
+export async function executeExpenseLifecycle(
+  pool: Pool,
+  id: number | string,
+  dto: any
+): Promise<any> {
+  const propertyId = Number(dto.property_id);
+  const action = dto.action;
+  const reason = dto.reason ? String(dto.reason).trim() : null;
+  const actor = String(dto.actor_name || '').trim() || null;
+  const actorUserId = dto.actor_user_id || null;
+
+  if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+    const err: any = new Error('property_id wajib diisi dan harus valid');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!action) {
+    const err: any = new Error('action wajib diisi');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const actionUpper = String(action).toUpperCase();
+  if (actionUpper !== 'SET_VERIFICATION' && actionUpper !== 'SET_WORKFLOW') {
+    const err: any = new Error(`Action '${action}' tidak valid untuk EXPENSE lifecycle`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const prev = await fetchLockedExpense(client, propertyId, id);
+    assertNonTerminal(prev.transaction_status);
+
+    if (prev.deleted_at) {
+      const err: any = new Error(`Transaksi #${id} telah dihapus dan tidak dapat diubah.`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    let newVerification: string | null = prev.verification_status;
+    let newVerifiedByUserId: string | null = prev.verified_by_user_id;
+    let newVerifiedByName: string | null = prev.verified_by_name_snapshot;
+    let newVerifiedAt: string | null = prev.verified_at;
+    let newWorkflow: string | null = prev.expense_workflow_status;
+    const autoRules = {
+      verified_forced_workflow_complete: false,
+      workflow_process_forced_unverify: false,
+    };
+
+    if (actionUpper === 'SET_VERIFICATION') {
+       const v = dto.verification_status;
+       if (!v || !['UNVERIFIED', 'VERIFIED', 'REJECTED'].includes(v)) {
+         const err: any = new Error(`verification_status '${v}' tidak valid`);
+         err.statusCode = 400;
+         throw err;
+       }
+       // Capture canonical row from the shared helper — audit payload must use
+       // actual DB state (RETURNING *), not stale local variables.
+       const canonicalRow = await applyCanonicalVerificationMutation(
+         client,
+         id,
+         propertyId,
+         v as VerificationStatus,
+         actorUserId,
+         actor,
+         reason,
+         prev
+       );
+       // Workflow auto-transition follows canonical expense rules:
+       // VERIFIED => SELESAI; UNVERIFIED/REJECTED => PROSES
+       newWorkflow = v === 'VERIFIED' ? 'SELESAI' : 'PROSES';
+       // Pull audit fields from the canonical RETURNING row so payload.next is authoritative.
+       newVerification = canonicalRow.verification_status;
+       newVerifiedByUserId = canonicalRow.verified_by_user_id;
+       newVerifiedByName = canonicalRow.verified_by_name_snapshot;
+       newVerifiedAt = canonicalRow.verified_at;
+       autoRules.verified_forced_workflow_complete = v === 'VERIFIED';
+     } else if (actionUpper === 'SET_WORKFLOW') {
+       const w = dto.workflow_status;
+       if (!w || !['PROSES', 'SELESAI'].includes(w)) {
+         const err: any = new Error(`workflow_status '${w}' tidak valid`);
+         err.statusCode = 400;
+         throw err;
+       }
+       newWorkflow = w;
+       if (w === 'PROSES') {
+         newVerification = 'UNVERIFIED';
+         newVerifiedByUserId = null;
+         newVerifiedByName = null;
+         newVerifiedAt = null;
+         autoRules.workflow_process_forced_unverify = true;
+       }
+     }
+
+     // Single UPDATE: only touch expense_workflow_status for SET_VERIFICATION,
+     // or both verification + workflow for SET_WORKFLOW.  The canonical helper
+     // already wrote verification_status / verified_*/ verified_at for
+     // SET_VERIFICATION so we do NOT overwrite those fields here.
+     if (actionUpper === 'SET_VERIFICATION') {
+       await client.query(
+         `UPDATE transactions
+          SET expense_workflow_status = $1,
+              updated_at = NOW()
+          WHERE id = $2 AND property_id = $3`,
+         [newWorkflow, id, propertyId]
+       );
+     } else {
+       // SET_WORKFLOW: also reset verification_status/verified fields when switching to PROSES
+       await client.query(
+         `UPDATE transactions
+          SET verification_status = $1,
+              verified_by_user_id = $2,
+              verified_by_name_snapshot = $3,
+              verified_at = $4,
+              expense_workflow_status = $5,
+              updated_at = NOW()
+          WHERE id = $6 AND property_id = $7`,
+         [newVerification, newVerifiedByUserId, newVerifiedByName, newVerifiedAt, newWorkflow, id, propertyId]
+       );
+     }
+
+     const payload = buildExpenseAuditPayload(
+       Number(id), propertyId, actionUpper,
+       prev,
+       {
+         verification_status: newVerification,
+         expense_workflow_status: newWorkflow,
+         verified_by_user_id: newVerifiedByUserId,
+         verified_by_name_snapshot: newVerifiedByName,
+         verified_at: newVerifiedAt,
+       },
+       autoRules,
+       reason,
+       actor
+     );
+
+    await client.query(
+      `INSERT INTO audit_logs (
+        module, action, entity, record_id, new_value, property_id, timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        'TRANSACTIONS',
+        'EXPENSE_LIFECYCLE_UPDATED',
         'transactions',
         String(id),
         JSON.stringify(payload),

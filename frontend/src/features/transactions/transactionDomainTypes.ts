@@ -8,6 +8,9 @@ export type DepartmentCode = 'FRONT_OFFICE' | 'HOUSEKEEPING' | 'FNB' | 'MAINTENA
 /** PURCHASE-2A3: canonical lifecycle action for inline purchase controls. */
 export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
 
+/** EXPENSE-1C: canonical lifecycle action for inline expense controls. */
+export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
+
 export type SupplierEntityType = 'SUPPLIER' | 'VENDOR' | 'BOTH';
 export type SupplierStatus = 'ACTIVE' | 'INACTIVE' | 'BLACKLISTED';
 

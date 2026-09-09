@@ -25,9 +25,10 @@ import {
   fetchCategoriesApi,
   fetchTransactionDetailApi,
   softDeleteTransactionApi,
-  updatePurchaseLifecycleApi
+  updatePurchaseLifecycleApi,
+  updateExpenseLifecycleApi,
 } from './transactionClient';
-import type { PurchaseLifecycleAction } from './transactionDomainTypes';
+import type { PurchaseLifecycleAction, ExpenseLifecycleAction } from './transactionDomainTypes';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
 import { BookingSalesDetailDrawer } from './BookingSalesDetailDrawer';
@@ -366,6 +367,42 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
       console.error(`PURCHASE-2A3: ${action} failed:`, err);
+    } finally {
+      setLifecycleSaving(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
+  // EXPENSE-1C: inline lifecycle mutation handler for expense verification & workflow
+  const handleExpenseLifecycleMutation = async (
+    tx: TransactionRecord,
+    action: ExpenseLifecycleAction,
+    value: string
+  ) => {
+    const key = `exp:${String(tx.id)}:${action}`;
+    setLifecycleSaving(prev => ({ ...prev, [key]: true }));
+    setLifecycleError(null);
+    try {
+      const payload: {
+        property_id: number;
+        action: ExpenseLifecycleAction;
+        verification_status?: string | null;
+        workflow_status?: string | null;
+      } = { property_id: propertyId, action };
+      if (action === 'SET_VERIFICATION') {
+        payload.verification_status = value;
+      } else if (action === 'SET_WORKFLOW') {
+        payload.workflow_status = value;
+      }
+      await updateExpenseLifecycleApi(tx.id, payload);
+      await loadTransactions();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
+      setLifecycleError(msg);
+      console.error(`EXPENSE-1C: ${action} failed:`, err);
     } finally {
       setLifecycleSaving(prev => {
         const next = { ...prev };
@@ -1576,6 +1613,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">Kategori</th>
                         <th className="py-3 px-4">Keterangan</th>
                         <th className="py-3 px-3 text-right">Nominal</th>
+                        <th className="py-3 px-2 text-center">Pembayaran</th>
                         <th className="py-3 px-2 text-center">Verifikasi</th>
                         <th className="py-3 px-2 text-center">Status</th>
                         <th className="py-3 px-3 text-center">Aksi</th>
@@ -1976,74 +2014,132 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     );
                   }
 
-                  if (activeTab === 'EXPENSE') {
-                    return (
-                      <tr
-                        key={t.id}
-                        onClick={() => openDetailDrawer(t.id)}
-                        className="hover:bg-slate-50/80 transition-colors cursor-pointer"
-                      >
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
-                          <div className="text-[10px] text-slate-400">
-                            {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
-                          {t.transaction_no}
-                        </td>
-                        <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
-                          {party}
-                        </td>
-                        <td className="py-3 px-3 text-slate-700 truncate max-w-[130px]">
-                          <span className="text-[11px] font-medium text-slate-700">{t.category_name}</span>
-                        </td>
-                        <td className="py-3 px-4 max-w-xs truncate text-slate-800">
-                          <div>{t.description}</div>
-                          {t.source_reference && (
-                            <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
-                          {formatIdr(displayTransactionNet(t))}
-                        </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          {renderVerificationBadge(t.verification_status)}
-                        </td>
-                        <td className="py-3 px-2 text-center whitespace-nowrap">
-                          <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${op.badgeClass}`}>
-                            {op.label}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => openDetailDrawer(t.id)}
-                              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-                            >
-                              Detail
-                            </button>
-                            {isEligibleForSoftDelete(t) && (
-                              <button
-                                onClick={() => openSoftDeleteModal(t)}
-                                className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                            {t.transaction_status === 'POSTED' && (
-                              <button
-                                onClick={() => openVoidModal(t)}
-                                className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              >
-                                Void
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  }
+                   if (activeTab === 'EXPENSE') {
+                     return (
+                       <tr
+                         key={t.id}
+                         onClick={() => openDetailDrawer(t.id)}
+                         className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+                       >
+                         <td className="py-3 px-3 whitespace-nowrap">
+                           <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                           <div className="text-[10px] text-slate-400">
+                             {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                           </div>
+                         </td>
+                         <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
+                           {t.transaction_no}
+                         </td>
+                         <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
+                           {party}
+                         </td>
+                         <td className="py-3 px-3 text-slate-700 truncate max-w-[130px]">
+                           <span className="text-[11px] font-medium text-slate-700">{t.category_name}</span>
+                         </td>
+                         <td className="py-3 px-4 max-w-xs truncate text-slate-800">
+                           <div>{t.description}</div>
+                           {t.source_reference && (
+                             <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
+                           )}
+                         </td>
+                         <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
+                           {formatIdr(displayTransactionNet(t))}
+                         </td>
+                         {/* Pembayaran — read-only badge */}
+                         <td className="py-3 px-2 text-center whitespace-nowrap">
+                           <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                             t.payment_status === 'PAID'
+                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                               : 'bg-amber-50 text-amber-700 border-amber-200'
+                           }`}>
+                             {t.payment_status === 'PAID' ? 'Sudah Bayar' : 'Belum Bayar'}
+                           </span>
+                         </td>
+                         {/* Verifikasi — inline dropdown */}
+                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                           {(() => {
+                             const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
+                             return (
+                               <select
+                                 value={t.verification_status || 'UNVERIFIED'}
+                                 onChange={async (e) => {
+                                   e.stopPropagation();
+                                   await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
+                                 }}
+                                 disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
+                               >
+                                 <option value="UNVERIFIED">Belum Terverifikasi</option>
+                                 <option value="VERIFIED">Terverifikasi</option>
+                                 <option value="REJECTED">Ditolak</option>
+                               </select>
+                             );
+                           })()}
+                         </td>
+                         {/* Status — inline dropdown */}
+                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                           {(() => {
+                             const ws = t.operational_sheet || 'PROSES';
+                             const wc = getPurchaseWorkflowClass(ws);
+                             if (ws === 'BATAL') {
+                               return (
+                                 <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                   Batal
+                                 </span>
+                               );
+                             }
+                             if (ws === 'HAPUS') {
+                               return (
+                                 <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                   Dihapus
+                                 </span>
+                               );
+                             }
+                             return (
+                               <select
+                                 value={ws}
+                                 onChange={async (e) => {
+                                   e.stopPropagation();
+                                   await handleExpenseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
+                                 }}
+                                 disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`]}
+                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
+                               >
+                                 <option value="PROSES">Proses</option>
+                                 <option value="SELESAI">Selesai</option>
+                               </select>
+                             );
+                           })()}
+                         </td>
+                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                           <div className="flex items-center justify-center gap-1">
+                             <button
+                               onClick={() => openDetailDrawer(t.id)}
+                               className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                             >
+                               Detail
+                             </button>
+                             {isEligibleForSoftDelete(t) && (
+                               <button
+                                 onClick={() => openSoftDeleteModal(t)}
+                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                               >
+                                 Hapus
+                               </button>
+                             )}
+                             {t.transaction_status === 'POSTED' && (
+                               <button
+                                 onClick={() => openVoidModal(t)}
+                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                               >
+                                 Void
+                               </button>
+                             )}
+                           </div>
+                         </td>
+                       </tr>
+                     );
+                   }
 
                   if (activeTab === 'INCOME') {
                     return (

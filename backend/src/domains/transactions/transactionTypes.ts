@@ -494,6 +494,9 @@ export interface SoftDeleteTransactionDto {
 /** PURCHASE-2A2: canonical purchase lifecycle action enum. */
 export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
 
+/** EXPENSE-1C: canonical expense lifecycle action enum. */
+export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
+
 export interface PurchaseLifecycleDto {
   property_id: number;
   action: PurchaseLifecycleAction;
@@ -527,6 +530,45 @@ export interface PurchaseLifecycleAuditPayload {
     receiving_status: string | null;
     verification_status: string | null;
     purchase_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  };
+  auto_rules: {
+    verified_forced_workflow_complete: boolean;
+    workflow_process_forced_unverify: boolean;
+  };
+  reason: string | null;
+  actor: string | null;
+  timestamp: string;
+}
+
+/** EXPENSE-1C: DTO for expense lifecycle mutations. */
+export interface ExpenseLifecycleDto {
+  property_id: number;
+  action: ExpenseLifecycleAction;
+  verification_status?: VerificationStatus | null;
+  workflow_status?: ExpenseWorkflowStatus | null;
+  reason?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}
+
+/** Payload emitted inside audit_logs.new_value for EXPENSE_LIFECYCLE_UPDATED. */
+export interface ExpenseLifecycleAuditPayload {
+  transaction_id: number;
+  property_id: number;
+  action: ExpenseLifecycleAction;
+  previous: {
+    verification_status: string | null;
+    expense_workflow_status: string | null;
+    verified_by_user_id: string | null;
+    verified_by_name_snapshot: string | null;
+    verified_at: string | null;
+  };
+  next: {
+    verification_status: string | null;
+    expense_workflow_status: string | null;
     verified_by_user_id: string | null;
     verified_by_name_snapshot: string | null;
     verified_at: string | null;

@@ -525,6 +525,25 @@ export async function updatePurchaseLifecycleApi(
   });
 }
 
+export async function updateExpenseLifecycleApi(
+  id: number | string,
+  data: {
+    property_id: number;
+    action: 'SET_VERIFICATION' | 'SET_WORKFLOW';
+    verification_status?: string | null;
+    workflow_status?: string | null;
+    reason?: string | null;
+    actor_name?: string | null;
+    actor_user_id?: string | null;
+  }
+): Promise<TransactionRecord> {
+  return await fetchJson<TransactionRecord>(`${API_BASE}/expenses/${id}/lifecycle`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+}
+
 const PURCHASE_SETTINGS_BASE = '/api/settings/purchases';
 
 export interface PurchaseSettingsCategory {
