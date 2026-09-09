@@ -3330,11 +3330,12 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
 
       const updatedReservation = await client.query(
         `UPDATE reservations
-         SET status = 'CANCELLED',
-             stay_status = 'CANCELLED'
-         WHERE id = $1
-           AND status = 'BOOKED'
-         RETURNING *`,
+          SET status = 'CANCELLED',
+              stay_status = 'CANCELLED',
+              cancelled_at = CURRENT_TIMESTAMP
+          WHERE id = $1
+            AND status = 'BOOKED'
+          RETURNING *`,
         [reservation.id]
       );
 
@@ -3892,9 +3893,9 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
 
       const updated = await client.query(
         `UPDATE reservations
-         SET status = 'CANCELLED', stay_status = 'CANCELLED'
-         WHERE id = $1 AND status = 'BOOKED'
-         RETURNING *`,
+          SET status = 'CANCELLED', stay_status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP
+          WHERE id = $1 AND status = 'BOOKED'
+          RETURNING *`,
         [reservationId]
       );
       if (updated.rowCount !== 1) {

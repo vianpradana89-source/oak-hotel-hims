@@ -21,6 +21,7 @@ export interface PresentedPagePlan {
   total_count: number;
   summary: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
+  effective_date_map: Record<string, string>;
 }
 
 const LIFECYCLE_KEY_SQL = `COALESCE(
@@ -185,10 +186,11 @@ export async function queryPresentedPage(
         t.net_amount,
         t.correction_group_id,
         t.reversal_of_transaction_id,
-        t.metadata,
-        b.bid AS booking_bid,
-        r.status AS reservation_status,
-        r.stay_status AS reservation_stay_status,
+         t.metadata,
+         b.bid AS booking_bid,
+         r.status AS reservation_status,
+         r.stay_status AS reservation_stay_status,
+         r.cancelled_at AS reservation_cancelled_at,
         ${LIFECYCLE_KEY_SQL} AS lifecycle_key,
         ${STANDALONE_SHEET_SQL} AS standalone_sheet
       FROM transactions t
@@ -233,17 +235,33 @@ export async function queryPresentedPage(
       WHERE l.lifecycle_key IN (SELECT lifecycle_key FROM search_keys)
       ORDER BY l.lifecycle_key, ${PRIMARY_STATUS_RANK_SQL.replace(/t\./g, 'l.')}, l.id DESC
     ),
-    dated AS (
-      SELECT p.*
+    primaries_with_effective_date AS (
+      SELECT p.*,
+        CASE
+          WHEN UPPER(p.transaction_type) = 'SALE'
+               AND (UPPER(p.reservation_status) = 'CANCELLED'
+                    OR UPPER(p.reservation_stay_status) = 'CANCELLED')
+               AND p.reservation_cancelled_at IS NOT NULL
+          THEN p.reservation_cancelled_at::date
+          ELSE p.transaction_date
+        END AS effective_period_date
       FROM primaries p
-      WHERE ($${startIdx}::date IS NULL OR p.transaction_date >= $${startIdx}::date)
-        AND ($${endIdx}::date IS NULL OR p.transaction_date <= $${endIdx}::date)
+    ),
+    dated AS (
+      SELECT ped.*
+      FROM primaries_with_effective_date ped
+      WHERE ($${startIdx}::date IS NULL OR ped.effective_period_date >= $${startIdx}::date)
+        AND ($${endIdx}::date IS NULL OR ped.effective_period_date <= $${endIdx}::date)
     ),
     booking_sheets AS (
       SELECT b.property_id, b.bid,
         CASE
           WHEN COUNT(r.id) > 0
-            AND COUNT(r.id) FILTER (WHERE UPPER(r.status) = 'CANCELLED') = COUNT(r.id)
+            AND COUNT(r.id) FILTER (
+              WHERE
+                UPPER(COALESCE(r.status, '')) = 'CANCELLED'
+                OR UPPER(COALESCE(r.stay_status, '')) = 'CANCELLED'
+            ) = COUNT(r.id)
           THEN 'BATAL'
           WHEN COUNT(r.id) > 0
             AND COUNT(r.id) FILTER (WHERE UPPER(r.status) = 'CHECKED_OUT') = COUNT(r.id)
@@ -263,7 +281,7 @@ export async function queryPresentedPage(
           THEN 'bid:' || d.property_id::text || ':' || BTRIM(d.booking_bid)
           ELSE 'tx:' || d.id::text
         END AS presented_key,
-        MAX(d.transaction_date) AS sort_date,
+        MAX(COALESCE(d.effective_period_date, d.transaction_date)) AS sort_date,
         MAX(d.transaction_time) AS sort_time,
         MAX(d.id) AS sort_id,
         BOOL_OR(UPPER(d.transaction_type) = 'SALE') AS has_sale,
@@ -275,7 +293,14 @@ export async function queryPresentedPage(
         SUM(CASE WHEN UPPER(d.transaction_type) = 'EXPENSE' THEN d.effective_net ELSE 0 END) AS expense_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'INCOME' THEN d.effective_net ELSE 0 END) AS income_net,
         MAX(d.booking_bid) AS booking_bid,
-        MAX(COALESCE(bs.booking_sheet, d.standalone_sheet)) AS operational_sheet,
+        CASE
+          WHEN BOOL_OR(
+            UPPER(COALESCE(d.transaction_status, ''))
+              IN ('VOIDED', 'CANCELLED', 'REVERSED')
+          )
+          THEN 'BATAL'
+          ELSE MAX(COALESCE(bs.booking_sheet, d.standalone_sheet))
+        END AS operational_sheet,
         ARRAY_AGG(d.id) AS member_ids
       FROM dated d
       LEFT JOIN booking_sheets bs
@@ -307,11 +332,12 @@ export async function queryPresentedPage(
         (
           SELECT JSON_AGG(page_row)
           FROM (
-            SELECT JSON_BUILD_OBJECT(
-              'presented_key', presented_key,
-              'booking_bid', booking_bid,
-              'member_ids', member_ids
-            ) AS page_row
+             SELECT JSON_BUILD_OBJECT(
+               'presented_key', presented_key,
+               'booking_bid', booking_bid,
+               'member_ids', member_ids,
+               'effective_period_date', sort_date
+             ) AS page_row
             FROM filtered
             ORDER BY sort_date DESC, sort_time DESC, sort_id DESC
             LIMIT $${limitIdx} OFFSET $${offsetIdx}
@@ -339,6 +365,12 @@ export async function queryPresentedPage(
     }
   }
 
+  const effectiveDateMap = new Map<string, string>();
+  for (const item of pageKeys) {
+    const ed = String(item.effective_period_date || '');
+    if (ed) effectiveDateMap.set(String(item.presented_key), ed);
+  }
+
   return {
     keys,
     bids: [...new Set(bids)],
@@ -360,6 +392,7 @@ export async function queryPresentedPage(
       batal: Number(row.sheet_batal || 0),
       hapus: hapusCount,
     },
+    effective_date_map: Object.fromEntries(effectiveDateMap.entries()),
   };
 }
 
@@ -385,6 +418,7 @@ export function emptyPresentedPlan(hapusCount: number): PresentedPagePlan {
     total_count: 0,
     summary: emptySummary(),
     sheet_counts: { proses: 0, selesai: 0, batal: 0, hapus: hapusCount },
+    effective_date_map: {},
   };
 }
 

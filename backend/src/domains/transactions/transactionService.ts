@@ -2747,8 +2747,9 @@ export async function getTransactions(
            r.booking_number,
            r.stay_type,
            r.stay_sequence,
-           r.status AS reservation_status,
-           r.stay_status AS reservation_stay_status,
+            r.status AS reservation_status,
+            r.stay_status AS reservation_stay_status,
+            r.cancelled_at AS reservation_cancelled_at,
            r.check_in::text AS check_in,
            r.check_out::text AS check_out,
            r.amount_paid AS reservation_amount_paid,
@@ -2789,7 +2790,7 @@ export async function getTransactions(
   const hapusCount = Number(hapusCountRes.rows[0]?.count_hapus || 0);
   const unboundedAllTime = !params.start_date && !params.end_date && targetSheet !== 'HAPUS';
   const hasSearch = Boolean(params.search && params.search.trim());
-  const usePresentedSqlPaging = targetSheet !== 'HAPUS' && (unboundedAllTime || hasSearch);
+  const usePresentedSqlPaging = targetSheet !== 'HAPUS';
 
   if (usePresentedSqlPaging) {
     const pagePlan = await queryPresentedPage(pool, params, hapusCount);
@@ -2814,6 +2815,7 @@ export async function getTransactions(
       );
     const candidates = allTimeCandidates.rows;
     const candidateIds = new Set(candidates.map((row: any) => Number(row.id)));
+    const sqlEffectiveDateMap = pagePlan.effective_date_map || {};
     let scopedRows = candidates;
     const expansion = siblingExpansionIds(candidates);
     if (candidates.length > 0) {
@@ -2845,7 +2847,14 @@ export async function getTransactions(
       scopedRows = [...byId.values()];
     }
     const groups = groupSaleLifecycles(scopedRows).filter((group) => {
-      if (!isLifecyclePrimaryInPeriod(group.primary.transaction_date, params.start_date, params.end_date)) {
+      const primary = group.primary as any;
+      const presentedKey = presentedListKey(group.primary, propertyId);
+      const effectiveDate = (primary.reservation_cancelled_at
+        && (primary.reservation_status === 'CANCELLED'
+            || primary.reservation_stay_status === 'CANCELLED'))
+        ? primary.reservation_cancelled_at?.toISOString?.().slice(0, 10) || primary.reservation_cancelled_at?.slice?.(0, 10)
+        : undefined;
+      if (!isLifecyclePrimaryInPeriod(effectiveDate || sqlEffectiveDateMap[presentedKey] || group.primary.transaction_date, params.start_date, params.end_date)) {
         return false;
       }
       if (params.transaction_status) {

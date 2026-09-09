@@ -344,9 +344,14 @@ function buildGroup(
     ...children.map((child) => child.operational_sheet),
     ...unattachedMembers.map((row) => operationalSheetOf(row)),
   ];
-  const statusSheets = lifetimeSheets.length > 0
-    ? lifetimeSheets
-    : (periodSheets.length > 0 ? periodSheets : members.map((row) => operationalSheetOf(row)));
+  const periodIsFullyBatal =
+    periodSheets.length > 0
+    && periodSheets.every((sheet) => sheet === 'BATAL');
+  const statusSheets: OperationalSheet[] = periodIsFullyBatal
+    ? ['BATAL']
+    : (lifetimeSheets.length > 0
+        ? lifetimeSheets
+        : (periodSheets.length > 0 ? periodSheets : members.map((row) => operationalSheetOf(row))));
 
   return {
     bid,

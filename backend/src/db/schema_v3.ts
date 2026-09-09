@@ -5040,5 +5040,48 @@ export async function initializeDatabase(pool: Pool) {
 
   // GL accounts & guest seeds removed — fresh DB must remain data-neutral (Rule 11)
 
+  // Migration: fo_1b_reservation_cancelled_at_v1
+  const fo1bCheck = await pool.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'fo_1b_reservation_cancelled_at_v1'`
+  );
+  if ((fo1bCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      ALTER TABLE reservations
+        ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+
+      WITH cancel_candidates AS (
+        SELECT DISTINCT ON (r.id)
+          r.id AS reservation_id,
+          al.timestamp AS cancel_timestamp
+        FROM reservations r
+        JOIN bookings b
+          ON b.id = r.booking_id
+        JOIN audit_logs al
+          ON al.record_id = r.id::text
+         AND al.property_id = b.property_id
+        WHERE al.module = 'PMS'
+          AND al.action = 'CANCEL'
+          AND al.entity = 'RESERVATION'
+          AND al.record_id IS NOT NULL
+          AND al.record_id ~ '^[0-9]+$'
+          AND (
+            UPPER(COALESCE(r.status, '')) = 'CANCELLED'
+            OR UPPER(COALESCE(r.stay_status, '')) = 'CANCELLED'
+          )
+        ORDER BY r.id, al.timestamp DESC
+      )
+      UPDATE reservations r
+      SET cancelled_at = cc.cancel_timestamp
+      FROM cancel_candidates cc
+      WHERE r.id = cc.reservation_id
+        AND r.cancelled_at IS NULL;
+    `);
+    await pool.query(`
+      INSERT INTO schema_migrations (version)
+      VALUES ('fo_1b_reservation_cancelled_at_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }

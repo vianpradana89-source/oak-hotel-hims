@@ -237,10 +237,10 @@ export function deriveReservationLinkedSaleSheet(row: {
 
 export function deriveLifecycleSheet(row: LifecycleMemberInput): OperationalSheet {
   if (row.deleted_at) return 'HAPUS';
-  const reservationSheet = deriveReservationLinkedSaleSheet(row);
-  if (reservationSheet) return reservationSheet;
   const status = upper(row.transaction_status);
   if (TERMINAL.has(status)) return 'BATAL';
+  const reservationSheet = deriveReservationLinkedSaleSheet(row);
+  if (reservationSheet) return reservationSheet;
   const type = upper(row.transaction_type);
   if (type === 'PURCHASE') {
     // PURCHASE-2A1: must match deriveOperationalSheet + PURCHASE_WORKFLOW_SHEET_SQL.
@@ -305,7 +305,9 @@ export function presentedTimeKey(value: unknown): string {
 }
 
 export function comparePresentedListRows(a: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }, b: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }): number {
-  const dateCmp = hotelDateOf(b.transaction_date).localeCompare(hotelDateOf(a.transaction_date));
+  const dateA = String((a as any).effective_period_date || a.transaction_date).slice(0, 10);
+  const dateB = String((b as any).effective_period_date || b.transaction_date).slice(0, 10);
+  const dateCmp = dateB.localeCompare(dateA);
   if (dateCmp !== 0) return dateCmp;
   const timeCmp = presentedTimeKey(b.transaction_time).localeCompare(presentedTimeKey(a.transaction_time));
   if (timeCmp !== 0) return timeCmp;
@@ -323,6 +325,11 @@ export function presentLifecyclePrimary<T extends LifecycleMemberInput>(group: S
 } {
   return {
     ...group.primary,
+    effective_period_date: (group.primary as any).reservation_cancelled_at
+      && ((group.primary as any).reservation_status === 'CANCELLED'
+          || (group.primary as any).reservation_stay_status === 'CANCELLED')
+      ? (group.primary as any).reservation_cancelled_at?.toISOString?.().slice(0, 10) || (group.primary as any).reservation_cancelled_at?.slice?.(0, 10)
+      : undefined,
     operational_sheet: group.sheet,
     net_amount: group.effectiveNet,
     effective_net_amount: group.effectiveNet,
