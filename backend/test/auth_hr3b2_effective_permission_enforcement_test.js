@@ -289,7 +289,7 @@ async function runTests() {
     const mappingExpect = [
       ['GET', '/api/reservations', 'Kalender', 'view'],
       ['POST', '/api/reservations', 'Kalender', 'edit'],
-      ['POST', '/api/reservations/12/cancel', 'Kalender', 'delete'],
+      ['POST', '/api/reservations/12/cancel', 'Kalender', 'edit'],
       ['GET', '/api/reservations/12/folio', 'Transaksi', 'view'],
       ['POST', '/api/deposits', 'Transaksi', 'edit'],
       ['GET', '/api/guests', 'Pelanggan', 'view'],
@@ -486,6 +486,51 @@ async function runTests() {
       'property-2 allow remains after property-1 DENY'
     );
     pass('User override on property A does not grant or deny access on property B');
+
+    console.log('\n--- G. CANCEL ROUTE SEMANTIC: EDIT NOT DELETE ---');
+    // Reservation cancel is a lifecycle mutation (BOOKED → CANCELLED), not a destructive delete.
+    // It MUST require Kalender.edit, NOT Kalender.delete, so Front Office roles can cancel
+    // without being granted broad delete permission.
+    const cancelMapping = matchOperationalAccessRule('/api/reservations/975/cancel', 'POST');
+    if (!cancelMapping) fail('POST /api/reservations/:id/cancel must match an operational access rule');
+    if (!cancelMapping.resources.includes('Kalender')) fail('Cancel route must map to Kalender resource');
+    if (cancelMapping.action !== 'edit') fail(`Cancel route must require 'edit' action, got '${cancelMapping.action}'`);
+    pass('POST /api/reservations/:id/cancel maps to Kalender/edit (lifecycle mutation, not delete)');
+
+    // Regression: generic DELETE_LIKE inference still works for other endpoints
+    const voidMapping = matchOperationalAccessRule('/api/transactions/1/void', 'POST');
+    if (!voidMapping) fail('POST /api/transactions/:id/void must match a rule');
+    if (voidMapping.action !== 'delete') fail(`Transaction void must require 'delete' action, got '${voidMapping.action}'`);
+    pass('POST /api/transactions/:id/void still requires delete (generic DELETE_LIKE intact)');
+
+    // Regression: hard-delete endpoints still use delete action
+    const hardDeleteMapping = matchOperationalAccessRule('/api/hrd/employees/1/hard-delete', 'DELETE');
+    if (!hardDeleteMapping) fail('DELETE /api/hrd/employees/:id/hard-delete must match a rule');
+    if (hardDeleteMapping.action !== 'delete') fail(`Hard-delete must require 'delete' action, got '${hardDeleteMapping.action}'`);
+    pass('DELETE /api/hrd/employees/:id/hard-delete still requires delete');
+
+    // Cancel with edit ALLOW + delete DENY → should PASS (Front Office can cancel)
+    await clearOverrides(denyUser.id, 1);
+    await override(denyUser.id, 1, [
+      { resource: 'Kalender', action: 'edit', effect: 'ALLOW' },
+      { resource: 'Kalender', action: 'delete', effect: 'DENY' },
+    ]);
+    const cancelWithEditAllow = await makeRequest('POST', '/api/reservations/975/cancel', { property_id: 1 }, denyToken);
+    // Should NOT be 403 due to missing delete permission
+    if (cancelWithEditAllow.status === 403) {
+      fail(`Cancel should succeed when edit is ALLOW and delete is DENY; got ${cancelWithEditAllow.status}: ${JSON.stringify(cancelWithEditAllow.body)}`);
+    }
+    pass('Cancel route passes when Kalender.edit ALLOW + Kalender.delete DENY');
+
+    // Cancel with edit DENY + delete ALLOW → should FAIL with 403
+    await clearOverrides(denyUser.id, 1);
+    await override(denyUser.id, 1, [
+      { resource: 'Kalender', action: 'edit', effect: 'DENY' },
+      { resource: 'Kalender', action: 'delete', effect: 'ALLOW' },
+    ]);
+    const cancelWithEditDeny = await makeRequest('POST', '/api/reservations/975/cancel', { property_id: 1 }, denyToken);
+    assertDenied(cancelWithEditDeny, 'Cancel route blocked when Kalender.edit DENY even if delete ALLOW');
+    pass('Cancel route blocked when Kalender.edit DENY (delete ALLOW is irrelevant)');
 
     console.log('\n=======================================================');
     console.log(`ALL AUTH-HR-3B2 ENFORCEMENT TESTS PASSED (${passed} assertions)`);

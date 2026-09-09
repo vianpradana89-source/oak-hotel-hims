@@ -43,6 +43,7 @@ const DELETE_LIKE = [
  * First match wins. Unlisted /api routes stay on their existing auth helpers.
  */
 export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
+  { pattern: /^\/api\/reservations\/[^/]+\/cancel$/, resources: ['Kalender'], action: 'edit', methods: ['POST'] },
   { pattern: /^\/api\/reservations\/[^/]+\/(folio|payments)/, resources: ['Transaksi'] },
   { pattern: /^\/api\/deposits/, resources: ['Transaksi'] },
   { pattern: /^\/api\/transactions/, resources: ['Transaksi'] },

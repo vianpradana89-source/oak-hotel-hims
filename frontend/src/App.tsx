@@ -2781,7 +2781,8 @@ function AppContent() {
   );
   const canCheckIn = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
   const canCheckOut = activeReservationStatus === 'CHECKED_IN';
-  const canCancel = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus);
+  const canCancel = !['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(activeReservationStatus)
+    && effectiveAccess?.effective['Kalender']?.edit?.allowed === true;
   const canPay = activeReservationStatus !== 'CANCELLED';
   const canChangeCheckoutDate = canShowCheckoutDateChange(activeReservationStatus);
 
