@@ -753,6 +753,14 @@ export default function QuickBookingModal({
     }
   }, [grandTotal, channelType]);
 
+  // Deterministic channel switch: zero payment on OTA switch unless user touched it
+  const handleChannelTypeChange = useCallback((next: 'WALKIN' | 'OTA') => {
+    if (next === 'OTA' && !isPaymentTouchedRef.current) {
+      setAmountPaid(0);
+    }
+    setChannelType(next);
+  }, []);
+
   // CRM guest selection
   const handleSelectGuest = (guest: Guest) => {
     setSelectedCrmGuest(guest);
@@ -1423,7 +1431,7 @@ export default function QuickBookingModal({
                 <div className="grid grid-cols-2 gap-2 p-1 bg-stone-100 rounded-xl">
                   <button
                     type="button"
-                    onClick={() => setChannelType('WALKIN')}
+                    onClick={() => handleChannelTypeChange('WALKIN')}
                     className={'py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
                       channelType === 'WALKIN'
                         ? 'bg-emerald-800 text-white shadow-sm'
@@ -1434,7 +1442,7 @@ export default function QuickBookingModal({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setChannelType('OTA')}
+                    onClick={() => handleChannelTypeChange('OTA')}
                     className={'py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
                       channelType === 'OTA'
                         ? 'bg-emerald-800 text-white shadow-sm'

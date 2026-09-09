@@ -100,6 +100,44 @@ check(
   'D: Backend must exempt CASH from evidence requirement'
 );
 
+// --- FIX 5: Deterministic channel switch handler ---
+check(
+  modalSrc.includes('handleChannelTypeChange'),
+  'E: Channel switch must use a dedicated handler function'
+);
+check(
+  /handleChannelTypeChange\s*=\s*useCallback/.test(modalSrc),
+  'E: Handler must be wrapped in useCallback for stable reference'
+);
+check(
+  /next\s*===\s*'OTA'/.test(modalSrc),
+  'E: Handler must check next === OTA'
+);
+check(
+  /!isPaymentTouchedRef\.current/.test(modalSrc) && /setAmountPaid\(0\)/.test(modalSrc),
+  'E: Handler must zero amountPaid when switching to OTA without touch'
+);
+check(
+  /setChannelType\(next\)/.test(modalSrc),
+  'E: Handler must call setChannelType(next) at the end'
+);
+check(
+  !modalSrc.includes("onClick={() => setChannelType('OTA')}"),
+  'E: OTA button must NOT directly call setChannelType — must use handler'
+);
+check(
+  !modalSrc.includes("onClick={() => setChannelType('WALKIN')}"),
+  'E: WALKIN button must NOT directly call setChannelType — must use handler'
+);
+check(
+  modalSrc.includes("onClick={() => handleChannelTypeChange('OTA')}"),
+  'E: OTA button must use handleChannelTypeChange handler'
+);
+check(
+  modalSrc.includes("onClick={() => handleChannelTypeChange('WALKIN')}"),
+  'E: WALKIN button must use handleChannelTypeChange handler'
+);
+
 // ============================================================
 // LOGIC CONTRACT VERIFICATION
 // ============================================================
