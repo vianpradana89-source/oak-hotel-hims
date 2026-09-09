@@ -8,7 +8,7 @@ import type {
   OperationalStatus,
   VerificationStatus
 } from './transactionDomainTypes';
-import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass, getPurchaseReceivingClass, getPurchaseVerificationClass, getPurchaseWorkflowClass } from './transactionDomainTypes';
+import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass, getPurchaseReceivingClass, getPurchaseVerificationClass, getPurchaseWorkflowClass, isTransactionEditable } from './transactionDomainTypes';
 import {
   flattenAllTabRows,
   formatStayShortDate,
@@ -1915,7 +1915,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                   e.stopPropagation();
                                   await handlePurchaseLifecycleMutation(t, 'SET_RECEIVING', e.target.value);
                                 }}
-                                disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || !isTransactionEditable(t)}
                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${rc.bg} ${rc.border} ${rc.text} hover:bg-opacity-80`}
                               >
                                 <option value="BELUM_DITERIMA">Belum Diterima</option>
@@ -1936,7 +1936,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                   e.stopPropagation();
                                   await handlePurchaseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
                                 }}
-                                disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
                               >
                                 <option value="UNVERIFIED">Belum Terverifikasi</option>
@@ -2204,7 +2204,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                       e.stopPropagation();
                                       await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
                                     }}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
                                     className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
                                   >
                                     <option value="UNVERIFIED">Belum Terverifikasi</option>

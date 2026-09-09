@@ -3,7 +3,9 @@ import {
   formatReservationStayType,
   stayTypeBadgeClass,
   getPurchaseReceivingClass,
-  getPurchaseWorkflowClass
+  getPurchaseWorkflowClass,
+  isTransactionEditable,
+  isTransactionVerificationEditable
 } from './transactionDomainTypes';
 import type {
   TransactionRecord,
@@ -491,7 +493,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <button
                       type="button"
                       onClick={() => setShowVerifyModal(true)}
-                      disabled={tx.operational_sheet === 'BATAL' || tx.operational_sheet === 'HAPUS'}
+                      disabled={!isTransactionVerificationEditable(tx)}
                       className="text-[10px] text-slate-600 underline hover:text-emerald-800 font-semibold cursor-pointer ml-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
                     >
                       Ubah
@@ -509,7 +511,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                           <select
                             value={tx.receiving_status || 'BELUM_DITERIMA'}
                             onChange={(e) => handleReceivingChange(e.target.value as ReceivingStatus)}
-                            disabled={isUpdatingReceiving || tx.operational_sheet === 'BATAL' || tx.operational_sheet === 'HAPUS'}
+                            disabled={isUpdatingReceiving || !isTransactionEditable(tx)}
                             className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${rc.bg} ${rc.border} ${rc.text} border hover:bg-opacity-80 disabled:opacity-60`}
                           >
                             <option value="BELUM_DITERIMA">Belum Diterima</option>

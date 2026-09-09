@@ -152,22 +152,20 @@ if (expenseBlock) {
 }
 
 // ============================================================================
-// Test N: Terminal state controls — VERIFICATION disabled for BATAL/HAPUS
-// (WORKFLOW uses no-op for HAPUS via backend; inline dropdown reflects server state)
+// Test N: Terminal state controls — VERIFICATION disabled for terminal states
+// (Guard now uses isTransactionEditable helper instead of raw checks)
 // ============================================================================
 console.log('\n--- Test N: Terminal state controls ---');
 if (expenseBlock) {
   const verificationSection = expenseBlock[0].match(/SET_VERIFICATION[\s\S]{0,300}/);
   if (verificationSection) {
-    check(/operational_sheet.*BATAL/.test(verificationSection[0]),
-      'N1. VERIFICATION dropdown disabled for BATAL status');
-    check(/operational_sheet.*HAPUS/.test(verificationSection[0]),
-      'N2. VERIFICATION dropdown disabled for HAPUS status');
+    check(/isTransactionEditable/.test(verificationSection[0]),
+      'N1. VERIFICATION dropdown uses isTransactionEditable helper for editability');
   }
   const workflowSection = expenseBlock[0].match(/SET_WORKFLOW[\s\S]{0,300}/);
   if (workflowSection) {
     check(/lifecycleSaving.*SET_WORKFLOW/.test(workflowSection[0]),
-      'N3. WORKFLOW dropdown disabled during save operation');
+      'N2. WORKFLOW dropdown disabled during save operation');
   }
 }
 

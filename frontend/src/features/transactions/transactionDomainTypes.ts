@@ -521,6 +521,59 @@ export function isReportingEligible(sheet: OperationalSheet): boolean {
   return sheet === 'SELESAI';
 }
 
+// ============================================================================
+// EDIT-1A: Unified Transaction Editability Contract
+// ============================================================================
+
+/**
+ * EDIT-1A canonical editability rule for operational edit domains PURCHASE, EXPENSE, INCOME.
+ *
+ * Edit / Revisi action is permitted ONLY when operational_sheet === 'PROSES'.
+ * Terminal states SELESAI, BATAL, HAPUS are always read-only.
+ *
+ * Financial status (transaction_status === 'POSTED') does NOT override this rule —
+ * an operational workflow state and a financial posting are independent dimensions.
+ */
+export function isTransactionEditable(tx: {
+  operational_sheet?: OperationalSheet | null;
+}): boolean {
+  return tx.operational_sheet === 'PROSES';
+}
+
+/**
+ * EDIT-1A domain-scope helper.
+ *
+ * Returns true for transaction types that are subject to the unified
+ * PROSES-only editability contract (PURCHASE, EXPENSE, INCOME).
+ *
+ * Transaction types outside this domain (e.g. SALE) preserve their
+ * existing verification behavior and must NOT be gated by
+ * isTransactionEditable().
+ */
+export function isOperationalEditDomainType(transactionType?: string | null): boolean {
+  return transactionType === 'PURCHASE' || transactionType === 'EXPENSE' || transactionType === 'INCOME';
+}
+
+/**
+ * EDIT-1A verification eligibility helper for the drawer's generic
+ * "Ubah" verification button.
+ *
+ * For PURCHASE / EXPENSE / INCOME: governed by PROSES-only editability.
+ * For other types (SALE, etc.): governed by BATAL/HAPUS terminal guard.
+ *
+ * This is the single source of truth consumed by TransactionDetailDrawer
+ * to avoid duplicating the conditional logic in the component.
+ */
+export function isTransactionVerificationEditable(tx: {
+  transaction_type?: string | null;
+  operational_sheet?: OperationalSheet | null;
+}): boolean {
+  if (isOperationalEditDomainType(tx.transaction_type)) {
+    return isTransactionEditable(tx);
+  }
+  return tx.operational_sheet !== 'BATAL' && tx.operational_sheet !== 'HAPUS';
+}
+
 /**
  * Purchase lifecycle color helpers for inline inline controls.
  */

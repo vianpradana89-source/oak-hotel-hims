@@ -44,6 +44,7 @@
     "test:purchase-lifecycle": "node test/purchase_lifecycle_test.ts",
     "test:purchase-expandable": "node test/purchase_expandable_test.ts",
     "test:expense-expandable": "node test/expense_expandable_test.ts",
+    "test:edit-1a-editability": "node --experimental-strip-types test/edit_1a_editability_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
