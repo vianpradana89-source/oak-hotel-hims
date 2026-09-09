@@ -14,6 +14,7 @@ import {
   CreateManualTransactionDto,
   CreatePurchaseTransactionDto,
   CreateExpenseTransactionDto,
+  UpdateExpenseTransactionDto,
   CreateIncomeTransactionDto,
   VerifyTransactionDto,
   CreateCustomCategoryDto,
@@ -1551,6 +1552,321 @@ export async function createExpenseTransaction(
 }
 
 /**
+ * EDIT-1B: Update an existing Expense transaction.
+ *
+ * Business rules:
+ * - Transaction must be EXPENSE type, property-scoped
+ * - Operational workflow must be 'PROSES' (derived from expense_workflow_status)
+ * - Rejects SELESAI/VOIDED/CANCELLED/REVERSED/HAPUS with 409
+ * - Preserves: id, transaction_no, transaction_type, source_type, created_at, created_by
+ * - Updates mutable fields only
+ * - Synchronizes payment_transactions amount+method atomically (no duplicate rows)
+ * - Resets verification to UNVERIFIED and clears verifier metadata
+ * - Writes EXPENSE_UPDATED audit event
+ */
+export async function updateExpenseTransaction(
+  pool: Pool,
+  id: number | string,
+  dto: UpdateExpenseTransactionDto
+): Promise<TransactionRow> {
+  const propertyId = Number(dto.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    const err: any = new Error('property_id wajib diisi dan harus valid');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const amount = Number(dto.amount);
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isInteger(amount)) {
+    const err: any = new Error('Nominal pengeluaran harus berupa bilangan bulat integer IDR > 0');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!dto.category_code || !dto.category_code.trim()) {
+    const err: any = new Error('Kategori pengeluaran wajib dipilih');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!dto.description || !dto.description.trim()) {
+    const err: any = new Error('Keterangan pengeluaran wajib diisi');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Row-lock and validate
+    const prevRes = await client.query(
+      `SELECT id, transaction_no, transaction_type, transaction_status,
+              verification_status, expense_workflow_status,
+              verified_by_user_id, verified_by_name_snapshot, verified_at, deleted_at,
+              party_name, description, amount, payment_method,
+              category_code, department_code, source_reference, notes,
+              recipient_bank_name, recipient_bank_account, recipient_bank_holder
+       FROM transactions
+       WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+      [id, propertyId]
+    );
+
+    if ((prevRes.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const prev = prevRes.rows[0];
+
+    if (String(prev.transaction_type || '').toUpperCase() !== 'EXPENSE') {
+      const err: any = new Error(`Transaksi #${id} bukan tipe EXPENSE`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    assertNonTerminal(prev.transaction_status);
+
+    if (prev.deleted_at) {
+      const err: any = new Error(`Transaksi #${id} telah dihapus dan tidak dapat diubah.`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // 2. PROSES-only enforcement
+    const workflowStatus = String(prev.expense_workflow_status || 'PROSES').toUpperCase();
+    if (workflowStatus === 'SELESAI') {
+      const err: any = new Error('Transaksi pengeluaran ini sudah SELESAI. Ubah workflow kembali ke PROSES terlebih dahulu.');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (workflowStatus === 'BATAL') {
+      const err: any = new Error('Transaksi pengeluaran ini telah dibatalkan dan tidak dapat diedit.');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (workflowStatus === 'HAPUS') {
+      const err: any = new Error('Transaksi pengeluaran ini telah dihapus dan tidak dapat diedit.');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // 3. Resolve category meta (for name fallback, same as create)
+    const catMeta = await getCategoryMeta(pool, propertyId, dto.category_code, 'EXPENSE');
+    const categoryName = dto.category_name || catMeta.name;
+    const departmentCode = dto.department_code || catMeta.defaultDept;
+    const paymentMethod = dto.payment_method || prev.payment_method || 'CASH';
+
+    // 3.5. Validate supplier_id if provided (must belong to same property)
+    let supplierId = dto.supplier_id ?? null;
+    if (supplierId !== null && supplierId !== undefined) {
+      const supCheck = await client.query(
+        `SELECT id FROM suppliers WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL`,
+        [supplierId, propertyId]
+      );
+      if ((supCheck.rowCount ?? 0) === 0) {
+        const err: any = new Error(`Supplier #${supplierId} bukan milik properti #${propertyId}`);
+        err.statusCode = 403;
+        err.code = 'CROSS_PROPERTY_SUPPLIER';
+        throw err;
+      }
+    }
+
+    // 3.6. Validate transaction_date if provided (YYYY-MM-DD format)
+    let newTransactionDate = prev.transaction_date;
+    if (dto.transaction_date) {
+      const dateStr = String(dto.transaction_date).trim();
+      // Validate YYYY-MM-DD format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        const err: any = new Error('Format tanggal transaksi harus YYYY-MM-DD');
+        err.statusCode = 400;
+        throw err;
+      }
+      // Validate it's a real date
+      const parsed = new Date(dateStr + 'T00:00:00Z');
+      if (isNaN(parsed.getTime())) {
+        const err: any = new Error('Tanggal transaksi tidak valid');
+        err.statusCode = 400;
+        throw err;
+      }
+      newTransactionDate = dateStr;
+    }
+
+    // 4. Snapshot old mutable values for audit
+    const oldSnapshot = {
+      transaction_date: prev.transaction_date,
+      supplier_id: prev.supplier_id,
+      party_name: prev.party_name,
+      description: prev.description,
+      amount: prev.amount,
+      payment_method: prev.payment_method,
+      category_code: prev.category_code,
+      department_code: prev.department_code,
+      source_reference: prev.source_reference,
+      notes: prev.notes,
+      recipient_bank_name: prev.recipient_bank_name,
+      recipient_bank_account: prev.recipient_bank_account,
+      recipient_bank_holder: prev.recipient_bank_holder,
+    };
+
+    // 5. Update transaction header
+    const updateRes = await client.query(
+      `UPDATE transactions SET
+          category_code = $1,
+          category_name = $2,
+          department_code = $3,
+          supplier_id = $4,
+          party_name = $5,
+          description = $6,
+          amount = $7,
+          net_amount = $7,
+          payment_method = $8,
+          source_reference = $9,
+          notes = $10,
+          recipient_bank_name = $11,
+          recipient_bank_account = $12,
+          recipient_bank_holder = $13,
+          transaction_date = $14,
+          verification_status = 'UNVERIFIED',
+          verified_by_user_id = NULL,
+          verified_by_name_snapshot = NULL,
+          verified_at = NULL,
+          updated_at = NOW()
+        WHERE id = $15 AND property_id = $16
+        RETURNING *`,
+      [
+        dto.category_code,
+        categoryName,
+        departmentCode,
+        supplierId,
+        dto.party_name?.trim() || null,
+        dto.description.trim(),
+        amount,
+        paymentMethod,
+        dto.source_reference?.trim() || null,
+        dto.notes?.trim() || null,
+        dto.recipient_bank_name?.trim() || null,
+        dto.recipient_bank_account?.trim() || null,
+        dto.recipient_bank_holder?.trim() || null,
+        newTransactionDate,
+        id,
+        propertyId,
+      ]
+    );
+
+    if ((updateRes.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Transaksi #${id} tidak ditemukan setelah validasi`);
+      err.statusCode = 404;
+      throw err;
+    }
+
+    // 6. Check authoritative payment rows (SUCCESS only, locked for update)
+    const payRes = await client.query(
+      `SELECT id, amount, payment_method, reference_code, status
+       FROM payment_transactions
+       WHERE property_id = $1 AND transaction_id = $2 AND transaction_type = 'PAYMENT'
+           AND status = 'SUCCESS'
+       ORDER BY created_at ASC
+       FOR UPDATE`,
+      [propertyId, id]
+    );
+
+    const successfulPayments = payRes.rows;
+    const paymentCount = successfulPayments.length;
+    const existingPaymentStatus = String(prev.payment_status || 'UNPAID').toUpperCase();
+
+    if (existingPaymentStatus === 'PAID') {
+      if (paymentCount === 0) {
+        // CASE B: PAID but zero authoritative SUCCESS payments -> integrity error
+        const err: any = new Error(
+          'EXPENSE_PAYMENT_INTEGRITY_ERROR: Transaksi berstatus PAID tetapi pembayaran authoritative tidak ditemukan.'
+        );
+        err.statusCode = 409;
+        throw err;
+      }
+      if (paymentCount > 1) {
+        // CASE C: Multiple successful payments -> not safe to edit directly
+        const err: any = new Error(
+          'EXPENSE_PAYMENT_INTEGRITY_ERROR: Transaksi memiliki lebih dari satu pembayaran dan tidak aman diedit langsung.'
+        );
+        err.statusCode = 409;
+        throw err;
+      }
+      // CASE A: Exactly one authoritative SUCCESS payment -> update it in place
+      const payRow = successfulPayments[0];
+      await client.query(
+        `UPDATE payment_transactions SET
+           amount = $1,
+           payment_method = $2,
+           updated_at = NOW()
+         WHERE id = $3 AND property_id = $4`,
+        [amount, paymentMethod, payRow.id, propertyId]
+      );
+    } else {
+      // CASE D: UNPAID or other non-PAID status
+      // Do NOT create payment during edit — preserve payment history as-is
+      if (paymentCount > 0) {
+        // Edge case: UNPAID but has SUCCESS payments -> integrity issue
+        const err: any = new Error(
+          'EXPENSE_PAYMENT_INTEGRITY_ERROR: Transaksi berstatus UNPAID namun memiliki pembayaran SUCCESS. Periksa integritas data.'
+        );
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+
+    // 7. Audit log
+    const actor = dto.actor_name || dto.actor_user_id || 'Staff';
+    await client.query(
+      `INSERT INTO audit_logs (
+        module, action, entity, record_id, new_value, property_id, timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        'TRANSACTIONS',
+        'EXPENSE_UPDATED',
+        'transactions',
+        String(id),
+        JSON.stringify({
+          transaction_no: prev.transaction_no,
+          old: oldSnapshot,
+          new: {
+            party_name: dto.party_name?.trim() || null,
+            description: dto.description.trim(),
+            amount,
+            payment_method: paymentMethod,
+            category_code: dto.category_code,
+            department_code: departmentCode,
+            source_reference: dto.source_reference?.trim() || null,
+            notes: dto.notes?.trim() || null,
+            recipient_bank_name: dto.recipient_bank_name?.trim() || null,
+            recipient_bank_account: dto.recipient_bank_account?.trim() || null,
+            recipient_bank_holder: dto.recipient_bank_holder?.trim() || null,
+          },
+          actor,
+          payment_rows_updated: paymentCount,
+          payment_case: existingPaymentStatus === 'PAID'
+            ? (paymentCount === 1 ? 'A_SINGLE_PAYMENT_UPDATED' : 'B_OR_C_REJECTED')
+            : (paymentCount === 0 ? 'D_UNPAID_NO_PAYMENT_TOUCHED' : 'INTEGRITY_ERROR'),
+          transaction_date_changed: oldSnapshot.transaction_date !== newTransactionDate,
+          supplier_id_changed: oldSnapshot.supplier_id !== supplierId,
+        }),
+        propertyId,
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return await getTransactionById(pool, propertyId, id);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * TRANSACTION-2D: Dedicated Pemasukan Manual (Income) Creation Workflow.
  */
 export async function createIncomeTransaction(
@@ -1857,11 +2173,16 @@ export async function verifyTransaction(
         propertyId
       ]
     );
-
     await client.query('COMMIT');
-    return await getTransactionById(pool, propertyId, id);
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+
+    return canonicalRow;
+  } catch (err: any) {
+    // Always roll back on ANY error to maintain atomicity
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Ignore rollback errors if connection is already dead
+    }
     throw err;
   } finally {
     client.release();

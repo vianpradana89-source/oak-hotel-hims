@@ -341,6 +341,27 @@ export interface CreateExpenseTransactionDto {
   recipient_bank_holder?: string | null;
 }
 
+/** EDIT-1B: DTO for updating an existing Expense transaction (PROSES only) */
+export interface UpdateExpenseTransactionDto {
+  property_id: number;
+  transaction_date?: string;
+  category_code: string;
+  category_name?: string;
+  department_code?: string;
+  supplier_id?: number | null;
+  party_name?: string | null;
+  description: string;
+  amount: number;
+  payment_method?: string | null;
+  source_reference?: string | null;
+  notes?: string | null;
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}
+
 export interface CreateIncomeTransactionDto {
   property_id: number;
   transaction_date?: string;

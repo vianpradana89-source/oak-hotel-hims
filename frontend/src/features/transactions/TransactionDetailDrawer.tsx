@@ -95,6 +95,8 @@ interface TransactionDetailDrawerProps {
   onClose: () => void;
   onOpenVoidModal?: (tx: TransactionRecord) => void;
   onOpenSoftDeleteModal?: (tx: TransactionRecord) => void;
+  /** EDIT-1B: Open expense editor in edit mode */
+  onEditExpense?: (tx: TransactionRecord) => void;
   onNavigateToReservation?: (reservationId: number) => void;
   onNavigateToFolio?: (reservationId: number) => void;
   onTransactionUpdated?: () => void;
@@ -109,6 +111,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   onClose,
   onOpenVoidModal,
   onOpenSoftDeleteModal,
+  onEditExpense,
   onNavigateToReservation,
   onNavigateToFolio,
   onTransactionUpdated
@@ -1048,6 +1051,20 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 Batalkan (Void)
               </button>
             )}
+
+            {/* EDIT-1B: Edit/Revisi button for EXPENSE when editable */}
+            {tx &&
+              tx.transaction_type === 'EXPENSE' &&
+              isTransactionEditable(tx) &&
+              onEditExpense && (
+                <button
+                  type="button"
+                  onClick={() => onEditExpense(tx)}
+                  className="px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 bg-emerald-50 border border-emerald-200 rounded-xl transition-colors cursor-pointer"
+                >
+                  Edit/Revisi
+                </button>
+              )}
 
             {tx &&
               !tx.deleted_at &&

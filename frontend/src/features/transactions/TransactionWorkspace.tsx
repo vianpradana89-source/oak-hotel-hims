@@ -71,6 +71,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 }) => {
   // Editor View Mode (null = table view, 'PURCHASE' | 'EXPENSE' | 'INCOME' = dedicated full editors)
   const [activeEditor, setActiveEditor] = useState<'PURCHASE' | 'EXPENSE' | 'INCOME' | null>(null);
+  /** EDIT-1B: Store transaction id for edit mode */
+  const [editingExpenseId, setEditingExpenseId] = useState<number | string | null>(null);
+  /** EDIT-1B: Store transaction data for edit mode pre-population */
+  const [editingExpenseData, setEditingExpenseData] = useState<TransactionRecord | null>(null);
 
   // LEVEL 1 — TRANSACTION TYPE (Default: SALE)
   const [activeTab, setActiveTab] = useState<'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL'>('SALE');
@@ -343,6 +347,23 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setDeleteReason('');
     setSoftDeleteError(null);
     setSoftDeleteModalOpen(true);
+  };
+
+  /** EDIT-1B: Open expense in edit mode */
+  const openExpenseEditor = async (tx: TransactionRecord) => {
+    // Load full detail for pre-population
+    try {
+      const detail = await fetchTransactionDetailApi(tx.id, propertyId);
+      setEditingExpenseData(detail);
+      setEditingExpenseId(tx.id);
+      setActiveEditor('EXPENSE');
+    } catch (err) {
+      console.error('Failed to load expense detail for editing:', err);
+      // Fallback: use list data
+      setEditingExpenseData(tx);
+      setEditingExpenseId(tx.id);
+      setActiveEditor('EXPENSE');
+    }
   };
 
   // PURCHASE-2A3: inline lifecycle mutation handler with per-cell loading state
@@ -1126,11 +1147,19 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       <ExpenseTransactionEditor
         propertyId={propertyId}
         actorName={currentStaffName}
-        onBack={() => setActiveEditor(null)}
-        onSuccess={(createdId) => {
+        onBack={() => {
           setActiveEditor(null);
+          setEditingExpenseId(null);
+          setEditingExpenseData(null);
+        }}
+        editMode={!!editingExpenseId}
+        initialData={editingExpenseData}
+        onSuccess={(updatedId) => {
+          setActiveEditor(null);
+          setEditingExpenseId(null);
+          setEditingExpenseData(null);
           loadTransactions();
-          openDetailDrawer(createdId);
+          openDetailDrawer(updatedId);
         }}
       />
     );
@@ -2257,6 +2286,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 >
                                   Detail
                                 </button>
+                                {isTransactionEditable(t) && (
+                                  <button
+                                    onClick={() => openExpenseEditor(t)}
+                                    className="px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer border border-emerald-200"
+                                  >
+                                    Edit/Revisi
+                                  </button>
+                                )}
                                 {isEligibleForSoftDelete(t) && (
                                   <button
                                     onClick={() => openSoftDeleteModal(t)}
@@ -2837,6 +2874,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         onClose={() => {
           setDetailDrawerOpen(false);
           setSelectedTxIdForDetail(null);
+        }}
+        onEditExpense={(tx) => {
+          setDetailDrawerOpen(false);
+          openExpenseEditor(tx);
         }}
         onOpenVoidModal={(tx) => {
           setDetailDrawerOpen(false);

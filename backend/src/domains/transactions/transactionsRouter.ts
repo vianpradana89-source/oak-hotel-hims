@@ -9,6 +9,7 @@ import {
   createManualTransaction,
   createPurchaseTransaction,
   createExpenseTransaction,
+  updateExpenseTransaction,
   createIncomeTransaction,
   verifyTransaction,
   updatePurchaseReceivingStatus,
@@ -957,6 +958,56 @@ export function createTransactionsRouter(pool: Pool): Router {
       });
     } catch (err: any) {
       return res.status(err.statusCode || 500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  });
+
+  /**
+   * PATCH /api/transactions/expenses/:id
+   * EDIT-1B: Update existing Expense transaction (PROSES only).
+   * Atomic payment synchronization, verification reset, audit log.
+   */
+  router.patch('/expenses/:id', async (req: Request, res: Response) => {
+    try {
+      const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+      if (!scoped) return;
+
+      const id = req.params.id;
+      const body = req.body;
+
+      // actor metadata
+      const actorName = body.actor_name || scoped.user?.full_name || scoped.user?.username || null;
+      const actorUserId = body.actor_user_id || String(scoped.user?.id) || null;
+
+      const updated = await updateExpenseTransaction(pool, id, {
+        property_id: scoped.propertyId,
+        transaction_date: body.transaction_date,
+        category_code: body.category_code,
+        category_name: body.category_name,
+        department_code: body.department_code,
+        supplier_id: body.supplier_id ?? null,
+        party_name: body.party_name ?? null,
+        description: body.description,
+        amount: Number(body.amount),
+        payment_method: body.payment_method || null,
+        source_reference: body.source_reference || null,
+        notes: body.notes || null,
+        recipient_bank_name: body.recipient_bank_name || null,
+        recipient_bank_account: body.recipient_bank_account || null,
+        recipient_bank_holder: body.recipient_bank_holder || null,
+        actor_name: actorName,
+        actor_user_id: actorUserId,
+      });
+
+      return res.json({
+        success: true,
+        message: 'Transaksi pengeluaran berhasil diperbarui',
+        data: updated
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({
         success: false,
         error: err.message
       });

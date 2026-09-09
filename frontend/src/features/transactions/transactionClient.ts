@@ -328,6 +328,33 @@ export async function createExpenseTransactionApi(data: {
   });
 }
 
+/** EDIT-1B: Update existing Expense transaction */
+export async function updateExpenseTransactionApi(id: number | string, data: {
+  property_id: number;
+  transaction_date?: string;
+  category_code: string;
+  category_name?: string;
+  department_code?: string;
+  supplier_id?: number | string | null;
+  party_name?: string | null;
+  description: string;
+  amount: number;
+  payment_method?: string | null;
+  source_reference?: string | null;
+  notes?: string | null;
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}): Promise<TransactionRecord> {
+  return await fetchJson<TransactionRecord>(`${API_BASE}/expenses/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+}
+
 export async function createIncomeTransactionApi(data: {
   property_id: number;
   transaction_date?: string;
