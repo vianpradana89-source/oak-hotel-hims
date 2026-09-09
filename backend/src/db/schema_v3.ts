@@ -1029,6 +1029,7 @@ export async function initializeDatabase(pool: Pool) {
     // Ensure idempotent DDL: column, FK constraint, and indexes
     await auditMigrationClient.query(`
       ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS property_id INTEGER;
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS actor_user_id VARCHAR(255);
       DO $$ BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_property'
