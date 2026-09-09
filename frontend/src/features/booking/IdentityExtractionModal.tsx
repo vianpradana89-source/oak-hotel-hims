@@ -42,28 +42,31 @@ export interface NameMismatchInfo {
 }
 
 interface Props {
-  isOpen: boolean;
-  onClose: () => void;
-  guestName?: string;
-  guestPhone?: string;
-  guestId?: number | null;
-  propertyId?: number;
-  onIdentityConfirmed?: (data: ExtractedIdentityData, savedGuest?: any) => void;
-  onScanSuccess?: (parsedData: ExtractedIdentityData) => void;
-  onSelectExistingGuest?: (candidate: DuplicateCandidateInfo) => void;
-}
+   isOpen: boolean;
+   onClose: () => void;
+   guestName?: string;
+   guestPhone?: string;
+   guestId?: number | null;
+   propertyId?: number;
+   /** Context for identity confirm: 'CRM_EDIT' (default) or 'CHECKIN_IDENTITY_SCAN' (disables phone fallback). */
+   context?: 'CRM_EDIT' | 'CHECKIN_IDENTITY_SCAN';
+   onIdentityConfirmed?: (data: ExtractedIdentityData, savedGuest?: any) => void;
+   onScanSuccess?: (parsedData: ExtractedIdentityData) => void;
+   onSelectExistingGuest?: (candidate: DuplicateCandidateInfo) => void;
+ }
 
 export default function IdentityExtractionModal({
-  isOpen,
-  onClose,
-  guestName = '',
-  guestPhone,
-  guestId,
-  propertyId = 1,
-  onIdentityConfirmed,
-  onScanSuccess,
-  onSelectExistingGuest
-}: Props) {
+   isOpen,
+   onClose,
+   guestName = '',
+   guestPhone,
+   guestId,
+   propertyId = 1,
+   context = 'CRM_EDIT',
+   onIdentityConfirmed,
+   onScanSuccess,
+   onSelectExistingGuest
+ }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
@@ -422,28 +425,29 @@ export default function IdentityExtractionModal({
 
       // Persist directly to canonical CRM guests table
       const confirmPayload = {
-        guest_id: guestId || null,
-        property_id: propertyId || 1,
-        name: finalData.full_name,
-        nik: finalData.identity_number,
-        phone: guestPhone || undefined,
-        birth_place: finalData.birth_place || null,
-        birth_date: finalData.birth_date || null,
-        gender: finalData.gender || null,
-        address: finalData.address || null,
-        rt_rw: finalData.rt_rw || null,
-        village_kelurahan: finalData.village_kelurahan || null,
-        district_kecamatan: finalData.district_kecamatan || null,
-        religion: finalData.religion || null,
-        marital_status: finalData.marital_status || null,
-        occupation: finalData.occupation || null,
-        citizenship: finalData.citizenship || null,
-        valid_until: finalData.valid_until || null,
-        document_upload_id: finalData.document_upload_id || null,
-        identity_type: 'KTP',
-        confidence: finalData.confidence,
-        ocr_provider: finalData.provider
-      };
+         guest_id: guestId || null,
+         property_id: propertyId || 1,
+         name: finalData.full_name,
+         nik: finalData.identity_number,
+         phone: guestPhone || undefined,
+         birth_place: finalData.birth_place || null,
+         birth_date: finalData.birth_date || null,
+         gender: finalData.gender || null,
+         address: finalData.address || null,
+         rt_rw: finalData.rt_rw || null,
+         village_kelurahan: finalData.village_kelurahan || null,
+         district_kecamatan: finalData.district_kecamatan || null,
+         religion: finalData.religion || null,
+         marital_status: finalData.marital_status || null,
+         occupation: finalData.occupation || null,
+         citizenship: finalData.citizenship || null,
+         valid_until: finalData.valid_until || null,
+         document_upload_id: finalData.document_upload_id || null,
+         identity_type: 'KTP',
+         confidence: finalData.confidence,
+         ocr_provider: finalData.provider,
+         context: context
+       };
 
       const res = await authenticatedFetch('/api/identity/confirm', {
         method: 'POST',
@@ -456,15 +460,11 @@ export default function IdentityExtractionModal({
         throw new Error(resJson.message || 'Gagal menyimpan data identitas ke database CRM');
       }
 
-      const savedGuest = resJson.data || null;
+       const savedGuest = resJson.data || null;
 
-      // Apply reviewed OCR data to guest form via callbacks
-      if (onScanSuccess) {
-        onScanSuccess(finalData);
-      }
-      if (onIdentityConfirmed) {
-        onIdentityConfirmed(finalData, savedGuest);
-      }
+       if (onIdentityConfirmed) {
+         onIdentityConfirmed(finalData, savedGuest);
+       }
       onClose();
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menyimpan identitas ke database CRM.');

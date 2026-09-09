@@ -182,27 +182,28 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       const propertyId = await resolveAuthoritativeIdentityPropertyId(pool, user, req.body?.property_id);
       const isSuperAdmin = await isPlatformSuperAdmin(pool, user?.id);
       const {
-        guest_id,
-        name,
-        phone,
-        nik,
-        birth_place,
-        birth_date,
-        gender,
-        address,
-        rt_rw,
-        village_kelurahan,
-        district_kecamatan,
-        religion,
-        marital_status,
-        occupation,
-        citizenship,
-        valid_until,
-        identity_type = 'KTP',
-        confidence,
-        ocr_provider,
-        document_upload_id
-      } = req.body;
+         guest_id,
+         name,
+         phone,
+         nik,
+         birth_place,
+         birth_date,
+         gender,
+         address,
+         rt_rw,
+         village_kelurahan,
+         district_kecamatan,
+         religion,
+         marital_status,
+         occupation,
+         citizenship,
+         valid_until,
+         identity_type = 'KTP',
+         confidence,
+         ocr_provider,
+         document_upload_id,
+         context
+       } = req.body;
 
       if (!name || !String(name).trim()) {
         return res.status(400).json({
@@ -212,31 +213,32 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         });
       }
 
-      const guest = await confirmVerifiedIdentity(pool, {
-        document_upload_id: document_upload_id ? String(document_upload_id) : '',
-        actor_user_id: Number(user!.id),
-        is_platform_super_admin: isSuperAdmin,
-        guest_id: guest_id ? Number(guest_id) : null,
-        property_id: propertyId,
-        name: String(name),
-        phone: phone ? String(phone) : null,
-        nik: String(nik || ''),
-        birth_place: birth_place ? String(birth_place) : null,
-        birth_date: birth_date ? String(birth_date) : null,
-        gender: gender ? String(gender) : null,
-        address: address ? String(address) : null,
-        rt_rw: rt_rw ? String(rt_rw) : null,
-        village_kelurahan: village_kelurahan ? String(village_kelurahan) : null,
-        district_kecamatan: district_kecamatan ? String(district_kecamatan) : null,
-        religion: religion ? String(religion) : null,
-        marital_status: marital_status ? String(marital_status) : null,
-        occupation: occupation ? String(occupation) : null,
-        citizenship: citizenship ? String(citizenship) : null,
-        valid_until: valid_until ? String(valid_until) : null,
-        identity_type: String(identity_type || 'KTP'),
-        confidence: confidence ? Number(confidence) : 1.0,
-        ocr_provider: ocr_provider ? String(ocr_provider) : undefined
-      });
+       const guest = await confirmVerifiedIdentity(pool, {
+         document_upload_id: document_upload_id ? String(document_upload_id) : '',
+         actor_user_id: Number(user!.id),
+         is_platform_super_admin: isSuperAdmin,
+         guest_id: guest_id ? Number(guest_id) : null,
+         property_id: propertyId,
+         name: String(name),
+         phone: phone ? String(phone) : null,
+         nik: String(nik || ''),
+         birth_place: birth_place ? String(birth_place) : null,
+         birth_date: birth_date ? String(birth_date) : null,
+         gender: gender ? String(gender) : null,
+         address: address ? String(address) : null,
+         rt_rw: rt_rw ? String(rt_rw) : null,
+         village_kelurahan: village_kelurahan ? String(village_kelurahan) : null,
+         district_kecamatan: district_kecamatan ? String(district_kecamatan) : null,
+         religion: religion ? String(religion) : null,
+         marital_status: marital_status ? String(marital_status) : null,
+         occupation: occupation ? String(occupation) : null,
+         citizenship: citizenship ? String(citizenship) : null,
+         valid_until: valid_until ? String(valid_until) : null,
+         identity_type: String(identity_type || 'KTP'),
+         confidence: confidence ? Number(confidence) : 1.0,
+         ocr_provider: ocr_provider ? String(ocr_provider) : undefined,
+         context: context || 'CRM_EDIT'
+       });
 
       return res.json({
         success: true,

@@ -24,7 +24,7 @@ interface Props {
   propertyId?: number | null;
   onClose: () => void;
   onRefresh: () => void;
-  onCheckin: (reservationId: number) => void;
+  onCheckin: (reservationId: number, expectedPrimaryGuestId?: number | null) => void;
   onCheckout: (reservationId: number) => void;
   onCancel: (reservationId: number) => void;
   onRequestCheckoutInspection?: (reservationId: number) => void;
@@ -63,17 +63,25 @@ export default function ReservationDetailDrawer({
   const [inspectionMsg, setInspectionMsg] = useState<string | null>(null);
 
   // Guest Phone & Identity/KTP Management States
-  const [isIdentityModalOpen, setIsIdentityModalOpen] = useState<boolean>(false);
-  const [isEditingPhone, setIsEditingPhone] = useState<boolean>(false);
-  const [phoneDraft, setPhoneDraft] = useState<string>('');
-  const [savingPhone, setSavingPhone] = useState<boolean>(false);
-  const [isEditingNotes, setIsEditingNotes] = useState<boolean>(false);
-  const [notesDraft, setNotesDraft] = useState<string>('');
-  const [savingNotes, setSavingNotes] = useState<boolean>(false);
-  const [notesFeedback, setNotesFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
-  const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
-  const { authFetch } = useAuth();
+   const [isIdentityModalOpen, setIsIdentityModalOpen] = useState<boolean>(false);
+   const [isEditingPhone, setIsEditingPhone] = useState<boolean>(false);
+   const [phoneDraft, setPhoneDraft] = useState<string>('');
+   const [savingPhone, setSavingPhone] = useState<boolean>(false);
+   const [isEditingNotes, setIsEditingNotes] = useState<boolean>(false);
+   const [notesDraft, setNotesDraft] = useState<string>('');
+   const [savingNotes, setSavingNotes] = useState<boolean>(false);
+   const [notesFeedback, setNotesFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+   const [isKtpPreviewOpen, setIsKtpPreviewOpen] = useState<boolean>(false);
+   const [isPaymentEvidencePreviewOpen, setIsPaymentEvidencePreviewOpen] = useState<boolean>(false);
+   // KTP-MATCH-1: Mismatch detection state — stores full scanned identity data
+   const [ktpMismatchState, setKtpMismatchState] = useState<{
+     scannedData: ExtractedIdentityData;
+     currentPrimaryGuestId: number | null;
+     currentPrimaryGuestName: string | null;
+     currentPrimaryGuestNik: string | null;
+   } | null>(null);
+   const [replacingPrimaryGuest, setReplacingPrimaryGuest] = useState<boolean>(false);
+   const { authFetch } = useAuth();
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
@@ -278,36 +286,35 @@ export default function ReservationDetailDrawer({
     }
   };
 
-  const handleIdentityConfirmed = async (extracted: ExtractedIdentityData) => {
-    if (!detailData?.id || !activePropId) return;
-    try {
-      const result = await safeFetchJson(
-        `/api/reservations/${detailData.id}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            property_id: activePropId,
-            ktp_path: extracted.file_path,
-            identity_number: extracted.identity_number,
-            has_valid_identity: true,
-            guest_name: extracted.full_name || undefined
-          })
-        },
-        'Gagal menyimpan data KTP ke reservasi',
-        authFetch
-      );
-      if (result.ok) {
-        setIsIdentityModalOpen(false);
-        await loadFullReservation(detailData.id);
-        onRefresh();
-      } else {
-        alert(result.errorMessage || 'Gagal menyimpan data KTP ke reservasi');
+    const handleIdentityScanSuccess = (extracted: ExtractedIdentityData) => {
+      if (!detailData?.id) return;
+
+      // KTP-MATCH-1: Read-only NIK comparison — zero mutation
+      const primaryGuestId = detailData.primary_guest?.primary_guest_id || null;
+      const primaryGuestName = detailData.primary_guest?.primary_guest_name || null;
+      const primaryGuestNik = detailData.primary_guest?.primary_guest_identity_number || null;
+
+      if (primaryGuestId && extracted.identity_number && primaryGuestNik) {
+        const normalizeNik = (n: string) => String(n).replace(/\D/g, '');
+        if (normalizeNik(extracted.identity_number) !== normalizeNik(primaryGuestNik)) {
+          // MISMATCH DETECTED — store full scanned data for safe confirm later
+          setKtpMismatchState({
+            scannedData: extracted,
+            currentPrimaryGuestId: primaryGuestId,
+            currentPrimaryGuestName: primaryGuestName,
+            currentPrimaryGuestNik: primaryGuestNik
+          });
+          return;
+        }
       }
-    } catch (err: any) {
-      alert('Terjadi kesalahan saat menyimpan KTP: ' + err.message);
-    }
-  };
+    };
+
+    const handleIdentityConfirmed = async () => {
+      if (!detailData?.id || !activePropId) return;
+      setIsIdentityModalOpen(false);
+      await loadFullReservation(detailData.id);
+      onRefresh();
+    };
 
   useEffect(() => {
     if (reservation?.id) {
@@ -1332,7 +1339,7 @@ export default function ReservationDetailDrawer({
                       alert('Check-in tidak dapat dilakukan: Nomor Telepon dan Dokumen Identitas (KTP) wajib dilengkapi terlebih dahulu.');
                       return;
                     }
-                    onCheckin(data.id);
+                    onCheckin(data.id, detailData.primary_guest?.primary_guest_id || null);
                   }}
                   className={`px-4 py-2 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 ${
                     isCheckinReady
@@ -1404,17 +1411,149 @@ export default function ReservationDetailDrawer({
         </div>
 
         {/* Modals */}
-        {isIdentityModalOpen && activePropId && (
-          <IdentityExtractionModal
-            isOpen={isIdentityModalOpen}
-            onClose={() => setIsIdentityModalOpen(false)}
-            guestName={data.guest_name || data.booker_name || ''}
-            guestPhone={data.guest_phone || data.booker_phone || ''}
-            propertyId={activePropId}
-            onScanSuccess={handleIdentityConfirmed}
-            onIdentityConfirmed={handleIdentityConfirmed}
-          />
-        )}
+         {isIdentityModalOpen && activePropId && (
+           <IdentityExtractionModal
+             isOpen={isIdentityModalOpen}
+             onClose={() => setIsIdentityModalOpen(false)}
+             guestName={data.guest_name || data.booker_name || ''}
+             guestPhone={data.guest_phone || data.booker_phone || ''}
+             guestId={detailData.primary_guest?.primary_guest_id || null}
+             propertyId={activePropId}
+             context="CHECKIN_IDENTITY_SCAN"
+             onScanSuccess={handleIdentityScanSuccess}
+             onIdentityConfirmed={handleIdentityConfirmed}
+           />
+         )}
+
+         {/* KTP-MATCH-1: Mismatch confirmation dialog */}
+         {ktpMismatchState && (
+           <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+             <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-rose-200 overflow-hidden">
+               <div className="px-6 py-4 bg-gradient-to-r from-rose-900 via-rose-800 to-orange-900 text-white">
+                 <div className="flex items-center gap-3">
+                   <div className="w-8 h-8 rounded-full bg-rose-700 flex items-center justify-center">
+                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                     </svg>
+                   </div>
+                   <div>
+                     <h3 className="text-sm font-bold">Tamu KTP Berbeda Terdeteksi</h3>
+                     <p className="text-xs text-rose-200">Konfirmasi sebelum mengganti Tamu Menginap</p>
+                   </div>
+                 </div>
+               </div>
+               <div className="p-6 space-y-4">
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+                  <p className="text-xs font-semibold text-amber-900">Tamu Menginap Saat Ini</p>
+                  <p className="text-sm text-stone-800 font-medium">{ktpMismatchState.currentPrimaryGuestName || '—'}</p>
+                  <p className="text-xs text-stone-500 font-mono">NIK: {ktpMismatchState.currentPrimaryGuestNik || '—'}</p>
+                </div>
+                 <div className="flex items-center justify-center">
+                   <svg className="w-5 h-5 text-rose-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                   </svg>
+                 </div>
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-2">
+                    <p className="text-xs font-semibold text-emerald-900">KTP yang Dipindai</p>
+                    <p className="text-sm text-stone-800 font-medium">{ktpMismatchState.scannedData.full_name || '—'}</p>
+                    <p className="text-xs text-stone-500 font-mono">NIK: {ktpMismatchState.scannedData.identity_number || '—'}</p>
+                  </div>
+                 <div className="bg-rose-50 border border-rose-200 rounded-xl p-3">
+                   <p className="text-xs text-rose-800">
+                     <strong>⚠️ Perhatian:</strong> Tamu pada KTP ini berbeda dengan Tamu Menginap saat ini.
+                     Booker TIDAK akan berubah. Proses ini akan mengganti Tamu Menginap secara permanen.
+                   </p>
+                 </div>
+                 <div className="flex gap-3 pt-2">
+                   <button
+                     onClick={() => setKtpMismatchState(null)}
+                     className="flex-1 px-4 py-2.5 text-xs font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                   >
+                     Batalkan
+                   </button>
+                    <button
+                      onClick={async () => {
+                        if (!activePropId || !detailData?.id) return;
+                        setReplacingPrimaryGuest(true);
+                        try {
+                          // Step 1: Confirm identity for Guest B using FULL scanned data payload
+                          const s = ktpMismatchState.scannedData;
+                          const identityRes = await authFetch('/api/identity/confirm', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              property_id: activePropId,
+                              name: s.full_name || '',
+                              nik: s.identity_number || '',
+                              phone: undefined,
+                              birth_place: s.birth_place || null,
+                              birth_date: s.birth_date || null,
+                              gender: s.gender || null,
+                              address: s.address || null,
+                              rt_rw: s.rt_rw || null,
+                              village_kelurahan: s.village_kelurahan || null,
+                              district_kecamatan: s.district_kecamatan || null,
+                              religion: s.religion || null,
+                              marital_status: s.marital_status || null,
+                              occupation: s.occupation || null,
+                              citizenship: s.citizenship || null,
+                              valid_until: s.valid_until || null,
+                              document_upload_id: s.document_upload_id || null,
+                              identity_type: 'KTP',
+                              confidence: s.confidence,
+                              ocr_provider: s.provider,
+                              context: 'CHECKIN_IDENTITY_SCAN'
+                            })
+                          });
+                         const identityJson = await identityRes.json();
+                         if (!identityRes.ok) {
+                           throw new Error(identityJson.message || 'Gagal konfirmasi identitas');
+                         }
+                         const guestB = identityJson.data;
+
+                         // Step 2: Replace PRIMARY_GUEST
+                         const replaceRes = await authFetch(`/api/reservations/${detailData.id}/guests`, {
+                           method: 'POST',
+                           headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({
+                             property_id: activePropId,
+                             guest_id: guestB.id,
+                             role: 'PRIMARY_GUEST',
+                             is_staying: true,
+                             identity_verified: true,
+                             relation_source: 'CHECKIN_IDENTITY_CONFIRMATION',
+                             expected_primary_guest_id: ktpMismatchState.currentPrimaryGuestId
+                           })
+                         });
+                         const replaceJson = await replaceRes.json();
+                         if (!replaceRes.ok) {
+                           if (replaceJson.code === 'PRIMARY_GUEST_CHANGED') {
+                             throw new Error('Status tamu berubah. Silakan segarkan halaman dan coba lagi.');
+                           }
+                           throw new Error(replaceJson.message || 'Gagal mengganti Tamu Menginap');
+                         }
+
+                         // Success
+                         setKtpMismatchState(null);
+                         await loadFullReservation(detailData.id);
+                         onRefresh();
+                         alert('Tamu Menginap berhasil diganti. Anda dapat melakukan check-in.');
+                       } catch (err: any) {
+                         alert(`Gagal: ${err.message}`);
+                       } finally {
+                         setReplacingPrimaryGuest(false);
+                       }
+                     }}
+                     disabled={replacingPrimaryGuest}
+                     className="flex-1 px-4 py-2.5 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 rounded-xl transition-colors cursor-pointer"
+                   >
+                     {replacingPrimaryGuest ? 'Memproses...' : 'Gunakan Tamu KTP Ini'}
+                   </button>
+                 </div>
+               </div>
+             </div>
+           </div>
+         )}
 
         {isRepriceModalOpen && activePropId && (
           <BookedReservationRepriceModal

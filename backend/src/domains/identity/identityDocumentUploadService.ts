@@ -127,69 +127,72 @@ function normalizeGender(gender?: string | null): 'MALE' | 'FEMALE' | null {
 }
 
 async function loadTargetGuest(
-  client: PoolClient,
-  propertyId: number,
-  guestId: number | null,
-  normNik: string | null,
-  cleanPhone: string | null,
-  normPhone: string | null
-): Promise<{ id: number; identity_storage_key: string | null } | null> {
-  if (guestId) {
-    const guestRes = await client.query(
-      `SELECT id, created_property_id, identity_storage_key
-       FROM guests
-       WHERE id = $1
-       FOR UPDATE`,
-      [guestId]
-    );
-    if ((guestRes.rowCount ?? 0) === 0) {
-      httpError('Data tamu tidak ditemukan', 404, 'NOT_FOUND');
-    }
-    const guest = guestRes.rows[0];
-    if (Number(guest.created_property_id) !== propertyId) {
-      httpError('Tamu tidak berada pada properti yang berwenang.', 403, 'GUEST_PROPERTY_MISMATCH');
-    }
-    return { id: Number(guest.id), identity_storage_key: guest.identity_storage_key || null };
-  }
+   client: PoolClient,
+   propertyId: number,
+   guestId: number | null,
+   normNik: string | null,
+   cleanPhone: string | null,
+   normPhone: string | null,
+   skipPhoneFallback: boolean = false
+ ): Promise<{ id: number; identity_storage_key: string | null } | null> {
+   if (guestId) {
+     const guestRes = await client.query(
+       `SELECT id, created_property_id, identity_storage_key
+        FROM guests
+        WHERE id = $1
+        FOR UPDATE`,
+       [guestId]
+     );
+     if ((guestRes.rowCount ?? 0) === 0) {
+       httpError('Data tamu tidak ditemukan', 404, 'NOT_FOUND');
+     }
+     const guest = guestRes.rows[0];
+     if (Number(guest.created_property_id) !== propertyId) {
+       httpError('Tamu tidak berada pada properti yang berwenang.', 403, 'GUEST_PROPERTY_MISMATCH');
+     }
+     return { id: Number(guest.id), identity_storage_key: guest.identity_storage_key || null };
+   }
 
-  if (normNik) {
-    const nikRes = await client.query(
-      `SELECT id, identity_storage_key
-       FROM guests
-       WHERE normalized_identity_number = $1
-         AND created_property_id = $2
-       LIMIT 1
-       FOR UPDATE`,
-      [normNik, propertyId]
-    );
-    if ((nikRes.rowCount ?? 0) > 0) {
-      return {
-        id: Number(nikRes.rows[0].id),
-        identity_storage_key: nikRes.rows[0].identity_storage_key || null
-      };
-    }
-  }
+   if (normNik) {
+     const nikRes = await client.query(
+       `SELECT id, identity_storage_key
+        FROM guests
+        WHERE normalized_identity_number = $1
+          AND created_property_id = $2
+        LIMIT 1
+        FOR UPDATE`,
+       [normNik, propertyId]
+     );
+     if ((nikRes.rowCount ?? 0) > 0) {
+       return {
+         id: Number(nikRes.rows[0].id),
+         identity_storage_key: nikRes.rows[0].identity_storage_key || null
+       };
+     }
+   }
 
-  if (cleanPhone) {
-    const phoneRes = await client.query(
-      `SELECT id, identity_storage_key
-       FROM guests
-       WHERE created_property_id = $1
-         AND (phone = $2 OR (normalized_phone IS NOT NULL AND normalized_phone = $3))
-       LIMIT 1
-       FOR UPDATE`,
-      [propertyId, cleanPhone, normPhone]
-    );
-    if ((phoneRes.rowCount ?? 0) > 0) {
-      return {
-        id: Number(phoneRes.rows[0].id),
-        identity_storage_key: phoneRes.rows[0].identity_storage_key || null
-      };
-    }
-  }
+   // In CHECKIN_IDENTITY_SCAN context, skip phone fallback to prevent
+   // overwriting existing Guest A's CRM data when KTP B has the same phone.
+   if (cleanPhone && !skipPhoneFallback) {
+     const phoneRes = await client.query(
+       `SELECT id, identity_storage_key
+        FROM guests
+        WHERE created_property_id = $1
+          AND (phone = $2 OR (normalized_phone IS NOT NULL AND normalized_phone = $3))
+        LIMIT 1
+        FOR UPDATE`,
+       [propertyId, cleanPhone, normPhone]
+     );
+     if ((phoneRes.rowCount ?? 0) > 0) {
+       return {
+         id: Number(phoneRes.rows[0].id),
+         identity_storage_key: phoneRes.rows[0].identity_storage_key || null
+       };
+     }
+   }
 
-  return null;
-}
+   return null;
+ }
 
 export async function confirmVerifiedIdentity(
   pool: Pool,
@@ -214,14 +217,16 @@ export async function confirmVerifiedIdentity(
     httpError('Nama pada identitas wajib diisi', 400, 'VALIDATION_ERROR');
   }
 
-  const cleanNik = (input.nik || '').trim();
-  const cleanPhone = (input.phone || '').trim();
-  const normPhone = cleanPhone ? cleanPhone.replace(/\D/g, '') || null : null;
-  const normNik = cleanNik ? normalizeNik(cleanNik) : null;
-  const normGender = normalizeGender(input.gender);
-  const numConfidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
-  const identityType = String(input.identity_type || 'KTP');
-  const requestedGuestId = input.guest_id ? Number(input.guest_id) : null;
+    const cleanNik = (input.nik || '').trim();
+   const cleanPhone = (input.phone || '').trim();
+   const normPhone = cleanPhone ? cleanPhone.replace(/\D/g, '') || null : null;
+   const normNik = cleanNik ? normalizeNik(cleanNik) : null;
+   const normGender = normalizeGender(input.gender);
+   const numConfidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
+   const identityType = String(input.identity_type || 'KTP');
+   const requestedGuestId = input.guest_id ? Number(input.guest_id) : null;
+   const context = input.context || 'CRM_EDIT';
+   const skipPhoneFallback = context === 'CHECKIN_IDENTITY_SCAN';
 
   const client = await pool.connect();
   try {
@@ -265,15 +270,27 @@ export async function confirmVerifiedIdentity(
     }
 
     const targetGuest = await loadTargetGuest(
-      client,
-      propertyId,
-      Number.isInteger(requestedGuestId) && requestedGuestId! > 0 ? requestedGuestId : null,
-      normNik,
-      cleanPhone || null,
-      normPhone
-    );
+       client,
+       propertyId,
+       Number.isInteger(requestedGuestId) && requestedGuestId! > 0 ? requestedGuestId : null,
+       normNik,
+       cleanPhone || null,
+       normPhone,
+       skipPhoneFallback
+     );
 
-    if (upload.status === IDENTITY_UPLOAD_STATUS.CONFIRMED) {
+     // SAFETY: In CHECKIN context, reject if explicit guest_id NIK doesn't match scanned NIK
+     if (skipPhoneFallback && targetGuest && requestedGuestId && normNik) {
+       const guestNikRes = await client.query(
+         `SELECT normalized_identity_number FROM guests WHERE id = $1`,
+         [targetGuest.id]
+       );
+       if (guestNikRes.rows[0] && guestNikRes.rows[0].normalized_identity_number !== normNik) {
+         httpError('NIK pada KTP tidak cocok dengan tamu yang dipilih. Gunakan opsi lain.', 409, 'NIK_MISMATCH');
+       }
+     }
+
+     if (upload.status === IDENTITY_UPLOAD_STATUS.CONFIRMED) {
       const confirmedGuestId = upload.confirmed_guest_id ? Number(upload.confirmed_guest_id) : null;
       if (!confirmedGuestId || !targetGuest || confirmedGuestId !== targetGuest.id) {
         httpError('Unggahan identitas sudah dikonfirmasi untuk tamu lain.', 409, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');

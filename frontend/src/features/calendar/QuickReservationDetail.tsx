@@ -18,7 +18,7 @@ export interface QuickReservationDetailProps {
   propertyId?: number | null;
   onClose: () => void;
   onOpenFullDetail: (reservation: any) => void;
-  onCheckin?: (reservationId: number) => void;
+  onCheckin?: (reservationId: number, expectedPrimaryGuestId?: number | null) => void;
   onCheckout?: (reservationId: number) => void;
   onCancel?: (reservationId: number) => void;
   onOpenStayChange?: (reservation: any) => void;
@@ -536,7 +536,7 @@ export default function QuickReservationDetail({
                         onOpenFullDetail(data);
                         return;
                       }
-                      onCheckin(data.id);
+                       onCheckin(data.id, data.primary_guest?.primary_guest_id || null);
                       onClose();
                     }}
                     className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 ${

@@ -2964,6 +2964,28 @@ app.get('/api/reservations/:id', async (req, res) => {
       }
     }
 
+    // Enrich with PRIMARY_GUEST relation for KTP mismatch detection
+    let primary_guest_data: any = null;
+    try {
+      const pgRes = await pool.query(
+        `SELECT rg.guest_id, g.full_name, g.identity_number, g.has_valid_identity, g.phone
+         FROM reservation_guests rg
+         JOIN guests g ON g.id = rg.guest_id
+         WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
+         LIMIT 1`,
+        [reservationId]
+      );
+      if (pgRes.rowCount && pgRes.rowCount > 0) {
+        const pg = pgRes.rows[0];
+        primary_guest_data = {
+          primary_guest_id: Number(pg.guest_id),
+          primary_guest_name: pg.full_name || null,
+          primary_guest_identity_number: pg.identity_number || null,
+          primary_guest_identity_verified: Boolean(pg.has_valid_identity)
+        };
+      }
+    } catch (_pgErr) {}
+
     res.json({
       status: 'OK',
       data: {
@@ -2972,7 +2994,8 @@ app.get('/api/reservations/:id', async (req, res) => {
         checkout_inspection,
         require_checkout_inspection: requireCheckoutInspection,
         sibling_reservations,
-        rate_snapshot
+        rate_snapshot,
+        primary_guest: primary_guest_data
       }
     });
   } catch (err: any) {
@@ -5845,6 +5868,38 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     }
 
     // C2C2: Overlap check after ROOM + RESERVATION locks.
+
+    // KTP-MATCH-1: PRIMARY_GUEST CAS revalidation.
+    // This runs independently of force/override_guest_identity/override_housekeeping.
+    const expectedPrimaryGuestId = req.body?.expected_primary_guest_id
+      ? Number(req.body.expected_primary_guest_id)
+      : null;
+    if (expectedPrimaryGuestId !== null && Number.isInteger(expectedPrimaryGuestId) && expectedPrimaryGuestId > 0) {
+      const primaryGuestCheck = await client.query(
+        `SELECT rg.guest_id FROM reservation_guests rg
+         WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST' FOR UPDATE`,
+        [reservationId]
+      );
+      if (!hasRows(primaryGuestCheck)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'PRIMARY_GUEST_CHANGED',
+          message: 'PRIMARY_GUEST relation not found for this reservation.'
+        });
+      }
+      const currentPrimaryGuestId = Number(primaryGuestCheck.rows[0].guest_id);
+      if (currentPrimaryGuestId !== expectedPrimaryGuestId) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'PRIMARY_GUEST_CHANGED',
+          message: 'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.'
+        });
+      }
+    }
+
+    // C2C2: Overlap check after ROOM + RESERVATION locks.
     const overlap = await findActiveRoomOverlap(client, roomId, current.check_in, current.check_out, reservationId);
     if (hasRows(overlap)) {
       await client.query('ROLLBACK');
@@ -5874,7 +5929,7 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
           `SELECT g.phone, g.identity_number, g.identity_path, g.has_valid_identity
            FROM reservation_guests rg
            JOIN guests g ON rg.guest_id = g.id
-           WHERE rg.reservation_id = $1
+           WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
            LIMIT 1`,
           [reservationId]
         ).catch(() => ({ rowCount: 0, rows: [] as any[] }));

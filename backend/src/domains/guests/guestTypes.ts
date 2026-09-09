@@ -182,14 +182,16 @@ export interface ReservationGuest {
 }
 
 export interface ReservationGuestCreateInput {
-  property_id: number;
-  guest_id: number;
-  role: GuestRole;
-  relationship?: string | null;
-  is_staying?: boolean;
-  identity_verified?: boolean;
-  relation_source?: string;
-}
+   property_id: number;
+   guest_id: number;
+   role: GuestRole;
+   relationship?: string | null;
+   is_staying?: boolean;
+   identity_verified?: boolean;
+   relation_source?: string;
+   /** Expected current PRIMARY_GUEST guest_id for optimistic CAS. When provided and doesn't match, returns 409. */
+   expected_primary_guest_id?: number | null;
+ }
 
 export interface ReservationGuestUpdateInput {
   property_id: number;

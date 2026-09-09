@@ -295,17 +295,20 @@ export function createReservationGuestsRouter(pool: Pool) {
     }
   });
 
-  // POST /api/reservations/:id/guests
-  router.post('/:id/guests', async (req: any, res: any) => {
-    try {
-      const reservationId = Number(req.params.id);
-      if (!Number.isInteger(reservationId) || reservationId <= 0) {
-        throw httpError(400, 'VALIDATION_ERROR', 'invalid reservation id');
-      }
-      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
-      const correlationId = getCorrelationId(req);
+   // POST /api/reservations/:id/guests
+   router.post('/:id/guests', async (req: any, res: any) => {
+     try {
+       const reservationId = Number(req.params.id);
+       if (!Number.isInteger(reservationId) || reservationId <= 0) {
+         throw httpError(400, 'VALIDATION_ERROR', 'invalid reservation id');
+       }
+       const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+       const correlationId = getCorrelationId(req);
+       const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+         ? Number(req.user.id)
+         : null;
 
-      const relation = await addReservationGuest(pool, reservationId, propertyId, req.body || {}, correlationId);
+       const relation = await addReservationGuest(pool, reservationId, propertyId, req.body || {}, correlationId, actorUserId);
       return res.status(201).json({
         status: 'SUCCESS',
         data: relation

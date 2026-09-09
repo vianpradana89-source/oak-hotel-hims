@@ -1370,13 +1370,17 @@ function AppContent() {
     }
   };
 
-  const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout') => {
-    try {
-      const response = await authFetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ property_id: propertyId })
-      });
+   const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout', expectedPrimaryGuestId?: number | null) => {
+     try {
+       const body: Record<string, any> = { property_id: propertyId };
+       if (action === 'checkin' && expectedPrimaryGuestId !== null && expectedPrimaryGuestId !== undefined) {
+         body.expected_primary_guest_id = expectedPrimaryGuestId;
+       }
+       const response = await authFetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(body)
+       });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Action failed');
@@ -3176,7 +3180,7 @@ function AppContent() {
       disabled: !isRoomReadyForCheckIn,
       title: checkInDisabledReason,
       variant: 'success',
-      onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin')
+       onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin', selectedRes?.primary_guest?.primary_guest_id || null)
     },
     { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
     { key: 'checkout-date', label: CHECKOUT_DATE_CHANGE_LABEL, enabled: canChangeCheckoutDate, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt(Number(selectedRes.id), undefined, selectedRes) },
@@ -3764,7 +3768,7 @@ function AppContent() {
             reservationLoading={transactionLoading}
             reservationError={transactionError}
             onRefreshReservations={(start, end) => fetchTransactionReservations(propertyId, start, end)}
-            onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin')}
+             onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin', res?.primary_guest?.primary_guest_id || null)}
             onCheckout={(res) => openCheckoutConfirmation(Number(res.id))}
             onOpenReservationDetail={(res) => {
               setSelectedRes(res);
@@ -4238,12 +4242,12 @@ function AppContent() {
             setSelectedRes(target);
             fetchReservationFolio(Number(target.id));
           }}
-          onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
-          onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
-          onCancel={(resId) => handleReservationCancel(resId)}
-          onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
-          onRefresh={() => {
-            fetchData();
+           onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
+           onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
+           onCancel={(resId) => handleReservationCancel(resId)}
+           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
+           onRefresh={() => {
+             fetchData();
             fetchOperationsData();
           }}
         />

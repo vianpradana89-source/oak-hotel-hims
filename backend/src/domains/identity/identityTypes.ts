@@ -78,27 +78,29 @@ export interface IdentityCandidate extends Partial<IdentityCandidateData> {
 export interface IdentityExtractionResult extends NormalizedIdentityExtractionResponse {}
 
 export interface ConfirmIdentityInput {
-  document_upload_id: string;
-  actor_user_id: number;
-  is_platform_super_admin: boolean;
-  guest_id?: number | null;
-  property_id: number;
-  name: string;
-  phone?: string | null;
-  nik: string;
-  birth_place?: string | null;
-  birth_date?: string | null;
-  gender?: string | null;
-  address?: string | null;
-  rt_rw?: string | null;
-  village_kelurahan?: string | null;
-  district_kecamatan?: string | null;
-  religion?: string | null;
-  marital_status?: string | null;
-  occupation?: string | null;
-  citizenship?: string | null;
-  valid_until?: string | null;
-  identity_type?: string;
-  confidence?: number;
-  ocr_provider?: string;
-}
+   document_upload_id: string;
+   actor_user_id: number;
+   is_platform_super_admin: boolean;
+   guest_id?: number | null;
+   property_id: number;
+   name: string;
+   phone?: string | null;
+   nik: string;
+   birth_place?: string | null;
+   birth_date?: string | null;
+   gender?: string | null;
+   address?: string | null;
+   rt_rw?: string | null;
+   village_kelurahan?: string | null;
+   district_kecamatan?: string | null;
+   religion?: string | null;
+   marital_status?: string | null;
+   occupation?: string | null;
+   citizenship?: string | null;
+   valid_until?: string | null;
+   identity_type?: string;
+   confidence?: number;
+   ocr_provider?: string;
+   /** When 'CHECKIN_IDENTITY_SCAN', phone-based guest resolution is disabled to prevent CRM mutation of existing Guest A by KTP B. */
+   context?: 'CRM_EDIT' | 'CHECKIN_IDENTITY_SCAN';
+ }

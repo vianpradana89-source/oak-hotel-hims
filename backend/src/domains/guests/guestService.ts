@@ -169,33 +169,35 @@ export function normalizeRole(raw: unknown): GuestRole {
 }
 
 export async function writeGuestAudit(
-  client: PoolClient | Pool,
-  entry: {
-    action: 'GUEST_CREATE' | 'GUEST_UPDATE' | 'GUEST_ARCHIVE' | 'GUEST_RESTORE' | 'GUEST_DELETE' | 'RESERVATION_GUEST_ADD' | 'RESERVATION_GUEST_UPDATE' | 'RESERVATION_GUEST_REMOVE' | 'PRIMARY_GUEST_REPLACE';
-    entity: 'GUEST' | 'RESERVATION_GUEST';
-    recordId: string | number;
-    newValue: any;
-    propertyId: number;
-    correlationId?: string | null;
-  }
-): Promise<void> {
-  if (!entry.propertyId || !Number.isInteger(entry.propertyId) || entry.propertyId <= 0) {
-    throw new Error('AUDIT_INTEGRITY_ERROR: property_id must not be null for guest audit');
-  }
-  await client.query(
-    `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [
-      'GUEST_CRM',
-      entry.action,
-      entry.entity,
-      String(entry.recordId),
-      JSON.stringify(entry.newValue),
-      entry.correlationId || null,
-      entry.propertyId
-    ]
-  );
-}
+   client: PoolClient | Pool,
+   entry: {
+     action: 'GUEST_CREATE' | 'GUEST_UPDATE' | 'GUEST_ARCHIVE' | 'GUEST_RESTORE' | 'GUEST_DELETE' | 'RESERVATION_GUEST_ADD' | 'RESERVATION_GUEST_UPDATE' | 'RESERVATION_GUEST_REMOVE' | 'PRIMARY_GUEST_REPLACE';
+     entity: 'GUEST' | 'RESERVATION_GUEST';
+     recordId: string | number;
+     newValue: any;
+     propertyId: number;
+     correlationId?: string | null;
+     actorUserId?: number | null;
+   }
+ ): Promise<void> {
+   if (!entry.propertyId || !Number.isInteger(entry.propertyId) || entry.propertyId <= 0) {
+     throw new Error('AUDIT_INTEGRITY_ERROR: property_id must not be null for guest audit');
+   }
+   await client.query(
+     `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id, actor_user_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+     [
+       'GUEST_CRM',
+       entry.action,
+       entry.entity,
+       String(entry.recordId),
+       JSON.stringify(entry.newValue),
+       entry.correlationId || null,
+       entry.propertyId,
+       entry.actorUserId ? String(entry.actorUserId) : null
+     ]
+   );
+ }
 
 // ---------------------------------------------------------------------------
 // Guest Master CRUD & Search
@@ -1370,99 +1372,153 @@ export async function listReservationGuests(
 }
 
 export async function addReservationGuest(
-  pool: Pool,
-  reservationId: number,
-  propertyId: number,
-  input: ReservationGuestCreateInput,
-  correlationId?: string
-): Promise<ReservationGuest> {
-  await assertPropertyExists(pool, propertyId);
-  await assertReservationBelongsToProperty(pool, reservationId, propertyId);
+   pool: Pool,
+   reservationId: number,
+   propertyId: number,
+   input: ReservationGuestCreateInput,
+   correlationId?: string,
+   actorUserId?: number | null
+ ): Promise<ReservationGuest> {
+   await assertPropertyExists(pool, propertyId);
+   await assertReservationBelongsToProperty(pool, reservationId, propertyId);
 
-  const guestId = Number(input.guest_id);
-  if (!Number.isInteger(guestId) || guestId <= 0) {
-    throw httpError(400, 'VALIDATION_ERROR', 'guest_id must be a positive integer');
-  }
-  await assertGuestBelongsToProperty(pool, guestId, propertyId);
+   const guestId = Number(input.guest_id);
+   if (!Number.isInteger(guestId) || guestId <= 0) {
+     throw httpError(400, 'VALIDATION_ERROR', 'guest_id must be a positive integer');
+   }
+   await assertGuestBelongsToProperty(pool, guestId, propertyId);
 
-  const role = normalizeRole(input.role);
-  const relationship = input.relationship ? String(input.relationship).trim() || null : null;
-  const isStaying = input.is_staying !== undefined ? Boolean(input.is_staying) : true;
-  const identityVerified = input.identity_verified !== undefined ? Boolean(input.identity_verified) : false;
-  const relationSource = input.relation_source ? String(input.relation_source).trim() : 'MANUAL_ENTRY';
+   const role = normalizeRole(input.role);
+   const relationship = input.relationship ? String(input.relationship).trim() || null : null;
+   const isStaying = input.is_staying !== undefined ? Boolean(input.is_staying) : true;
+   const identityVerified = input.identity_verified !== undefined ? Boolean(input.identity_verified) : false;
+   const relationSource = input.relation_source ? String(input.relation_source).trim() : 'MANUAL_ENTRY';
+   const expectedPrimaryGuestId = input.expected_primary_guest_id ? Number(input.expected_primary_guest_id) : null;
+   const isCheckinIdentityConfirm = relationSource === 'CHECKIN_IDENTITY_CONFIRMATION' && role === 'PRIMARY_GUEST';
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+   const client = await pool.connect();
+   try {
+     await client.query('BEGIN');
 
-    // Invariant: Exactly 1 PRIMARY_GUEST per reservation
-    if (role === 'PRIMARY_GUEST') {
-      const existingPrimaryRes = await client.query(
-        `SELECT id, guest_id FROM reservation_guests WHERE reservation_id = $1 AND role = 'PRIMARY_GUEST'`,
-        [reservationId]
-      );
-      if ((existingPrimaryRes.rowCount ?? 0) > 0) {
-        // Replace existing primary guest relation
-        const existingId = existingPrimaryRes.rows[0].id;
-        await client.query(
-          `UPDATE reservation_guests
-           SET guest_id = $1, relationship = $2, is_staying = $3, identity_verified = $4,
-               relation_source = $5, updated_at = NOW()
-           WHERE id = $6`,
-          [guestId, relationship, isStaying, identityVerified, relationSource, existingId]
+     // Invariant: Exactly 1 PRIMARY_GUEST per reservation
+     if (role === 'PRIMARY_GUEST') {
+       // Canonical lock order: reservations first, then reservation_guests.
+       // This matches check-in lock order (rooms → reservations → reservation_guests)
+       // to prevent deadlocks.
+       if (isCheckinIdentityConfirm) {
+         // Lock the reservation row first (same lock as check-in transaction)
+         await client.query(
+           'SELECT id FROM reservations WHERE id = $1 FOR UPDATE',
+           [reservationId]
+         );
+       }
+
+        const existingPrimaryRes = await client.query(
+          `SELECT id, guest_id FROM reservation_guests WHERE reservation_id = $1 AND role = 'PRIMARY_GUEST' FOR UPDATE`,
+          [reservationId]
         );
+        if ((existingPrimaryRes.rowCount ?? 0) > 0) {
+          // CAS validation for CHECKIN_IDENTITY_CONFIRMATION
+          if (isCheckinIdentityConfirm && expectedPrimaryGuestId !== null) {
+            const currentPrimaryGuestId = Number(existingPrimaryRes.rows[0].guest_id);
+            if (currentPrimaryGuestId !== expectedPrimaryGuestId) {
+              await client.query('ROLLBACK');
+              throw httpError(409, 'PRIMARY_GUEST_CHANGED', 'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.');
+            }
+          }
 
-        await writeGuestAudit(client, {
-          action: 'PRIMARY_GUEST_REPLACE',
-          entity: 'RESERVATION_GUEST',
-          recordId: existingId,
-          newValue: { reservation_id: reservationId, guest_id: guestId, role },
-          propertyId,
-          correlationId
-        });
+          // Replace existing primary guest relation
+          const existingId = existingPrimaryRes.rows[0].id;
+          const currentGuestId = Number(existingPrimaryRes.rows[0].guest_id);
 
-        await client.query('COMMIT');
-        const updatedRes = await client.query('SELECT * FROM reservation_guests WHERE id = $1', [existingId]);
-        return updatedRes.rows[0];
-      }
-    }
+          await client.query(
+            `UPDATE reservation_guests
+             SET guest_id = $1, relationship = $2, is_staying = $3, identity_verified = $4,
+                 relation_source = $5, updated_at = NOW()
+             WHERE id = $6`,
+            [guestId, relationship, isStaying, identityVerified, relationSource, existingId]
+          );
 
-    const res = await client.query(
-      `INSERT INTO reservation_guests (
-        reservation_id, guest_id, role, relationship, is_staying,
-        identity_verified, relation_source, created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-      ON CONFLICT (reservation_id, guest_id, role)
-      DO UPDATE SET
-        relationship = EXCLUDED.relationship,
-        is_staying = EXCLUDED.is_staying,
-        identity_verified = EXCLUDED.identity_verified,
-        updated_at = NOW()
-      RETURNING *`,
-      [reservationId, guestId, role, relationship, isStaying, identityVerified, relationSource]
-    );
+           // Atomic snapshot sync for CHECKIN_IDENTITY_CONFIRMATION
+           if (isCheckinIdentityConfirm) {
+             await client.query(
+               `UPDATE reservations SET
+                  guest_name = (SELECT full_name FROM guests WHERE id = $1),
+                  guest_phone = (SELECT phone FROM guests WHERE id = $1),
+                  identity_number = (SELECT identity_number FROM guests WHERE id = $1),
+                  has_valid_identity = (SELECT has_valid_identity FROM guests WHERE id = $1),
+                  ktp_path = (SELECT identity_path FROM guests WHERE id = $1)
+                WHERE id = $2`,
+               [guestId, reservationId]
+             );
+          }
 
-    const createdRelation = res.rows[0];
+           await writeGuestAudit(client, {
+             action: 'PRIMARY_GUEST_REPLACE',
+             entity: 'RESERVATION_GUEST',
+             recordId: existingId,
+             newValue: {
+               reservation_id: reservationId,
+               previous_guest_id: currentGuestId,
+               new_guest_id: guestId,
+               role,
+               relation_source: relationSource
+             },
+             propertyId,
+             correlationId,
+             actorUserId
+           });
 
-    await writeGuestAudit(client, {
-      action: 'RESERVATION_GUEST_ADD',
-      entity: 'RESERVATION_GUEST',
-      recordId: createdRelation.id,
-      newValue: createdRelation,
-      propertyId,
-      correlationId
-    });
+          await client.query('COMMIT');
+          const updatedRes = await client.query('SELECT * FROM reservation_guests WHERE id = $1', [existingId]);
+          return updatedRes.rows[0];
+        }
 
-    await client.query('COMMIT');
-    return createdRelation;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-}
+        // MISSING-ROW GUARD: CHECKIN_IDENTITY_CONFIRMATION requires an existing
+        // PRIMARY_GUEST row. If expected_primary_guest_id is provided and the
+        // relation is missing, this violates CAS semantics — treat as changed.
+        if (isCheckinIdentityConfirm && expectedPrimaryGuestId !== null) {
+          await client.query('ROLLBACK');
+          throw httpError(409, 'PRIMARY_GUEST_CHANGED', 'PRIMARY_GUEST relation not found or has changed since the identity was confirmed. Please refresh and retry.');
+        }
+     }
+
+     const res = await client.query(
+       `INSERT INTO reservation_guests (
+         reservation_id, guest_id, role, relationship, is_staying,
+         identity_verified, relation_source, created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+       ON CONFLICT (reservation_id, guest_id, role)
+       DO UPDATE SET
+         relationship = EXCLUDED.relationship,
+         is_staying = EXCLUDED.is_staying,
+         identity_verified = EXCLUDED.identity_verified,
+         updated_at = NOW()
+       RETURNING *`,
+       [reservationId, guestId, role, relationship, isStaying, identityVerified, relationSource]
+     );
+
+     const createdRelation = res.rows[0];
+
+     await writeGuestAudit(client, {
+       action: 'RESERVATION_GUEST_ADD',
+       entity: 'RESERVATION_GUEST',
+       recordId: createdRelation.id,
+       newValue: createdRelation,
+       propertyId,
+       correlationId
+     });
+
+     await client.query('COMMIT');
+     return createdRelation;
+   } catch (err) {
+     await client.query('ROLLBACK').catch(() => {});
+     throw err;
+   } finally {
+     client.release();
+   }
+ }
 
 export async function updateReservationGuest(
   pool: Pool,
