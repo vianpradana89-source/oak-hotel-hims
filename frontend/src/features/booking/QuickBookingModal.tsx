@@ -133,7 +133,7 @@ export default function QuickBookingModal({
 
   const [guestName, setGuestName] = useState('');
   const [guestPhone, setGuestPhone] = useState('');
-  const [guestSegment, setGuestSegment] = useState<'Reguler' | 'Group' | 'Corporate' | 'Walk-in'>('Walk-in');
+  const [guestSegment, setGuestSegment] = useState<'Reguler' | 'Group' | 'Corporate'>('Reguler');
   const [selectedCrmGuest, setSelectedCrmGuest] = useState<Guest | null>(null);
   const [duplicateCandidates, setDuplicateCandidates] = useState<DuplicateCandidate[]>([]);
   const [showDuplicateModal, setShowDuplicateModal] = useState<boolean>(false);
@@ -430,7 +430,7 @@ export default function QuickBookingModal({
     setBookerPhone('');
     setGuestName('');
     setGuestPhone('');
-    setGuestSegment('Walk-in');
+    setGuestSegment('Reguler');
     setSelectedCrmGuest(null);
     setDuplicateCandidates([]);
     setShowDuplicateModal(false);
@@ -767,7 +767,7 @@ export default function QuickBookingModal({
     setGuestName(guest.full_name);
     if (guest.phone) setGuestPhone(guest.phone);
     if (guest.guest_segment) {
-      const validSegments = ['Reguler', 'Group', 'Corporate', 'Walk-in'];
+      const validSegments = ['Reguler', 'Group', 'Corporate'];
       if (validSegments.includes(guest.guest_segment)) {
         setGuestSegment(guest.guest_segment as any);
       }
@@ -1610,7 +1610,7 @@ export default function QuickBookingModal({
                       Segmentasi Tamu
                     </label>
                     <div className="flex gap-2">
-                      {['Walk-in', 'Reguler', 'Corporate', 'Group'].map(seg => (
+                      {['Reguler', 'Corporate', 'Group'].map(seg => (
                         <button
                           key={seg}
                           type="button"
