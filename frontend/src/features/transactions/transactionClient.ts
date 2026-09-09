@@ -316,6 +316,10 @@ export async function createExpenseTransactionApi(data: {
   notes?: string | null;
   actor_name?: string | null;
   actor_user_id?: string | null;
+  /** EXPENSE-1D: manual recipient bank snapshot */
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
 }): Promise<TransactionRecord> {
   return await fetchJson<TransactionRecord>(`${API_BASE}/expenses`, {
     method: 'POST',

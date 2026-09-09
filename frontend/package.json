@@ -43,6 +43,7 @@
     "test:reservation-context-metadata": "node test/reservation_context_metadata_test.ts",
     "test:purchase-lifecycle": "node test/purchase_lifecycle_test.ts",
     "test:purchase-expandable": "node test/purchase_expandable_test.ts",
+    "test:expense-expandable": "node test/expense_expandable_test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

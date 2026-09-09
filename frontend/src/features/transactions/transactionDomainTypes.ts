@@ -149,6 +149,12 @@ export interface TransactionRecord {
   supplier_bank_account?: string | null;
   supplier_bank_holder?: string | null;
   supplier_address?: string | null;
+  /** EXPENSE-1B: recipient bank snapshot (manual per-transaction, independent of Supplier Master) */
+  recipient_bank_name?: string | null;
+  recipient_bank_account?: string | null;
+  recipient_bank_holder?: string | null;
+  /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
+  expense_workflow_status?: string | null;
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
   verification_status: VerificationStatus;

@@ -38,6 +38,11 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
   const [sourceRef, setSourceRef] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
 
+  // EXPENSE-1D: recipient bank snapshot (manual entry)
+  const [recipientBankName, setRecipientBankName] = useState<string>('');
+  const [recipientBankAccount, setRecipientBankAccount] = useState<string>('');
+  const [recipientBankHolder, setRecipientBankHolder] = useState<string>('');
+
   // Upload Evidence
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
 
@@ -108,7 +113,10 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
         payment_method: paymentMethod,
         source_reference: sourceRef.trim() || null,
         notes: notes.trim() || null,
-        actor_name: actorName
+        actor_name: actorName,
+        recipient_bank_name: recipientBankName.trim() || null,
+        recipient_bank_account: recipientBankAccount.trim() || null,
+        recipient_bank_holder: recipientBankHolder.trim() || null,
       });
 
       // Upload Payment Proof Attachment
@@ -227,6 +235,46 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
                 placeholder="KW-2026-001 / No. Slip Tagihan"
                 value={sourceRef}
                 onChange={(e) => setSourceRef(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+              />
+            </div>
+          </div>
+
+          {/* EXPENSE-1D: Recipient Bank Snapshot */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Nama Bank (Opsional)
+              </label>
+              <input
+                type="text"
+                placeholder="Contoh: Bank Mandiri"
+                value={recipientBankName}
+                onChange={(e) => setRecipientBankName(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                No. Rekening (Opsional)
+              </label>
+              <input
+                type="text"
+                placeholder="Contoh: 123-456-7890"
+                value={recipientBankAccount}
+                onChange={(e) => setRecipientBankAccount(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Atas Nama (Opsional)
+              </label>
+              <input
+                type="text"
+                placeholder="Contoh: PT Listrik Jaya"
+                value={recipientBankHolder}
+                onChange={(e) => setRecipientBankHolder(e.target.value)}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
               />
             </div>

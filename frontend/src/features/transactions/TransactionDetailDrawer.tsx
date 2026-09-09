@@ -616,6 +616,38 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     )}
                   </div>
                 )}
+                {/* EXPENSE-1D: Recipient Bank Snapshot (manual, not from Supplier Master) */}
+                {tx.transaction_type === 'EXPENSE' && (tx.recipient_bank_name || tx.recipient_bank_account || tx.recipient_bank_holder) && (
+                  <div className="pt-2 border-t border-slate-100 space-y-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Data Rekening Penerima Dana</span>
+                    {tx.recipient_bank_name && (
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Bank: </span>
+                        <span className="text-slate-800 font-semibold text-xs">{tx.recipient_bank_name}</span>
+                      </div>
+                    )}
+                    {tx.recipient_bank_account && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 text-[11px]">No. Rekening: </span>
+                        <span className="font-mono font-bold text-xs text-slate-900">{tx.recipient_bank_account}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyBankAccount(tx.recipient_bank_account!)}
+                          className="ml-auto text-[10px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded px-1.5 py-0.5 transition-colors cursor-pointer font-medium"
+                          title="Salin no. rekening"
+                        >
+                          Salin
+                        </button>
+                      </div>
+                    )}
+                    {tx.recipient_bank_holder && (
+                      <div>
+                        <span className="text-slate-500 text-[11px]">Atas Nama: </span>
+                        <span className="text-slate-700 text-xs">{tx.recipient_bank_holder}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {tx.booking_bid && (
                   <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                     <span className="text-slate-500">Terkait Reservasi BID:</span>

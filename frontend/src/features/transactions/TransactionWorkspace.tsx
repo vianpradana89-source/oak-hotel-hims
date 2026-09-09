@@ -159,6 +159,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [purchaseLoadingIds, setPurchaseLoadingIds] = useState<Set<number | string>>(new Set());
   const [purchaseExpandErrors, setPurchaseExpandErrors] = useState<Map<number | string, string>>(new Map());
 
+  // EXPENSE-1D: expandable operational detail row (mirrors Purchase pattern)
+  const [expandedExpenseIds, setExpandedExpenseIds] = useState<Set<number | string>>(new Set());
+  const [expenseDetailCache, setExpenseDetailCache] = useState<Map<number | string, TransactionRecord>>(new Map());
+  const [expenseLoadingIds, setExpenseLoadingIds] = useState<Set<number | string>>(new Set());
+  const [expenseExpandErrors, setExpenseExpandErrors] = useState<Map<number | string, string>>(new Map());
+
   // PURCHASE-2A3: inline lifecycle control per-cell loading state
   const [lifecycleSaving, setLifecycleSaving] = useState<Record<string, boolean>>({});
 
@@ -268,6 +274,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setPurchaseDetailCache(new Map());
     setPurchaseLoadingIds(new Set());
     setPurchaseExpandErrors(new Map());
+    setExpandedExpenseIds(new Set());
+    setExpenseDetailCache(new Map());
+    setExpenseLoadingIds(new Set());
+    setExpenseExpandErrors(new Map());
   }, [propertyId, activeTab, operationalStatus, startDate, endDate, debouncedSearch, page]);
 
   useEffect(() => {
@@ -726,6 +736,92 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       });
     } finally {
       setPurchaseLoadingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    }
+  };
+
+  // EXPENSE-1D: toggle expense row expansion with lazy load
+  const toggleExpenseExpand = async (txId: number | string) => {
+    const isExpanded = expandedExpenseIds.has(txId);
+
+    if (isExpanded) {
+      setExpandedExpenseIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    } else {
+      setExpandedExpenseIds((prev) => {
+        const next = new Set(prev);
+        next.add(txId);
+        return next;
+      });
+      setExpenseExpandErrors((prev) => {
+        const next = new Map(prev);
+        next.delete(txId);
+        return next;
+      });
+
+      if (!expenseDetailCache.has(txId) && !expenseLoadingIds.has(txId)) {
+        setExpenseLoadingIds((prev) => {
+          const next = new Set(prev);
+          next.add(txId);
+          return next;
+        });
+        try {
+          const detail = await fetchTransactionDetailApi(txId, propertyId);
+          setExpenseDetailCache((prev) => {
+            const next = new Map(prev);
+            next.set(txId, detail);
+            return next;
+          });
+        } catch (err: any) {
+          setExpenseExpandErrors((prev) => {
+            const next = new Map(prev);
+            next.set(txId, err.message || 'Gagal memuat detail');
+            return next;
+          });
+        } finally {
+          setExpenseLoadingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(txId);
+            return next;
+          });
+        }
+      }
+    }
+  };
+
+  // EXPENSE-1D: retry detail fetch while keeping row expanded
+  const retryExpenseExpand = async (txId: number | string) => {
+    setExpenseExpandErrors((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setExpenseLoadingIds((prev) => {
+      const next = new Set(prev);
+      next.add(txId);
+      return next;
+    });
+    try {
+      const detail = await fetchTransactionDetailApi(txId, propertyId);
+      setExpenseDetailCache((prev) => {
+        const next = new Map(prev);
+        next.set(txId, detail);
+        return next;
+      });
+    } catch (err: any) {
+      setExpenseExpandErrors((prev) => {
+        const next = new Map(prev);
+        next.set(txId, err.message || 'Gagal memuat detail');
+        return next;
+      });
+    } finally {
+      setExpenseLoadingIds((prev) => {
         const next = new Set(prev);
         next.delete(txId);
         return next;
@@ -2014,132 +2110,330 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     );
                   }
 
-                   if (activeTab === 'EXPENSE') {
-                     return (
-                       <tr
-                         key={t.id}
-                         onClick={() => openDetailDrawer(t.id)}
-                         className="hover:bg-slate-50/80 transition-colors cursor-pointer"
-                       >
-                         <td className="py-3 px-3 whitespace-nowrap">
-                           <div className="font-semibold text-slate-800">{t.transaction_date}</div>
-                           <div className="text-[10px] text-slate-400">
-                             {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-                           </div>
-                         </td>
-                         <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
-                           {t.transaction_no}
-                         </td>
-                         <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
-                           {party}
-                         </td>
-                         <td className="py-3 px-3 text-slate-700 truncate max-w-[130px]">
-                           <span className="text-[11px] font-medium text-slate-700">{t.category_name}</span>
-                         </td>
-                         <td className="py-3 px-4 max-w-xs truncate text-slate-800">
-                           <div>{t.description}</div>
-                           {t.source_reference && (
-                             <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
-                           )}
-                         </td>
-                         <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
-                           {formatIdr(displayTransactionNet(t))}
-                         </td>
-                         {/* Pembayaran — read-only badge */}
-                         <td className="py-3 px-2 text-center whitespace-nowrap">
-                           <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
-                             t.payment_status === 'PAID'
-                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                               : 'bg-amber-50 text-amber-700 border-amber-200'
-                           }`}>
-                             {t.payment_status === 'PAID' ? 'Sudah Bayar' : 'Belum Bayar'}
-                           </span>
-                         </td>
-                         {/* Verifikasi — inline dropdown */}
-                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                           {(() => {
-                             const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
-                             return (
-                               <select
-                                 value={t.verification_status || 'UNVERIFIED'}
-                                 onChange={async (e) => {
-                                   e.stopPropagation();
-                                   await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
-                                 }}
-                                 disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
-                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
-                               >
-                                 <option value="UNVERIFIED">Belum Terverifikasi</option>
-                                 <option value="VERIFIED">Terverifikasi</option>
-                                 <option value="REJECTED">Ditolak</option>
-                               </select>
-                             );
-                           })()}
-                         </td>
-                         {/* Status — inline dropdown */}
-                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                           {(() => {
-                             const ws = t.operational_sheet || 'PROSES';
-                             const wc = getPurchaseWorkflowClass(ws);
-                             if (ws === 'BATAL') {
-                               return (
-                                 <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                   Batal
-                                 </span>
-                               );
-                             }
-                             if (ws === 'HAPUS') {
-                               return (
-                                 <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                   Dihapus
-                                 </span>
-                               );
-                             }
-                             return (
-                               <select
-                                 value={ws}
-                                 onChange={async (e) => {
-                                   e.stopPropagation();
-                                   await handleExpenseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
-                                 }}
-                                 disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`]}
-                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
-                               >
-                                 <option value="PROSES">Proses</option>
-                                 <option value="SELESAI">Selesai</option>
-                               </select>
-                             );
-                           })()}
-                         </td>
-                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                           <div className="flex items-center justify-center gap-1">
-                             <button
-                               onClick={() => openDetailDrawer(t.id)}
-                               className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-                             >
-                               Detail
-                             </button>
-                             {isEligibleForSoftDelete(t) && (
-                               <button
-                                 onClick={() => openSoftDeleteModal(t)}
-                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                               >
-                                 Hapus
-                               </button>
-                             )}
-                             {t.transaction_status === 'POSTED' && (
-                               <button
-                                 onClick={() => openVoidModal(t)}
-                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                               >
-                                 Void
-                               </button>
-                             )}
-                           </div>
-                         </td>
-                       </tr>
-                     );
-                   }
+                    if (activeTab === 'EXPENSE') {
+                      const isExpanded = expandedExpenseIds.has(t.id);
+                      const detail = expenseDetailCache.get(t.id);
+                      const isLoading = expenseLoadingIds.has(t.id);
+                      const error = expenseExpandErrors.get(t.id);
+                      const party = t.party_name || ' -';
+                      const hasRecipientBank = !!(t.recipient_bank_name || t.recipient_bank_account || t.recipient_bank_holder);
+
+                      return (
+                        <React.Fragment key={t.id}>
+                          <tr
+                            onClick={() => openDetailDrawer(t.id)}
+                            className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+                          >
+                            <td className="py-3 px-3 whitespace-nowrap">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  aria-label={isExpanded ? 'Tutup detail pengeluaran' : 'Lihat detail pengeluaran'}
+                                  aria-expanded={isExpanded}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleExpenseExpand(t.id);
+                                  }}
+                                  className="mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded text-slate-500 hover:bg-slate-100 cursor-pointer transition-colors"
+                                >
+                                  <svg className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                  </svg>
+                                </button>
+                                <div>
+                                  <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
+                              {t.transaction_no}
+                            </td>
+                            <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
+                              <div>{party}</div>
+                              {hasRecipientBank && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleBankPopoverToggle(t, e)}
+                                  onMouseEnter={(e) => handleBankTriggerMouseEnter(t, e)}
+                                  onMouseLeave={handleBankTriggerMouseLeave}
+                                  onFocus={(e) => handleBankTriggerFocus(t, e)}
+                                  onBlur={() => clearBankHoverTimer()}
+                                  className="mt-1 inline-flex items-center gap-1 text-[10px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded px-1 py-0.5 transition-colors cursor-pointer"
+                                  title="Lihat info bank penerima"
+                                >
+                                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                  <span>Bank</span>
+                                </button>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-slate-700 truncate max-w-[130px]">
+                              <span className="text-[11px] font-medium text-slate-700">{t.category_name}</span>
+                            </td>
+                            <td className="py-3 px-4 max-w-xs truncate text-slate-800">
+                              <div>{t.description}</div>
+                              {t.source_reference && (
+                                <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
+                              {formatIdr(displayTransactionNet(t))}
+                            </td>
+                            {/* Pembayaran — read-only badge */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap">
+                              <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                                t.payment_status === 'PAID'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-amber-50 text-amber-700 border-amber-200'
+                              }`}>
+                                {t.payment_status === 'PAID' ? 'Sudah Bayar' : 'Belum Bayar'}
+                              </span>
+                            </td>
+                            {/* Verifikasi — inline dropdown */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {(() => {
+                                const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
+                                return (
+                                  <select
+                                    value={t.verification_status || 'UNVERIFIED'}
+                                    onChange={async (e) => {
+                                      e.stopPropagation();
+                                      await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
+                                    }}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || t.operational_sheet === 'BATAL' || t.operational_sheet === 'HAPUS'}
+                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
+                                  >
+                                    <option value="UNVERIFIED">Belum Terverifikasi</option>
+                                    <option value="VERIFIED">Terverifikasi</option>
+                                    <option value="REJECTED">Ditolak</option>
+                                  </select>
+                                );
+                              })()}
+                            </td>
+                            {/* Status — inline dropdown */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {(() => {
+                                const ws = t.operational_sheet || 'PROSES';
+                                const wc = getPurchaseWorkflowClass(ws);
+                                if (ws === 'BATAL') {
+                                  return (
+                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                      Batal
+                                    </span>
+                                  );
+                                }
+                                if (ws === 'HAPUS') {
+                                  return (
+                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
+                                      Dihapus
+                                    </span>
+                                  );
+                                }
+                                return (
+                                  <select
+                                    value={ws}
+                                    onChange={async (e) => {
+                                      e.stopPropagation();
+                                      await handleExpenseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
+                                    }}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`]}
+                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
+                                  >
+                                    <option value="PROSES">Proses</option>
+                                    <option value="SELESAI">Selesai</option>
+                                  </select>
+                                );
+                              })()}
+                            </td>
+                            <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  onClick={() => openDetailDrawer(t.id)}
+                                  className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  Detail
+                                </button>
+                                {isEligibleForSoftDelete(t) && (
+                                  <button
+                                    onClick={() => openSoftDeleteModal(t)}
+                                    className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    Hapus
+                                  </button>
+                                )}
+                                {t.transaction_status === 'POSTED' && (
+                                  <button
+                                    onClick={() => openVoidModal(t)}
+                                    className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    Void
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="bg-slate-50/60">
+                              <td colSpan={10} className="px-4 py-3">
+                                <div className="rounded-lg border border-slate-200 bg-white/90 overflow-hidden">
+                                  <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
+                                    Rincian Operasional Pengeluaran
+                                  </div>
+                                  {isLoading ? (
+                                    <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                      Memuat detail...
+                                    </div>
+                                  ) : error ? (
+                                    <div className="px-4 py-4">
+                                      <div className="text-sm text-rose-600 mb-2">Gagal memuat detail pengeluaran.</div>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          retryExpenseExpand(t.id);
+                                        }}
+                                        className="text-xs text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
+                                      >
+                                        Coba lagi
+                                      </button>
+                                    </div>
+                                  ) : detail ? (
+                                    <>
+                                      {/* Line items table */}
+                                      {detail.lines && detail.lines.length > 0 ? (
+                                        <div className="overflow-x-auto border-b border-slate-100">
+                                          <table className="w-full text-[11px]">
+                                            <thead className="bg-slate-50 text-slate-500 font-bold uppercase text-[10px]">
+                                              <tr>
+                                                <th className="py-2 px-3 text-left">Item / Deskripsi</th>
+                                                <th className="py-2 px-3 text-right">Qty</th>
+                                                <th className="py-2 px-3 text-left">Satuan</th>
+                                                <th className="py-2 px-3 text-right">Harga Satuan</th>
+                                                <th className="py-2 px-3 text-right">Diskon</th>
+                                                <th className="py-2 px-3 text-right">Subtotal</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                              {detail.lines.map((line, idx) => (
+                                                <tr key={line.id || idx}>
+                                                  <td className="py-2 px-3 text-slate-700">{line.description_snapshot}</td>
+                                                  <td className="py-2 px-3 text-right font-mono">{Number(line.quantity)}</td>
+                                                  <td className="py-2 px-3 text-slate-500">{line.unit}</td>
+                                                  <td className="py-2 px-3 text-right font-mono">{formatIdr(Number(line.unit_price))}</td>
+                                                  <td className="py-2 px-3 text-right font-mono text-slate-500">{formatIdr(Number(line.discount_amount))}</td>
+                                                  <td className="py-2 px-3 text-right font-mono font-semibold text-slate-800">{formatIdr(Number(line.line_total))}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      ) : null}
+                                      {/* Summary block */}
+                                      <div className="px-4 py-3 border-t border-slate-200 bg-slate-50/30 space-y-1 text-xs">
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Keterangan:</span>
+                                          <span className="font-mono text-slate-700 max-w-[200px] text-right truncate" title={detail.description}>{detail.description || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Penerima / Vendor:</span>
+                                          <span className="font-mono text-slate-700">{detail.party_name || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Kategori:</span>
+                                          <span className="font-mono text-slate-700">{detail.category_name || detail.category_code || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Departemen:</span>
+                                          <span className="font-mono text-slate-700">{detail.department_name_snapshot || detail.department_code || '-'}</span>
+                                        </div>
+                                        {detail.source_reference && (
+                                          <div className="flex justify-between">
+                                            <span className="text-slate-500">Referensi:</span>
+                                            <span className="font-mono text-slate-700">{detail.source_reference}</span>
+                                          </div>
+                                        )}
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Metode Pembayaran:</span>
+                                          <span className="font-mono text-slate-700">{detail.payment_method || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Status Pembayaran:</span>
+                                          <span className={`font-mono font-semibold ${detail.payment_status === 'PAID' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                            {detail.payment_status || '-'}
+                                          </span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Status Verifikasi:</span>
+                                          <span className="font-mono text-slate-700">{detail.verification_status || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-slate-500">Workflow Pengeluaran:</span>
+                                          <span className="font-mono text-slate-700">{detail.expense_workflow_status || '-'}</span>
+                                        </div>
+                                        {/* Recipient bank snapshot */}
+                                        {detail.recipient_bank_name || detail.recipient_bank_account || detail.recipient_bank_holder ? (
+                                          <>
+                                            <div className="border-t border-slate-200 pt-1 mt-1"></div>
+                                            <div className="flex justify-between">
+                                              <span className="text-slate-500">Bank Penerima:</span>
+                                              <span className="font-mono text-slate-700">{detail.recipient_bank_name || '-'}</span>
+                                            </div>
+                                            {detail.recipient_bank_account && (
+                                              <div className="flex justify-between">
+                                                <span className="text-slate-500">No. Rekening:</span>
+                                                <span className="font-mono font-bold text-slate-800">{detail.recipient_bank_account}</span>
+                                              </div>
+                                            )}
+                                            {detail.recipient_bank_holder && (
+                                              <div className="flex justify-between">
+                                                <span className="text-slate-500">Atas Nama:</span>
+                                                <span className="font-mono text-slate-700">{detail.recipient_bank_holder}</span>
+                                              </div>
+                                            )}
+                                          </>
+                                        ) : (
+                                          <div className="flex justify-between text-slate-400 italic">
+                                            <span>Data rekening penerima:</span>
+                                            <span>Belum diisi</span>
+                                          </div>
+                                        )}
+                                        {/* Attachment count */}
+                                        {detail.attachments && detail.attachments.length > 0 && (
+                                          <div className="flex justify-between">
+                                            <span className="text-slate-500">Lampiran:</span>
+                                            <span className="font-mono text-slate-700">{detail.attachments.length} berkas</span>
+                                          </div>
+                                        )}
+                                        {/* Financial summary */}
+                                        <div className="flex justify-between border-t border-slate-200 pt-1 mt-1">
+                                          <span className="text-slate-500">Nominal:</span>
+                                          <span className="font-mono font-semibold text-rose-700">{formatIdr(detail.amount)}</span>
+                                        </div>
+                                        {/* Verified by metadata */}
+                                        {detail.verified_by_name_snapshot && (
+                                          <div className="flex justify-between text-[11px] text-slate-400">
+                                            <span>Terverifikasi oleh:</span>
+                                            <span>{detail.verified_by_name_snapshot}{detail.verified_at ? ` • ${new Date(detail.verified_at).toLocaleDateString('id-ID')}` : ''}</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                      Memuat detail...
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    }
 
                   if (activeTab === 'INCOME') {
                     return (
@@ -2586,13 +2880,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             ref={bankPopoverRef}
             style={{ position: 'fixed', top: `${bankPopoverPos.top}px`, left: `${bankPopoverPos.left}px`, zIndex: 60 }}
             role="dialog"
-            aria-label="Info Bank Supplier"
+            aria-label={bankPopoverTx?.transaction_type === 'EXPENSE' ? 'Info Bank Penerima' : 'Info Bank Supplier'}
             className="bg-white rounded-xl shadow-2xl border border-stone-200 w-[320px] p-4 animate-in fade-in zoom-in-95 duration-150"
             onMouseEnter={handleBankPopoverMouseEnter}
             onMouseLeave={handleBankPopoverMouseLeave}
           >
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wide">Info Bank Supplier</h3>
+              <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wide">
+                {bankPopoverTx?.transaction_type === 'EXPENSE' ? 'Info Bank Penerima' : 'Info Bank Supplier'}
+              </h3>
               <button
                 type="button"
                 onClick={() => closeBankPopover()}
@@ -2605,36 +2901,86 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </button>
             </div>
             <div className="space-y-2">
-              {bankPopoverTx.supplier_bank_name && (
-                <div>
-                  <span className="text-[11px] text-stone-500 block font-medium">Nama Bank</span>
-                  <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.supplier_bank_name}</span>
-                </div>
+              {/* PURCHASE: supplier bank fields */}
+              {bankPopoverTx?.transaction_type === 'PURCHASE' && (
+                <>
+                  {bankPopoverTx.supplier_bank_name && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">Nama Bank</span>
+                      <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.supplier_bank_name}</span>
+                    </div>
+                  )}
+                  {bankPopoverTx.supplier_bank_account && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">No. Rekening</span>
+                      <div className="flex items-center justify-between gap-2 mt-0.5">
+                        <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.supplier_bank_account}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleCopyBankAccount(bankPopoverTx.id, bankPopoverTx.supplier_bank_account!); }}
+                          className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                            bankCopied === String(bankPopoverTx.id)
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                          }`}
+                        >
+                          Salin
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {bankPopoverTx.supplier_bank_holder && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">Atas Nama</span>
+                      <span className="text-sm text-stone-700">{bankPopoverTx.supplier_bank_holder}</span>
+                    </div>
+                  )}
+                </>
               )}
-              {bankPopoverTx.supplier_bank_account && (
-                <div>
-                  <span className="text-[11px] text-stone-500 block font-medium">No. Rekening</span>
-                  <div className="flex items-center justify-between gap-2 mt-0.5">
-                    <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.supplier_bank_account}</span>
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); handleCopyBankAccount(bankPopoverTx.id, bankPopoverTx.supplier_bank_account!); }}
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-                        bankCopied === String(bankPopoverTx.id)
-                          ? 'bg-emerald-100 text-emerald-700'
-                          : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-                      }`}
-                    >
-                      Salin
-                    </button>
-                  </div>
-                </div>
+              {/* EXPENSE: recipient bank snapshot fields */}
+              {bankPopoverTx?.transaction_type === 'EXPENSE' && (
+                <>
+                  {bankPopoverTx.recipient_bank_name && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">Nama Bank</span>
+                      <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.recipient_bank_name}</span>
+                    </div>
+                  )}
+                  {bankPopoverTx.recipient_bank_account && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">No. Rekening</span>
+                      <div className="flex items-center justify-between gap-2 mt-0.5">
+                        <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.recipient_bank_account}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleCopyBankAccount(bankPopoverTx.id, bankPopoverTx.recipient_bank_account!); }}
+                          className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                            bankCopied === String(bankPopoverTx.id)
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                          }`}
+                        >
+                          Salin
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {bankPopoverTx.recipient_bank_holder && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">Atas Nama</span>
+                      <span className="text-sm text-stone-700">{bankPopoverTx.recipient_bank_holder}</span>
+                    </div>
+                  )}
+                </>
               )}
-              {bankPopoverTx.supplier_bank_holder && (
-                <div>
-                  <span className="text-[11px] text-stone-500 block font-medium">Atas Nama</span>
-                  <span className="text-sm text-stone-700">{bankPopoverTx.supplier_bank_holder}</span>
-                </div>
+              {bankPopoverTx?.transaction_type === 'EXPENSE' ? (
+                !(bankPopoverTx.recipient_bank_name || bankPopoverTx.recipient_bank_account || bankPopoverTx.recipient_bank_holder) && (
+                  <p className="text-xs text-stone-400 italic">Tidak ada data rekening</p>
+                )
+              ) : (
+                !(bankPopoverTx.supplier_bank_name || bankPopoverTx.supplier_bank_account || bankPopoverTx.supplier_bank_holder) && (
+                  <p className="text-xs text-stone-400 italic">Tidak ada data rekening</p>
+                )
               )}
             </div>
             <p className="text-[10px] text-stone-400 mt-3 pt-2 border-t border-stone-100">
