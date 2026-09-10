@@ -1049,22 +1049,12 @@ export default function QuickBookingModal({
     });
   };
 
-  // Upload Bukti Bayar
-  const handleBuktiBayarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload Bukti Bayar - hanya simpan file, tidak pre-upload
+  const handleBuktiBayarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setBuktiBayarFile(file);
-      const formData = new FormData();
-      formData.append('file', file);
-      try {
-        const res = await authenticatedFetch('/api/upload', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (res.ok && data.url) {
-          setBuktiBayarPath(data.url);
-        }
-      } catch (err) {
-        console.warn('Failed to upload payment receipt', err);
-      }
+      setBuktiBayarPath(null); // reset path legacy
     }
   };
 
@@ -1137,7 +1127,7 @@ export default function QuickBookingModal({
     const _evidenceRuleMode = getFieldMode('payment_evidence');
     const _isEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
       && amountPaid > 0;
-    if (_isEvidenceRequired && !buktiBayarFile && !buktiBayarPath) {
+    if (_isEvidenceRequired && !buktiBayarFile) {
       issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0');
     }
 
@@ -1367,17 +1357,21 @@ export default function QuickBookingModal({
             valid_until: extractedKtpData?.valid_until || selectedCrmGuest?.valid_until || undefined,
             ktp_ocr_confidence: extractedKtpData?.confidence || selectedCrmGuest?.ktp_ocr_confidence || undefined,
             ktp_ocr_provider: extractedKtpData?.provider || selectedCrmGuest?.ktp_ocr_provider || undefined,
-            bukti_bayar_path: buktiBayarPath || undefined,
+            bukti_bayar_path: undefined,
             special_requests: specialRequests.trim() || undefined,
             qty: 1
           };
         })
       };
 
+      const formData = new FormData();
+      formData.append('booking_payload', JSON.stringify(payload));
+      if (buktiBayarFile) {
+        formData.append('payment_evidence', buktiBayarFile);
+      }
       const res = await authenticatedFetch('/api/bookings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: formData
       });
 
       const json = await res.json();

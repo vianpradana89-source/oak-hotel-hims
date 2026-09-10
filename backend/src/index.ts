@@ -153,6 +153,11 @@ const memoryUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
+const quickBookingEvidenceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
 const handlePaymentUpload = (req: any, res: any, next: any) => {
   memoryUpload.single('file')(req, res, (err: any) => {
     if (err) {
@@ -1335,7 +1340,10 @@ async function createCanonicalBooking(
     const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
       ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
       : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
-    const paymentEvidence = bookingPayload.bukti_bayar_path || bookingPayload.initial_payment?.payment_evidence_path || rawReservationPayloads[0]?.bukti_bayar_path;
+    const paymentEvidence = bookingPayload.bukti_bayar_path
+      || bookingPayload.initial_payment?.payment_evidence_path
+      || rawReservationPayloads[0]?.bukti_bayar_path
+      || (req.file ? true : null);
     if (totalAmountPaid > 0 && !paymentEvidence) {
       missingFields.push('payment_evidence');
     }
@@ -1361,6 +1369,7 @@ async function createCanonicalBooking(
   }
 
   const client = await pool.connect();
+  const savedEvidenceKeys: string[] = [];
   try {
     await client.query('BEGIN');
 
@@ -2143,6 +2152,40 @@ async function createCanonicalBooking(
               path.basename(evidencePath)
             ]
           );
+        } else if (shouldAttachEvidence && req.file) {
+          const fileBuffer = req.file.buffer;
+          const validation = validateEvidenceUpload({
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            originalname: req.file.originalname,
+            buffer: fileBuffer
+          });
+          if (!validation.valid) {
+            throw createHttpError(400, validation.error || 'File bukti pembayaran tidak valid', validation.code || 'EVIDENCE_INVALID');
+          }
+          const savedEvidence = await saveEvidenceFile(bookingPropertyId, {
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            originalname: req.file.originalname || '',
+            buffer: fileBuffer
+          });
+          savedEvidenceKeys.push(savedEvidence.storageKey);
+          await client.query(
+            `INSERT INTO payment_evidences (
+               property_id, reservation_id, payment_transaction_id, evidence_type, storage_key, original_filename,
+               mime_type, file_size_bytes, note, is_active, uploaded_by_name_snapshot, created_at, updated_at
+             ) VALUES ($1, $2, $3, 'RECEIPT', $4, $5, $6, $7, 'Bukti bayar saat reservasi', TRUE, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              bookingPropertyId,
+              inserted.reservation.id,
+              pTxId,
+              savedEvidence.storageKey,
+              req.file.originalname || 'payment_evidence',
+              req.file.mimetype,
+              savedEvidence.fileSizeBytes,
+              bookingActor
+            ]
+          );
         }
 
         if (groupedBookingPayment) {
@@ -2556,6 +2599,11 @@ async function createCanonicalBooking(
     };
   } catch (err: any) {
     try { require('fs').writeFileSync('debug_create_error.txt', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail, stack: err?.stack?.split('\n').slice(0, 8) }, null, 2)); } catch(_e) {}
+    for (const key of savedEvidenceKeys) {
+      await deleteEvidenceFile(key).catch((cleanupErr: any) => {
+        console.error(`[evidence cleanup] Failed to delete orphan file ${key}:`, cleanupErr?.message || cleanupErr);
+      });
+    }
     await client.query('ROLLBACK');
     throw err;
   } finally {
@@ -4051,9 +4099,9 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
   }
 });
 
-app.post('/api/bookings', async (req, res) => {
+app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('payment_evidence'), async (req, res) => {
   try {
-    const payload = req.body || {};
+    const payload = req.body.booking_payload ? JSON.parse(req.body.booking_payload) : req.body;
     const reservations = payload.reservations;
     if (!Array.isArray(reservations) || reservations.length < 1) {
       const responseObj = { status: 'ERROR', message: 'reservations must be a non-empty array' };
