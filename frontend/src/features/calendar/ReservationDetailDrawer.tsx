@@ -80,8 +80,11 @@ export default function ReservationDetailDrawer({
      currentPrimaryGuestName: string | null;
      currentPrimaryGuestNik: string | null;
    } | null>(null);
-   const [replacingPrimaryGuest, setReplacingPrimaryGuest] = useState<boolean>(false);
-   const { authFetch } = useAuth();
+    const [replacingPrimaryGuest, setReplacingPrimaryGuest] = useState<boolean>(false);
+    // PAYMENT-EVIDENCE-VIEW-1: per-payment evidence preview state
+    const [activePaymentEvidenceId, setActivePaymentEvidenceId] = useState<number | null>(null);
+    const [activePaymentEvidenceMime, setActivePaymentEvidenceMime] = useState<string>('');
+    const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
   // to legacy reservation.ktp_path when a PG relation exists.
@@ -349,6 +352,13 @@ export default function ReservationDetailDrawer({
 
   const data = detailData || reservation;
   const bid = data.bid || data.legacy_booking_number || `#${data.id}`;
+
+  // PAYMENT-EVIDENCE-VIEW-1: per-payment evidence blob
+  const _paymentEvidenceUrl = (activePaymentEvidenceId != null && activePropId != null && data.id != null)
+    ? `/api/reservations/${data.id}/payments/${activePaymentEvidenceId}/evidences/${activePaymentEvidenceId}/content?property_id=${activePropId}`
+    : null;
+  const { blobUrl: paymentEvidenceRowBlobUrl, loading: paymentEvidenceRowLoading } = useSecureDocumentBlob(_paymentEvidenceUrl, activePaymentEvidenceId != null);
+
   const isCheckedIn = data.status === 'CHECKED_IN';
   const isBooked = data.status === 'BOOKED';
   const isCheckedOut = data.status === 'CHECKED_OUT';
@@ -1095,6 +1105,14 @@ export default function ReservationDetailDrawer({
             {/* Recorded Payments History */}
             {(() => {
               const payments = folioData?.payments || [];
+              const evidences = (folioData?.evidences || []) as any[];
+              // Index evidence by payment_transaction_id for O(1) lookup
+              const evidenceByPayment: Record<number, any> = {};
+              for (const ev of evidences) {
+                if (ev.is_active && ev.payment_transaction_id != null && !evidenceByPayment[ev.payment_transaction_id]) {
+                  evidenceByPayment[ev.payment_transaction_id] = ev;
+                }
+              }
               if (payments.length === 0) return null;
               return (
                 <div className="mt-3 border border-stone-200 rounded-lg overflow-hidden text-xs">
@@ -1105,27 +1123,44 @@ export default function ReservationDetailDrawer({
                     </span>
                   </div>
                   <div className="divide-y divide-stone-100 max-h-48 overflow-y-auto">
-                    {payments.map((pmt: any, idx: number) => (
-                      <div key={pmt.id} className="p-2.5 flex items-center justify-between text-xs hover:bg-stone-50">
-                        <div>
-                          <div className="font-semibold text-stone-800 flex items-center gap-1.5 text-xs">
-                            <span>Pembayaran #{payments.length - idx}</span>
-                            <span className="text-xs bg-stone-100 text-stone-700 px-1.5 py-0.5 rounded font-mono">
-                              {pmt.payment_method || pmt.method || 'CASH'}
-                            </span>
-                            <span className={`text-xs px-1.5 py-0.5 rounded font-bold uppercase ${pmt.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
-                              {pmt.status}
+                    {payments.map((pmt: any, idx: number) => {
+                      const ev = evidenceByPayment[pmt.id];
+                      const hasEvidence = ev != null;
+                      return (
+                        <div key={pmt.id} className="p-2.5 flex items-center justify-between text-xs hover:bg-stone-50">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-semibold text-stone-800 flex items-center gap-1.5 text-xs">
+                              <span>Pembayaran #{payments.length - idx}</span>
+                              <span className="text-xs bg-stone-100 text-stone-700 px-1.5 py-0.5 rounded font-mono">
+                                {pmt.payment_method || pmt.method || 'CASH'}
+                              </span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded font-bold uppercase ${pmt.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                                {pmt.status}
+                              </span>
+                            </div>
+                            <span className="text-xs text-stone-400 block font-mono mt-0.5">
+                              {pmt.payment_ref ? `Ref: ${pmt.payment_ref} • ` : ''}{pmt.created_at ? new Date(pmt.created_at).toLocaleString('id-ID') : ''}
                             </span>
                           </div>
-                          <span className="text-xs text-stone-400 block font-mono mt-0.5">
-                            {pmt.payment_ref ? `Ref: ${pmt.payment_ref} • ` : ''}{pmt.created_at ? new Date(pmt.created_at).toLocaleString('id-ID') : ''}
-                          </span>
+                          <div className="flex items-center gap-2 ml-2">
+                            {hasEvidence ? (
+                              <button
+                                type="button"
+                                onClick={() => { setActivePaymentEvidenceId(ev.id); setActivePaymentEvidenceMime(ev.mime_type); }}
+                                className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-semibold text-xs rounded border border-emerald-200 cursor-pointer transition-colors"
+                              >
+                                Lihat Bukti
+                              </button>
+                            ) : (
+                              <span className="text-stone-400 text-xs italic">Belum ada bukti</span>
+                            )}
+                            <div className="font-mono font-bold text-emerald-900 text-right text-xs whitespace-nowrap">
+                              Rp {Number(pmt.amount || 0).toLocaleString('id-ID')}
+                            </div>
+                          </div>
                         </div>
-                        <div className="font-mono font-bold text-emerald-900 text-right text-xs">
-                          Rp {Number(pmt.amount || 0).toLocaleString('id-ID')}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -1787,6 +1822,61 @@ export default function ReservationDetailDrawer({
                     />
                   )
                 ) : null}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* PAYMENT-EVIDENCE-VIEW-1: Per-payment evidence preview modal */}
+        {activePaymentEvidenceId != null && (
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
+            onClick={() => setActivePaymentEvidenceId(null)}
+          >
+            <div
+              className="bg-stone-900 border border-stone-700 rounded-2xl max-w-2xl w-full p-4 space-y-3 shadow-2xl overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+                <span className="text-sm font-bold text-stone-100">
+                  Lihat Bukti — Pembayaran #{activePaymentEvidenceId}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActivePaymentEvidenceId(null)}
+                  className="text-stone-400 hover:text-white p-1 rounded-lg text-lg leading-none cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="flex items-center justify-center bg-stone-950/60 rounded-xl p-2 min-h-[300px] max-h-[70vh] overflow-auto">
+                {paymentEvidenceRowLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2">
+                    <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    <span>Mengunduh bukti pembayaran...</span>
+                  </div>
+                ) : paymentEvidenceRowBlobUrl ? (
+                  activePaymentEvidenceMime === 'application/pdf' ? (
+                    <iframe
+                      src={paymentEvidenceRowBlobUrl}
+                      title="Bukti Pembayaran"
+                      className="w-full h-[60vh] rounded-lg border-0"
+                    />
+                  ) : (
+                    <img
+                      src={paymentEvidenceRowBlobUrl}
+                      alt="Bukti Pembayaran"
+                      className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
+                    />
+                  )
+                ) : (
+                  <div className="text-center p-8 text-rose-400 text-xs">
+                    <div className="text-2xl mb-2">⚠️</div>
+                    <p className="font-bold">Gagal memuat bukti</p>
+                    <p className="text-stone-500 text-[11px]">Bukti pembayaran tidak ditemukan atau telah dihapus.</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
