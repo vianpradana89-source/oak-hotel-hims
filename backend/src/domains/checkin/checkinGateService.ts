@@ -42,10 +42,16 @@ export async function evaluatePreCheckinEligibility(
 ): Promise<PreCheckinEligibility> {
   const missing: MissingRequirement[] = [];
 
-  // ── Validate reservation belongs to property ───────────────────────────
+  // ── Validate reservation belongs to property (canonical: booking→room fallback) ──
   const resCheck = await client.query(
-    `SELECT id, room_id FROM reservations WHERE id = $1 AND property_id = $2`,
-    [reservationId, propertyId]
+    `SELECT res.id, res.room_id,
+            b.property_id AS booking_property_id,
+            r.property_id AS room_property_id
+     FROM reservations res
+     LEFT JOIN bookings b ON b.id = res.booking_id
+     LEFT JOIN rooms r ON r.id = res.room_id
+     WHERE res.id = $1`,
+    [reservationId]
   );
   if (resCheck.rowCount === 0) {
     return {
@@ -63,7 +69,25 @@ export async function evaluatePreCheckinEligibility(
     };
   }
 
-  const roomId = Number(resCheck.rows[0].room_id);
+  const row = resCheck.rows[0];
+  const effectivePropertyId = row.booking_property_id ?? row.room_property_id;
+  if (effectivePropertyId != null && Number(effectivePropertyId) !== propertyId) {
+    return {
+      eligible: false,
+      guest_name_ok: false,
+      guest_phone_ok: false,
+      identity_ok: false,
+      payment_ok: false,
+      payment_evidence_ok: false,
+      guarantee_ok: false,
+      room_ready_ok: false,
+      missing: [
+        { code: 'RESERVATION_NOT_FOUND', label: 'Reservation tidak ditemukan atau tidak milik properti ini' },
+      ],
+    };
+  }
+
+  const roomId = Number(row.room_id);
 
   // ── Gate 1+2: PRIMARY_GUEST name & phone ───────────────────────────────
   const pgRes = await client.query(
