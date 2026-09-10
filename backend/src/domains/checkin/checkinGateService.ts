@@ -2,6 +2,7 @@
 
 import type { Pool, PoolClient } from 'pg';
 import { evaluateRoomReadiness } from '../turnover/turnoverService';
+import { deriveDepositBalance } from '../deposits/depositService';
 import type { MissingRequirement } from './checkinGateTypes';
 
 /**
@@ -183,19 +184,29 @@ export async function evaluatePreCheckinEligibility(
 
   // ── Gate 6: Guarantee ──────────────────────────────────────────────────
   // TRUE if EITHER:
-  //   A. Active cash deposit (RECEIVED or PARTIALLY_USED with balance_remaining > 0)
+  //   A. Active cash deposit with remaining balance > 0 (computed from deposit_events)
   //   B. Held identity custody (status = 'HELD')
-  const depositRes = await client.query(
-    `SELECT COUNT(*) AS cnt
-     FROM deposits
+  // Note: deposits table has no balance_remaining column; balance is derived from deposit_events
+  // Using canonical deriveDepositBalance from deposit domain to avoid duplicate accounting logic
+  const depositsRes = await client.query(
+    `SELECT id FROM deposits
      WHERE reservation_id = $1
        AND property_id = $2
-       AND status IN ('RECEIVED', 'PARTIALLY_USED')
-       AND balance_remaining > 0`,
+       AND status IN ('RECEIVED', 'PARTIALLY_USED')`,
     [reservationId, propertyId]
   );
 
-  const cashDepositCount = parseInt(depositRes.rows[0].cnt, 10) || 0;
+  let cashDepositCount = 0;
+  for (const deposit of depositsRes.rows) {
+    const eventsRes = await client.query(
+      `SELECT * FROM deposit_events WHERE deposit_id = $1 ORDER BY id`,
+      [deposit.id]
+    );
+    const balance = deriveDepositBalance(eventsRes.rows);
+    if (balance.remaining > 0) {
+      cashDepositCount++;
+    }
+  }
 
   const identityCustodyRes = await client.query(
     `SELECT COUNT(*) AS cnt

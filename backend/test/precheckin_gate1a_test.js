@@ -19,11 +19,22 @@ function createMockClient(rows) {
       callLog.push({ sql, params });
 
       // ── Reservation check (always first query) ─────────────────────────
-      if (sql.includes('FROM reservations') && sql.includes('WHERE id =') && sql.includes('property_id')) {
+      if (sql.includes('FROM reservations') && sql.includes('res.id')) {
         const resId = params[0];
-        const propId = params[1];
-        const res = rows.reservations?.find(r => r.id === resId && r.property_id === propId);
-        return res ? { rows: [res], rowCount: 1 } : { rows: [], rowCount: 0 };
+        const res = rows.reservations?.find(r => r.id === resId);
+        if (res) {
+          // Service expects booking_property_id or room_property_id
+          return {
+            rows: [{
+              id: res.id,
+              room_id: res.room_id,
+              booking_property_id: res.property_id,
+              room_property_id: res.property_id
+            }],
+            rowCount: 1
+          };
+        }
+        return { rows: [], rowCount: 0 };
       }
 
       // ── PRIMARY_GUEST name & phone ─────────────────────────────────────
@@ -78,7 +89,28 @@ function createMockClient(rows) {
         return { rows: [{ cnt, total }], rowCount: 1 };
       }
 
-      // ── Deposit query (COUNT) ──────────────────────────────────────────
+      // ── Deposit query (SELECT id - new pattern after HOTFIX-2) ──────────
+      if (sql.includes('FROM deposits') && sql.includes('SELECT id')) {
+        const resId = params[0];
+        const propId = params[1];
+        const deposits = rows.deposits || [];
+        const filtered = deposits.filter(d =>
+          d.reservation_id === resId &&
+          d.property_id === propId &&
+          d.status === 'RECEIVED' || d.status === 'PARTIALLY_USED'
+        );
+        return { rows: filtered.map(d => ({ id: d.id })), rowCount: filtered.length };
+      }
+
+      // ── Deposit events query (new pattern after HOTFIX-2) ───────────────
+      if (sql.includes('FROM deposit_events') && sql.includes('WHERE deposit_id')) {
+        const depositId = params[0];
+        const events = rows.events || [];
+        const filtered = events.filter(e => e.deposit_id === depositId);
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── Deposit query (COUNT) for backward compat ───────────────────────
       if (sql.includes('FROM deposits') && sql.includes('COUNT(*)')) {
         const resId = params[0];
         const propId = params[1];
@@ -148,20 +180,20 @@ async function test(name, fn) {
   }
 }
 
-async function expectEq(actual, expected, msg) {
+function expectEq(actual, expected, msg) {
   if (actual !== expected) {
     throw new Error(`${msg || 'Assertion failed'}: expected ${expected}, got ${actual}`);
   }
 }
 
-async function expectHasMissing(result, code, msg) {
+function expectHasMissing(result, code, msg) {
   const found = result.missing.find(m => m.code === code);
   if (!found) {
     throw new Error(`${msg || 'Missing requirement not found'}: expected code ${code} in missing array`);
   }
 }
 
-async function expectNotHasMissing(result, code, msg) {
+function expectNotHasMissing(result, code, msg) {
   const found = result.missing.find(m => m.code === code);
   if (found) {
     throw new Error(`${msg || 'Unexpected missing requirement'}: did not expect code ${code} in missing array`);
@@ -177,7 +209,8 @@ async function main() {
       primary_guests_identity: [{ reservation_id: 1, identity_storage_key: 'id-docs/1/abc.jpg', has_valid_identity: true }],
       payments: [{ id: 100, reservation_id: 1, status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 500000 }],
       evidences: [{ reservation_id: 1, is_active: true, payment_transaction_id: 100 }],
-      deposits: [{ reservation_id: 1, property_id: 1, status: 'RECEIVED', balance_remaining: 100000 }],
+      deposits: [{ id: 1, reservation_id: 1, property_id: 1, status: 'RECEIVED' }],
+      events: [{ deposit_id: 1, event_type: 'RECEIVED', amount: 200000 }],
       rooms: [{ id: 10, status: 'VACANT_CLEAN' }]
     });
 
@@ -302,7 +335,8 @@ async function main() {
       primary_guests_identity: [{ reservation_id: 7, identity_storage_key: 'id-docs/7/doc.jpg', has_valid_identity: true }],
       payments: [{ id: 400, reservation_id: 7, status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 500000 }],
       evidences: [{ reservation_id: 7, is_active: true, payment_transaction_id: 400 }],
-      deposits: [{ reservation_id: 7, property_id: 1, status: 'RECEIVED', balance_remaining: 200000 }],
+      deposits: [{ id: 7, reservation_id: 7, property_id: 1, status: 'RECEIVED' }],
+      events: [{ deposit_id: 7, event_type: 'RECEIVED', amount: 300000 }],
       rooms: [{ id: 10, status: 'VACANT_CLEAN' }]
     });
 
