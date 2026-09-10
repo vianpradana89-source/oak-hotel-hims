@@ -14,6 +14,7 @@ import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
 import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
 import { createGuestsRouter, createReservationGuestsRouter } from './domains/guests/guestsRouter';
+import { normalizeDigitsOnly, syncPrimaryGuestFromReservation } from './domains/guests/guestService';
 import { createPropertiesRouter } from './domains/properties/propertiesRouter';
 import { createPropertyBrandingRouter } from './domains/propertyBranding/propertyBrandingRouter';
 import { parsePropertyId, assertRoomBelongsToProperty } from './domains/roomMaster/roomMasterService';
@@ -2252,13 +2253,15 @@ async function createCanonicalBooking(
 
         if (stayingGuestId) {
           // Check that the guest actually exists
-          const existingCheck = await client.query('SELECT id, has_valid_identity, identity_number, identity_path FROM guests WHERE id = $1', [stayingGuestId]);
+          const existingCheck = await client.query('SELECT id, has_valid_identity, identity_number, identity_path, phone, normalized_phone FROM guests WHERE id = $1', [stayingGuestId]);
           if ((existingCheck.rowCount ?? 0) === 0) {
             stayingGuestId = null;
           } else {
             const cleanNik = (child.identityNumber || '').trim();
             const normNik = cleanNik ? cleanNik.replace(/[^0-9A-Za-z]/g, '').toUpperCase() : null;
             const hasValidId = Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity || existingCheck.rows[0].has_valid_identity);
+            const trimmedPhone = child.guestPhone ? String(child.guestPhone).trim() : '';
+            const normPhone = trimmedPhone ? normalizeDigitsOnly(trimmedPhone) : null;
             await client.query(
               `UPDATE guests
                SET identity_path = COALESCE($1::TEXT, identity_path),
@@ -2280,23 +2283,33 @@ async function createCanonicalBooking(
                    ktp_ocr_confidence = COALESCE($17::NUMERIC, ktp_ocr_confidence),
                    ktp_ocr_provider = COALESCE(NULLIF($18, '')::VARCHAR, ktp_ocr_provider),
                    ktp_extracted_at = CASE WHEN $1::TEXT IS NOT NULL OR $2::VARCHAR IS NOT NULL THEN NOW() ELSE ktp_extracted_at END,
+                   phone = CASE
+                     WHEN $20::VARCHAR IS NOT NULL AND TRIM($20::VARCHAR) <> '' THEN $20::VARCHAR
+                     ELSE phone
+                   END,
+                   normalized_phone = CASE
+                     WHEN $21::VARCHAR IS NOT NULL AND TRIM($21::VARCHAR) <> '' THEN $21::VARCHAR
+                     ELSE normalized_phone
+                   END,
                    updated_at = NOW()
                WHERE id = $19::INT`,
               [
                 child.ktpPath || null, cleanNik || null, normNik || null, hasValidId,
                 bPlace, bDate, gGender, gAddress, gRtRw, gKelurahan, gKecamatan,
                 gReligion, gMarital, gOccupation, gCitizenship, gValidUntil,
-                gKtpConf, gKtpProv, stayingGuestId
+                gKtpConf, gKtpProv, stayingGuestId,
+                trimmedPhone || null, normPhone || null
               ]
             );
           }
         }
 
         if (!stayingGuestId && child.guestPhone) {
-          const normPhone = child.guestPhone.replace(/\D/g, '');
+          const trimmedPhone = String(child.guestPhone).trim();
+          const normPhone = trimmedPhone ? normalizeDigitsOnly(trimmedPhone) : null;
           const existingGuestRes = await client.query(
-            `SELECT id, has_valid_identity, identity_number, identity_path FROM guests WHERE phone = $1 OR normalized_phone = $2 LIMIT 1`,
-            [child.guestPhone, normPhone || null]
+            `SELECT id, has_valid_identity, identity_number, identity_path, phone, normalized_phone FROM guests WHERE phone = $1 OR (normalized_phone IS NOT NULL AND normalized_phone = $2) LIMIT 1`,
+            [trimmedPhone, normPhone || null]
           );
           if (existingGuestRes.rowCount && existingGuestRes.rowCount > 0) {
             stayingGuestId = existingGuestRes.rows[0].id;
@@ -2324,20 +2337,30 @@ async function createCanonicalBooking(
                    ktp_ocr_confidence = COALESCE($17::NUMERIC, ktp_ocr_confidence),
                    ktp_ocr_provider = COALESCE(NULLIF($18, '')::VARCHAR, ktp_ocr_provider),
                    ktp_extracted_at = CASE WHEN $1::TEXT IS NOT NULL OR $2::VARCHAR IS NOT NULL THEN NOW() ELSE ktp_extracted_at END,
+                   phone = CASE
+                     WHEN $20::VARCHAR IS NOT NULL AND TRIM($20::VARCHAR) <> '' THEN $20::VARCHAR
+                     ELSE phone
+                   END,
+                   normalized_phone = CASE
+                     WHEN $21::VARCHAR IS NOT NULL AND TRIM($21::VARCHAR) <> '' THEN $21::VARCHAR
+                     ELSE normalized_phone
+                   END,
                    updated_at = NOW()
                WHERE id = $19::INT`,
               [
                 child.ktpPath || null, cleanNik || null, normNik || null, hasValidId,
                 bPlace, bDate, gGender, gAddress, gRtRw, gKelurahan, gKecamatan,
                 gReligion, gMarital, gOccupation, gCitizenship, gValidUntil,
-                gKtpConf, gKtpProv, stayingGuestId
+                gKtpConf, gKtpProv, stayingGuestId,
+                trimmedPhone || null, normPhone || null
               ]
             );
           }
         }
 
         if (!stayingGuestId) {
-          const normPhone = child.guestPhone ? child.guestPhone.replace(/\D/g, '') : null;
+          const trimmedPhone = child.guestPhone ? String(child.guestPhone).trim() : null;
+          const normPhone = trimmedPhone ? normalizeDigitsOnly(trimmedPhone) : null;
           const cleanNik = child.identityNumber ? child.identityNumber.trim() : null;
           const normNik = cleanNik ? cleanNik.replace(/[^0-9A-Za-z]/g, '').toUpperCase() : null;
           const normName = (child.guestName || '').toLowerCase().trim();
@@ -2360,7 +2383,7 @@ async function createCanonicalBooking(
             [
               child.guestName,
               normName,
-              child.guestPhone || null,
+              trimmedPhone || null,
               normPhone,
               cleanNik,
               normNik,
@@ -2395,13 +2418,13 @@ async function createCanonicalBooking(
                reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source
              ) VALUES ($1, $2, 'PRIMARY_GUEST', 'SELF', TRUE, $3, 'CANONICAL_BOOKING')
              ON CONFLICT (reservation_id) WHERE role = 'PRIMARY_GUEST' DO UPDATE
-             SET guest_id = EXCLUDED.guest_id, identity_verified = EXCLUDED.identity_verified`,
+             SET guest_id = EXCLUDED.guest_id, identity_verified = EXCLUDED.identity_verified, updated_at = NOW()`,
             [
               inserted.reservation.id,
               stayingGuestId,
               Boolean(child.ktpPath || child.identityNumber || child.hasValidIdentity)
             ]
-          ).catch((e: any) => console.warn('[createCanonicalBooking] Note: reservation_guests PRIMARY_GUEST fallback', e?.message));
+          );
         }
 
         const bName = child.bookerName || bookerName;
@@ -2409,9 +2432,9 @@ async function createCanonicalBooking(
         if (bName && bName.trim().toLowerCase() !== child.guestName.trim().toLowerCase()) {
           let bookerGuestId: number | null = null;
           if (bPhone) {
-            const normBPhone = bPhone.replace(/\D/g, '');
+            const normBPhone = normalizeDigitsOnly(bPhone);
             const existingBookerRes = await client.query(
-              `SELECT id FROM guests WHERE phone = $1 OR normalized_phone = $2 LIMIT 1`,
+              `SELECT id FROM guests WHERE phone = $1 OR (normalized_phone IS NOT NULL AND normalized_phone = $2) LIMIT 1`,
               [bPhone, normBPhone || null]
             );
             if (existingBookerRes.rowCount && existingBookerRes.rowCount > 0) {
@@ -2419,7 +2442,7 @@ async function createCanonicalBooking(
             }
           }
           if (!bookerGuestId) {
-            const normBPhone = bPhone ? bPhone.replace(/\D/g, '') : null;
+            const normBPhone = bPhone ? normalizeDigitsOnly(bPhone) : null;
             const normBName = (bName || '').toLowerCase().trim();
             const newBookerRes = await client.query(
               `INSERT INTO guests (
@@ -3041,6 +3064,8 @@ app.get('/api/reservations/:id', async (req, res) => {
         primary_guest_data = {
           primary_guest_id: Number(pg.guest_id),
           primary_guest_name: pg.full_name || null,
+          primary_guest_phone: pg.phone || null,
+          phone: pg.phone || null,
           primary_guest_identity_number: pg.identity_number || null,
           primary_guest_identity_verified: Boolean(pg.has_valid_identity),
           primary_guest_identity_path: pg.identity_path || null,
@@ -3665,17 +3690,17 @@ app.patch('/api/reservations/:id', async (req, res) => {
       ]
     );
 
-    // Sync guest details to linked guests table if exists
-    await client.query(
-      `UPDATE guests
-       SET phone = COALESCE($1, phone),
-           identity_number = COALESCE($2, identity_number),
-           full_name = COALESCE($3, full_name)
-       WHERE id IN (
-         SELECT guest_id FROM reservation_guests WHERE reservation_id = $4
-       )`,
-      [guestPhone || null, identityNumber || null, guestName || null, reservationId]
-    ).catch(() => {});
+    // Sync primary staying guest phone & name to canonical guests table if edited
+    const hasIncomingPhone = Object.prototype.hasOwnProperty.call(payload, 'guest_phone');
+    const hasIncomingName = Object.prototype.hasOwnProperty.call(payload, 'guest_name');
+    if (hasIncomingPhone || hasIncomingName) {
+      await syncPrimaryGuestFromReservation(client, reservationId, {
+        guestPhone: hasIncomingPhone ? payload.guest_phone : null,
+        guestName: hasIncomingName ? payload.guest_name : null,
+        propertyId: reservationPropertyId,
+        relationSource: 'CANONICAL_PATCH'
+      });
+    }
 
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)

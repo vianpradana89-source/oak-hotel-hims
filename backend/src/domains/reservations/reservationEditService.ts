@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { addDays, calculatePriceQuote, createReservationRateSnapshots, toHotelDateString } from '../pricing/pricingService';
 import { validateEvidenceUpload, saveEvidenceFile, deleteEvidenceFile } from '../payments/evidenceStorageService';
 import { createPaymentInTransaction } from '../payments/paymentDomainService';
+import { syncPrimaryGuestFromReservation } from '../guests/guestService';
 import { validateDayUseInterval } from '../../utils/dayUseInterval';
 import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
 
@@ -480,7 +481,7 @@ async function refreshPreservedPriceSnapshotContext(
  * and the existing selling price and snapshots are preserved.
  * When isOta=true: manual OTA rate is authoritative, no reprice from BAR/Rate Calendar.
  */
-async function applyReservationEdit(
+export async function applyReservationEdit(
   client: PoolClient,
   reservationId: number,
   payload: ReservationEditPayload,
@@ -749,6 +750,16 @@ async function applyReservationEdit(
       reservationId
     ]
   );
+
+  // Synchronize primary staying guest phone to canonical guests table if guest phone or name was edited
+  if (payload.guest_phone !== undefined || payload.guest_name !== undefined) {
+    await syncPrimaryGuestFromReservation(client, reservationId, {
+      guestPhone: targetGuestPhone,
+      guestName: targetGuestName,
+      propertyId,
+      relationSource: 'RESERVATION_EDIT'
+    });
+  }
 
   // 8. Keep snapshot identity aligned with the selected assignment. The money
   // remains unchanged only for an explicit preserved-price or OTA-manual edit.

@@ -1642,3 +1642,81 @@ export async function deleteReservationGuest(
     client.release();
   }
 }
+
+export interface SyncPrimaryGuestInput {
+  guestPhone?: string | null;
+  guestName?: string | null;
+  propertyId?: number | null;
+  relationSource?: string;
+}
+
+/**
+ * Authoritatively synchronizes primary staying guest phone between reservation write-paths
+ * and the canonical guests table via reservation_guests (role = 'PRIMARY_GUEST').
+ *
+ * Invariants:
+ * 1. Do not overwrite an existing valid canonical phone with empty input.
+ * 2. Synchronize normalized_phone using canonical normalizeDigitsOnly.
+ * 3. Never swallow database errors silently.
+ * 4. Narrow scope: phone + normalized_phone (and name if explicitly provided).
+ *    Never touches identityNumber, ktpPath, or hasValidIdentity.
+ * 5. Fail closed if PRIMARY_GUEST relation is missing; do not guess identity by phone.
+ */
+export async function syncPrimaryGuestFromReservation(
+  client: PoolClient,
+  reservationId: number,
+  input: SyncPrimaryGuestInput
+): Promise<number> {
+  const rawPhone = input.guestPhone !== undefined && input.guestPhone !== null ? String(input.guestPhone).trim() : null;
+  const normPhone = rawPhone ? normalizeDigitsOnly(rawPhone) : null;
+  const rawName = input.guestName !== undefined && input.guestName !== null ? String(input.guestName).trim() : null;
+
+  // 1. Lock and check if PRIMARY_GUEST is already linked in reservation_guests
+  const pgLinkRes = await client.query(
+    `SELECT rg.id AS link_id, rg.guest_id, g.phone, g.normalized_phone, g.full_name
+     FROM reservation_guests rg
+     JOIN guests g ON g.id = rg.guest_id
+     WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
+     FOR UPDATE OF rg, g
+     LIMIT 1`,
+    [reservationId]
+  );
+
+  if ((pgLinkRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(
+      `CANONICAL_PRIMARY_GUEST_MISSING: Reservation #${reservationId} does not have a linked PRIMARY_GUEST relation.`
+    );
+    err.statusCode = 404;
+    err.code = 'PRIMARY_GUEST_RELATION_MISSING';
+    throw err;
+  }
+
+  const guestId = Number(pgLinkRes.rows[0].guest_id);
+
+  // 2. Authoritatively synchronize phone (and name if explicitly supplied).
+  await client.query(
+    `UPDATE guests
+     SET phone = CASE
+           WHEN $1::VARCHAR IS NOT NULL AND TRIM($1::VARCHAR) <> '' THEN $1::VARCHAR
+           ELSE phone
+         END,
+         normalized_phone = CASE
+           WHEN $2::VARCHAR IS NOT NULL AND TRIM($2::VARCHAR) <> '' THEN $2::VARCHAR
+           ELSE normalized_phone
+         END,
+         full_name = CASE
+           WHEN $3::VARCHAR IS NOT NULL AND TRIM($3::VARCHAR) <> '' THEN $3::VARCHAR
+           ELSE full_name
+         END,
+         updated_at = NOW()
+     WHERE id = $4`,
+    [
+      rawPhone || null,
+      normPhone || null,
+      rawName || null,
+      guestId
+    ]
+  );
+
+  return guestId;
+}
