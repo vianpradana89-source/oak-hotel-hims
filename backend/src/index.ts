@@ -1336,7 +1336,7 @@ async function createCanonicalBooking(
       ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
       : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
     const paymentEvidence = bookingPayload.bukti_bayar_path || bookingPayload.initial_payment?.payment_evidence_path || rawReservationPayloads[0]?.bukti_bayar_path;
-    if (totalAmountPaid > 0 && String(paymentMethod).toUpperCase() !== 'CASH' && !paymentEvidence) {
+    if (totalAmountPaid > 0 && !paymentEvidence) {
       missingFields.push('payment_evidence');
     }
   }

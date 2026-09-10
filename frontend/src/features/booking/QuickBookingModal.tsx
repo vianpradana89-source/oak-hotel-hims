@@ -1131,15 +1131,14 @@ export default function QuickBookingModal({
     }
 
     // Payment Proof Gate — must align with backend canonical rule:
-    // backend rejects only when: evidence REQUIRED AND amountPaid > 0 AND paymentMethod != CASH AND no evidence
-    // WALK-IN/DIRECT: user is expected to pay at counter, so evidence follows amount paid + non-cash path
+    // backend rejects only when: evidence REQUIRED AND amountPaid > 0 AND no evidence
+    // WALK-IN/DIRECT: user is expected to pay at counter, evidence required for ALL methods including CASH
     // OTA: pay-at-hotel (Hotel Collect) is a valid pattern — amountPaid=0 must NOT require evidence
     const _evidenceRuleMode = getFieldMode('payment_evidence');
     const _isEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
-      && amountPaid > 0
-      && String(paymentMethod).toUpperCase() !== 'CASH';
+      && amountPaid > 0;
     if (_isEvidenceRequired && !buktiBayarFile && !buktiBayarPath) {
-      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0 (non-tunai)');
+      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0');
     }
 
     // Multi-room Validation
@@ -2518,8 +2517,7 @@ export default function QuickBookingModal({
                     {(() => {
                       const _evMode = getFieldMode('payment_evidence');
                       const _evRequired = _evMode === 'REQUIRED'
-                        && amountPaid > 0
-                        && String(paymentMethod).toUpperCase() !== 'CASH';
+                        && amountPaid > 0;
                       return (
                         <label className="block text-xs font-semibold text-stone-700 mb-1">
                           Upload Bukti Pembayaran{' '}
@@ -2527,6 +2525,9 @@ export default function QuickBookingModal({
                             <span className="text-rose-500">*</span>
                           ) : (
                             <span className="text-stone-400 font-normal">(opsional)</span>
+                          )}
+                          {amountPaid > 0 && String(paymentMethod).toUpperCase() === 'CASH' && _evMode === 'REQUIRED' && (
+                            <span className="text-stone-500 font-normal ml-1 text-[10px]">— Foto uang tunai yang diterima</span>
                           )}
                         </label>
                       );
