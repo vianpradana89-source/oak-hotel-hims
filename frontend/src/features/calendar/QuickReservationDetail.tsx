@@ -11,6 +11,14 @@ import {
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
 
+import {
+  CANONICAL_CHECKIN_REQUIREMENT_LABELS,
+  getMissingRequirementLabel,
+  evaluatePrecheckinReadiness,
+} from './precheckinGateUi';
+
+export { CANONICAL_CHECKIN_REQUIREMENT_LABELS };
+
 export interface QuickReservationDetailProps {
   reservation: any;
   anchorRect?: DOMRect | null;
@@ -57,41 +65,51 @@ export default function QuickReservationDetail({
   const isPropertyMissing = !activePropId;
 
   // Hydrate canonical reservation detail
+  const isMountedRef = useRef(true);
   useEffect(() => {
-    let isMounted = true;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
+  const loadData = useCallback(async (showLoading = true) => {
     if (!activePropId) {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
       return;
     }
 
-    setLoading(true);
+    if (showLoading && isMountedRef.current) {
+      setLoading(true);
+    }
 
-    const loadData = async () => {
-      try {
-        const result = await safeFetchJson<{ data?: any }>(
-          `/api/reservations/${reservation.id}?property_id=${activePropId}`,
-          undefined,
-          'Data operasional reservasi belum dapat dimuat.',
-          authFetch
-        );
-        if (result.ok && result.data?.data && isMounted) {
-          setFullData(result.data.data);
-        }
-      } catch (err) {
-        console.warn('[QuickDetail] Failed to hydrate canonical reservation detail:', err);
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+    try {
+      const result = await safeFetchJson<{ data?: any }>(
+        `/api/reservations/${reservation.id}?property_id=${activePropId}`,
+        undefined,
+        'Data operasional reservasi belum dapat dimuat.',
+        authFetch
+      );
+      if (result.ok && result.data?.data && isMountedRef.current) {
+        setFullData(result.data.data);
       }
-    };
-
-    loadData();
-    return () => {
-      isMounted = false;
-    };
+    } catch (err) {
+      console.warn('[QuickDetail] Failed to hydrate canonical reservation detail:', err);
+    } finally {
+      if (showLoading && isMountedRef.current) {
+        setLoading(false);
+      }
+    }
   }, [reservation.id, activePropId, authFetch]);
+
+  useEffect(() => {
+    loadData(true);
+  }, [loadData]);
+
+  const handleRefresh = useCallback(() => {
+    loadData(false);
+    onRefresh?.();
+  }, [loadData, onRefresh]);
 
   // Viewport-aware positioning & flip calculation
   const updatePosition = useCallback(() => {
@@ -170,6 +188,7 @@ export default function QuickReservationDetail({
       const target = e.target as Node;
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if ((target as Element).closest?.('[data-portal-overlay]')) return;
+        if ((target as Element).closest?.('[role="dialog"]')) return;
         onClose();
       }
       if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
@@ -226,10 +245,10 @@ export default function QuickReservationDetail({
 
   const paymentStatus = getPaymentStatus();
 
-  // Check-in readiness check
-  const hasPhone = Boolean(guestPhone && String(guestPhone).trim().length >= 6);
-  const hasIdentity = Boolean(data.ktp_image_url || data.identity_number || data.identity_type);
-  const isCheckinReady = hasPhone && hasIdentity;
+  // PRECHECKIN-GATE-1C: Canonical pre-checkin eligibility is the single authoritative source of truth.
+  // Fail-closed: if precheckin_eligibility is missing/unavailable, do NOT treat reservation as ready.
+  // Local phone/identity heuristics CANNOT override canonical eligibility.
+  const { isCheckinEligible, missingRequirements, precheckinEligibility } = evaluatePrecheckinReadiness(data);
 
   const handleCopyBid = async () => {
     try {
@@ -266,11 +285,7 @@ export default function QuickReservationDetail({
 
       if (result.ok && (result.data?.status === 'OK' || result.data?.success)) {
         setInspectionFeedback({ type: 'success', text: 'Permintaan pemeriksaan kamar berhasil dikirim ke Housekeeping.' });
-        onRefresh?.();
-        const fresh = await safeFetchJson<{ data?: any }>(`/api/reservations/${data.id}?property_id=${activePropId}`, undefined, undefined, authFetch);
-        if (fresh.ok && fresh.data?.data) {
-          setFullData(fresh.data.data);
-        }
+        handleRefresh();
       } else {
         const errorMsg = result.errorMessage || 'Status pemeriksaan belum dapat dimuat. Coba lagi.';
         setInspectionFeedback({ type: 'error', text: errorMsg });
@@ -489,8 +504,66 @@ export default function QuickReservationDetail({
               reservationStatus={data.status}
               remainingBalance={remainingBalance}
               compact
-              onRefresh={() => { onRefresh?.(); }}
+              onRefresh={handleRefresh}
             />
+          )}
+
+          {/* Persyaratan Check-in (Canonical Gate) */}
+          {isBooked && (
+            <div
+              className={`p-3 rounded-xl border text-xs transition-colors ${
+                isCheckinEligible
+                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                  : 'bg-amber-50/80 border-amber-300 text-amber-950 shadow-xs'
+              }`}
+            >
+              <div className="flex items-center justify-between pb-1.5 border-b border-stone-200/60 font-bold">
+                <span className="flex items-center gap-1.5 text-stone-800">
+                  <span>{isCheckinEligible ? '✓' : '⚠️'}</span>
+                  <span>Persyaratan Check-in</span>
+                </span>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                    isCheckinEligible
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      : precheckinEligibility
+                      ? 'bg-amber-100 text-amber-900 border-amber-300'
+                      : 'bg-stone-200 text-stone-700 border-stone-300'
+                  }`}
+                >
+                  {isCheckinEligible
+                    ? 'Siap Check-in'
+                    : precheckinEligibility
+                    ? 'Wajib Dilengkapi'
+                    : 'Belum Terverifikasi'}
+                </span>
+              </div>
+
+              <div className="pt-2">
+                {isCheckinEligible ? (
+                  <div className="flex items-center gap-1.5 text-emerald-800 font-semibold">
+                    <span className="text-emerald-600 font-bold">✓</span>
+                    <span>Persyaratan Check-in Lengkap</span>
+                  </div>
+                ) : precheckinEligibility && missingRequirements.length > 0 ? (
+                  <div className="space-y-1">
+                    {missingRequirements.map((req) => {
+                      const label = getMissingRequirementLabel(req);
+                      return (
+                        <div key={req.code} className="flex items-center gap-1.5 text-rose-700 font-medium">
+                          <span className="text-rose-500 font-bold flex-shrink-0">✕</span>
+                          <span>{label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-stone-600">
+                    Kesiapan check-in belum dapat diverifikasi.
+                  </p>
+                )}
+              </div>
+            </div>
           )}
 
           {/* Inspection feedback message if any */}
@@ -532,29 +605,29 @@ export default function QuickReservationDetail({
                     disabled={isPropertyMissing}
                     onClick={() => {
                       if (isPropertyMissing) return;
-                      if (!isCheckinReady) {
+                      if (!isCheckinEligible) {
                         onOpenFullDetail(data);
                         return;
                       }
-                       onCheckin(data.id, data.primary_guest?.primary_guest_id || null);
+                      onCheckin(data.id, data.primary_guest?.primary_guest_id || null);
                       onClose();
                     }}
                     className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 ${
                       isPropertyMissing
                         ? 'bg-stone-200 text-stone-400 border border-stone-300 cursor-not-allowed'
-                        : isCheckinReady
+                        : isCheckinEligible
                         ? 'bg-emerald-800 hover:bg-emerald-700 text-white cursor-pointer'
                         : 'bg-stone-200 text-stone-500 border border-stone-300 cursor-pointer'
                     }`}
                     title={
                       isPropertyMissing
                         ? 'Properti aktif tidak tersedia'
-                        : isCheckinReady
+                        : isCheckinEligible
                         ? 'Check-in Tamu'
-                        : 'Buka Detail untuk melengkapi Telepon / KTP'
+                        : 'Lengkapi persyaratan check-in'
                     }
                   >
-                    <span>{isCheckinReady ? '✓' : '🔒'}</span>
+                    <span>{isCheckinEligible ? '✓' : '🔒'}</span>
                     <span>Check-in Tamu</span>
                   </button>
                 )}

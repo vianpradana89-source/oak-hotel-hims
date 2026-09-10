@@ -131,40 +131,52 @@ export default function DepositGuaranteeSection({
 
   if (!capabilities.canViewSummary) return null;
 
-  /* ───── COMPACT MODE: Summary + Held Warning only ───── */
-  if (compact) {
-    return (
-      <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-        <div className="p-3 flex items-center justify-between">
-          <div>
-            <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Deposit & Jaminan</div>
-            <div className="mt-0.5 flex items-center gap-1.5">
-              <span className={`inline-block w-1.5 h-1.5 rounded-full ${guaranteeStatus === 'Belum Ada' ? 'bg-stone-300' : 'bg-emerald-500'}`} />
-              <span className="text-xs font-semibold text-stone-800">{guaranteeStatus}</span>
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] text-stone-400">Saldo</div>
-            <div className={`text-xs font-semibold ${balance.remaining > 0 ? 'text-emerald-600' : 'text-stone-400'}`}>
-              {fmtRp(balance.remaining)}
-            </div>
-          </div>
-        </div>
-        {heldIdentity && (
-          <div className="mx-3 mb-3 px-2 py-1.5 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-1.5">
-            <span className="text-[10px] font-bold text-amber-800">Identitas Ditahan:</span>
-            <span className="text-[10px] text-amber-700">{heldIdentity.document_type}</span>
-            {heldIdentity.document_number_masked && (
-              <span className="text-[10px] text-amber-600 font-mono">{heldIdentity.document_number_masked}</span>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
-    <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
+    <>
+      {compact ? (
+        /* ───── COMPACT MODE: Summary + Held Warning + Add Guarantee Action ───── */
+        <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
+          <div className="p-3 flex items-center justify-between gap-2">
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Deposit & Jaminan</div>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${guaranteeStatus === 'Belum Ada' ? 'bg-stone-300' : 'bg-emerald-500'}`} />
+                <span className="text-xs font-semibold text-stone-800">{guaranteeStatus}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="text-right">
+                <div className="text-[10px] text-stone-400">Saldo</div>
+                <div className={`text-xs font-semibold ${balance.remaining > 0 ? 'text-emerald-600' : 'text-stone-400'}`}>
+                  {fmtRp(balance.remaining)}
+                </div>
+              </div>
+              {!isClosed && capabilities.canReceiveDeposit && (
+                <button
+                  type="button"
+                  onClick={() => { setError(null); setShowChooser(true); }}
+                  className="px-2 py-1 bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold rounded-lg shadow-xs transition cursor-pointer flex items-center gap-1 shrink-0 ml-1"
+                  title="Tambah Jaminan"
+                >
+                  <span>+</span>
+                  <span>Tambah Jaminan</span>
+                </button>
+              )}
+            </div>
+          </div>
+          {heldIdentity && (
+            <div className="mx-3 mb-3 px-2 py-1.5 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-1.5">
+              <span className="text-[10px] font-bold text-amber-800">Identitas Ditahan:</span>
+              <span className="text-[10px] text-amber-700">{heldIdentity.document_type}</span>
+              {heldIdentity.document_number_masked && (
+                <span className="text-[10px] text-amber-600 font-mono">{heldIdentity.document_number_masked}</span>
+              )}
+            </div>
+          )}
+          {error && <div className="px-3 py-1.5 bg-red-50 border-t border-red-100 text-[11px] text-red-600">{error}</div>}
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
       {/* Header */}
       <div className="p-4 pb-3 border-b border-stone-100 flex items-center justify-between">
         <div>
@@ -297,6 +309,8 @@ export default function DepositGuaranteeSection({
 
       {/* Error */}
       {error && <div className="px-4 py-2 bg-red-50 border-t border-red-100 text-xs text-red-600">{error}</div>}
+        </div>
+      )}
 
       {/* === MODALS === */}
 
@@ -413,7 +427,7 @@ export default function DepositGuaranteeSection({
           </div>
         </Modal>
       )}
-    </div>
+    </>
   );
 }
 
