@@ -45,7 +45,7 @@ import {
   toEvidenceMetadata
 } from './domains/payments/paymentEvidenceTypes';
 import {
-  createEvidenceReadStream,
+  getEvidenceFileBuffer,
   saveEvidenceFile,
   deleteEvidenceFile,
   validateEvidenceUpload
@@ -7253,13 +7253,14 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content
       ? `attachment; filename="${encodeURIComponent(row.original_filename)}"`
       : `inline; filename="${encodeURIComponent(row.original_filename)}"`;
 
+    const fileBuffer = await getEvidenceFileBuffer(row.storage_key);
+
     res.setHeader('Content-Type', row.mime_type);
     res.setHeader('Content-Disposition', disposition);
-    res.setHeader('Content-Length', row.file_size_bytes);
+    res.setHeader('Content-Length', fileBuffer.length);
     res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
 
-    const stream = createEvidenceReadStream(row.storage_key);
-    stream.pipe(res);
+    return res.send(fileBuffer);
   } catch (err: any) {
     const statusCode = err.statusCode || 500;
     return res.status(statusCode).json({
