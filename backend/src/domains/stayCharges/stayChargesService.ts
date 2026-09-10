@@ -12,6 +12,10 @@ import type {
 } from './stayChargesTypes';
 import { projectFolioEntryToTransaction } from '../transactions/transactionService';
 import { shouldApplyPostedCommercialDiscount } from '../reservations/reservationBilling';
+import {
+  getEffectivePaymentStateForReservation,
+  type EffectivePaymentState
+} from '../payments/paymentAllocationService';
 
 const VALID_CHARGE_TYPES = new Set<StayChargeType>([
   'EXTRA_BED',
@@ -504,19 +508,18 @@ export async function recalculateReservationFinancials(
     netTotalCharges = nightlySum > 0 ? nightlySum : Math.round(Number(resRow.total_price || 0));
   }
 
-  // 3. Calculate Total Payments (Credits) from payment_transactions:
-  const pmtRes = await client.query(
-    `SELECT
-       COALESCE(SUM(CASE
-         WHEN status = 'SUCCESS' AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT') THEN amount
-         ELSE 0
-       END), 0) AS net_paid
-     FROM payment_transactions
-     WHERE reservation_id = $1`,
-    [reservationId]
+  // 3. Calculate Total Payments from canonical dual-source engine:
+  //    A. Direct ROOM_RESERVATION payment_transactions
+  //    B. Allocated BOOKING_GROUP payments via payment_allocations
+  //
+  // NOTE: legacy fallback (folio/persisted) runs ONLY when no canonical source
+  // row exists at all (canonicalSourceExists === false). We do NOT use
+  // totalEffectivePaid === 0 as the fallback trigger — a zero-amount SUCCESS
+  // direct payment is still a canonical source that must not be overridden.
+  const payState = await getEffectivePaymentStateForReservation(
+    client, reservationId, propertyId
   );
-  let ordinaryAmountPaid = Math.round(Number(pmtRes.rows[0]?.net_paid || 0));
-  if (ordinaryAmountPaid < 0) ordinaryAmountPaid = 0;
+  let ordinaryAmountPaid = payState.totalEffectivePaid;
 
   const depositApplyRes = await client.query(
     `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
@@ -534,18 +537,22 @@ export async function recalculateReservationFinancials(
 
   // Deposit cash movements are liabilities, not reservation settlement. Only
   // ordinary settlement transaction types participate in this legacy fallback.
-  const hasPaymentTx = await client.query(
-    `SELECT 1 FROM payment_transactions
-     WHERE reservation_id = $1
-       AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-     LIMIT 1`,
-    [reservationId]
-  );
-  if ((hasPaymentTx.rowCount ?? 0) === 0) {
+  //
+  // CRITICAL: We use canonicalPaymentHistoryExists (broad: any status), NOT
+  // canonicalSourceExists (narrow: SUCCESS only). This preserves the pre-1B2
+  // invariant: a reservation whose canonical payment was later VOIDED/CORRECTED/
+  // REVERSED still has canonical history and must NOT fall back to stale folio
+  // or persisted amount_paid. Using the narrow check would re-activate the
+  // legacy fallback and resurrect obsolete payment amounts.
+  if (!payState.canonicalPaymentHistoryExists) {
     const folioPmtRes = await client.query(
       `SELECT
-         COALESCE(SUM(CASE WHEN direction = 'CREDIT' AND entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT') AND reversal_of_entry_id IS NULL THEN amount ELSE 0 END), 0) -
-         COALESCE(SUM(CASE WHEN direction = 'DEBIT' AND entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL') THEN amount ELSE 0 END), 0) AS folio_paid
+         COALESCE(SUM(CASE WHEN direction = 'CREDIT'
+           AND entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+           AND reversal_of_entry_id IS NULL THEN amount ELSE 0 END), 0) -
+         COALESCE(SUM(CASE WHEN direction = 'DEBIT'
+           AND entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL') THEN amount ELSE 0 END), 0)
+           AS folio_paid
        FROM folio_entries
        WHERE reservation_id = $1`,
       [reservationId]

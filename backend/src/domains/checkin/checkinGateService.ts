@@ -3,6 +3,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { evaluateRoomReadiness } from '../turnover/turnoverService';
 import { deriveDepositBalance } from '../deposits/depositService';
+import { getEffectivePaymentStateForReservation } from '../payments/paymentAllocationService';
 import type { MissingRequirement } from './checkinGateTypes';
 
 /**
@@ -143,20 +144,17 @@ export async function evaluatePreCheckinEligibility(
   if (!identityOk) missing.push({ code: 'IDENTITY_DOCUMENT_MISSING', label: MISSING_LABELS.IDENTITY_DOCUMENT_MISSING });
 
   // ── Gate 4: Payment ────────────────────────────────────────────────────
-  // At least one SUCCESS payment_transaction with amount > 0 for this reservation.
+  // At least one qualifying positive payment exists for this reservation.
+  // Qualifying sources:
+  //   A. Direct ROOM_RESERVATION payment with amount > 0
+  //   B. ACTIVE allocation from a SUCCESS BOOKING_GROUP payment with
+  //      allocated_amount > 0
   // Partial payment is acceptable. Full settlement is NOT required here.
-  const paymentRes = await client.query(
-    `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
-     FROM payment_transactions
-     WHERE reservation_id = $1
-       AND status = 'SUCCESS'
-       AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-       AND amount > 0`,
-    [reservationId]
+  // Gate 5 (evidence) is intentionally unchanged — group evidence is a 1B3+ concern.
+  const payState = await getEffectivePaymentStateForReservation(
+    client, reservationId, effectivePropertyId
   );
-
-  const paymentCount = parseInt(paymentRes.rows[0].cnt, 10) || 0;
-  const paymentOk = paymentCount > 0;
+  const paymentOk = payState.qualifyingPositivePaymentExists;
 
   if (!paymentOk) missing.push({ code: 'PAYMENT_MISSING', label: MISSING_LABELS.PAYMENT_MISSING });
 
