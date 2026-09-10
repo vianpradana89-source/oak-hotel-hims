@@ -10,9 +10,12 @@ const { initializeDatabase } = require('../dist/db/schema_v3');
 const { deleteEvidenceFile } = require('../dist/domains/payments/evidenceStorageService');
 const { uploadPaymentEvidence } = require('../dist/domains/payments/paymentEvidenceService');
 const { createPaymentCore } = require('../dist/domains/payments/paymentDomainService');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 let server;
 let baseUrl;
+let authToken;
+let authTokenProperty2;
 let passed = 0;
 let failed = 0;
 
@@ -28,8 +31,9 @@ function expect(condition, msg) {
 
 async function api(method, routePath, body, isJson = true) {
   const opts = { method };
+  opts.headers = { 'Authorization': authToken || '' };
   if (isJson) {
-    opts.headers = { 'Content-Type': 'application/json' };
+    opts.headers['Content-Type'] = 'application/json';
     if (body && method !== 'GET') opts.body = JSON.stringify(body);
   } else if (body) {
     opts.body = body;
@@ -301,7 +305,10 @@ async function runTests() {
   jpegForm.append('note', 'Transfer bukti BCA');
   jpegForm.append('file', jpegBlob, 'bukti_transfer.jpg');
 
+  console.log('Sending test 3.1 upload...');
+  const t0 = Date.now();
   const uploadResA = await api('POST', `/api/reservations/${resIdA}/payments/${paymentIdA}/evidences`, jpegForm, false);
+  console.log(`Test 3.1 upload took ${Date.now() - t0}ms, status=${uploadResA.status}`);
   expect(uploadResA.status === 201, '3.1 JPEG upload returns 201');
   expect(uploadResA.json.status === 'SUCCESS', '3.2 status is SUCCESS');
   const evidA = uploadResA.json.data?.evidence;
@@ -327,7 +334,7 @@ async function runTests() {
   console.log('\n--- 4. Content Retrieval & Audit Logging ---');
 
   // 4.1 Preview stream (inline)
-  const previewRes = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdA}`);
+  const previewRes = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdA}`, { headers: { Authorization: authToken || '' } });
   expect(previewRes.status === 200, '4.1 preview stream returns 200');
   expect(previewRes.headers.get('content-type') === 'image/jpeg', '4.2 Content-Type is image/jpeg');
   expect(previewRes.headers.get('content-disposition').includes('inline'), '4.3 Content-Disposition is inline');
@@ -343,7 +350,7 @@ async function runTests() {
   expect(auditView.rows.length >= 1, '4.5 PAYMENT_EVIDENCE_VIEWED audit log written');
 
   // 4.2 Download stream (attachment)
-  const downloadRes = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdA}&download=1`);
+  const downloadRes = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdA}&download=1`, { headers: { Authorization: authToken || '' } });
   expect(downloadRes.status === 200, '4.6 download stream returns 200');
   expect(downloadRes.headers.get('content-disposition').includes('attachment'), '4.7 Content-Disposition is attachment');
   expect(downloadRes.headers.get('content-disposition').includes('bukti_transfer.jpg'), '4.8 filename in disposition header');
@@ -360,7 +367,7 @@ async function runTests() {
   console.log('\n--- 5. Multi-Property Access Enforcement ---');
 
   // 5.1 Property B cannot access Property A evidence content
-  const crossPropContent = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdB}`);
+  const crossPropContent = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidA.id}/content?property_id=${propIdB}`, { headers: { Authorization: authToken || '' } });
   expect(crossPropContent.status === 403, '5.1 cross-property content access rejected with 403');
 
   // 5.2 Property B cannot upload evidence to Property A payment
@@ -405,16 +412,19 @@ async function runTests() {
   );
   expect(auditDeact.rows.length === 1, '6.6 PAYMENT_EVIDENCE_DEACTIVATED audit log written');
 
-  // Test 7: Actor Truth (Never Fabricated)
+  // Test 7: Actor Truth — derived from req.user, never from client
   console.log('\n--- 7. Actor Truth Verification ---');
   const pdfBlob = new Blob(['%PDF-1.4 sample pdf content'], { type: 'application/pdf' });
   const pdfForm = new FormData();
   pdfForm.append('property_id', String(propIdA));
   pdfForm.append('evidence_type', 'BANK_RECEIPT');
   pdfForm.append('file', pdfBlob, 'rekening_koran.pdf');
-  // No actor supplied
+  // Client tries to spoof actor — must be ignored
+  pdfForm.append('actor_user_id', '99999');
+  pdfForm.append('actor_name', 'SPOOFED USER');
+  pdfForm.append('actor_role', 'SPOOFED ROLE');
   const uploadNoActor = await api('POST', `/api/reservations/${resIdA}/payments/${paymentIdA}/evidences`, pdfForm, false);
-  expect(uploadNoActor.status === 201, '7.1 upload without actor succeeds');
+  expect(uploadNoActor.status === 201, '7.1 upload with spoofed actor succeeds');
   const evidNoActor = uploadNoActor.json.data?.evidence;
   const dbEvidNoActor = await pool.query('SELECT storage_key FROM payment_evidences WHERE id = $1', [evidNoActor.id]);
   if (dbEvidNoActor.rows[0]?.storage_key) createdStorageKeys.push(dbEvidNoActor.rows[0].storage_key);
@@ -424,9 +434,10 @@ async function runTests() {
      FROM payment_evidences WHERE id = $1`,
     [evidNoActor.id]
   );
-  expect(dbNoActor.rows[0].uploaded_by_user_id === null, '7.2 unknown user_id is NULL');
-  expect(dbNoActor.rows[0].uploaded_by_name_snapshot === null, '7.3 unknown name is NULL (never fabricated)');
-  expect(dbNoActor.rows[0].uploaded_by_role_snapshot === null, '7.4 unknown role is NULL (never fabricated)');
+  // Actor comes from req.user (vian, id=1), NOT from client spoofed values
+  expect(dbNoActor.rows[0].uploaded_by_user_id === '1', '7.2 actor_user_id is from req.user, not client spoof');
+  expect(dbNoActor.rows[0].uploaded_by_name_snapshot === 'Vian Pradana', '7.3 actor_name is from req.user.full_name, not client spoof');
+  expect(dbNoActor.rows[0].uploaded_by_role_snapshot === 'Super Admin', '7.4 actor_role is from req.user.role, not client spoof');
 
   // Test 8: Folio Integration
   console.log('\n--- 8. Folio Integration ---');
@@ -587,6 +598,7 @@ async function runTests() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Authorization': authToken || '',
       'x-internal-system-payment': 'true'
     },
     body: JSON.stringify({
@@ -604,6 +616,7 @@ async function runTests() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Authorization': authToken || '',
       'x-internal-system-payment': 'true'
     },
     body: JSON.stringify({
@@ -744,6 +757,65 @@ async function runTests() {
   const replPaymentCheck = await pool.query('SELECT * FROM payment_transactions WHERE id = $1', [replPayment.id]);
   expect(replPaymentCheck.rows[0].status === 'SUCCESS', '16.4 previous replacement payment remains SUCCESS and unmutated');
 
+  // Test 17: Secure Content 403 & Authorization
+  console.log('\n--- 17. Secure Content 403 & Authorization ---');
+
+  // Upload evidence C for Property A
+  const evidCBlob = new Blob(['SECURE_CONTENT_TEST'], { type: 'image/jpeg' });
+  const evidCForm = new FormData();
+  evidCForm.append('property_id', String(propIdA));
+  evidCForm.append('evidence_type', 'BANK_TRANSFER');
+  evidCForm.append('file', evidCBlob, 'secure_test.jpg');
+  const evidCUpload = await api('POST', `/api/reservations/${resIdA}/payments/${paymentIdA}/evidences`, evidCForm, false);
+  expect(evidCUpload.status === 201, '17.0 evidence C uploaded for property A');
+  const evidC = evidCUpload.json.data?.evidence;
+  if (evidC?.id) {
+    const dbEvidC = await pool.query('SELECT storage_key FROM payment_evidences WHERE id = $1', [evidC.id]);
+    if (dbEvidC.rows[0]?.storage_key) createdStorageKeys.push(dbEvidC.rows[0].storage_key);
+  }
+
+  // 17.1 Authenticated user authorized for property A → content returns 200
+  const authorizedContent = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidC.id}/content?property_id=${propIdA}`, {
+    headers: { Authorization: authToken || '' }
+  });
+  expect(authorizedContent.status === 200, '17.1 authorized user + matching property → content returns 200');
+
+  // 17.2 Unauthenticated request → 401
+  const unauthContent = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidC.id}/content?property_id=${propIdA}`, {
+    headers: {}
+  });
+  expect(unauthContent.status === 401, '17.2 unauthenticated → 401');
+
+  // 17.3 Token property != request property_id → 403 via assertPropertyScope
+  // user2 token property=propIdB, but request property is propIdA → rejected
+  const crossPropContent17 = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidC.id}/content?property_id=${propIdA}`, {
+    headers: { Authorization: authTokenProperty2 || '' }
+  });
+  expect(crossPropContent17.status === 403, '17.3 token property != request property_id → 403');
+
+  // 17.4 Evidence from another payment → denied (via hierarchy check)
+  // Use evidA (from paymentIdA) but reference paymentIdB
+  const wrongPaymentContent = await fetch(`${baseUrl}/api/reservations/${resIdA}/payments/${paymentIdB}/evidences/${evidA.id}/content?property_id=${propIdA}`, {
+    headers: { Authorization: authToken || '' }
+  });
+  expect(wrongPaymentContent.status === 404 || wrongPaymentContent.status === 403, '17.4 evidence from another payment → denied');
+
+  // 17.5 Deactivate with spoofed actor → actor comes from req.user
+  const deactSpoofRes = await api('POST', `/api/reservations/${resIdA}/payments/${paymentIdA}/evidences/${evidC.id}/deactivate`, {
+    property_id: propIdA,
+    reason: 'Test spoof',
+    actor_user_id: '99999',
+    actor_name: 'SPOOF',
+    actor_role: 'SPOOF'
+  });
+  expect(deactSpoofRes.status === 200, '17.5 deactivate with spoofed actor succeeds');
+  const dbDeactEvid = await pool.query(
+    `SELECT deactivated_by_user_id, deactivated_by_name_snapshot, deactivated_by_role_snapshot
+     FROM payment_evidences WHERE id = $1`,
+    [evidC.id]
+  );
+  expect(dbDeactEvid.rows[0].deactivated_by_user_id !== '99999', '17.6 client actor_user_id not used for deactivate');
+
   console.log(`\n================================`);
   console.log(`Summary: ${passed} PASSED, ${failed} FAILED`);
   console.log(`================================\n`);
@@ -765,6 +837,39 @@ async function runTests() {
     baseUrl = `http://127.0.0.1:${port}`;
 
     await setupFixtures();
+
+    // Generate auth tokens AFTER fixtures are created so property_ids match
+    const userRes = await pool.query("SELECT id, username, full_name, role_id FROM users WHERE username = 'vian'");
+    authToken = null;
+    if (userRes.rows.length > 0 && propIdA) {
+      authToken = 'Bearer ' + generateToken({
+        id: userRes.rows[0].id,
+        email: '',
+        username: userRes.rows[0].username,
+        full_name: userRes.rows[0].full_name,
+        role: 'Super Admin',
+        role_id: userRes.rows[0].role_id,
+        property_id: propIdA,
+        scope: 'FULL'
+      });
+    }
+
+    // Generate a second token for cross-property tests: user assigned to property 2
+    const userRes2 = await pool.query("SELECT id, username, full_name, role_id FROM users WHERE username != 'vian' LIMIT 1");
+    authTokenProperty2 = null;
+    if (userRes2.rows.length > 0 && propIdB) {
+      authTokenProperty2 = 'Bearer ' + generateToken({
+        id: userRes2.rows[0].id,
+        email: '',
+        username: userRes2.rows[0].username,
+        full_name: userRes2.rows[0].full_name,
+        role: 'Staff',
+        role_id: userRes2.rows[0].role_id,
+        property_id: propIdB,
+        scope: 'FULL'
+      });
+    }
+
     await runTests();
   } catch (err) {
     console.error('Test run error:', err);

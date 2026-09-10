@@ -55,7 +55,8 @@ import {
   getPaymentEvidences,
   getEvidenceRowById,
   deactivateEvidence,
-  recordEvidenceAccessAudit
+  recordEvidenceAccessAudit,
+  replaceEvidence
 } from './domains/payments/paymentEvidenceService';
 import {
   evaluateRoomReadiness,
@@ -124,6 +125,7 @@ import { releaseReservationInventoryForCheckout } from './domains/reservations/r
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { requireAuth, onboardingSecurityGuard } from './domains/auth/authMiddleware';
+import { isPlatformSuperAdmin } from './domains/auth/authService';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
@@ -224,6 +226,16 @@ async function assertPropertyExists(pool: any, propertyId: number): Promise<void
   const result = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
   if ((result.rowCount ?? 0) === 0) {
     throw { statusCode: 404, code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` };
+  }
+}
+
+// Property scope guard: user's token property must match requested property,
+// unless the user is a platform super admin.
+async function assertPropertyScope(req: any, propertyId: number): Promise<void> {
+  const tokenPropertyId = Number(req.user?.property_id);
+  const isSuperAdmin = req.user?.id ? await isPlatformSuperAdmin(pool, req.user.id) : false;
+  if (!isSuperAdmin && tokenPropertyId !== propertyId) {
+    throw { statusCode: 403, code: 'PROPERTY_SCOPE_REQUIRED', message: 'Tidak memiliki akses ke properti ini' };
   }
 }
 
@@ -7025,6 +7037,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
 
 app.post(
   '/api/reservations/:id/payments/:paymentId/evidences',
+  requireAuth,
   (req: any, res: any, next: any) => {
     memoryUpload.single('file')(req, res, (err: any) => {
       if (err) {
@@ -7070,12 +7083,14 @@ app.post(
 
     const evidenceType = (req.body?.evidence_type || 'BANK_TRANSFER') as PaymentEvidenceType;
     const note = req.body?.note || null;
-    const actorName = req.body?.actor_name_snapshot || req.body?.actor_name || req.body?.created_by || null;
-    const actorId = req.body?.actor_user_id || req.body?.actor_id || null;
-    const actorRole = req.body?.actor_role_snapshot || req.body?.actor_role || null;
+    // Actor identity derived from authenticated token — never trust client
+    const actorUserId = req.user?.id?.toString() || null;
+    const actorName = req.user?.full_name || null;
+    const actorRole = req.user?.role || null;
     const corrId = req.body?.correlation_id || req.headers['x-correlation-id'] || `corr_evid_${Date.now()}`;
 
     try {
+      await assertPropertyScope(req, propertyId);
       const evidence = await uploadPaymentEvidence(pool, {
         propertyId,
         reservationId,
@@ -7088,10 +7103,10 @@ app.post(
           originalname: file.originalname || 'evidence',
           buffer: file.buffer
         },
-        actorUserId: actorId,
+        correlationId: corrId,
+        actorUserId,
         actorNameSnapshot: actorName,
-        actorRoleSnapshot: actorRole,
-        correlationId: corrId
+        actorRoleSnapshot: actorRole
       });
 
       return res.status(201).json({
@@ -7109,7 +7124,7 @@ app.post(
   }
 );
 
-app.get('/api/reservations/:id/payments/:paymentId/evidences', async (req: any, res: any) => {
+app.get('/api/reservations/:id/payments/:paymentId/evidences', requireAuth, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   const paymentId = Number(req.params.paymentId);
   if (!Number.isInteger(reservationId) || reservationId <= 0) {
@@ -7131,6 +7146,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences', async (req: any, 
   const includeInactive = req.query.include_inactive !== 'false';
 
   try {
+    await assertPropertyScope(req, propertyId);
     const evidences = await getPaymentEvidences(pool, propertyId, reservationId, paymentId, includeInactive);
     return res.json({
       status: 'OK',
@@ -7146,7 +7162,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences', async (req: any, 
   }
 });
 
-app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId', async (req: any, res: any) => {
+app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId', requireAuth, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   const paymentId = Number(req.params.paymentId);
   const evidenceId = Number(req.params.evidenceId);
@@ -7170,6 +7186,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId', async
   }
 
   try {
+    await assertPropertyScope(req, propertyId);
     const row = await getEvidenceRowById(pool, propertyId, reservationId, paymentId, evidenceId);
     return res.json({
       status: 'OK',
@@ -7185,7 +7202,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId', async
   }
 });
 
-app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content', async (req: any, res: any) => {
+app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content', requireAuth, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   const paymentId = Number(req.params.paymentId);
   const evidenceId = Number(req.params.evidenceId);
@@ -7209,12 +7226,14 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content
   }
 
   const isDownload = req.query.download === '1' || req.query.download === 'true';
-  const actorName = req.query.actor_name_snapshot || req.query.actor_name || null;
-  const actorId = req.query.actor_user_id || req.query.actor_id || null;
-  const actorRole = req.query.actor_role_snapshot || req.query.actor_role || null;
+  // Actor identity derived from authenticated token — never trust client query params
+  const actorUserId = req.user?.id?.toString() || null;
+  const actorName = req.user?.full_name || null;
+  const actorRole = req.user?.role || null;
   const corrId = req.query.correlation_id || req.headers['x-correlation-id'] || `corr_view_${Date.now()}`;
 
   try {
+    await assertPropertyScope(req, propertyId);
     const row = await getEvidenceRowById(pool, propertyId, reservationId, paymentId, evidenceId);
 
     // Audit log
@@ -7224,7 +7243,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content
       paymentId,
       evidenceId,
       action: isDownload ? 'PAYMENT_EVIDENCE_DOWNLOADED' : 'PAYMENT_EVIDENCE_VIEWED',
-      actorUserId: actorId,
+      actorUserId,
       actorNameSnapshot: actorName,
       actorRoleSnapshot: actorRole,
       correlationId: corrId
@@ -7251,7 +7270,7 @@ app.get('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/content
   }
 });
 
-app.post('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/deactivate', async (req: any, res: any) => {
+app.post('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/deactivate', requireAuth, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
   const paymentId = Number(req.params.paymentId);
   const evidenceId = Number(req.params.evidenceId);
@@ -7274,27 +7293,29 @@ app.post('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/deacti
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
   }
 
-  const { reason, actor_name, actor_id, actor_role, correlation_id } = req.body || {};
+  const { reason, correlation_id } = req.body || {};
   if (!reason || !String(reason).trim()) {
     return res.status(400).json({ status: 'ERROR', code: 'DEACTIVATION_REASON_REQUIRED', message: 'Alasan penonaktifan bukti pembayaran wajib diisi' });
   }
 
-  const actorName = req.body?.actor_name_snapshot || actor_name || req.body?.created_by || null;
-  const actorUserId = req.body?.actor_user_id || actor_id || null;
-  const actorRole = req.body?.actor_role_snapshot || actor_role || null;
+  // Actor identity derived from authenticated token — never trust client
+  const actorUserId = req.user?.id?.toString() || null;
+  const actorName = req.user?.full_name || null;
+  const actorRole = req.user?.role || null;
   const corrId = correlation_id || req.headers['x-correlation-id'] || `corr_deact_${Date.now()}`;
 
   try {
+    await assertPropertyScope(req, propertyId);
     const updated = await deactivateEvidence(pool, {
       propertyId,
       reservationId,
       paymentId,
       evidenceId,
       reason: String(reason).trim(),
+      correlationId: corrId,
       actorUserId,
       actorNameSnapshot: actorName,
-      actorRoleSnapshot: actorRole,
-      correlationId: corrId
+      actorRoleSnapshot: actorRole
     });
 
     return res.status(200).json({
@@ -7310,6 +7331,104 @@ app.post('/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/deacti
     });
   }
 });
+
+// POST replace evidence: atomically save new file, create new row, deactivate old row, delete old file
+app.post(
+  '/api/reservations/:id/payments/:paymentId/evidences/:evidenceId/replace',
+  requireAuth,
+  (req: any, res: any, next: any) => {
+    memoryUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'FILE_TOO_LARGE',
+            message: 'Ukuran file melebihi batas maksimum 10 MB'
+          });
+        }
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'UPLOAD_ERROR',
+          message: err.message || 'Error saat memproses file unggahan'
+        });
+      }
+      next();
+    });
+  },
+  async (req: any, res: any) => {
+    const reservationId = Number(req.params.id);
+    const paymentId = Number(req.params.paymentId);
+    const evidenceId = Number(req.params.evidenceId);
+    if (!Number.isInteger(reservationId) || reservationId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation id' });
+    }
+    if (!Number.isInteger(paymentId) || paymentId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid payment id' });
+    }
+    if (!Number.isInteger(evidenceId) || evidenceId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid evidence id' });
+    }
+
+    const propertyIdRaw = req.body?.property_id ?? req.query?.property_id;
+    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+    }
+    const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  const file = req.file;
+    if (!file) {
+      return res.status(400).json({ status: 'ERROR', code: 'FILE_REQUIRED', message: 'File bukti pembayaran wajib diunggah' });
+    }
+
+    const evidenceType = (req.body?.evidence_type || 'BANK_TRANSFER') as PaymentEvidenceType;
+    const note = req.body?.note || null;
+    // Actor identity derived from authenticated token — never trust client
+    const actorUserId = req.user?.id?.toString() || null;
+    const actorName = req.user?.full_name || null;
+    const actorRole = req.user?.role || null;
+    const corrId = req.body?.correlation_id || req.headers['x-correlation-id'] || `corr_replace_${Date.now()}`;
+
+    try {
+      await assertPropertyScope(req, propertyId);
+      const result = await replaceEvidence(pool, {
+        propertyId,
+        reservationId,
+        paymentId,
+        oldEvidenceId: evidenceId,
+        evidenceType,
+        note,
+        file: {
+          mimetype: file.mimetype,
+          size: file.size,
+          originalname: file.originalname || 'evidence',
+          buffer: file.buffer
+        },
+        correlationId: corrId,
+        actorUserId,
+        actorNameSnapshot: actorName,
+        actorRoleSnapshot: actorRole
+      });
+
+      return res.status(200).json({
+        status: 'SUCCESS',
+        data: {
+          new_evidence: result.newEvidence,
+          deactivated_evidence: result.deactivatedEvidence
+        }
+      });
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message
+      });
+    }
+  }
+);
 
 // POST canonical temporary availability hold.
 app.post('/api/availability/lock', async (req, res) => {

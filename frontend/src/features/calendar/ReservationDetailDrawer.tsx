@@ -84,6 +84,12 @@ export default function ReservationDetailDrawer({
     // PAYMENT-EVIDENCE-VIEW-1: per-payment evidence preview state
     const [activePaymentEvidenceId, setActivePaymentEvidenceId] = useState<number | null>(null);
     const [activePaymentEvidenceMime, setActivePaymentEvidenceMime] = useState<string>('');
+    const [activePaymentEvidencePaymentId, setActivePaymentEvidencePaymentId] = useState<number | null>(null);
+    // PAYMENT-EVIDENCE-VIEW-1: upload/replace state
+    const [uploadingEvidencePaymentId, setUploadingEvidencePaymentId] = useState<number | null>(null);
+    const [replacingEvidencePaymentId, setReplacingEvidencePaymentId] = useState<number | null>(null);
+    const [evidenceUploadError, setEvidenceUploadError] = useState<string | null>(null);
+    const [evidenceUploadSuccess, setEvidenceUploadSuccess] = useState<string | null>(null);
     const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -228,6 +234,78 @@ export default function ReservationDetailDrawer({
     }
   };
 
+  // PAYMENT-EVIDENCE-VIEW-1: Handle upload evidence for a payment
+  const handleUploadEvidence = async (paymentId: number, file: File) => {
+    if (!activePropId || !data.id) return;
+    setUploadingEvidencePaymentId(paymentId);
+    setEvidenceUploadError(null);
+    setEvidenceUploadSuccess(null);
+    try {
+      const form = new FormData();
+      form.append('property_id', String(activePropId));
+      form.append('file', file);
+      form.append('evidence_type', 'BANK_TRANSFER');
+      const result = await safeFetchJson<{ data?: { evidence?: any } }>(
+        `/api/reservations/${data.id}/payments/${paymentId}/evidences`,
+        {
+          method: 'POST',
+          body: form
+        },
+        undefined,
+        authFetch
+      );
+      if (result.ok && result.data?.data?.evidence) {
+        setEvidenceUploadSuccess('Bukti berhasil ditambahkan');
+        setActivePaymentEvidenceId(result.data.data.evidence.id);
+        setActivePaymentEvidencePaymentId(paymentId);
+        setActivePaymentEvidenceMime(result.data.data.evidence.mime_type);
+        await loadFolio(data.id);
+      } else {
+        setEvidenceUploadError(result.errorMessage || 'Gagal menambahkan bukti');
+      }
+    } catch (err: any) {
+      setEvidenceUploadError(err.message || 'Gagal menambahkan bukti');
+    } finally {
+      setUploadingEvidencePaymentId(null);
+    }
+  };
+
+  // PAYMENT-EVIDENCE-VIEW-1: Handle replace evidence for a payment
+  const handleReplaceEvidence = async (paymentId: number, oldEvidenceId: number, file: File) => {
+    if (!activePropId || !data.id) return;
+    setReplacingEvidencePaymentId(paymentId);
+    setEvidenceUploadError(null);
+    setEvidenceUploadSuccess(null);
+    try {
+      const form = new FormData();
+      form.append('property_id', String(activePropId));
+      form.append('file', file);
+      form.append('evidence_type', 'BANK_TRANSFER');
+      const result = await safeFetchJson<{ data?: { new_evidence?: any; deactivated_evidence?: any } }>(
+        `/api/reservations/${data.id}/payments/${paymentId}/evidences/${oldEvidenceId}/replace`,
+        {
+          method: 'POST',
+          body: form
+        },
+        undefined,
+        authFetch
+      );
+      if (result.ok && result.data?.data?.new_evidence) {
+        setEvidenceUploadSuccess('Bukti berhasil diganti');
+        setActivePaymentEvidenceId(result.data.data.new_evidence.id);
+        setActivePaymentEvidencePaymentId(paymentId);
+        setActivePaymentEvidenceMime(result.data.data.new_evidence.mime_type);
+        await loadFolio(data.id);
+      } else {
+        setEvidenceUploadError(result.errorMessage || 'Gagal mengganti bukti');
+      }
+    } catch (err: any) {
+      setEvidenceUploadError(err.message || 'Gagal mengganti bukti');
+    } finally {
+      setReplacingEvidencePaymentId(null);
+    }
+  };
+
   const handleSavePhone = async () => {
     if (!detailData?.id || !activePropId) return;
     if (!phoneDraft.trim()) {
@@ -354,8 +432,8 @@ export default function ReservationDetailDrawer({
   const bid = data.bid || data.legacy_booking_number || `#${data.id}`;
 
   // PAYMENT-EVIDENCE-VIEW-1: per-payment evidence blob
-  const _paymentEvidenceUrl = (activePaymentEvidenceId != null && activePropId != null && data.id != null)
-    ? `/api/reservations/${data.id}/payments/${activePaymentEvidenceId}/evidences/${activePaymentEvidenceId}/content?property_id=${activePropId}`
+  const _paymentEvidenceUrl = (activePaymentEvidenceId != null && activePropId != null && data.id != null && activePaymentEvidencePaymentId != null)
+    ? `/api/reservations/${data.id}/payments/${activePaymentEvidencePaymentId}/evidences/${activePaymentEvidenceId}/content?property_id=${activePropId}`
     : null;
   const { blobUrl: paymentEvidenceRowBlobUrl, loading: paymentEvidenceRowLoading } = useSecureDocumentBlob(_paymentEvidenceUrl, activePaymentEvidenceId != null);
 
@@ -1144,15 +1222,65 @@ export default function ReservationDetailDrawer({
                           </div>
                           <div className="flex items-center gap-2 ml-2">
                             {hasEvidence ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActivePaymentEvidenceId(ev.id);
+                                    setActivePaymentEvidenceMime(ev.mime_type);
+                                    setActivePaymentEvidencePaymentId(ev.payment_transaction_id);
+                                  }}
+                                  className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-semibold text-xs rounded border border-emerald-200 cursor-pointer transition-colors"
+                                >
+                                  Lihat Bukti
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const input = document.createElement('input');
+                                    input.type = 'file';
+                                    input.accept = 'image/jpeg,image/png,image/webp,application/pdf';
+                                    input.onchange = (e) => {
+                                      const file = (e.target as HTMLInputElement).files?.[0];
+                                      if (file) {
+                                        handleReplaceEvidence(ev.payment_transaction_id, ev.id, file);
+                                      }
+                                    };
+                                    input.click();
+                                  }}
+                                  className="px-2 py-0.5 bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold text-xs rounded border border-amber-200 cursor-pointer transition-colors"
+                                >
+                                  Ganti Bukti
+                                </button>
+                              </div>
+                            ) : (
                               <button
                                 type="button"
-                                onClick={() => { setActivePaymentEvidenceId(ev.id); setActivePaymentEvidenceMime(ev.mime_type); }}
-                                className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-semibold text-xs rounded border border-emerald-200 cursor-pointer transition-colors"
+                                onClick={() => {
+                                  const input = document.createElement('input');
+                                  input.type = 'file';
+                                  input.accept = 'image/jpeg,image/png,image/webp,application/pdf';
+                                  input.onchange = (e) => {
+                                    const file = (e.target as HTMLInputElement).files?.[0];
+                                    if (file) {
+                                      handleUploadEvidence(pmt.id, file);
+                                    }
+                                  };
+                                  input.click();
+                                }}
+                                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-900 font-semibold text-xs rounded border border-blue-200 cursor-pointer transition-colors"
                               >
-                                Lihat Bukti
+                                Tambah Bukti
                               </button>
-                            ) : (
-                              <span className="text-stone-400 text-xs italic">Belum ada bukti</span>
+                            )}
+                            {(uploadingEvidencePaymentId === pmt.id || replacingEvidencePaymentId === pmt.id) && (
+                              <span className="text-xs text-stone-500 italic">Memproses...</span>
+                            )}
+                            {evidenceUploadSuccess && uploadingEvidencePaymentId !== pmt.id && replacingEvidencePaymentId !== pmt.id && (
+                              <span className="text-xs text-emerald-600 font-semibold">{evidenceUploadSuccess}</span>
+                            )}
+                            {evidenceUploadError && uploadingEvidencePaymentId !== pmt.id && replacingEvidencePaymentId !== pmt.id && (
+                              <span className="text-xs text-rose-600 font-semibold">{evidenceUploadError}</span>
                             )}
                             <div className="font-mono font-bold text-emerald-900 text-right text-xs whitespace-nowrap">
                               Rp {Number(pmt.amount || 0).toLocaleString('id-ID')}
@@ -1839,7 +1967,7 @@ export default function ReservationDetailDrawer({
             >
               <div className="flex items-center justify-between border-b border-stone-800 pb-3">
                 <span className="text-sm font-bold text-stone-100">
-                  Lihat Bukti — Pembayaran #{activePaymentEvidenceId}
+                  Lihat Bukti — Pembayaran #{activePaymentEvidencePaymentId || activePaymentEvidenceId}
                 </span>
                 <button
                   type="button"
