@@ -2127,12 +2127,12 @@ async function createCanonicalBooking(
           groupedBookingPayment
             ? `INSERT INTO payment_transactions (
                  reservation_id, transaction_type, amount, payment_method, reference_code, correction_group_id,
-                 status, created_by, created_at
-               ) VALUES ($1, 'PAYMENT', $2, $3, $4, $5, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
+                 status, created_by, created_at, booking_id, scope
+               ) VALUES ($1, 'PAYMENT', $2, $3, $4, $5, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP, $6, 'ROOM_RESERVATION')
                RETURNING id`
             : `INSERT INTO payment_transactions (
-                 reservation_id, transaction_type, amount, payment_method, status, created_by, created_at
-               ) VALUES ($1, 'PAYMENT', $2, $3, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP)
+                 reservation_id, transaction_type, amount, payment_method, status, created_by, created_at, booking_id, scope
+               ) VALUES ($1, 'PAYMENT', $2, $3, 'SUCCESS', 'PMS', CURRENT_TIMESTAMP, $4, 'ROOM_RESERVATION')
                RETURNING id`,
           groupedBookingPayment
             ? [
@@ -2140,9 +2140,10 @@ async function createCanonicalBooking(
               Number(child.amountPaid || 0),
               pMethod,
               child.bookingPaymentReferenceCode,
-              child.bookingPaymentGroupId
+              child.bookingPaymentGroupId,
+              bookingRecord.id
             ]
-            : [inserted.reservation.id, Number(child.amountPaid || 0), pMethod]
+            : [inserted.reservation.id, Number(child.amountPaid || 0), pMethod, bookingRecord.id]
         );
         const pTxId = pTxRes.rows[0].id;
 
@@ -6611,14 +6612,18 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
       [paymentId]
     );
 
+    const bookingId = reservation.rows[0].booking_id ? Number(reservation.rows[0].booking_id) : null;
+
     // 2. Insert compensating REVERSAL
     const reversal = await client.query(
       `INSERT INTO payment_transactions (
         reservation_id, transaction_type, amount, payment_method, reference_code,
-        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by,
+        booking_id, scope
       ) VALUES (
         $1, 'REVERSAL', $2, $3, $4,
-        'SUCCESS', $5, $6, $7, $8, $9
+        'SUCCESS', $5, $6, $7, $8, $9,
+        $10, 'ROOM_RESERVATION'
       ) RETURNING *`,
       [
         reservationId,
@@ -6629,7 +6634,8 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
         correlationId,
         reason_code,
         reason_text || null,
-        actor
+        actor,
+        bookingId
       ]
     );
 
@@ -6638,10 +6644,12 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
     const replacement = await client.query(
       `INSERT INTO payment_transactions (
         reservation_id, transaction_type, amount, payment_method, reference_code,
-        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by,
+        booking_id, scope
       ) VALUES (
         $1, 'CORRECTION_REPLACEMENT', $2, $3, $4,
-        'SUCCESS', $5, $6, $7, $8, $9
+        'SUCCESS', $5, $6, $7, $8, $9,
+        $10, 'ROOM_RESERVATION'
       ) RETURNING *`,
       [
         reservationId,
@@ -6652,7 +6660,8 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
         correlationId,
         reason_code,
         reason_text || null,
-        actor
+        actor,
+        bookingId
       ]
     );
     const replacementRow = replacement.rows[0];
@@ -6909,14 +6918,18 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
       [paymentId]
     );
 
+    const bookingId = reservation.rows[0].booking_id ? Number(reservation.rows[0].booking_id) : null;
+
     // 2. Insert compensating REVERSAL
     const reversal = await client.query(
       `INSERT INTO payment_transactions (
         reservation_id, transaction_type, amount, payment_method, reference_code,
-        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by
+        status, reference_payment_id, correction_group_id, reason_code, reason_text, created_by,
+        booking_id, scope
       ) VALUES (
         $1, 'REVERSAL', $2, $3, $4,
-        'SUCCESS', $5, $6, $7, $8, $9
+        'SUCCESS', $5, $6, $7, $8, $9,
+        $10, 'ROOM_RESERVATION'
       ) RETURNING *`,
       [
         reservationId,
@@ -6927,7 +6940,8 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
         correlationId,
         reason_code,
         reason_text || null,
-        actor
+        actor,
+        bookingId
       ]
     );
 

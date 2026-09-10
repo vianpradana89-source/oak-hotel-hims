@@ -113,15 +113,17 @@ export async function createPaymentInTransaction(
     };
   }
 
+  const bookingId = reservationRes.rows[0].booking_id ? Number(reservationRes.rows[0].booking_id) : null;
+
   const payInsert = await client.query(`
     INSERT INTO payment_transactions (
       reservation_id, transaction_type, amount, payment_method, reference_code,
-      status, created_by, correction_group_id
-    ) VALUES ($1, $2, $3, $4, $5, 'SUCCESS', $6, $7)
+      status, created_by, correction_group_id, booking_id, scope
+    ) VALUES ($1, $2, $3, $4, $5, 'SUCCESS', $6, $7, $8, 'ROOM_RESERVATION')
     RETURNING *
   `, [
     reservationId, transactionType, paymentAmount, paymentMethod,
-    input.referenceCode || `TXN-${Date.now()}`, input.actorNameSnapshot, corrId
+    input.referenceCode || `TXN-${Date.now()}`, input.actorNameSnapshot, corrId, bookingId
   ]);
   const paymentRow = payInsert.rows[0];
 

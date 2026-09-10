@@ -5023,6 +5023,287 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // MULTI-BOOKING-SCOPE-1A (PHASE 1): Schema Foundation v1
+    //
+    // SOURCE OF TRUTH & RUNTIME EXECUTION ARCHITECTURE:
+    // This runner inside schema_v3.ts is AUTHORITATIVE for application runtime.
+    // backend/src/db/migrations/multi_booking_scope_1a_foundation.sql is the
+    // standalone reference SQL script; both must maintain exact semantic parity.
+    //
+    // Establishes additive booking_id and scope columns, basic scope CHECK,
+    // and backfills historical child records from reservations.booking_id.
+    // ------------------------------------------------------------------
+    const multiBookingScopeCheckV1 = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'multi_booking_scope_1a_foundation_v1'`
+    );
+    if ((multiBookingScopeCheckV1.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. payment_transactions
+        ALTER TABLE payment_transactions
+          ADD COLUMN IF NOT EXISTS booking_id BIGINT,
+          ADD COLUMN IF NOT EXISTS scope VARCHAR(32) NOT NULL DEFAULT 'ROOM_RESERVATION';
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_payment_transactions_scope'
+          ) THEN
+            ALTER TABLE payment_transactions
+              ADD CONSTRAINT chk_payment_transactions_scope
+              CHECK (scope IN ('ROOM_RESERVATION', 'BOOKING_GROUP'));
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_booking_id
+          ON payment_transactions (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_scope
+          ON payment_transactions (scope);
+
+        -- 2. deposits
+        ALTER TABLE deposits
+          ADD COLUMN IF NOT EXISTS booking_id BIGINT,
+          ADD COLUMN IF NOT EXISTS scope VARCHAR(32) NOT NULL DEFAULT 'ROOM_RESERVATION';
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_deposits_scope'
+          ) THEN
+            ALTER TABLE deposits
+              ADD CONSTRAINT chk_deposits_scope
+              CHECK (scope IN ('ROOM_RESERVATION', 'BOOKING_GROUP'));
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_deposits_booking_id
+          ON deposits (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_deposits_scope
+          ON deposits (scope);
+
+        -- 3. identity_custody
+        ALTER TABLE identity_custody
+          ADD COLUMN IF NOT EXISTS booking_id BIGINT,
+          ADD COLUMN IF NOT EXISTS scope VARCHAR(32) NOT NULL DEFAULT 'ROOM_RESERVATION';
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_identity_custody_scope'
+          ) THEN
+            ALTER TABLE identity_custody
+              ADD CONSTRAINT chk_identity_custody_scope
+              CHECK (scope IN ('ROOM_RESERVATION', 'BOOKING_GROUP'));
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_identity_custody_booking_id
+          ON identity_custody (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_identity_custody_scope
+          ON identity_custody (scope);
+
+        -- 4. Idempotent Backfill: populate booking_id from reservations.booking_id
+        UPDATE payment_transactions pt
+        SET booking_id = r.booking_id
+        FROM reservations r
+        WHERE pt.reservation_id = r.id
+          AND pt.booking_id IS NULL
+          AND r.booking_id IS NOT NULL;
+
+        UPDATE deposits d
+        SET booking_id = r.booking_id
+        FROM reservations r
+        WHERE d.reservation_id = r.id
+          AND d.booking_id IS NULL
+          AND r.booking_id IS NOT NULL;
+
+        UPDATE identity_custody ic
+        SET booking_id = r.booking_id
+        FROM reservations r
+        WHERE ic.reservation_id = r.id
+          AND ic.booking_id IS NULL
+          AND r.booking_id IS NOT NULL;
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('multi_booking_scope_1a_foundation_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
+    // ------------------------------------------------------------------
+    // MULTI-BOOKING-SCOPE-1A (PHASE 2): Integrity & Sealing v2
+    //
+    // Upgrades all booking_id FKs to ON DELETE RESTRICT (dropping any legacy
+    // SET NULL or non-RESTRICT constraints) and adds group ownership CHECK
+    // constraints: (scope <> 'BOOKING_GROUP' OR booking_id IS NOT NULL).
+    //
+    // Safe for both clean environments (runs after v1) and existing dev/test
+    // environments that already executed early draft variants of v1.
+    // ------------------------------------------------------------------
+    const multiBookingScopeCheckV2 = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'multi_booking_scope_1a_integrity_v2'`
+    );
+    if ((multiBookingScopeCheckV2.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. payment_transactions: Ensure RESTRICT FK & group ownership CHECK
+        DO $$
+        DECLARE
+          fk_name TEXT;
+        BEGIN
+          -- Drop any legacy FK on booking_id that is not RESTRICT (confdeltype != 'r')
+          FOR fk_name IN
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'payment_transactions'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype != 'r'
+          LOOP
+            EXECUTE 'ALTER TABLE payment_transactions DROP CONSTRAINT ' || quote_ident(fk_name);
+          END LOOP;
+
+          -- Add RESTRICT foreign key constraint if not present
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'payment_transactions'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype = 'r'
+          ) THEN
+            ALTER TABLE payment_transactions
+              ADD CONSTRAINT payment_transactions_booking_id_fkey
+              FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE RESTRICT;
+          END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_payment_transactions_group_booking_id'
+          ) THEN
+            ALTER TABLE payment_transactions
+              ADD CONSTRAINT chk_payment_transactions_group_booking_id
+              CHECK (scope <> 'BOOKING_GROUP' OR booking_id IS NOT NULL);
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_booking_id
+          ON payment_transactions (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_payment_transactions_scope
+          ON payment_transactions (scope);
+
+        -- 2. deposits: Ensure RESTRICT FK & group ownership CHECK
+        DO $$
+        DECLARE
+          fk_name TEXT;
+        BEGIN
+          -- Drop any legacy FK on booking_id that is not RESTRICT (confdeltype != 'r')
+          FOR fk_name IN
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'deposits'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype != 'r'
+          LOOP
+            EXECUTE 'ALTER TABLE deposits DROP CONSTRAINT ' || quote_ident(fk_name);
+          END LOOP;
+
+          -- Add RESTRICT foreign key constraint if not present
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'deposits'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype = 'r'
+          ) THEN
+            ALTER TABLE deposits
+              ADD CONSTRAINT deposits_booking_id_fkey
+              FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE RESTRICT;
+          END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_deposits_group_booking_id'
+          ) THEN
+            ALTER TABLE deposits
+              ADD CONSTRAINT chk_deposits_group_booking_id
+              CHECK (scope <> 'BOOKING_GROUP' OR booking_id IS NOT NULL);
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_deposits_booking_id
+          ON deposits (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_deposits_scope
+          ON deposits (scope);
+
+        -- 3. identity_custody: Ensure RESTRICT FK & group ownership CHECK
+        DO $$
+        DECLARE
+          fk_name TEXT;
+        BEGIN
+          -- Drop any legacy FK on booking_id that is not RESTRICT (confdeltype != 'r')
+          FOR fk_name IN
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'identity_custody'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype != 'r'
+          LOOP
+            EXECUTE 'ALTER TABLE identity_custody DROP CONSTRAINT ' || quote_ident(fk_name);
+          END LOOP;
+
+          -- Add RESTRICT foreign key constraint if not present
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'identity_custody'::regclass
+              AND c.contype = 'f'
+              AND a.attname = 'booking_id'
+              AND c.confdeltype = 'r'
+          ) THEN
+            ALTER TABLE identity_custody
+              ADD CONSTRAINT identity_custody_booking_id_fkey
+              FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE RESTRICT;
+          END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'chk_identity_custody_group_booking_id'
+          ) THEN
+            ALTER TABLE identity_custody
+              ADD CONSTRAINT chk_identity_custody_group_booking_id
+              CHECK (scope <> 'BOOKING_GROUP' OR booking_id IS NOT NULL);
+          END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_identity_custody_booking_id
+          ON identity_custody (booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_identity_custody_scope
+          ON identity_custody (scope);
+
+        INSERT INTO schema_migrations (version)
+        VALUES ('multi_booking_scope_1a_integrity_v2')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});

@@ -329,13 +329,14 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
     assertReservationOpenForDeposit(reservation, 'receive');
 
     const depositNumber = await generateDepositNumber(client, propertyId, 'DEP');
+    const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
     const paymentResult = await client.query(
       `INSERT INTO payment_transactions (
          reservation_id, property_id, transaction_type, amount, payment_method,
-         reference_code, status, created_by
-       ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6)
+         reference_code, status, created_by, booking_id, scope
+       ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6, $7, 'ROOM_RESERVATION')
        RETURNING *`,
-      [reservationId, propertyId, amount, method, depositNumber, input.actor.name]
+      [reservationId, propertyId, amount, method, depositNumber, input.actor.name, bookingId]
     );
     const payment = paymentResult.rows[0];
 
@@ -358,10 +359,10 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
     const depositResult = await client.query(
       `INSERT INTO deposits (
          property_id, reservation_id, deposit_number, original_amount,
-         payment_method, status, received_by, notes
-       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7)
+         payment_method, status, received_by, notes, booking_id, scope
+       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, 'ROOM_RESERVATION')
        RETURNING *`,
-      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null]
+      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, bookingId]
     );
     const deposit = depositResult.rows[0];
 
@@ -505,7 +506,7 @@ export async function refundDeposit(pool: Pool, input: RefundDepositInput): Prom
   try {
     await client.query('BEGIN');
     await lockIdempotencyKey(client, propertyId, idempotencyKey);
-    await lockReservation(client, propertyId, reservationId);
+    const reservation = await lockReservation(client, propertyId, reservationId);
     await lockDeposit(client, depositId, propertyId, reservationId);
 
     const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'REFUND');
@@ -525,13 +526,14 @@ export async function refundDeposit(pool: Pool, input: RefundDepositInput): Prom
     }
 
     const refundNumber = await generateDepositNumber(client, propertyId, 'RFD');
+    const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
     const paymentResult = await client.query(
       `INSERT INTO payment_transactions (
          reservation_id, property_id, transaction_type, amount, payment_method,
-         reference_code, status, created_by
-       ) VALUES ($1, $2, 'DEPOSIT_REFUND', $3, $4, $5, 'SUCCESS', $6)
+         reference_code, status, created_by, booking_id, scope
+       ) VALUES ($1, $2, 'DEPOSIT_REFUND', $3, $4, $5, 'SUCCESS', $6, $7, 'ROOM_RESERVATION')
        RETURNING *`,
-      [reservationId, propertyId, amount, method, refundNumber, input.actor.name]
+      [reservationId, propertyId, amount, method, refundNumber, input.actor.name, bookingId]
     );
     const payment = paymentResult.rows[0];
 
@@ -587,7 +589,7 @@ export async function reverseDeposit(pool: Pool, input: ReverseDepositInput): Pr
   try {
     await client.query('BEGIN');
     await lockIdempotencyKey(client, propertyId, idempotencyKey);
-    await lockReservation(client, propertyId, reservationId);
+    const reservation = await lockReservation(client, propertyId, reservationId);
     const deposit = await lockDeposit(client, depositId, propertyId, reservationId);
 
     const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'REVERSAL');
@@ -614,13 +616,14 @@ export async function reverseDeposit(pool: Pool, input: ReverseDepositInput): Pr
 
     const refundNumber = await generateDepositNumber(client, propertyId, 'RFD');
     const correctionGroupId = `dep_reverse_${depositId}_${crypto.randomUUID()}`;
+    const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
     const paymentResult = await client.query(
       `INSERT INTO payment_transactions (
          reservation_id, property_id, transaction_type, amount, payment_method,
          reference_code, status, reference_payment_id, correction_group_id,
-         reason_code, reason_text, created_by
+         reason_code, reason_text, created_by, booking_id, scope
        ) VALUES ($1, $2, 'DEPOSIT_REFUND', $3, $4, $5, 'SUCCESS', $6, $7,
-         'PAYMENT_CANCELLED', $8, $9)
+         'PAYMENT_CANCELLED', $8, $9, $10, 'ROOM_RESERVATION')
        RETURNING *`,
       [
         reservationId,
@@ -631,7 +634,8 @@ export async function reverseDeposit(pool: Pool, input: ReverseDepositInput): Pr
         original.payment_transaction_id,
         correctionGroupId,
         reason,
-        input.actor.name
+        input.actor.name,
+        bookingId
       ]
     );
     const payment = paymentResult.rows[0];

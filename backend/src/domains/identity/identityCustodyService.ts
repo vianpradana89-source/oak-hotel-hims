@@ -17,7 +17,7 @@ function maskDocumentNumber(value?: string | null): string | null {
 
 async function assertReservationOwnership(client: PoolClient, propertyId: number, reservationId: number): Promise<any> {
   const result = await client.query(
-    `SELECT r.id, r.status
+    `SELECT r.id, r.status, r.booking_id
      FROM reservations r
      JOIN bookings b ON b.id = r.booking_id
      WHERE r.id = $1 AND b.property_id = $2
@@ -67,11 +67,13 @@ export async function holdIdentity(pool: Pool, input: {
     if (['CHECKED_OUT', 'CANCELLED'].includes(String(reservation.status || '').toUpperCase())) {
       throw domainError(409, 'IDENTITY_CUSTODY_RESERVATION_CLOSED', 'Cannot hold identity for a closed reservation');
     }
+    const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
     const result = await client.query(
       `INSERT INTO identity_custody (
          property_id, reservation_id, document_type, document_holder_name,
-         document_number_masked, status, received_by, storage_location, notes
-       ) VALUES ($1, $2, $3, $4, $5, 'HELD', $6, $7, $8)
+         document_number_masked, status, received_by, storage_location, notes,
+         booking_id, scope
+       ) VALUES ($1, $2, $3, $4, $5, 'HELD', $6, $7, $8, $9, 'ROOM_RESERVATION')
        RETURNING *`,
       [
         input.propertyId,
@@ -81,7 +83,8 @@ export async function holdIdentity(pool: Pool, input: {
         maskedNumber,
         input.actor.name,
         input.storageLocation || null,
-        input.notes || null
+        input.notes || null,
+        bookingId
       ]
     );
     const custody = result.rows[0];
