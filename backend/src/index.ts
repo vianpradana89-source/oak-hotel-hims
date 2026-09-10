@@ -63,6 +63,7 @@ import {
   normalizePhysicalRoomStatus,
   isReadyPhysicalStatus
 } from './domains/turnover/turnoverService';
+import { evaluatePreCheckinEligibility } from './domains/checkin/checkinGateService';
 import type {
   TurnoverState,
   ReadinessReasonCode,
@@ -3036,6 +3037,26 @@ app.get('/api/reservations/:id', async (req, res) => {
       }
     } catch (_pgErr) {}
 
+    // PRECHECKIN-GATE-1B: canonical eligibility enrichment (fail-closed)
+    let precheckin_eligibility: any = null;
+    try {
+      precheckin_eligibility = await evaluatePreCheckinEligibility(pool, propertyId, reservationId);
+    } catch (_peErr) {
+      console.warn('[GET /api/reservations/:id] precheckin_eligibility evaluation error:', _peErr);
+      // Fail-closed: never return eligible=true when evaluator itself fails.
+      precheckin_eligibility = {
+        eligible: false,
+        guest_name_ok: false,
+        guest_phone_ok: false,
+        identity_ok: false,
+        payment_ok: false,
+        payment_evidence_ok: false,
+        guarantee_ok: false,
+        room_ready_ok: false,
+        missing: [{ code: 'PRECHECKIN_EVALUATION_FAILED', label: 'Kesiapan check-in belum dapat diverifikasi' }]
+      };
+    }
+
     res.json({
       status: 'OK',
       data: {
@@ -3045,7 +3066,8 @@ app.get('/api/reservations/:id', async (req, res) => {
         require_checkout_inspection: requireCheckoutInspection,
         sibling_reservations,
         rate_snapshot,
-        primary_guest: primary_guest_data
+        primary_guest: primary_guest_data,
+        precheckin_eligibility
       }
     });
   } catch (err: any) {

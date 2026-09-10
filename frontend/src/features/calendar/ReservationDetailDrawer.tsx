@@ -354,13 +354,9 @@ export default function ReservationDetailDrawer({
   const isCheckedOut = data.status === 'CHECKED_OUT';
   const isCancelled = data.status === 'CANCELLED';
 
-  const hasPhone = Boolean(data.guest_phone && String(data.guest_phone).trim().length > 0);
-  const hasIdentity = Boolean(
-    data.has_valid_identity ||
-    (data.ktp_path && String(data.ktp_path).trim().length > 0) ||
-    (data.identity_number && String(data.identity_number).trim().length > 0)
-  );
-  const isCheckinReady = hasPhone && hasIdentity;
+  const precheckinEligibility = data.precheckin_eligibility;
+  const isCheckinReady = precheckinEligibility?.eligible === true;
+  const missingRequirements = precheckinEligibility?.missing ?? [];
   const sourceLabel = formatReservationSourceLabel(data);
   const ratePlanLabel = formatReservationRatePlanLabel(data);
   const specialRequestsNote = reservationSpecialRequestsText(data);
@@ -875,7 +871,7 @@ export default function ReservationDetailDrawer({
             </div>
           </div>
 
-          {/* Check-in Readiness Banner for Booked reservation */}
+          {/* Check-in Readiness Checklist for Booked reservation */}
           {isBooked && (
             <div className={`p-3.5 rounded-xl border transition-all ${
               isCheckinReady
@@ -884,22 +880,45 @@ export default function ReservationDetailDrawer({
             }`}>
               <div className="flex items-start gap-2.5">
                 <span className="text-base leading-none mt-0.5">{isCheckinReady ? '✅' : '⚠️'}</span>
-                <div className="flex-1 space-y-0.5">
+                <div className="flex-1 space-y-2">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-bold">
-                      {isCheckinReady ? 'Persyaratan Check-in Lengkap' : 'Syarat Wajib Check-in Belum Lengkap'}
+                      {isCheckinReady
+                        ? 'Persyaratan Check-in Lengkap'
+                        : precheckinEligibility
+                          ? 'Syarat Wajib Check-in Belum Lengkap'
+                          : 'Kesiapan Check-in Belum Dapat Diverifikasi'}
                     </h4>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-semibold border ${
-                      isCheckinReady ? 'bg-emerald-100 text-emerald-900 border-emerald-300' : 'bg-amber-100 text-amber-900 border-amber-300'
+                      isCheckinReady
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                        : precheckinEligibility
+                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          : 'bg-stone-200 text-stone-700 border-stone-300'
                     }`}>
-                      {isCheckinReady ? 'Siap Check-in' : 'Wajib Dilengkapi'}
+                      {isCheckinReady
+                        ? 'Siap Check-in'
+                        : precheckinEligibility
+                          ? 'Wajib Dilengkapi'
+                          : 'Belum Terverifikasi'}
                     </span>
                   </div>
-                  <p className="text-xs opacity-90">
-                    {isCheckinReady
-                      ? 'Nomor telepon tamu dan dokumen identitas (KTP/NIK) telah terverifikasi.'
-                      : 'Nomor telepon tamu dan dokumen identitas (KTP/NIK) wajib diisi sebelum proses check-in dapat dilakukan.'}
-                  </p>
+                  {precheckinEligibility && missingRequirements.length > 0 ? (
+                    <div className="space-y-1">
+                      {missingRequirements.map((req: any) => (
+                        <div key={req.code} className="flex items-center gap-1.5 text-xs text-rose-700">
+                          <span className="text-rose-500 flex-shrink-0">❌</span>
+                          <span>{req.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : precheckinEligibility && missingRequirements.length === 0 ? (
+                    <p className="text-xs opacity-90">Semua persyaratan check-in telah terpenuhi.</p>
+                  ) : (
+                    <p className="text-xs text-stone-600">
+                      Kesiapan check-in belum dapat diverifikasi. Pastikan layanan sedang aktif.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
