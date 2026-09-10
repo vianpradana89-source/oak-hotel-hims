@@ -162,6 +162,8 @@ export default function QuickBookingModal({
   // --- Front Office Dynamic Property Rules & Day Use Presets ---
   const [propertyRules, setPropertyRules] = useState<{ WALK_IN: Record<string, string>; OTA: Record<string, string> }>({ WALK_IN: {}, OTA: {} });
   const [dayUseDurationsList, setDayUseDurationsList] = useState<any[]>([]);
+  const [rulesLoading, setRulesLoading] = useState<boolean>(false);
+  const [rulesLoadError, setRulesLoadError] = useState<string | null>(null);
 
   const activeChannelRules = useMemo(() => {
     return channelType === 'OTA' ? propertyRules.OTA || {} : propertyRules.WALK_IN || {};
@@ -391,6 +393,8 @@ export default function QuickBookingModal({
     }
 
     try {
+      setRulesLoading(true);
+      setRulesLoadError(null);
       const [rulesRes, durRes] = await Promise.all([
         authenticatedFetch(`/api/properties/${propertyId}/quick-booking-rules`),
         authenticatedFetch(`/api/properties/${propertyId}/day-use-durations`)
@@ -400,6 +404,8 @@ export default function QuickBookingModal({
         if (rulesJson.data?.rules) {
           setPropertyRules(rulesJson.data.rules);
         }
+      } else {
+        setRulesLoadError('Gagal memuat konfigurasi Front Office');
       }
       if (durRes.ok) {
         const durJson = await durRes.json();
@@ -409,6 +415,9 @@ export default function QuickBookingModal({
       }
     } catch (err) {
       console.warn('Failed to load FO property rules / day use durations', err);
+      setRulesLoadError('Konfigurasi Front Office gagal dimuat');
+    } finally {
+      setRulesLoading(false);
     }
   };
 
@@ -456,6 +465,8 @@ export default function QuickBookingModal({
     setAvailabilityByKey({});
     setAvailabilityLoading(false);
     setSelectionWarning(null);
+    setRulesLoading(false);
+    setRulesLoadError(null);
     availabilityRequestRef.current += 1;
   }, []);
 
@@ -1062,30 +1073,38 @@ export default function QuickBookingModal({
     const issues: string[] = [];
 
     // Booker Validation
-    if (!sameAsBooker) {
-      if (getFieldMode('booker_name') === 'REQUIRED' && !bookerName.trim()) {
+    const _bookerNameMode = getFieldMode('booker_name');
+    const _bookerPhoneMode = getFieldMode('booker_phone');
+    if (!sameAsBooker && !rulesLoading) {
+      if (_bookerNameMode === 'REQUIRED' && !bookerName.trim()) {
         issues.push('Nama pemesan (Booker) wajib diisi');
       }
-      if (getFieldMode('booker_phone') === 'REQUIRED' && !bookerPhone.trim()) {
+      if (_bookerPhoneMode === 'REQUIRED' && !bookerPhone.trim()) {
         issues.push('Nomor HP pemesan wajib diisi');
       }
     }
 
     // Guest Validation
-    if (getFieldMode('guest_name') === 'REQUIRED' && !guestName.trim()) {
-      issues.push('Nama tamu menginap wajib diisi');
-    }
-    if (getFieldMode('guest_phone') === 'REQUIRED' && !guestPhone.trim()) {
-      issues.push('Nomor HP tamu menginap wajib diisi');
+    const _guestNameMode = getFieldMode('guest_name');
+    const _guestPhoneMode = getFieldMode('guest_phone');
+    if (!rulesLoading) {
+      if (_guestNameMode === 'REQUIRED' && !guestName.trim()) {
+        issues.push('Nama tamu menginap wajib diisi');
+      }
+      if (_guestPhoneMode === 'REQUIRED' && !guestPhone.trim()) {
+        issues.push('Nomor HP tamu menginap wajib diisi');
+      }
     }
 
     // Identity Gate
-    if (getFieldMode('identity') === 'REQUIRED' && !hasValidIdentity && !ktpPath && !identityNumber.trim()) {
+    const _identityMode = getFieldMode('identity');
+    if (!rulesLoading && !rulesLoadError && _identityMode === 'REQUIRED' && !hasValidIdentity && !ktpPath && !identityNumber.trim()) {
       issues.push('Dokumen identitas (KTP) wajib dilampirkan atau diisi NIK');
     }
 
     // Rate Plan Gate (only for non-OTA channels)
-    if (channelType !== 'OTA' && getFieldMode('rate_plan') === 'REQUIRED' && roomsList.some(r => !r.ratePlanId)) {
+    const _ratePlanMode = getFieldMode('rate_plan');
+    if (!rulesLoading && !rulesLoadError && channelType !== 'OTA' && _ratePlanMode === 'REQUIRED' && roomsList.some(r => !r.ratePlanId)) {
       issues.push('Rate plan wajib dipilih untuk setiap kamar');
     }
 
@@ -1097,6 +1116,18 @@ export default function QuickBookingModal({
       if (!referral.trim()) {
         issues.push('Nomor booking / kode voucher OTA wajib diisi');
       }
+    }
+
+    // Payment Method Gate
+    const _paymentMethodMode = getFieldMode('payment_method');
+    if (!rulesLoading && !rulesLoadError && _paymentMethodMode === 'REQUIRED' && !paymentMethod) {
+      issues.push('Metode pembayaran wajib dipilih');
+    }
+
+    // Payment Amount Gate
+    const _paymentAmountMode = getFieldMode('payment_amount');
+    if (!rulesLoading && !rulesLoadError && _paymentAmountMode === 'REQUIRED' && amountPaid <= 0) {
+      issues.push('Nominal pembayaran wajib lebih dari 0');
     }
 
     // Payment Proof Gate — must align with backend canonical rule:
@@ -1193,7 +1224,9 @@ export default function QuickBookingModal({
     globalDiscountType,
     globalDiscountValue,
     globalDiscountAmount,
-    globalDiscountReason
+    globalDiscountReason,
+    rulesLoading,
+    rulesLoadError
   ]);
 
   const isValid = validationIssues.length === 0;
@@ -1202,6 +1235,12 @@ export default function QuickBookingModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+
+    // QB-FO-FORM-1A: Hard guard — never submit when rules are unavailable
+    if (rulesLoading || rulesLoadError) {
+      setErrorMsg('Konfigurasi Front Office belum siap. Harap tunggu hingga konfigurasi dimuat.');
+      return;
+    }
 
     if (!isValid) {
       setErrorMsg('Harap lengkapi semua persyaratan:\n' + validationIssues.join('\n'));
@@ -1526,7 +1565,7 @@ export default function QuickBookingModal({
                   </label>
                 </div>
 
-                {!sameAsBooker && (
+                {!sameAsBooker && getFieldMode('booker_name') !== 'HIDDEN' && (
                   <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-3">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500">
                       Data Pemesan (Booker)
@@ -1534,11 +1573,13 @@ export default function QuickBookingModal({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs font-semibold text-stone-700 mb-1">
-                          Nama Pemesan <span className="text-rose-500">*</span>
+                          Nama Pemesan
+                          {getFieldMode('booker_name') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                          {getFieldMode('booker_name') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
                         </label>
                         <input
                           type="text"
-                          required
+                          required={getFieldMode('booker_name') === 'REQUIRED'}
                           value={bookerName}
                           onChange={e => setBookerName(e.target.value)}
                           placeholder="Nama lengkap pemesan..."
@@ -1547,11 +1588,13 @@ export default function QuickBookingModal({
                       </div>
                       <div>
                         <label className="block text-xs font-semibold text-stone-700 mb-1">
-                          Nomor HP Pemesan <span className="text-rose-500">*</span>
+                          Nomor HP Pemesan
+                          {getFieldMode('booker_phone') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                          {getFieldMode('booker_phone') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
                         </label>
                         <input
                           type="tel"
-                          required
+                          required={getFieldMode('booker_phone') === 'REQUIRED'}
                           value={bookerPhone}
                           onChange={e => setBookerPhone(e.target.value)}
                           placeholder="08xxxxxxxxxx"
@@ -1561,42 +1604,39 @@ export default function QuickBookingModal({
                     </div>
                   </div>
                 )}
-
                 <div className="space-y-3">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500">
                     Tamu Menginap (Staying Guest)
                   </span>
-                  
-                  <GuestSearchAutocomplete
-                    propertyId={propertyId}
-                    value={guestName}
-                    onChange={name => setGuestName(name)}
-                    onSelectGuest={handleSelectGuest}
-                    onClearGuest={handleClearGuest}
-                    selectedGuest={selectedCrmGuest}
-                  />
+
+                  {getFieldMode('guest_name') !== 'HIDDEN' && (
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Nama Tamu Menginap
+                      {getFieldMode('guest_name') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                      {getFieldMode('guest_name') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
+                    </label>
+                    <GuestSearchAutocomplete
+                      propertyId={propertyId}
+                      value={guestName}
+                      onChange={name => setGuestName(name)}
+                      onSelectGuest={handleSelectGuest}
+                      onClearGuest={handleClearGuest}
+                      selectedGuest={selectedCrmGuest}
+                    />
+                  </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div className="sm:col-span-2">
-                      <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Nama Tamu Menginap <span className="text-rose-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={guestName}
-                        onChange={e => setGuestName(e.target.value)}
-                        placeholder="Nama lengkap tamu..."
-                        className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                      />
-                    </div>
                     <div>
                       <label className="block text-xs font-semibold text-stone-700 mb-1">
-                        Nomor HP Tamu <span className="text-rose-500">*</span>
+                        Nomor HP Tamu
+                        {getFieldMode('guest_phone') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                        {getFieldMode('guest_phone') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
                       </label>
                       <input
                         type="tel"
-                        required
+                        required={getFieldMode('guest_phone') === 'REQUIRED'}
                         value={guestPhone}
                         onChange={e => setGuestPhone(e.target.value)}
                         placeholder="08xxxxxxxxxx"
@@ -1630,11 +1670,14 @@ export default function QuickBookingModal({
               </div>
 
               {/* SEKSI 3: DOKUMEN IDENTITAS (KTP) */}
+              {getFieldMode('identity') !== 'HIDDEN' && (
               <div className="bg-white p-5 rounded-2xl border border-stone-200/80 shadow-xs space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-950 flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-700"></span>
-                    3. Dokumen Identitas Tamu (KTP) <span className="text-rose-500">*</span>
+                    3. Dokumen Identitas Tamu (KTP)
+                    {getFieldMode('identity') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                    {getFieldMode('identity') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
                   </h3>
                   {hasValidIdentity && (
                     <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold border border-emerald-200">
@@ -1683,6 +1726,7 @@ export default function QuickBookingModal({
                   </div>
                 )}
               </div>
+              )}
 
               {/* SEKSI 4 & 5: KAMAR & DETAIL MENGINAP (MULTI-ROOM SUPPORT) */}
               <div className="space-y-4">
@@ -1987,13 +2031,16 @@ export default function QuickBookingModal({
                           )}
                         </div>
 
-                        {channelType !== 'OTA' && (
+                        {channelType !== 'OTA' && getFieldMode('rate_plan') !== 'HIDDEN' && (
                           <div className="sm:col-span-2">
                             <label className="block text-xs font-semibold text-stone-700 mb-1">
                               Rate Plan / Paket Harga {isDayUse ? '(Khusus Day Use)' : ''}
+                              {getFieldMode('rate_plan') === 'REQUIRED' && <span className="text-rose-500">*</span>}
+                              {getFieldMode('rate_plan') === 'OPTIONAL' && <span className="text-stone-400 font-normal ml-1">(opsional)</span>}
                             </label>
                             <select
                               value={roomDraft.ratePlanId || ''}
+                              required={getFieldMode('rate_plan') === 'REQUIRED'}
                               onChange={e => handleUpdateRoom(roomIdx, { ratePlanId: e.target.value ? Number(e.target.value) : null })}
                               className="w-full text-xs px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                             >
@@ -2407,47 +2454,66 @@ export default function QuickBookingModal({
                 </h3>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Metode Pembayaran <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={paymentMethod}
-                      onChange={e => setPaymentMethod(e.target.value as any)}
-                      className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                    >
-                      <option value="CASH">💵 Tunai (Cash)</option>
-                      <option value="TRANSFER">🏦 Transfer Bank</option>
-                      <option value="QRIS">📱 QRIS / E-Wallet</option>
-                      <option value="DEBIT_CARD">💳 Kartu Debit</option>
-                      <option value="CREDIT_CARD">💳 Kartu Kredit</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-semibold text-stone-700">
-                        Nominal Dibayar (DP / Lunas) <span className="text-rose-500">*</span>
+                  {getFieldMode('payment_method') !== 'HIDDEN' && (
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">
+                        Metode Pembayaran
+                        {getFieldMode('payment_method') === 'REQUIRED' && (
+                          <span className="text-rose-500">*</span>
+                        )}
+                        {getFieldMode('payment_method') === 'OPTIONAL' && (
+                          <span className="text-stone-400 font-normal ml-1">(opsional)</span>
+                        )}
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => { isPaymentTouchedRef.current = true; setAmountPaid(grandTotal); }}
-                        className="text-[10px] font-bold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 cursor-pointer transition-colors"
+                      <select
+                        value={paymentMethod}
+                        onChange={e => setPaymentMethod(e.target.value as any)}
+                        required={getFieldMode('payment_method') === 'REQUIRED'}
+                        className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
                       >
-                        Bayar Pas / Lunas (Rp {grandTotal.toLocaleString('id-ID')})
-                      </button>
+                        <option value="">— Pilih Metode Pembayaran —</option>
+                        <option value="CASH">💵 Tunai (Cash)</option>
+                        <option value="TRANSFER">🏦 Transfer Bank</option>
+                        <option value="QRIS">📱 QRIS / E-Wallet</option>
+                        <option value="DEBIT_CARD">💳 Kartu Debit</option>
+                        <option value="CREDIT_CARD">💳 Kartu Kredit</option>
+                      </select>
                     </div>
-                    <input
-                      type="number"
-                      required
-                      min="0"
-                      step="1000"
-                      value={amountPaid}
-                      onChange={e => { isPaymentTouchedRef.current = true; setAmountPaid(Number(e.target.value)); }}
-                      className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none font-mono font-bold text-emerald-950"
-                    />
-                  </div>
+                  )}
 
+                  {getFieldMode('payment_amount') !== 'HIDDEN' && (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold text-stone-700">
+                          Nominal Dibayar (DP / Lunas)
+                          {getFieldMode('payment_amount') === 'REQUIRED' && (
+                            <span className="text-rose-500">*</span>
+                          )}
+                          {getFieldMode('payment_amount') === 'OPTIONAL' && (
+                            <span className="text-stone-400 font-normal ml-1">(opsional)</span>
+                          )}
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => { isPaymentTouchedRef.current = true; setAmountPaid(grandTotal); }}
+                          className="text-[10px] font-bold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 cursor-pointer transition-colors"
+                        >
+                          Bayar Pas / Lunas (Rp {grandTotal.toLocaleString('id-ID')})
+                        </button>
+                      </div>
+                      <input
+                        type="number"
+                        required={getFieldMode('payment_amount') === 'REQUIRED'}
+                        min="0"
+                        step="1000"
+                        value={amountPaid}
+                        onChange={e => { isPaymentTouchedRef.current = true; setAmountPaid(Number(e.target.value)); }}
+                        className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none font-mono font-bold text-emerald-950"
+                      />
+                    </div>
+                  )}
+
+                  {getFieldMode('payment_evidence') !== 'HIDDEN' && (
                   <div className="sm:col-span-2">
                     {(() => {
                       const _evMode = getFieldMode('payment_evidence');
@@ -2478,6 +2544,7 @@ export default function QuickBookingModal({
                       </span>
                     )}
                   </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2619,7 +2686,20 @@ export default function QuickBookingModal({
                   <h5 className="font-bold text-stone-800 text-[11px] uppercase tracking-wider">
                     Kelayakan Reservasi (Gate Check)
                   </h5>
-                  {isValid ? (
+                  {rulesLoading ? (
+                    <div className="p-2.5 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
+                      <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                      </svg>
+                      <span className="font-semibold">Memuat konfigurasi Front Office...</span>
+                    </div>
+                  ) : rulesLoadError ? (
+                    <div className="p-2.5 bg-rose-50 rounded-xl border border-rose-200 text-rose-900 text-xs">
+                      <span className="font-semibold">Konfigurasi Front Office gagal dimuat</span>
+                      <p className="text-[11px] mt-1 text-rose-700">{rulesLoadError}</p>
+                    </div>
+                  ) : isValid ? (
                     <div className="p-2.5 bg-emerald-50 rounded-xl border border-emerald-200 text-emerald-900 text-xs flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
                       <span className="font-semibold">Semua dokumen & data wajib lengkap ({roomsList.length} kamar).</span>
@@ -2641,7 +2721,7 @@ export default function QuickBookingModal({
               <div className="space-y-2 pt-4 border-t border-stone-200">
                 <button
                   type="button"
-                  disabled={!isValid || submitting}
+                  disabled={!isValid || submitting || rulesLoading || !!rulesLoadError}
                   onClick={handleSubmit}
                   className="w-full py-3 px-4 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
