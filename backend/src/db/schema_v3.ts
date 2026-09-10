@@ -5304,6 +5304,87 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
 
+    // ------------------------------------------------------------------
+    // MULTI-BOOKING-SCOPE-1B1: Payment Allocations Foundation v1
+    //
+    // Establishes canonical payment_allocations table and composite FK
+    // relationships for cross-booking and cross-property DB integrity.
+    // ------------------------------------------------------------------
+    const multiBookingScope1BCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM schema_migrations WHERE version = 'multi_booking_scope_1b_payment_allocations_v1'`
+    );
+    if ((multiBookingScope1BCheck.rowCount ?? 0) === 0) {
+      await auditMigrationClient.query(`
+        -- 1. Ensure composite unique constraints on referenced tables for composite FKs
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'uq_bookings_id_property_id'
+          ) THEN
+            ALTER TABLE bookings ADD CONSTRAINT uq_bookings_id_property_id UNIQUE (id, property_id);
+          END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'uq_reservations_id_booking_id'
+          ) THEN
+            ALTER TABLE reservations ADD CONSTRAINT uq_reservations_id_booking_id UNIQUE (id, booking_id);
+          END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'uq_payment_transactions_id_booking_property'
+          ) THEN
+            ALTER TABLE payment_transactions ADD CONSTRAINT uq_payment_transactions_id_booking_property UNIQUE (id, booking_id, property_id);
+          END IF;
+        END $$;
+
+        -- 2. Create canonical payment_allocations table
+        CREATE TABLE IF NOT EXISTS payment_allocations (
+          id BIGSERIAL PRIMARY KEY,
+          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+          booking_id BIGINT NOT NULL REFERENCES bookings(id) ON DELETE RESTRICT,
+          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+          payment_transaction_id INTEGER NOT NULL REFERENCES payment_transactions(id) ON DELETE RESTRICT,
+          allocated_amount NUMERIC(12,2) NOT NULL,
+          allocation_sequence SMALLINT NOT NULL DEFAULT 1,
+          status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+          notes TEXT,
+          created_by VARCHAR(100),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_payment_alloc_status CHECK (status IN ('ACTIVE', 'REVERSED', 'VOIDED')),
+          CONSTRAINT chk_payment_alloc_amount CHECK (allocated_amount > 0),
+          CONSTRAINT uq_payment_alloc_pt_res UNIQUE (payment_transaction_id, reservation_id),
+          CONSTRAINT fk_payment_alloc_booking_prop FOREIGN KEY (booking_id, property_id)
+            REFERENCES bookings(id, property_id) ON DELETE RESTRICT,
+          CONSTRAINT fk_payment_alloc_res_booking FOREIGN KEY (reservation_id, booking_id)
+            REFERENCES reservations(id, booking_id) ON DELETE RESTRICT,
+          CONSTRAINT fk_payment_alloc_pt_booking_prop FOREIGN KEY (payment_transaction_id, booking_id, property_id)
+            REFERENCES payment_transactions(id, booking_id, property_id) ON DELETE RESTRICT
+        );
+
+        -- 3. Indexes for lookup and reporting performance
+        CREATE INDEX IF NOT EXISTS idx_payment_alloc_res_status
+          ON payment_allocations (reservation_id, status);
+        CREATE INDEX IF NOT EXISTS idx_payment_alloc_booking_status
+          ON payment_allocations (booking_id, status);
+        CREATE INDEX IF NOT EXISTS idx_payment_alloc_pt
+          ON payment_allocations (payment_transaction_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_alloc_property
+          ON payment_allocations (property_id);
+
+        -- 4. Record migration version
+        INSERT INTO schema_migrations (version)
+        VALUES ('multi_booking_scope_1b_payment_allocations_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+
     await auditMigrationClient.query('COMMIT');
   } catch (err) {
     await auditMigrationClient.query('ROLLBACK').catch(() => {});
