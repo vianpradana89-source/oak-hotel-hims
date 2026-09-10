@@ -2968,7 +2968,7 @@ app.get('/api/reservations/:id', async (req, res) => {
     let primary_guest_data: any = null;
     try {
       const pgRes = await pool.query(
-        `SELECT rg.guest_id, g.full_name, g.identity_number, g.has_valid_identity, g.phone
+        `SELECT rg.guest_id, g.full_name, g.identity_number, g.has_valid_identity, g.phone, g.identity_path, g.identity_storage_key
          FROM reservation_guests rg
          JOIN guests g ON g.id = rg.guest_id
          WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
@@ -2981,7 +2981,9 @@ app.get('/api/reservations/:id', async (req, res) => {
           primary_guest_id: Number(pg.guest_id),
           primary_guest_name: pg.full_name || null,
           primary_guest_identity_number: pg.identity_number || null,
-          primary_guest_identity_verified: Boolean(pg.has_valid_identity)
+          primary_guest_identity_verified: Boolean(pg.has_valid_identity),
+          primary_guest_identity_path: pg.identity_path || null,
+          primary_guest_identity_storage_key: pg.identity_storage_key || null
         };
       }
     } catch (_pgErr) {}

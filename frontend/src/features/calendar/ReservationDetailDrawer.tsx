@@ -83,6 +83,13 @@ export default function ReservationDetailDrawer({
    const [replacingPrimaryGuest, setReplacingPrimaryGuest] = useState<boolean>(false);
    const { authFetch } = useAuth();
 
+  // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
+  // to legacy reservation.ktp_path when a PG relation exists.
+  const hasCanonicalPrimaryGuest = Boolean(detailData?.primary_guest?.primary_guest_id);
+  const ktpDocPath = hasCanonicalPrimaryGuest
+    ? (detailData.primary_guest?.primary_guest_identity_path || null)
+    : ((detailData || reservation)?.ktp_path || null);
+
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
   const {
@@ -90,7 +97,7 @@ export default function ReservationDetailDrawer({
     loading: ktpLoading,
     error: ktpError,
     isHistoricalFileMissing: isKtpHistoricalMissing
-  } = useSecureDocumentBlob(currentRes?.ktp_path, isKtpPreviewOpen);
+  } = useSecureDocumentBlob(ktpDocPath, isKtpPreviewOpen);
   const { blobUrl: paymentEvidenceBlobUrl, loading: paymentEvidenceLoading, error: paymentEvidenceError } = useSecureDocumentBlob(currentRes?.bukti_bayar_path, isPaymentEvidencePreviewOpen);
 
   // Keyboard Escape listener for document preview modals
@@ -829,7 +836,7 @@ export default function ReservationDetailDrawer({
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    {data.ktp_path && (
+                    {Boolean(ktpDocPath) && (
                       <button
                         type="button"
                         onClick={() => setIsKtpPreviewOpen(true)}
@@ -1622,7 +1629,7 @@ export default function ReservationDetailDrawer({
         )}
 
         {/* KTP Document Preview Modal */}
-        {isKtpPreviewOpen && data.ktp_path && (
+        {isKtpPreviewOpen && Boolean(ktpDocPath) && (
           <div
             className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
             onClick={() => setIsKtpPreviewOpen(false)}
