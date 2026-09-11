@@ -137,7 +137,13 @@ async function cleanupCommittedFixture(propertyId) {
     await client.query('DELETE FROM deposits WHERE property_id = $1', [propertyId]);
     await client.query('DELETE FROM identity_custody WHERE property_id = $1', [propertyId]);
     await client.query('DELETE FROM payment_allocations WHERE property_id = $1', [propertyId]);
-    await client.query('DELETE FROM payment_transactions WHERE property_id = $1', [propertyId]);
+    await client.query(
+      `DELETE FROM payment_transactions
+       WHERE property_id = $1
+          OR booking_id IN (SELECT id FROM bookings WHERE property_id = $1)
+          OR reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE b.property_id = $1)`,
+      [propertyId]
+    );
     await client.query('DELETE FROM reservation_room_moves WHERE property_id = $1', [propertyId]);
     await client.query('DELETE FROM reservation_nightly_rates WHERE property_id = $1', [propertyId]);
     await client.query('DELETE FROM reservation_guests WHERE reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE b.property_id = $1)', [propertyId]);
@@ -162,7 +168,13 @@ async function assertZeroResidue(propertyId) {
   const checkQueries = [
     { name: 'payment_evidences', sql: 'SELECT COUNT(*) FROM payment_evidences WHERE property_id = $1' },
     { name: 'payment_allocations', sql: 'SELECT COUNT(*) FROM payment_allocations WHERE property_id = $1' },
-    { name: 'payment_transactions', sql: 'SELECT COUNT(*) FROM payment_transactions WHERE property_id = $1' },
+    {
+      name: 'payment_transactions',
+      sql: `SELECT COUNT(*) FROM payment_transactions
+            WHERE property_id = $1
+               OR booking_id IN (SELECT id FROM bookings WHERE property_id = $1)
+               OR reservation_id IN (SELECT r.id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE b.property_id = $1)`
+    },
     { name: 'folio_entries', sql: 'SELECT COUNT(*) FROM folio_entries WHERE property_id = $1' },
     { name: 'reservations', sql: 'SELECT COUNT(*) FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id = $1)' },
     { name: 'bookings', sql: 'SELECT COUNT(*) FROM bookings WHERE property_id = $1' },
@@ -1303,6 +1315,116 @@ async function test36_reversedAllocationRejectedInMutations() {
   }
 }
 
+// ─── T37: Direct Payment NULL-Property Compatibility ──────────────────────────
+async function test37_directPaymentNullPropertyCompatibility() {
+  console.log('\n--- T37: Direct ROOM_RESERVATION payment with property_id IS NULL compatibility ---');
+  let propertyId;
+  let propWrong;
+  try {
+    const setupClient = await pool.connect();
+    let resId;
+    let paymentId;
+    let wrongPaymentId;
+    try {
+      await setupClient.query('BEGIN');
+      propertyId = await mkProperty(setupClient);
+      propWrong = await mkProperty(setupClient);
+      const bookingId = await mkBooking(setupClient, propertyId);
+      resId = await mkReservation(setupClient, bookingId, 500000);
+
+      // Insert direct payment with property_id IS NULL (legacy / standard direct behavior)
+      const payRes = await setupClient.query(
+        `INSERT INTO payment_transactions (
+           property_id, booking_id, reservation_id, transaction_type,
+           amount, scope, status
+         ) VALUES (NULL, $1, $2, 'PAYMENT', 500000, 'ROOM_RESERVATION', 'SUCCESS')
+         RETURNING id`,
+        [bookingId, resId]
+      );
+      paymentId = Number(payRes.rows[0].id);
+
+      // Insert direct payment with NON-NULL WRONG property_id
+      const wrongPayRes = await setupClient.query(
+        `INSERT INTO payment_transactions (
+           property_id, booking_id, reservation_id, transaction_type,
+           amount, scope, status
+         ) VALUES ($1, $2, $3, 'PAYMENT', 500000, 'ROOM_RESERVATION', 'SUCCESS')
+         RETURNING id`,
+        [propWrong, bookingId, resId]
+      );
+      wrongPaymentId = Number(wrongPayRes.rows[0].id);
+
+      await setupClient.query('COMMIT');
+    } catch (err) {
+      await setupClient.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      setupClient.release();
+    }
+
+    // A. Upload succeeds with property_id IS NULL
+    const uploadRes = await uploadPaymentEvidence(pool, {
+      propertyId,
+      reservationId: resId,
+      paymentId,
+      evidenceType: 'BANK_TRANSFER',
+      file: { mimetype: 'image/jpeg', size: 1024, originalname: 'legacy_direct.jpg', buffer: mockFileBuffer() }
+    });
+    check(uploadRes && uploadRes.is_active === true, 'T37.A: Upload succeeds for direct payment with property_id IS NULL');
+
+    // B. List succeeds with property_id IS NULL
+    const listRes = await getPaymentEvidences(pool, propertyId, resId, paymentId);
+    check(listRes.length === 1 && listRes[0].id === uploadRes.id, 'T37.B: List succeeds for direct payment with property_id IS NULL');
+
+    // C. Get/view succeeds with property_id IS NULL
+    const viewRes = await getEvidenceRowById(pool, propertyId, resId, paymentId, uploadRes.id);
+    check(viewRes && viewRes.id === uploadRes.id, 'T37.C: Get/view succeeds for direct payment with property_id IS NULL');
+
+    // D. Gate 5 qualifying evidence succeeds with property_id IS NULL
+    const gate5Res = await getQualifyingEvidenceForReservation(pool, resId, propertyId);
+    check(gate5Res.length === 1 && gate5Res[0].id === uploadRes.id, 'T37.D: Gate 5 qualifying evidence succeeds for direct payment with property_id IS NULL');
+
+    // E. Replace succeeds with property_id IS NULL
+    const replaceRes = await replaceEvidence(pool, {
+      propertyId,
+      reservationId: resId,
+      paymentId,
+      oldEvidenceId: uploadRes.id,
+      evidenceType: 'BANK_TRANSFER',
+      file: { mimetype: 'image/jpeg', size: 1024, originalname: 'legacy_replace.jpg', buffer: mockFileBuffer() }
+    });
+    check(replaceRes.newEvidence.is_active === true && replaceRes.deactivatedEvidence.is_active === false, 'T37.E: Replace succeeds for direct payment with property_id IS NULL');
+
+    // F. Deactivate succeeds with property_id IS NULL
+    const deactRes = await deactivateEvidence(pool, {
+      propertyId,
+      reservationId: resId,
+      paymentId,
+      evidenceId: replaceRes.newEvidence.id,
+      reason: 'Testing direct deactivate compatibility'
+    });
+    check(deactRes && deactRes.is_active === false, 'T37.F: Deactivate succeeds for direct payment with property_id IS NULL');
+
+    // G. ROOM_RESERVATION with NON-NULL WRONG property_id is rejected
+    let wrongRejected = false;
+    try {
+      await validatePaymentHierarchy(pool, propertyId, resId, wrongPaymentId);
+    } catch (err) {
+      wrongRejected = err.code === 'CROSS_PROPERTY_RESERVATION' || err.statusCode === 403;
+    }
+    check(wrongRejected, 'T37.G: ROOM_RESERVATION with NON-NULL WRONG property_id is rejected');
+  } finally {
+    if (propertyId) {
+      await cleanupCommittedFixture(propertyId);
+      await assertZeroResidue(propertyId);
+    }
+    if (propWrong) {
+      await cleanupCommittedFixture(propWrong);
+      await assertZeroResidue(propWrong);
+    }
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log(`\n=== RUNNING MULTI-BOOKING-SCOPE-1B3B TESTS [runId=${runId}] ===\n`);
@@ -1343,7 +1465,8 @@ async function main() {
     test33_siblingReplacesAnchorsEvidence,
     test34_replacementRetainsOriginalAnchor,
     test35_anchorNotRecomputedOnReplace,
-    test36_reversedAllocationRejectedInMutations
+    test36_reversedAllocationRejectedInMutations,
+    test37_directPaymentNullPropertyCompatibility
   ];
 
   for (const test of tests) {

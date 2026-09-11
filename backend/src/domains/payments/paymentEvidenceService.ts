@@ -134,7 +134,7 @@ export async function validatePaymentHierarchy(
     if (Number(payment.reservation_id) !== reservationId) {
       throw { statusCode: 403, code: 'CROSS_RESERVATION_PAYMENT', message: `Payment ${paymentId} does not belong to reservation ${reservationId}` };
     }
-    if (Number(payment.property_id) !== propertyId) {
+    if (payment.property_id != null && Number(payment.property_id) !== propertyId) {
       throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
     }
   } else if (scope === 'BOOKING_GROUP') {
@@ -251,7 +251,10 @@ export async function getQualifyingEvidenceForReservation(
        AND pe.payment_transaction_id IN (
          SELECT pt.id FROM payment_transactions pt
          WHERE pt.reservation_id = $1
-           AND pt.property_id = $2
+           AND (
+             pt.property_id = $2
+             OR pt.property_id IS NULL
+           )
            AND pt.status = 'SUCCESS'
            AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
        )
@@ -372,8 +375,8 @@ export async function uploadPaymentEvidence(
 
     // Step F: Acquire lock on parent payment row (serialization primitive)
     const lockRes = await client.query(
-      `SELECT id, property_id, booking_id, scope FROM payment_transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
-      [payment, propertyId]
+      `SELECT id, property_id, booking_id, scope, reservation_id FROM payment_transactions WHERE id = $1 FOR UPDATE`,
+      [payment]
     );
     if ((lockRes.rowCount ?? 0) === 0) {
       throw { statusCode: 404, code: 'PAYMENT_NOT_FOUND', message: `Payment ${payment} not found` };
@@ -384,6 +387,10 @@ export async function uploadPaymentEvidence(
     let effectiveReservationId: number;
 
     if (lockedPayment.scope === 'BOOKING_GROUP') {
+      if (Number(lockedPayment.property_id) !== propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
+
       // Re-validate and lock requesting reservation's active allocation inside transaction
       await lockBookingGroupEvidenceAccess(
         client,
@@ -414,9 +421,17 @@ export async function uploadPaymentEvidence(
         await deleteEvidenceFile(saved.storageKey).catch(() => {});
         throw { statusCode: 409, code: 'EVIDENCE_ALREADY_EXISTS', message: 'This booking group already has evidence attached' };
       }
-    } else {
+    } else if (lockedPayment.scope === 'ROOM_RESERVATION') {
+      if (Number(lockedPayment.reservation_id) !== reservationId) {
+        throw { statusCode: 403, code: 'CROSS_RESERVATION_PAYMENT', message: `Payment ${payment} does not belong to reservation ${reservationId}` };
+      }
+      if (lockedPayment.property_id != null && Number(lockedPayment.property_id) !== propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
       // Direct mode — use requesting reservation as anchor
       effectiveReservationId = reservationId;
+    } else {
+      throw { statusCode: 400, code: 'VALIDATION_ERROR', message: `Unsupported payment scope: ${lockedPayment.scope}` };
     }
 
     // Step H: INSERT exactly one evidence row
@@ -610,8 +625,8 @@ export async function deactivateEvidence(
 
     // Acquire lock on parent payment row FOR UPDATE
     const lockRes = await client.query(
-      `SELECT id, property_id, booking_id, scope FROM payment_transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
-      [input.paymentId, input.propertyId]
+      `SELECT id, property_id, booking_id, scope, reservation_id FROM payment_transactions WHERE id = $1 FOR UPDATE`,
+      [input.paymentId]
     );
     if ((lockRes.rowCount ?? 0) === 0) {
       throw { statusCode: 404, code: 'PAYMENT_NOT_FOUND', message: `Payment ${input.paymentId} not found` };
@@ -619,6 +634,9 @@ export async function deactivateEvidence(
     const lockedPayment = lockRes.rows[0];
 
     if (lockedPayment.scope === 'BOOKING_GROUP') {
+      if (Number(lockedPayment.property_id) !== input.propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
       await lockBookingGroupEvidenceAccess(
         client,
         input.propertyId,
@@ -626,6 +644,15 @@ export async function deactivateEvidence(
         input.paymentId,
         lockedPayment.booking_id
       );
+    } else if (lockedPayment.scope === 'ROOM_RESERVATION') {
+      if (Number(lockedPayment.reservation_id) !== input.reservationId) {
+        throw { statusCode: 403, code: 'CROSS_RESERVATION_PAYMENT', message: `Payment ${input.paymentId} does not belong to reservation ${input.reservationId}` };
+      }
+      if (lockedPayment.property_id != null && Number(lockedPayment.property_id) !== input.propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
+    } else {
+      throw { statusCode: 400, code: 'VALIDATION_ERROR', message: `Unsupported payment scope: ${lockedPayment.scope}` };
     }
 
     // UPDATE with property_id + payment_transaction_id guards to prevent cross-property updates
@@ -776,8 +803,8 @@ export async function replaceEvidence(
 
     // Step D: acquire lock on parent payment row for serialization
     const lockRes = await client.query(
-      `SELECT id, property_id, booking_id, scope FROM payment_transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
-      [input.paymentId, input.propertyId]
+      `SELECT id, property_id, booking_id, scope, reservation_id FROM payment_transactions WHERE id = $1 FOR UPDATE`,
+      [input.paymentId]
     );
     if ((lockRes.rowCount ?? 0) === 0) {
       throw { statusCode: 404, code: 'PAYMENT_NOT_FOUND', message: `Payment ${input.paymentId} not found` };
@@ -785,6 +812,9 @@ export async function replaceEvidence(
     const lockedPayment = lockRes.rows[0];
 
     if (lockedPayment.scope === 'BOOKING_GROUP') {
+      if (Number(lockedPayment.property_id) !== input.propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
       await lockBookingGroupEvidenceAccess(
         client,
         input.propertyId,
@@ -792,6 +822,15 @@ export async function replaceEvidence(
         input.paymentId,
         lockedPayment.booking_id
       );
+    } else if (lockedPayment.scope === 'ROOM_RESERVATION') {
+      if (Number(lockedPayment.reservation_id) !== input.reservationId) {
+        throw { statusCode: 403, code: 'CROSS_RESERVATION_PAYMENT', message: `Payment ${input.paymentId} does not belong to reservation ${input.reservationId}` };
+      }
+      if (lockedPayment.property_id != null && Number(lockedPayment.property_id) !== input.propertyId) {
+        throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Payment belongs to a different property' };
+      }
+    } else {
+      throw { statusCode: 400, code: 'VALIDATION_ERROR', message: `Unsupported payment scope: ${lockedPayment.scope}` };
     }
 
     // Step E: authoritative SELECT FOR UPDATE inside the transaction
