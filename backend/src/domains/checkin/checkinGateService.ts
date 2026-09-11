@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { evaluateRoomReadiness } from '../turnover/turnoverService';
 import { deriveDepositBalance } from '../deposits/depositService';
 import { getEffectivePaymentStateForReservation } from '../payments/paymentAllocationService';
+import { getQualifyingEvidenceForReservation } from '../payments/paymentEvidenceService';
 import type { MissingRequirement } from './checkinGateTypes';
 
 /**
@@ -161,21 +162,14 @@ export async function evaluatePreCheckinEligibility(
   // ── Gate 5: Payment Evidence ───────────────────────────────────────────
   // At least one ACTIVE evidence row linked to a qualifying SUCCESS payment_transaction.
   // If no payment exists: evidence_ok = false (explicitly).
-  const evidenceRes = await client.query(
-    `SELECT COUNT(*) AS cnt
-     FROM payment_evidences pe
-     WHERE pe.reservation_id = $1
-       AND pe.payment_transaction_id IN (
-         SELECT pt.id FROM payment_transactions pt
-         WHERE pt.reservation_id = $1
-           AND pt.status = 'SUCCESS'
-           AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-       )
-       AND pe.is_active = TRUE`,
-    [reservationId]
-  );
-
-  const evidenceCount = parseInt(evidenceRes.rows[0].cnt, 10) || 0;
+  // Supports both direct ROOM_RESERVATION payments and BOOKING_GROUP allocations.
+  let evidenceCount = 0;
+  if (paymentOk) {
+    const evidenceRows = await getQualifyingEvidenceForReservation(
+      client, reservationId, effectivePropertyId
+    );
+    evidenceCount = evidenceRows.length;
+  }
   const paymentEvidenceOk = paymentOk && evidenceCount > 0;
 
   if (!paymentEvidenceOk) missing.push({ code: 'PAYMENT_EVIDENCE_MISSING', label: MISSING_LABELS.PAYMENT_EVIDENCE_MISSING });
