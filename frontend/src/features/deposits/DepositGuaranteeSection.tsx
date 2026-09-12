@@ -524,7 +524,7 @@ export default function DepositGuaranteeSection({
 
       {/* Group Refund Deposit Modal */}
       <RefundDepositModal isOpen={showGroupRefund} onClose={() => setShowGroupRefund(false)}
-        reservationId={reservationId} propertyId={propertyId}
+        reservationId={actionableGroupDeposit?.reservation_id ?? reservationId} propertyId={propertyId}
         onSuccess={refreshAll} deposit={actionableGroupDeposit} />
 
       {/* Reverse Deposit Confirmation */}
