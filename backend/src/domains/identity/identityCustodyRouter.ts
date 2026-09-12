@@ -40,7 +40,8 @@ export function createIdentityCustodyRouter(pool: Pool): Router {
         documentNumberMasked: req.body?.document_number_masked || null,
         storageLocation: req.body?.storage_location || null,
         notes: req.body?.notes || null,
-        actor: actorFor(req)
+        actor: actorFor(req),
+        scope: 'scope' in (req.body || {}) ? req.body.scope : undefined
       });
       return res.status(201).json({ status: 'SUCCESS', data: result });
     } catch (error) {

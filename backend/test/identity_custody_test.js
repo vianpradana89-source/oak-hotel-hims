@@ -36,7 +36,7 @@ function custodyPool(options = {}) {
         return options.ownership === false ? { rows: [], rowCount: 0 } : { rows: [{ id: 20, status: options.reservationStatus || 'BOOKED' }], rowCount: 1 };
       }
       if (text.includes('INSERT INTO identity_custody')) {
-        return { rows: [{ id: 50, property_id: params[0], reservation_id: params[1], document_type: params[2], document_holder_name: params[3], status: 'HELD', received_by: params[5] }], rowCount: 1 };
+        return { rows: [{ id: 50, property_id: params[0], reservation_id: params[1], document_type: params[2], document_holder_name: params[3], status: 'HELD', received_by: params[5], scope: params[9] || 'ROOM_RESERVATION' }], rowCount: 1 };
       }
       if (text.includes('SELECT * FROM identity_custody')) {
         return options.found === false ? { rows: [], rowCount: 0 } : { rows: [existing], rowCount: 1 };
@@ -99,7 +99,7 @@ async function main() {
       documentNumberMasked: 'A12****89', storageLocation: 'Safe A-2', notes: 'Envelope 4', actor
     });
     const insert = fixture.calls.find(call => call.text.includes('INSERT INTO identity_custody'));
-    assert.deepStrictEqual(insert.params.slice(4), ['********1289', 'Front Desk', 'Safe A-2', 'Envelope 4']);
+    assert.deepStrictEqual(insert.params.slice(4), ['********1289', 'Front Desk', 'Safe A-2', 'Envelope 4', null, 'ROOM_RESERVATION']);
     assert.ok(!insert.text.includes('document_number,'));
   });
   await test('hold writes an audit snapshot without an unmasked identifier', async () => {

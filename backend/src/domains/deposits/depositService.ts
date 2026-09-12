@@ -8,6 +8,7 @@ import type {
   DepositBalanceSummary,
   DepositEventType,
   DepositReconciliationIssue,
+  DepositScope,
   DepositStatus,
   EvidenceUpload,
   ReceiveDepositInput,
@@ -51,6 +52,13 @@ function validateIdempotencyKey(value: unknown): string {
     throw domainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A valid idempotency key is required');
   }
   return key;
+}
+
+function validateScope(value: unknown): DepositScope {
+  if (value === undefined || value === null) return 'ROOM_RESERVATION';
+  const s = String(value);
+  if (s === 'ROOM_RESERVATION' || s === 'BOOKING_GROUP') return s as DepositScope;
+  throw domainError(400, 'INVALID_SCOPE', `Invalid deposit scope: ${value}. Allowed values: ROOM_RESERVATION, BOOKING_GROUP`);
 }
 
 function validateEvidence(file?: EvidenceUpload | null): void {
@@ -137,7 +145,7 @@ async function lockReservation(client: PoolClient, propertyId: number, reservati
     [reservationId]
   );
   const result = await client.query(
-    `SELECT r.*, b.property_id AS booking_property_id
+    `SELECT r.*, b.property_id AS booking_property_id, b.id AS booking_id
      FROM reservations r
      LEFT JOIN bookings b ON b.id = r.booking_id
      WHERE r.id = $1
@@ -152,6 +160,16 @@ async function lockReservation(client: PoolClient, propertyId: number, reservati
     throw domainError(403, 'CROSS_PROPERTY_RESERVATION', 'Reservation belongs to a different property');
   }
   return reservation;
+}
+
+async function validateGroupOwnership(client: PoolClient, propertyId: number, reservationId: number, bookingId: number): Promise<void> {
+  const result = await client.query(
+    `SELECT 1 FROM bookings WHERE id = $1 AND property_id = $2 LIMIT 1`,
+    [bookingId, propertyId]
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw domainError(403, 'BOOKING_NOT_FOUND', 'Booking not found or does not belong to this property');
+  }
 }
 
 async function lockIdempotencyKey(client: PoolClient, propertyId: number, idempotencyKey: string): Promise<void> {
@@ -311,6 +329,7 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
   const method = normalizePaymentMethod(input.paymentMethod);
   const idempotencyKey = validateIdempotencyKey(input.idempotencyKey);
   validateEvidence(input.evidence);
+  const scope = validateScope(input.scope);
 
   let savedStorageKey: string | null = null;
   const client = await pool.connect();
@@ -328,15 +347,23 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
     }
     assertReservationOpenForDeposit(reservation, 'receive');
 
+    // For BOOKING_GROUP: validate booking ownership
+    const resolvedBookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
+    if (scope === 'BOOKING_GROUP') {
+      if (!resolvedBookingId) {
+        throw domainError(400, 'BOOKING_REQUIRED', 'BOOKING_GROUP deposit requires reservation to be linked to a booking');
+      }
+      await validateGroupOwnership(client, propertyId, reservationId, resolvedBookingId);
+    }
+
     const depositNumber = await generateDepositNumber(client, propertyId, 'DEP');
-    const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
     const paymentResult = await client.query(
       `INSERT INTO payment_transactions (
          reservation_id, property_id, transaction_type, amount, payment_method,
          reference_code, status, created_by, booking_id, scope
-       ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6, $7, 'ROOM_RESERVATION')
+       ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6, $7, $8)
        RETURNING *`,
-      [reservationId, propertyId, amount, method, depositNumber, input.actor.name, bookingId]
+      [reservationId, propertyId, amount, method, depositNumber, input.actor.name, resolvedBookingId, scope]
     );
     const payment = paymentResult.rows[0];
 
@@ -360,9 +387,9 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
       `INSERT INTO deposits (
          property_id, reservation_id, deposit_number, original_amount,
          payment_method, status, received_by, notes, booking_id, scope
-       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, 'ROOM_RESERVATION')
+       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, $9)
        RETURNING *`,
-      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, bookingId]
+      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, resolvedBookingId, scope]
     );
     const deposit = depositResult.rows[0];
 

@@ -1,5 +1,6 @@
 export type DepositStatus = 'RECEIVED' | 'PARTIALLY_USED' | 'CLOSED' | 'CANCELLED';
 export type DepositEventType = 'RECEIVED' | 'APPLY' | 'REFUND' | 'REVERSAL';
+export type DepositScope = 'ROOM_RESERVATION' | 'BOOKING_GROUP';
 
 export interface DepositActor {
   userId: string;
@@ -25,6 +26,7 @@ export interface DepositOperationBase {
 
 export interface ReceiveDepositInput extends DepositOperationBase {
   paymentMethod: string;
+  scope?: DepositScope;
   evidence?: EvidenceUpload | null;
   evidenceNote?: string | null;
 }

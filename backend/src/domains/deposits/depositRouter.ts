@@ -62,7 +62,8 @@ export function createDepositRouter(pool: Pool): Router {
         actor: actorFor(req),
         notes: req.body?.notes || null,
         evidence: req.file || null,
-        evidenceNote: req.body?.evidence_note || null
+        evidenceNote: req.body?.evidence_note || null,
+        scope: 'scope' in (req.body || {}) ? req.body.scope : undefined
       });
       return res.status(result.idempotent_replay ? 200 : 201).json({ status: 'SUCCESS', data: result });
     } catch (error) {

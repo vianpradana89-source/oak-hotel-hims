@@ -177,19 +177,50 @@ export async function evaluatePreCheckinEligibility(
   // ── Gate 6: Guarantee ──────────────────────────────────────────────────
   // TRUE if EITHER:
   //   A. Active cash deposit with remaining balance > 0 (computed from deposit_events)
+  //      - ROOM_RESERVATION scope: reservation_id = target
+  //      - BOOKING_GROUP scope: booking_id = target's booking, scope = 'BOOKING_GROUP'
   //   B. Held identity custody (status = 'HELD')
+  //      - ROOM_RESERVATION scope: reservation_id = target
+  //      - BOOKING_GROUP scope: booking_id = target's booking, scope = 'BOOKING_GROUP'
   // Note: deposits table has no balance_remaining column; balance is derived from deposit_events
   // Using canonical deriveDepositBalance from deposit domain to avoid duplicate accounting logic
-  const depositsRes = await client.query(
+
+  // First, get the booking_id for this reservation (for GROUP scope lookup)
+  const bookingRes = await client.query(
+    `SELECT b.id AS booking_id
+     FROM reservations r
+     LEFT JOIN bookings b ON b.id = r.booking_id
+     WHERE r.id = $1`,
+    [reservationId]
+  );
+  const targetBookingId = bookingRes.rows[0]?.booking_id ? Number(bookingRes.rows[0].booking_id) : null;
+
+  // Query reservation-scoped deposits (ROOM_RESERVATION)
+  const resDepositsRes = await client.query(
     `SELECT id FROM deposits
      WHERE reservation_id = $1
        AND property_id = $2
+       AND scope = 'ROOM_RESERVATION'
        AND status IN ('RECEIVED', 'PARTIALLY_USED')`,
     [reservationId, propertyId]
   );
 
+  // Query booking-group-scoped deposits (BOOKING_GROUP)
+  let groupDepositsRes: any = { rows: [] };
+  if (targetBookingId && targetBookingId > 0) {
+    groupDepositsRes = await client.query(
+      `SELECT id FROM deposits
+       WHERE booking_id = $1
+         AND property_id = $2
+         AND scope = 'BOOKING_GROUP'
+         AND status IN ('RECEIVED', 'PARTIALLY_USED')`,
+      [targetBookingId, propertyId]
+    );
+  }
+
   let cashDepositCount = 0;
-  for (const deposit of depositsRes.rows) {
+  const allDeposits = [...resDepositsRes.rows, ...groupDepositsRes.rows];
+  for (const deposit of allDeposits) {
     const eventsRes = await client.query(
       `SELECT * FROM deposit_events WHERE deposit_id = $1 ORDER BY id`,
       [deposit.id]
@@ -200,16 +231,35 @@ export async function evaluatePreCheckinEligibility(
     }
   }
 
-  const identityCustodyRes = await client.query(
+  // Query reservation-scoped identity custody (ROOM_RESERVATION)
+  const resCustodyRes = await client.query(
     `SELECT COUNT(*) AS cnt
      FROM identity_custody
      WHERE reservation_id = $1
        AND property_id = $2
+       AND scope = 'ROOM_RESERVATION'
        AND status = 'HELD'`,
     [reservationId, propertyId]
   );
 
-  const heldCustodyCount = parseInt(identityCustodyRes.rows[0].cnt, 10) || 0;
+  // Query booking-group-scoped identity custody (BOOKING_GROUP)
+  let groupCustodyRes: any = { rows: [{ cnt: 0 }] };
+  if (targetBookingId && targetBookingId > 0) {
+    groupCustodyRes = await client.query(
+      `SELECT COUNT(*) AS cnt
+       FROM identity_custody
+       WHERE booking_id = $1
+         AND property_id = $2
+         AND scope = 'BOOKING_GROUP'
+         AND status = 'HELD'`,
+      [targetBookingId, propertyId]
+    );
+  }
+
+  const heldCustodyCount =
+    parseInt(resCustodyRes.rows[0].cnt, 10) +
+    parseInt(groupCustodyRes.rows[0].cnt, 10);
+
   const guaranteeOk = cashDepositCount > 0 || heldCustodyCount > 0;
 
   if (!guaranteeOk) missing.push({ code: 'GUARANTEE_MISSING', label: MISSING_LABELS.GUARANTEE_MISSING });

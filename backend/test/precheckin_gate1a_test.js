@@ -144,10 +144,12 @@ function createMockClient(rows) {
         const resId = params[0];
         const propId = params[1];
         const deposits = rows.deposits || [];
+        // Must match: (room-reservation scoped by reservation_id) OR (group scoped by booking_id)
         const filtered = deposits.filter(d =>
-          d.reservation_id === resId &&
           d.property_id === propId &&
-          (d.status === 'RECEIVED' || d.status === 'PARTIALLY_USED')
+          (d.status === 'RECEIVED' || d.status === 'PARTIALLY_USED') &&
+          ((d.scope === 'ROOM_RESERVATION' && d.reservation_id === resId) ||
+           (d.scope === 'BOOKING_GROUP' && rows.targetBookingId && d.booking_id === rows.targetBookingId))
         );
         return { rows: filtered.map(d => ({ id: d.id })), rowCount: filtered.length };
       }
@@ -178,11 +180,13 @@ function createMockClient(rows) {
       if (sql.includes('identity_custody') && sql.includes('COUNT(*)')) {
         const resId = params[0];
         const propId = params[1];
-        const custody = rows.custody || [];
-        const filtered = custody.filter(c =>
-          c.reservation_id === resId &&
+        const custodyList = rows.custody || [];
+        const targetBookingId = rows.targetBookingId || null;
+        const filtered = custodyList.filter(c =>
           c.property_id === propId &&
-          c.status === 'HELD'
+          c.status === 'HELD' &&
+          ((c.scope === 'ROOM_RESERVATION' && c.reservation_id === resId) ||
+           (c.scope === 'BOOKING_GROUP' && targetBookingId && c.booking_id === targetBookingId))
         );
         return { rows: [{ cnt: String(filtered.length) }], rowCount: 1 };
       }
