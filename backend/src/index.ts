@@ -81,6 +81,9 @@ import { createScheduleRouter } from './domains/schedule/scheduleRouter';
 import { createFeatureRouter } from './domains/features/featureRouter';
 import { isFeatureEnabled } from './domains/features/featureService';
 import { createPaymentCore } from './domains/payments/paymentDomainService';
+import {
+  createBookingGroupPaymentWithAllocations
+} from './domains/payments/bookingGroupPaymentService';
 import { createPricingRouter } from './domains/pricing/pricingRouter';
 import { calculatePriceQuote, createReservationRateSnapshots } from './domains/pricing/pricingService';
 import {
@@ -1839,7 +1842,12 @@ async function createCanonicalBooking(
       }
     }
 
-    if (useBookingLevelPayment) {
+    const useGroupPayment =
+      useBookingLevelPayment &&
+      bookingLevelCash > 0 &&
+      normalizedChildren.length >= 2;
+
+    if (useBookingLevelPayment && !useGroupPayment) {
       const childNets = normalizedChildren.map((childRow) => (
         Math.max(0, Number(childRow.discountBase || 0) - Number(childRow.discountAmount || 0))
       ));
@@ -2534,6 +2542,83 @@ async function createCanonicalBooking(
       });
     }
 
+    // ── 1B3C: Multi-room booking-level payment → single BOOKING_GROUP parent ──
+    let groupPaymentResult: Awaited<ReturnType<typeof createBookingGroupPaymentWithAllocations>> | null = null;
+    if (useGroupPayment) {
+      // Collect inserted reservation IDs in deterministic stay order.
+      const insertedReservationIds = insertedChildren
+        .slice()
+        .sort((a, b) => Number(a.stay_sequence || 0) - Number(b.stay_sequence || 0))
+        .map((r) => Number(r.id));
+
+      groupPaymentResult = await createBookingGroupPaymentWithAllocations(client, {
+        propertyId: Number(bookingRecord.property_id),
+        bookingId: Number(bookingRecord.id),
+        amount: Number(bookingLevelCash),
+        paymentMethod: bookingPaymentMethod || 'CASH',
+        referenceCode: `QB-PAY-${bookingRecord.id}-${correlationId || Date.now()}`,
+        createdBy: bookingActor,
+        description: 'Pembayaran awal group booking',
+        reservationIds: insertedReservationIds
+      });
+
+      // Single evidence row anchored to the group parent payment, attached to
+      // the first positive-allocation reservation (deterministic anchor).
+      const firstPositiveAllocation = groupPaymentResult.allocations.find(
+        (a) => Number(a.allocatedAmount) > 0
+      );
+      const evidencePath = bookingPaymentEvidencePath;
+      if (evidencePath && firstPositiveAllocation) {
+        await client.query(
+          `INSERT INTO payment_evidences (
+             property_id, reservation_id, payment_transaction_id, evidence_type, storage_key, original_filename,
+             mime_type, file_size_bytes, note, is_active, uploaded_by_name_snapshot, created_at, updated_at
+           ) VALUES ($1, $2, $3, 'RECEIPT', $4, $5, 'image/jpeg', 0, 'Bukti bayar saat reservasi', TRUE, 'Front Office', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            bookingPropertyId,
+            firstPositiveAllocation.reservationId,
+            groupPaymentResult.parentPayment.id,
+            evidencePath,
+            path.basename(evidencePath)
+          ]
+        );
+      } else if (req.file && firstPositiveAllocation) {
+        const fileBuffer = req.file.buffer;
+        const validation = validateEvidenceUpload({
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+          originalname: req.file.originalname,
+          buffer: fileBuffer
+        });
+        if (!validation.valid) {
+          throw createHttpError(400, validation.error || 'File bukti pembayaran tidak valid', validation.code || 'EVIDENCE_INVALID');
+        }
+        const savedEvidence = await saveEvidenceFile(bookingPropertyId, {
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+          originalname: req.file.originalname || '',
+          buffer: fileBuffer
+        });
+        savedEvidenceKeys.push(savedEvidence.storageKey);
+        await client.query(
+          `INSERT INTO payment_evidences (
+             property_id, reservation_id, payment_transaction_id, evidence_type, storage_key, original_filename,
+             mime_type, file_size_bytes, note, is_active, uploaded_by_name_snapshot, created_at, updated_at
+           ) VALUES ($1, $2, $3, 'RECEIPT', $4, $5, $6, $7, 'Bukti bayar saat reservasi', TRUE, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            bookingPropertyId,
+            firstPositiveAllocation.reservationId,
+            groupPaymentResult.parentPayment.id,
+            savedEvidence.storageKey,
+            req.file.originalname || 'payment_evidence',
+            req.file.mimetype,
+            savedEvidence.fileSizeBytes,
+            bookingActor
+          ]
+        );
+      }
+    }
+
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -2628,7 +2713,8 @@ async function createCanonicalBooking(
         booking_status: 'ACTIVE',
         currency_code: currencyCode,
         legacy_booking_number: bookingLegacyNumber,
-        correlation_id: correlationId
+        correlation_id: correlationId,
+        ...(groupPaymentResult ? { payment_id: groupPaymentResult.parentPayment.id } : {})
       },
       reservations: insertedChildren.map(withReservationHotelDates),
       correlationId,

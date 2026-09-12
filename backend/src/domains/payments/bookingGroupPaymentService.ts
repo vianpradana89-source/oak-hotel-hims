@@ -188,7 +188,7 @@ export async function createBookingGroupPaymentWithAllocations(
       WHERE r.booking_id = $1
         AND r.id = ANY($2::int[])
         AND b.property_id = $3
-        AND r.status IN ('CONFIRMED', 'CHECKED_IN')
+        AND r.status IN ('BOOKED', 'CONFIRMED', 'CHECKED_IN')
       ORDER BY r.stay_sequence ASC, r.id ASC
       FOR UPDATE OF r
     `;
@@ -202,7 +202,7 @@ export async function createBookingGroupPaymentWithAllocations(
       JOIN bookings b ON b.id = r.booking_id
       WHERE r.booking_id = $1
         AND b.property_id = $2
-        AND r.status IN ('CONFIRMED', 'CHECKED_IN')
+        AND r.status IN ('BOOKED', 'CONFIRMED', 'CHECKED_IN')
       ORDER BY r.stay_sequence ASC, r.id ASC
       FOR UPDATE OF r
     `;
