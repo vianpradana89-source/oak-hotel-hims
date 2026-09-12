@@ -3,10 +3,9 @@
  *
  * Canonical helper for BOOKING_GROUP guarantee lifecycle state.
  *
- * Returns eligibility and diagnostic metadata derived from the current
- * reservation children of a booking.  Used by read paths (deposit / custody
- * list) to attach release-enabling metadata; mutation paths will consume
- * this same helper in later phases (1B-B / 1B-C).
+ * Separated into two layers:
+ *  - Pure derive function (no DB I/O) — reusable by both read and mutation paths.
+ *  - Database-backed query function (read path only, no locks).
  *
  * Rules (GROUP-GUARANTEE-RELEASE-1B):
  *   Active child states    : BOOKED | CHECKED_IN
@@ -55,67 +54,21 @@ export interface BookingGroupGuaranteeState {
   releaseBlockReason: string | null;
 }
 
-// ─── Internal helpers ────────────────────────────────────────────────────────
-
-function deriveLifecycleStatus(
-  activeCount: number,
-  checkedOutCount: number,
-  cancelledCount: number,
-  unknownCount: number,
-  totalCount: number
-): BookingLifecycleStatus {
-  if (activeCount > 0 || unknownCount > 0) return 'ACTIVE';
-  // All terminal (no active, no unknown).
-  if (checkedOutCount > 0) return 'COMPLETED';
-  if (cancelledCount === totalCount && totalCount > 0) return 'CANCELLED';
-  // Unknown count but no active — still ACTIVE to be safe.
-  return 'ACTIVE';
-}
-
-function domainError(statusCode: number, code: string, message: string): Error {
-  return Object.assign(new Error(message), { statusCode, code });
-}
-
-// ─── Public API ──────────────────────────────────────────────────────────────
+// ─── Pure derive function (no DB I/O) ────────────────────────────────────────
 
 /**
- * Compute the canonical release state for a BOOKING_GROUP guarantee.
+ * Derive release state from a list of reservation child rows.
+ * Used by both read-path (unlocked) and mutation-path (locked) callers.
  *
- * @param client  a pooled PgClient (read-only — no FOR UPDATE).
- *                For mutation-time re-checks the caller should pass a
- *                transaction client that already holds the relevant locks.
- * @param bookingId  the booking that owns the group guarantee.
- * @param propertyId  used to enforce cross-property isolation.
- *
- * Rules:
- *   - releaseEligible requires at least one covered child AND zero active children
- *   - Zero children → lifecycleTerminal=false, releaseEligible=false (empty set not terminal)
- *   - Property isolation enforced via booking ownership validation
+ * @param children rows with at least `id` and `status` fields.
+ * @param bookingId  the booking that owns the group.
+ * @param propertyId  the property (attached to state but not used in derivation).
  */
-export async function getBookingGroupGuaranteeReleaseState(
-  client: PoolClient,
+export function deriveGroupGuaranteeStateFromChildren(
+  children: Array<{ id: number; status: string }>,
   bookingId: number,
   propertyId: number
-): Promise<BookingGroupGuaranteeState> {
-  // Validate the booking exists and belongs to the requesting property.
-  const bRes = await client.query(
-    `SELECT id, booking_status FROM bookings WHERE id = $1 AND property_id = $2 LIMIT 1`,
-    [bookingId, propertyId]
-  );
-  if ((bRes.rowCount ?? 0) === 0) {
-    throw domainError(404, 'BOOKING_NOT_FOUND', 'Booking not found or does not belong to this property');
-  }
-
-  // Query ALL children canonically (no lock — read-path only).
-  const childrenRes = await client.query(
-    `SELECT id, status
-     FROM reservations
-     WHERE booking_id = $1
-     ORDER BY stay_sequence ASC, id ASC`,
-    [bookingId]
-  );
-  const children = childrenRes.rows as Array<{ id: number; status: string }>;
-
+): BookingGroupGuaranteeState {
   let activeCount = 0;
   let checkedOutCount = 0;
   let cancelledCount = 0;
@@ -142,7 +95,6 @@ export async function getBookingGroupGuaranteeReleaseState(
   const total = children.length;
 
   // Zero children is NOT terminal — an empty covered set cannot be released.
-  // This prevents a booking with no reservations from appearing eligible.
   if (total === 0) {
     return {
       bookingId,
@@ -162,11 +114,11 @@ export async function getBookingGroupGuaranteeReleaseState(
   }
 
   // CANONICAL SAFETY RULE: releaseEligible requires ALL children to be recognized terminal states.
-  // Unknown/unrecognized statuses fail CLOSED (not eligible).
   const recognizedTerminalCount = checkedOutCount + cancelledCount;
   const allChildrenRecognizedTerminal = recognizedTerminalCount === total;
   const terminal = activeCount === 0 && unknownCount === 0 && allChildrenRecognizedTerminal;
   const releaseEligible = terminal;
+
   const lifecycleStatus = deriveLifecycleStatus(activeCount, checkedOutCount, cancelledCount, unknownCount, total);
   const releaseBlockReason = terminal
     ? null
@@ -195,6 +147,65 @@ export async function getBookingGroupGuaranteeReleaseState(
   };
 }
 
+function deriveLifecycleStatus(
+  activeCount: number,
+  checkedOutCount: number,
+  cancelledCount: number,
+  unknownCount: number,
+  totalCount: number
+): BookingLifecycleStatus {
+  if (activeCount > 0 || unknownCount > 0) return 'ACTIVE';
+  // All terminal (no active, no unknown).
+  if (checkedOutCount > 0) return 'COMPLETED';
+  if (cancelledCount === totalCount && totalCount > 0) return 'CANCELLED';
+  return 'ACTIVE';
+}
+
+function domainError(statusCode: number, code: string, message: string): Error {
+  return Object.assign(new Error(message), { statusCode, code });
+}
+
+// ─── Database-backed read-path function ──────────────────────────────────────
+
+/**
+ * Compute the canonical release state for a BOOKING_GROUP guarantee by querying the DB.
+ *
+ * @param client  a pooled PgClient (read-only — no FOR UPDATE).
+ *                For mutation-time re-checks the caller should pass a
+ *                transaction client that already holds the relevant locks,
+ *                or use deriveGroupGuaranteeStateFromChildren directly.
+ * @param bookingId  the booking that owns the group guarantee.
+ * @param propertyId  used to enforce cross-property isolation.
+ */
+export async function getBookingGroupGuaranteeReleaseState(
+  client: PoolClient,
+  bookingId: number,
+  propertyId: number
+): Promise<BookingGroupGuaranteeState> {
+  // Validate the booking exists and belongs to the requesting property.
+  const bRes = await client.query(
+    `SELECT id, booking_status FROM bookings WHERE id = $1 AND property_id = $2 LIMIT 1`,
+    [bookingId, propertyId]
+  );
+  if ((bRes.rowCount ?? 0) === 0) {
+    throw domainError(404, 'BOOKING_NOT_FOUND', 'Booking not found or does not belong to this property');
+  }
+
+  // Query ALL children canonically (no lock — read-path only).
+  const childrenRes = await client.query(
+    `SELECT id, status
+     FROM reservations
+     WHERE booking_id = $1
+     ORDER BY stay_sequence ASC, id ASC`,
+    [bookingId]
+  );
+  const children = childrenRes.rows as Array<{ id: number; status: string }>;
+
+  return deriveGroupGuaranteeStateFromChildren(children, bookingId, propertyId);
+}
+
+// ─── Enrichment (read path) ──────────────────────────────────────────────────
+
 /**
  * Enrich a list of group-scope rows (deposits or identity_custody) with
  * release metadata.  Non-group rows are left untouched.
@@ -206,7 +217,7 @@ export async function getBookingGroupGuaranteeReleaseState(
  *   releaseEligible, releaseBlockReason, activeChildCount, groupLifecycleStatus
  *
  * Integrity rules:
- *   - BOOKING_GROUP rows MUST have a valid positive booking_id
+ *   - BOOKING_GROUP rows MUST have a valid positive integer booking_id
  *   - Missing/invalid booking_id throws BOOKING_GROUP_INTEGRITY_ERROR
  *   - All helper errors propagate (do NOT silently convert to release-blocked state)
  */

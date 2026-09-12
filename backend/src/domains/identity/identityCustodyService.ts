@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
-import { enrichGroupRowsWithReleaseMetadata } from '../guarantees/bookingGroupReleaseEligibility';
+import { enrichGroupRowsWithReleaseMetadata, deriveGroupGuaranteeStateFromChildren } from '../guarantees/bookingGroupReleaseEligibility';
 
 export type IdentityDocumentType = 'KTP' | 'SIM' | 'PASSPORT' | 'OTHER';
 export type IdentityScope = 'ROOM_RESERVATION' | 'BOOKING_GROUP';
@@ -37,6 +37,58 @@ async function assertReservationOwnership(client: PoolClient, propertyId: number
     throw domainError(404, 'RESERVATION_NOT_FOUND', 'Reservation not found for this property');
   }
   return result.rows[0];
+}
+
+// ---------------------------------------------------------------------------
+// Lock-strategy: NOWAIT to prevent checkout ↔ group-mutation deadlock
+// ---------------------------------------------------------------------------
+//
+// Checkout path (index.ts):
+//   target reservation FOR UPDATE → booking FOR UPDATE → all children FOR UPDATE
+//
+// If returnIdentity used the same order (booking → children), we get:
+//   TX-return: holds booking, waits for child
+//   TX-checkout: holds child, waits for booking  ← deadlock
+//
+// Safe strategy — returnIdentity uses a booking-first, NOWAIT approach:
+//   1. Lock owning booking FOR UPDATE (no reservation held yet)
+//   2. Try locking each child FOR UPDATE NOWAIT, in deterministic ORDER BY
+//   3. If any child is currently held by checkout: PG lock_not_available (55P03)
+//      → catch and raise BOOKING_GROUP_LIFECYCLE_BUSY (409) so the caller retries
+//   4. Derive eligibility from the locked child rows (no unlocked decision)
+//
+// This cannot deadlock because:
+//   - returnIdentity never waits while holding booking FOR a reservation
+//   - if any child is locked by checkout, we abort immediately, releasing booking
+//   - lock order is always: booking → (NOWAIT) children
+//
+// The same strategy is replicated in refundDeposit.
+// ---------------------------------------------------------------------------
+
+const PG_LOCK_NOT_AVAILABLE = '55P03';
+
+function isLockNotAvailable(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  return String((err as Record<string, unknown>).code) === PG_LOCK_NOT_AVAILABLE;
+}
+
+/**
+ * Lock all children of a booking in deterministic order using FOR UPDATE NOWAIT.
+ * Returns locked rows or throws BOOKING_GROUP_LIFECYCLE_BUSY on lock contention.
+ */
+async function lockGroupChildrenNowait(
+  client: PoolClient,
+  bookingId: number
+): Promise<Array<{ id: number; status: string }>> {
+  const res = await client.query(
+    `SELECT id, status
+     FROM reservations
+     WHERE booking_id = $1
+     ORDER BY stay_sequence ASC, id ASC
+     FOR UPDATE NOWAIT`,
+    [bookingId]
+  );
+  return res.rows as Array<{ id: number; status: string }>;
 }
 
 async function audit(
@@ -138,6 +190,39 @@ export async function returnIdentity(pool: Pool, input: {
     if ((result.rowCount ?? 0) === 0) throw domainError(404, 'IDENTITY_CUSTODY_NOT_FOUND', 'Identity custody record not found');
     const custody = result.rows[0];
     if (custody.status !== 'HELD') throw domainError(409, 'IDENTITY_ALREADY_RETURNED', 'Identity document has already been returned');
+
+    // BOOKING_GROUP guard: verify canonical release eligibility before allowing return.
+    if (String(custody.scope || '') === 'BOOKING_GROUP') {
+      const bookingId = Number(custody.booking_id);
+      if (!Number.isInteger(bookingId) || bookingId <= 0) {
+        throw domainError(400, 'BOOKING_GROUP_INTEGRITY_ERROR', 'BOOKING_GROUP custody requires a valid positive booking_id');
+      }
+      // Lock owning booking to validate cross-property isolation.
+      const bookingCheck = await client.query(
+        `SELECT id FROM bookings WHERE id = $1 AND property_id = $2 LIMIT 1 FOR UPDATE`,
+        [bookingId, input.propertyId]
+      );
+      if ((bookingCheck.rowCount ?? 0) === 0) {
+        throw domainError(404, 'BOOKING_NOT_FOUND', 'Booking not found or does not belong to this property');
+      }
+      // Lock children with NOWAIT — if any child is held by checkout, fail fast
+      // instead of holding the booking while waiting (prevents deadlock).
+      let children: Array<{ id: number; status: string }>;
+      try {
+        children = await lockGroupChildrenNowait(client, bookingId);
+      } catch (err: unknown) {
+        if (isLockNotAvailable(err)) {
+          throw domainError(409, 'BOOKING_GROUP_LIFECYCLE_BUSY', 'Group lifecycle is currently being modified by another operation (e.g. checkout). Please retry.');
+        }
+        throw err;
+      }
+      const state = deriveGroupGuaranteeStateFromChildren(children, bookingId, input.propertyId);
+      if (!state.releaseEligible) {
+        throw domainError(409, 'BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE',
+          state.releaseBlockReason || 'Group guarantee is not eligible for release');
+      }
+    }
+
     await assertReservationOwnership(client, input.propertyId, Number(custody.reservation_id));
     const updated = await client.query(
       `UPDATE identity_custody

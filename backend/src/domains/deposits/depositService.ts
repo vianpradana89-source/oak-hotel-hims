@@ -3,7 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { deleteEvidenceFile, saveEvidenceFile, validateEvidenceUpload } from '../payments/evidenceStorageService';
 import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
 import { generateDepositNumber } from './depositNumberService';
-import { enrichGroupRowsWithReleaseMetadata } from '../guarantees/bookingGroupReleaseEligibility';
+import { enrichGroupRowsWithReleaseMetadata, deriveGroupGuaranteeStateFromChildren } from '../guarantees/bookingGroupReleaseEligibility';
 import type {
   ApplyDepositInput,
   DepositBalanceSummary,
@@ -185,6 +185,60 @@ function assertReservationOpenForDeposit(reservation: any, operation: 'receive' 
   if (status === 'CHECKED_OUT' || status === 'CANCELLED') {
     throw domainError(409, 'RESERVATION_CLOSED_FOR_DEPOSIT', `Cannot ${operation} deposit on a closed reservation`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lock-strategy for BOOKING_GROUP mutations (shared with identityCustodyService)
+// ---------------------------------------------------------------------------
+// Uses booking-first ordering with NOWAIT on children to prevent deadlock
+// against checkout (which locks reservation → booking → siblings).
+// ---------------------------------------------------------------------------
+
+const PG_LOCK_NOT_AVAILABLE = '55P03';
+
+function isLockNotAvailable(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  return String((err as Record<string, unknown>).code) === PG_LOCK_NOT_AVAILABLE;
+}
+
+/**
+ * Lock all children of a booking in deterministic order using FOR UPDATE NOWAIT.
+ */
+async function lockGroupChildrenNowait(
+  client: PoolClient,
+  bookingId: number
+): Promise<Array<{ id: number; status: string }>> {
+  const res = await client.query(
+    `SELECT id, status
+     FROM reservations
+     WHERE booking_id = $1
+     ORDER BY stay_sequence ASC, id ASC
+     FOR UPDATE NOWAIT`,
+    [bookingId]
+  );
+  return res.rows as Array<{ id: number; status: string }>;
+}
+
+/**
+ * Verify no BOOKING_GROUP custody row remains HELD for the given booking/property.
+ * Locks relevant custody rows in deterministic order (id ASC) to serialize
+ * returnIdentity vs refundDeposit concurrently.
+ * Returns true when a HELD custody still exists (caller should reject).
+ */
+async function hasHeldGroupCustody(
+  client: PoolClient,
+  propertyId: number,
+  bookingId: number
+): Promise<boolean> {
+  const res = await client.query(
+    `SELECT id FROM identity_custody
+     WHERE property_id = $1 AND booking_id = $2 AND scope = 'BOOKING_GROUP'
+       AND status = 'HELD'
+     ORDER BY id ASC
+     FOR UPDATE NOWAIT`,
+    [propertyId, bookingId]
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 async function findIdempotentEvent(
@@ -532,10 +586,139 @@ export async function refundDeposit(pool: Pool, input: RefundDepositInput): Prom
   const client = await pool.connect();
 
   try {
+    // ── Explicit transaction boundary ──────────────────────────────────────────
+    // ALL row locks (preview is advisory-read-only) and ALL financial mutations
+    // for both scopes execute inside this single transaction.
     await client.query('BEGIN');
     await lockIdempotencyKey(client, propertyId, idempotencyKey);
-    const reservation = await lockReservation(client, propertyId, reservationId);
-    await lockDeposit(client, depositId, propertyId, reservationId);
+
+    // ── Determine scope early to pick safe lock path ───────────────────────────
+    //
+    // DEADLOCK FIX (Phase 1B-final):
+    //
+    // The old lock order for BOOKING_GROUP refunds was:
+    //   reservation FOR UPDATE  ← acquired BEFORE knowing scope
+    //   → deposit FOR UPDATE
+    //   → booking FOR UPDATE
+    //   → children FOR UPDATE NOWAIT
+    //
+    // This creates a deadlock with checkout when refund holds reservation A and
+    // checkout (for sibling B) holds booking and tries to lock reservation A:
+    //   refund: holds A, waits booking
+    //   checkout: holds booking, waits A  ← cycle!
+    //
+    // Fix: for BOOKING_GROUP, skip the early lockReservation. Instead we read
+    // the deposit WITHOUT locking (advisory only, to choose the path), then lock
+    // booking → children NOWAIT → custody → anchor reservation → target deposit.
+    // For ROOM_RESERVATION the existing lock order is kept unchanged.
+    // --------------------------------------------------------------------------
+    const scopePreview = await client.query(
+      `SELECT scope, booking_id, reservation_id FROM deposits
+       WHERE id = $1 AND property_id = $2`,
+      [depositId, propertyId]
+    );
+    if ((scopePreview.rowCount ?? 0) === 0) {
+      throw domainError(404, 'DEPOSIT_NOT_FOUND', 'Deposit not found for this property and reservation');
+    }
+    const scopeRow = scopePreview.rows[0];
+    const depositScope = String(scopeRow.scope || '');
+
+    let reservation: any = null;
+    let groupBookingId: number | null = null;
+    let lockedDepositRow: any = null;
+
+    if (depositScope === 'BOOKING_GROUP') {
+      // ── BOOKING_GROUP path: no reservation lock before booking lock ────────
+      const rawBookingId = scopeRow.booking_id ? Number(scopeRow.booking_id) : null;
+      if (!Number.isInteger(rawBookingId) || (rawBookingId ?? 0) <= 0) {
+        throw domainError(400, 'BOOKING_GROUP_INTEGRITY_ERROR', 'BOOKING_GROUP deposit requires a valid positive booking_id');
+      }
+      const lockedBookingId: number = rawBookingId as number;
+      groupBookingId = lockedBookingId;
+
+      // Lock owning booking first (no reservation held yet — prevents deadlock).
+      const bookingCheck = await client.query(
+        `SELECT id FROM bookings WHERE id = $1 AND property_id = $2 LIMIT 1 FOR UPDATE`,
+        [lockedBookingId, propertyId]
+      );
+      if ((bookingCheck.rowCount ?? 0) === 0) {
+        throw domainError(404, 'BOOKING_NOT_FOUND', 'Booking not found or does not belong to this property');
+      }
+
+      // Lock children with NOWAIT — fail fast if checkout holds any sibling.
+      let children: Array<{ id: number; status: string }>;
+      try {
+        children = await lockGroupChildrenNowait(client, lockedBookingId);
+      } catch (err: unknown) {
+        if (isLockNotAvailable(err)) {
+          throw domainError(409, 'BOOKING_GROUP_LIFECYCLE_BUSY', 'Group lifecycle is currently being modified by another operation (e.g. checkout). Please retry.');
+        }
+        throw err;
+      }
+
+      const state = deriveGroupGuaranteeStateFromChildren(children, lockedBookingId, propertyId);
+      if (!state.releaseEligible) {
+        throw domainError(409, 'BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE',
+          state.releaseBlockReason || 'Group guarantee is not eligible for release');
+      }
+
+      // CUSTODY-FIRST RULE: refund requires all GROUP identity custody to be returned.
+      // Only same BOOKING_GROUP custody blocks; ROOM_RESERVATION custody is irrelevant.
+      // Uses FOR UPDATE NOWAIT — if returnIdentity currently owns the custody row,
+      // PostgreSQL raises 55P03 immediately, preventing a deadlock cycle:
+      //   return: holds custody, waits booking   vs   refund: holds booking, waits custody
+      let heldCustody = false;
+      try {
+        heldCustody = await hasHeldGroupCustody(client, propertyId, lockedBookingId);
+      } catch (err: unknown) {
+        if (isLockNotAvailable(err)) {
+          throw domainError(409, 'BOOKING_GROUP_LIFECYCLE_BUSY',
+            'Group guarantee is currently being modified by another operation. Please retry.');
+        }
+        throw err;
+      }
+      if (heldCustody) {
+        throw domainError(409, 'BOOKING_GROUP_CUSTODY_STILL_HELD',
+          'Identitas grup masih ditahan dan harus dikembalikan sebelum refund deposit');
+      }
+
+      // Lock the anchor reservation NOW — booking and children are already secured,
+      // so this cannot create a deadlock cycle (checkout would need booking first).
+      reservation = await lockReservation(client, propertyId, reservationId);
+
+      // Validate the anchor reservation belongs to the locked booking.
+      const actualBookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
+      if (actualBookingId !== lockedBookingId) {
+        throw domainError(403, 'BOOKING_MISMATCH', 'Anchor reservation does not belong to the group booking');
+      }
+
+      // ── Lock the TARGET DEPOSIT — the locked row is authoritative ──────────
+      // The scopePreview above is advisory only. This FOR UPDATE lock serializes
+      // concurrent refunds/applies/reversals on the same deposit row and is
+      // acquired AFTER booking/children/custody/reservation, so it cannot form
+      // a cycle with the checkout path (checkout never locks deposits).
+      lockedDepositRow = await lockDeposit(client, depositId, propertyId, reservationId);
+      const lockedScope = String(lockedDepositRow.scope || '');
+      const lockedDepositBookingId = lockedDepositRow.booking_id ? Number(lockedDepositRow.booking_id) : null;
+      if (lockedScope !== 'BOOKING_GROUP' || lockedDepositBookingId !== lockedBookingId) {
+        // Preview/locked mismatch: the deposit changed between preview and lock
+        // (scope flip or booking re-link). Fail safely — never mutate on stale preview.
+        throw domainError(409, 'DEPOSIT_SCOPE_CONFLICT',
+          'Deposit scope/booking changed during refund; the locked deposit no longer matches the group booking. Please retry.');
+      }
+    } else {
+      // ── ROOM_RESERVATION path: preserve existing lock order ──────────────
+      reservation = await lockReservation(client, propertyId, reservationId);
+      lockedDepositRow = await lockDeposit(client, depositId, propertyId, reservationId);
+      // Revalidate the locked row against the preview: if scope flipped to
+      // BOOKING_GROUP after the non-locking preview, the old reservation-first
+      // lock order would be unsafe — fail deterministically instead.
+      const lockedScope = String(lockedDepositRow.scope || '');
+      if (lockedScope === 'BOOKING_GROUP') {
+        throw domainError(409, 'DEPOSIT_SCOPE_CONFLICT',
+          'Deposit became BOOKING_GROUP scoped between preview and lock. Please retry with the group refund flow.');
+      }
+    }
 
     const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'REFUND');
     if (replay) {
@@ -555,13 +738,15 @@ export async function refundDeposit(pool: Pool, input: RefundDepositInput): Prom
 
     const refundNumber = await generateDepositNumber(client, propertyId, 'RFD');
     const bookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
+    // Scope must match the deposit's scope, not hard-coded to ROOM_RESERVATION.
+    const paymentScope: string = groupBookingId !== null ? 'BOOKING_GROUP' : 'ROOM_RESERVATION';
     const paymentResult = await client.query(
       `INSERT INTO payment_transactions (
          reservation_id, property_id, transaction_type, amount, payment_method,
          reference_code, status, created_by, booking_id, scope
-       ) VALUES ($1, $2, 'DEPOSIT_REFUND', $3, $4, $5, 'SUCCESS', $6, $7, 'ROOM_RESERVATION')
+       ) VALUES ($1, $2, 'DEPOSIT_REFUND', $3, $4, $5, 'SUCCESS', $6, $7, $8)
        RETURNING *`,
-      [reservationId, propertyId, amount, method, refundNumber, input.actor.name, bookingId]
+      [reservationId, propertyId, amount, method, refundNumber, input.actor.name, bookingId, paymentScope]
     );
     const payment = paymentResult.rows[0];
 
