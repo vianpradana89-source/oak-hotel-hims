@@ -286,40 +286,41 @@ export default function DepositGuaranteeSection({
       {/* Action Buttons */}
       {/* Note: canShowChooser controls only "+ Tambah Jaminan" visibility.
           Direct mutation actions (Apply/Refund/Reverse) are gated separately below. */}
-      {!isClosed && capabilities.canReceiveDeposit && (
-        <div className="px-4 py-3 border-t border-stone-100 flex flex-wrap gap-2">
-          {canShowChooser && (
-            <button onClick={() => { setError(null); setShowChooser(true); }}
-              className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition">
-              + Tambah Jaminan
-            </button>
-          )}
-          {capabilities.canApplyDeposit && actionableRoomDeposit && balance.remaining > 0 && remainingBalance > 0 && (
-            <button onClick={() => { setError(null); setShowApply(true); }}
-              className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition">
-              Gunakan ke Tagihan
-            </button>
-          )}
-          {capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
-            <button onClick={() => { setError(null); setShowRefund(true); }}
-              className="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 transition">
-              Refund Deposit
-            </button>
-          )}
-          {capabilities.canReverseDeposit && actionableRoomDeposit && actionableRoomDeposit.status === 'RECEIVED' && actionableRoomDeposit.events?.length === 1 && actionableRoomDeposit.events[0]?.event_type === 'RECEIVED' && (
-            <button onClick={() => { setError(null); setShowReverse(true); }}
-              className="px-3 py-1.5 bg-red-50 text-red-600 text-xs font-semibold rounded-lg hover:bg-red-100 border border-red-200 transition">
-              Batalkan Penerimaan
-            </button>
-          )}
-          {isMultiRoomBooking && actionableGroupDeposit && actionableGroupDeposit.balance?.remaining > 0 && (
-            <button onClick={() => { setError(null); setShowGroupRefund(true); }}
-              className="px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 transition">
-              Kembalikan Deposit Grup
-            </button>
-          )}
-        </div>
-      )}
+      <div className="px-4 py-3 border-t border-stone-100 flex flex-wrap gap-2">
+        {!isClosed && capabilities.canReceiveDeposit && canShowChooser && (
+          <button onClick={() => { setError(null); setShowChooser(true); }}
+            className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition">
+            + Tambah Jaminan
+          </button>
+        )}
+        {!isClosed && capabilities.canApplyDeposit && actionableRoomDeposit && balance.remaining > 0 && remainingBalance > 0 && (
+          <button onClick={() => { setError(null); setShowApply(true); }}
+            className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition">
+            Gunakan ke Tagihan
+          </button>
+        )}
+        {!isClosed && capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
+          <button onClick={() => { setError(null); setShowRefund(true); }}
+            className="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 transition">
+            Refund Deposit
+          </button>
+        )}
+        {!isClosed && capabilities.canReverseDeposit && actionableRoomDeposit && actionableRoomDeposit.status === 'RECEIVED' && actionableRoomDeposit.events?.length === 1 && actionableRoomDeposit.events[0]?.event_type === 'RECEIVED' && (
+          <button onClick={() => { setError(null); setShowReverse(true); }}
+            className="px-3 py-1.5 bg-red-50 text-red-600 text-xs font-semibold rounded-lg hover:bg-red-100 border border-red-200 transition">
+            Batalkan Penerimaan
+          </button>
+        )}
+        {capabilities.canRefundDeposit &&
+         isMultiRoomBooking &&
+         actionableGroupDeposit &&
+         actionableGroupDeposit.balance?.remaining > 0 && (
+          <button onClick={() => { setError(null); setShowGroupRefund(true); }}
+            className="px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 transition">
+            Kembalikan Deposit Grup
+          </button>
+        )}
+      </div>
 
       {/* Identity Section */}
       <div className="px-4 py-3 border-t border-stone-100">
