@@ -260,6 +260,7 @@ export default function ReservationDetailDrawer({
         setActivePaymentEvidencePaymentId(paymentId);
         setActivePaymentEvidenceMime(result.data.data.evidence.mime_type);
         await loadFolio(data.id);
+        await loadFullReservation(data.id);
       } else {
         setEvidenceUploadError(result.errorMessage || 'Gagal menambahkan bukti');
       }
@@ -296,6 +297,7 @@ export default function ReservationDetailDrawer({
         setActivePaymentEvidencePaymentId(paymentId);
         setActivePaymentEvidenceMime(result.data.data.new_evidence.mime_type);
         await loadFolio(data.id);
+        await loadFullReservation(data.id);
       } else {
         setEvidenceUploadError(result.errorMessage || 'Gagal mengganti bukti');
       }
