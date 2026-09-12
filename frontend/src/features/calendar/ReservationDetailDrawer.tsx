@@ -430,7 +430,7 @@ export default function ReservationDetailDrawer({
         loadRoomFindings(reservation.room_id, reservation.property_id || activePropId);
       }
     }
-  }, [reservation?.id, reservation?.room_id, activePropId]);
+  }, [reservation?.id, reservation?.room_id, reservation?.status, activePropId]);
 
   if (!reservation) return null;
 
