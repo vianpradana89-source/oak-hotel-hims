@@ -5,7 +5,16 @@ import { getDepositGuaranteeCapabilities } from './depositCapabilities';
 import {
   depositApi, identityCustodyApi,
   type Deposit, type DepositBalance, type IdentityCustodyRecord,
+  type GuaranteeScope,
 } from './depositApi';
+import {
+  getGuaranteeScope,
+  selectActionableRoomDeposit,
+  selectActionableRoomCustody,
+  canShowCreateChooser,
+  canCreateGroupDeposit,
+  canCreateGroupCustody,
+} from './guaranteeScopePolicy';
 
 const PAYMENT_METHODS = [
   { value: 'CASH', label: 'Tunai' },
@@ -76,10 +85,12 @@ interface Props {
   remainingBalance: number;
   compact?: boolean;
   onRefresh?: () => void;
+  isMultiRoomBooking?: boolean;
 }
 
 export default function DepositGuaranteeSection({
   reservationId, propertyId, reservationStatus, remainingBalance, compact, onRefresh,
+  isMultiRoomBooking = false,
 }: Props) {
   const { user } = useAuth();
   const capabilities = useMemo(() => getDepositGuaranteeCapabilities(user?.role), [user?.role]);
@@ -101,10 +112,24 @@ export default function DepositGuaranteeSection({
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const balance: DepositBalance = deposits.find(d => d.status !== 'CANCELLED')?.balance
+  // ─── Scope-aware helpers (Blocker 1 & 2 fixes) ───
+  // Deterministic actionable deposit: first non-group, active (non-CANCELLED/CLOSED) record.
+  // This is order-independent of group deposits and excludes BOOKING_GROUP from actions.
+  // The SAME record is used for visibility, amount/balance calculation, and mutation API.
+  const actionableRoomDeposit = selectActionableRoomDeposit(deposits);
+  const actionableRoomCustody = selectActionableRoomCustody(custody);
+  const guaranteeScope: GuaranteeScope = getGuaranteeScope(isMultiRoomBooking);
+
+  // Creation gating: category-specific, not global
+  const canShowChooser = canShowCreateChooser(isMultiRoomBooking, deposits, custody);
+  const groupDepositBlocked = !canCreateGroupDeposit(isMultiRoomBooking, deposits);
+  const groupCustodyBlocked = !canCreateGroupCustody(isMultiRoomBooking, custody);
+
+  const balance: DepositBalance = actionableRoomDeposit?.balance
     || { effective_received: 0, applied: 0, refunded: 0, reversed_received: 0, remaining: 0, status: 'RECEIVED' };
   const guaranteeStatus = deriveStatus(deposits, custody);
-  const heldIdentity = custody.find(c => c.status === 'HELD');
+  // Use actionableRoomCustody for mutable operations; kept as heldIdentity for display
+  const heldIdentity = actionableRoomCustody || custody.find(c => c.status === 'HELD');
   const returnedCustody = custody.filter(c => c.status === 'RETURNED');
   const isClosed = ['CHECKED_OUT', 'CANCELLED'].includes(reservationStatus);
 
@@ -151,13 +176,13 @@ export default function DepositGuaranteeSection({
                   {fmtRp(balance.remaining)}
                 </div>
               </div>
-              {!isClosed && capabilities.canReceiveDeposit && (
-                <button
-                  type="button"
-                  onClick={() => { setError(null); setShowChooser(true); }}
-                  className="px-2 py-1 bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold rounded-lg shadow-xs transition cursor-pointer flex items-center gap-1 shrink-0 ml-1"
-                  title="Tambah Jaminan"
-                >
+          {!isClosed && capabilities.canReceiveDeposit && canShowChooser && (
+            <button
+              type="button"
+              onClick={() => { setError(null); setShowChooser(true); }}
+              className="px-2 py-1 bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold rounded-lg shadow-xs transition cursor-pointer flex items-center gap-1 shrink-0 ml-1"
+              title="Tambah Jaminan"
+            >
                   <span>+</span>
                   <span>Tambah Jaminan</span>
                 </button>
@@ -229,25 +254,29 @@ export default function DepositGuaranteeSection({
       )}
 
       {/* Action Buttons */}
+      {/* Note: canShowChooser controls only "+ Tambah Jaminan" visibility.
+          Direct mutation actions (Apply/Refund/Reverse) are gated separately below. */}
       {!isClosed && capabilities.canReceiveDeposit && (
         <div className="px-4 py-3 border-t border-stone-100 flex flex-wrap gap-2">
-          <button onClick={() => { setError(null); setShowChooser(true); }}
-            className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition">
-            + Tambah Jaminan
-          </button>
-          {capabilities.canApplyDeposit && balance.remaining > 0 && remainingBalance > 0 && (
+          {canShowChooser && (
+            <button onClick={() => { setError(null); setShowChooser(true); }}
+              className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition">
+              + Tambah Jaminan
+            </button>
+          )}
+          {capabilities.canApplyDeposit && actionableRoomDeposit && balance.remaining > 0 && remainingBalance > 0 && (
             <button onClick={() => { setError(null); setShowApply(true); }}
               className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition">
               Gunakan ke Tagihan
             </button>
           )}
-          {capabilities.canRefundDeposit && balance.remaining > 0 && (
+          {capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
             <button onClick={() => { setError(null); setShowRefund(true); }}
               className="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 transition">
               Refund Deposit
             </button>
           )}
-          {capabilities.canReverseDeposit && deposits.some(d => d.status === 'RECEIVED' && d.events?.length === 1 && d.events[0]?.event_type === 'RECEIVED') && (
+          {capabilities.canReverseDeposit && actionableRoomDeposit && actionableRoomDeposit.status === 'RECEIVED' && actionableRoomDeposit.events?.length === 1 && actionableRoomDeposit.events[0]?.event_type === 'RECEIVED' && (
             <button onClick={() => { setError(null); setShowReverse(true); }}
               className="px-3 py-1.5 bg-red-50 text-red-600 text-xs font-semibold rounded-lg hover:bg-red-100 border border-red-200 transition">
               Batalkan Penerimaan
@@ -269,7 +298,7 @@ export default function DepositGuaranteeSection({
                   <span className="text-xs text-amber-600 ml-1.5 font-mono">{heldIdentity.document_number_masked}</span>
                 )}
               </div>
-              {!isClosed && capabilities.canReturnIdentity && (
+              {!isClosed && capabilities.canReturnIdentity && actionableRoomCustody && (
                 <button onClick={() => { setError(null); setShowReturnId(true); }}
                   className="px-2.5 py-1 bg-white text-amber-700 text-xs font-semibold rounded-lg border border-amber-300 hover:bg-amber-100 transition">
                   Kembalikan
@@ -319,8 +348,15 @@ export default function DepositGuaranteeSection({
         title="Tambah Jaminan" size="sm">
         <p className="text-xs text-stone-500 mb-3">Pilih jenis jaminan yang diterima dari tamu:</p>
         <div className="space-y-2">
-          <button onClick={() => { setShowChooser(false); setError(null); setShowReceive(true); }}
-            className="w-full flex items-center gap-3 p-3 border border-stone-200 rounded-lg hover:bg-stone-50 hover:border-emerald-300 transition text-left group">
+          <button
+            onClick={() => { if (groupDepositBlocked) return; setShowChooser(false); setError(null); setShowReceive(true); }}
+            disabled={groupDepositBlocked}
+            className={`w-full flex items-center gap-3 p-3 border rounded-lg text-left group transition ${
+              groupDepositBlocked
+                ? 'border-stone-200 bg-stone-50 opacity-50 cursor-not-allowed'
+                : 'border-stone-200 hover:bg-stone-50 hover:border-emerald-300'
+            }`}
+          >
             <span className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 text-lg group-hover:bg-emerald-100 transition">
               Rp
             </span>
@@ -328,10 +364,20 @@ export default function DepositGuaranteeSection({
               <div className="text-sm font-semibold text-stone-800">Deposit Uang</div>
               <div className="text-[11px] text-stone-400">Terima uang jaminan sebagai deposit</div>
             </div>
+            {groupDepositBlocked && (
+              <span className="ml-auto text-[10px] text-stone-400 font-semibold">Sudah ada</span>
+            )}
           </button>
           {capabilities.canHoldIdentity && (
-            <button onClick={() => { setShowChooser(false); setError(null); setShowHoldId(true); }}
-              className="w-full flex items-center gap-3 p-3 border border-stone-200 rounded-lg hover:bg-stone-50 hover:border-amber-300 transition text-left group">
+            <button
+              onClick={() => { if (groupCustodyBlocked) return; setShowChooser(false); setError(null); setShowHoldId(true); }}
+              disabled={groupCustodyBlocked}
+              className={`w-full flex items-center gap-3 p-3 border border-stone-200 rounded-lg text-left group transition ${
+                groupCustodyBlocked
+                  ? 'bg-stone-50 opacity-50 cursor-not-allowed'
+                  : 'hover:bg-stone-50 hover:border-amber-300'
+              }`}
+            >
               <span className="w-10 h-10 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600 text-lg group-hover:bg-amber-100 transition">
                 ID
               </span>
@@ -347,17 +393,18 @@ export default function DepositGuaranteeSection({
       {/* Receive Deposit Modal */}
       <ReceiveDepositModal isOpen={showReceive} onClose={() => setShowReceive(false)}
         reservationId={reservationId} propertyId={propertyId}
+        guaranteeScope={guaranteeScope}
         onSuccess={refreshAll} />
 
       {/* Apply Deposit Modal */}
       <ApplyDepositModal isOpen={showApply} onClose={() => setShowApply(false)}
         reservationId={reservationId} propertyId={propertyId}
-        onSuccess={refreshAll} deposits={deposits} remainingBalance={remainingBalance} />
+        onSuccess={refreshAll} deposit={actionableRoomDeposit} remainingBalance={remainingBalance} />
 
       {/* Refund Deposit Modal */}
       <RefundDepositModal isOpen={showRefund} onClose={() => setShowRefund(false)}
         reservationId={reservationId} propertyId={propertyId}
-        onSuccess={refreshAll} deposits={deposits} />
+        onSuccess={refreshAll} deposit={actionableRoomDeposit} />
 
       {/* Reverse Deposit Confirmation */}
       {showReverse && (
@@ -379,13 +426,12 @@ export default function DepositGuaranteeSection({
               const reason = (window as any).__reverseReason;
               if (!reason?.trim()) { setError('Alasan wajib diisi'); return; }
               setBusy(true); setError(null);
-              try {
-                const unreversed = deposits.find(d => d.status === 'RECEIVED' && d.events?.length === 1 && d.events[0]?.event_type === 'RECEIVED');
-                if (!unreversed) throw new Error('Deposit tidak memenuhi syarat pembatalan');
-                await depositApi.reverse(unreversed.id, {
-                  property_id: propertyId, reservation_id: reservationId,
-                  idempotency_key: uid(), reason: reason.trim(),
-                });
+               try {
+                 if (!actionableRoomDeposit) throw new Error('Deposit tidak memenuhi syarat pembatalan');
+                 await depositApi.reverse(actionableRoomDeposit.id, {
+                   property_id: propertyId, reservation_id: reservationId,
+                   idempotency_key: uid(), reason: reason.trim(),
+                 });
                 setShowReverse(false); await refreshAll();
               } catch (e: any) { setError(e.message || 'Gagal membatalkan'); }
               finally { setBusy(false); }
@@ -401,14 +447,15 @@ export default function DepositGuaranteeSection({
       <Modal isOpen={showHoldId} onClose={() => { setShowHoldId(false); setError(null); }}
         title="Terima Identitas Ditahan" size="sm">
         <HoldIdentityForm propertyId={propertyId} reservationId={reservationId}
+          guaranteeScope={guaranteeScope}
           onSuccess={() => { setShowHoldId(false); refreshAll(); }} onError={setError} />
       </Modal>
 
       {/* Return Identity Confirmation */}
-      {showReturnId && heldIdentity && (
+      {showReturnId && actionableRoomCustody && (
         <Modal isOpen title="Kembalikan Identitas" onClose={() => { setShowReturnId(false); setError(null); }} size="sm">
           <p className="text-sm text-stone-600 mb-4">
-            Mengembalikan {heldIdentity.document_type} milik {heldIdentity.document_holder_name}.
+            Mengembalikan {actionableRoomCustody.document_type} milik {actionableRoomCustody.document_holder_name}.
           </p>
           <div className="flex justify-end gap-2">
             <button onClick={() => { setShowReturnId(false); setError(null); }}
@@ -416,7 +463,7 @@ export default function DepositGuaranteeSection({
             <button disabled={busy} onClick={async () => {
               setBusy(true); setError(null);
               try {
-                await identityCustodyApi.returnDoc(heldIdentity.id, propertyId);
+                await identityCustodyApi.returnDoc(actionableRoomCustody.id, propertyId);
                 setShowReturnId(false); await refreshAll();
               } catch (e: any) { setError(e.message || 'Gagal mengembalikan'); }
               finally { setBusy(false); }
@@ -433,8 +480,9 @@ export default function DepositGuaranteeSection({
 
 /* ────────── Receive Deposit Sub-Modal ────────── */
 
-function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess }: {
+function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guaranteeScope, onSuccess }: {
   isOpen: boolean; onClose: () => void; reservationId: number; propertyId: number;
+  guaranteeScope: GuaranteeScope;
   onSuccess: () => void;
 }) {
   const [amount, setAmount] = useState('');
@@ -453,6 +501,7 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, onSuc
         property_id: propertyId, reservation_id: reservationId,
         amount: raw, payment_method: method, idempotency_key: uid(),
         notes: notes.trim() || undefined, file: file || undefined,
+        scope: guaranteeScope,
       });
       onSuccess(); onClose();
     } catch (e: any) { setError(e.message || 'Gagal menerima deposit'); }
@@ -502,12 +551,12 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, onSuc
 
 /* ────────── Apply Deposit Sub-Modal ────────── */
 
-function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess, deposits, remainingBalance }: {
+function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess, deposit, remainingBalance }: {
   isOpen: boolean; onClose: () => void; reservationId: number; propertyId: number;
-  onSuccess: () => void; deposits: Deposit[];
+  onSuccess: () => void; deposit: Deposit | undefined;
   remainingBalance: number;
 }) {
-  const available = deposits.find(d => d.status !== 'CANCELLED')?.balance?.remaining || 0;
+  const available = deposit?.balance?.remaining || 0;
   const maxApply = Math.min(available, remainingBalance);
   const [amount, setAmount] = useState(String(maxApply || ''));
   const [busy, setBusy] = useState(false);
@@ -520,11 +569,10 @@ function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSucce
     if (!raw || raw <= 0) { setError('Nominal harus lebih dari 0'); return; }
     if (raw > available) { setError('Melebihi saldo deposit tersedia'); return; }
     if (raw > remainingBalance) { setError('Melebihi sisa tagihan'); return; }
-    const dep = deposits.find(d => d.status !== 'CANCELLED');
-    if (!dep) { setError('Tidak ada deposit aktif'); return; }
+    if (!deposit) { setError('Tidak ada deposit aktif'); return; }
     setBusy(true); setError(null);
     try {
-      await depositApi.apply(dep.id, {
+      await depositApi.apply(deposit.id, {
         property_id: propertyId, reservation_id: reservationId,
         amount: raw, idempotency_key: uid(),
       });
@@ -562,11 +610,11 @@ function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSucce
 
 /* ────────── Refund Deposit Sub-Modal ────────── */
 
-function RefundDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess, deposits }: {
+function RefundDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess, deposit }: {
   isOpen: boolean; onClose: () => void; reservationId: number; propertyId: number;
-  onSuccess: () => void; deposits: Deposit[];
+  onSuccess: () => void; deposit: Deposit | undefined;
 }) {
-  const available = deposits.find(d => d.status !== 'CANCELLED')?.balance?.remaining || 0;
+  const available = deposit?.balance?.remaining || 0;
   const [amount, setAmount] = useState(String(available || ''));
   const [method, setMethod] = useState('CASH');
   const [notes, setNotes] = useState('');
@@ -579,11 +627,10 @@ function RefundDepositModal({ isOpen, onClose, reservationId, propertyId, onSucc
     const raw = parseInt(String(amount).replace(/\D/g, ''), 10);
     if (!raw || raw <= 0) { setError('Nominal harus lebih dari 0'); return; }
     if (raw > available) { setError('Melebihi saldo deposit tersedia'); return; }
-    const dep = deposits.find(d => d.status !== 'CANCELLED');
-    if (!dep) { setError('Tidak ada deposit aktif'); return; }
+    if (!deposit) { setError('Tidak ada deposit aktif'); return; }
     setBusy(true); setError(null);
     try {
-      await depositApi.refund(dep.id, {
+      await depositApi.refund(deposit.id, {
         property_id: propertyId, reservation_id: reservationId,
         amount: raw, payment_method: method, idempotency_key: uid(),
         notes: notes.trim() || undefined,
@@ -634,8 +681,9 @@ function RefundDepositModal({ isOpen, onClose, reservationId, propertyId, onSucc
 
 /* ────────── Hold Identity Form ────────── */
 
-function HoldIdentityForm({ propertyId, reservationId, onSuccess, onError }: {
+function HoldIdentityForm({ propertyId, reservationId, guaranteeScope, onSuccess, onError }: {
   propertyId: number; reservationId: number;
+  guaranteeScope: GuaranteeScope;
   onSuccess: () => void; onError: (msg: string | null) => void;
 }) {
   const [docType, setDocType] = useState('KTP');
@@ -652,6 +700,7 @@ function HoldIdentityForm({ propertyId, reservationId, onSuccess, onError }: {
         property_id: propertyId, reservation_id: reservationId,
         document_type: docType as any, document_holder_name: holderName.trim(),
         storage_location: location.trim() || undefined, notes: notes.trim() || undefined,
+        scope: guaranteeScope,
       });
       onSuccess();
     } catch (e: any) { onError(e.message || 'Gagal menyimpan'); }

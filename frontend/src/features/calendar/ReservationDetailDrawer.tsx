@@ -1389,6 +1389,7 @@ export default function ReservationDetailDrawer({
               propertyId={activePropId}
               reservationStatus={data.status}
               remainingBalance={remainingBalance}
+              isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
             />
           )}

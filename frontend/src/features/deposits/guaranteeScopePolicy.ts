@@ -1,0 +1,124 @@
+/**
+ * guaranteeScopePolicy.ts — pure decision helpers for GROUP-GUARANTEE-SCOPE-1A
+ *
+ * All logic lives here so production code and tests share the same implementation.
+ */
+
+import type { Deposit, IdentityCustodyRecord, GuaranteeScope } from './depositApi';
+
+export type { GuaranteeScope };
+
+/** Scope assigned to a new guarantee based on booking context. */
+export function getGuaranteeScope(isMultiRoomBooking: boolean): GuaranteeScope {
+  return isMultiRoomBooking ? 'BOOKING_GROUP' : 'ROOM_RESERVATION';
+}
+
+/** Whether a deposit record is a BOOKING_GROUP (read-only in 1A). */
+export function isGroupDeposit(d: Deposit): boolean {
+  return d.scope === 'BOOKING_GROUP';
+}
+
+/** Whether a custody record is a BOOKING_GROUP (read-only in 1A). */
+export function isGroupCustody(c: IdentityCustodyRecord): boolean {
+  return c.scope === 'BOOKING_GROUP';
+}
+
+/**
+ * True when a deposit record is active (eligible for display / action consideration).
+ * Excludes CANCELLED and CLOSED states.
+ */
+export function isActiveDeposit(d: Deposit): boolean {
+  return d.status !== 'CANCELLED' && d.status !== 'CLOSED';
+}
+
+/** True when a custody record is actively held. */
+export function isActiveCustody(c: IdentityCustodyRecord): boolean {
+  return c.status === 'HELD';
+}
+
+/**
+ * True if any active BOOKING_GROUP deposit exists (blocks new group deposit creation).
+ * Historical CLOSED/CANCELLED/RETURNED records do NOT count.
+ */
+export function hasActiveGroupDeposit(deposits: Deposit[]): boolean {
+  return deposits.some(
+    d => isGroupDeposit(d) && (d.status === 'RECEIVED' || d.status === 'PARTIALLY_USED')
+  );
+}
+
+/**
+ * True if any HELD BOOKING_GROUP custody exists (blocks new group custody creation).
+ */
+export function hasActiveGroupCustody(custody: IdentityCustodyRecord[]): boolean {
+  return custody.some(c => isGroupCustody(c) && c.status === 'HELD');
+}
+
+/**
+ * Select the deterministic actionable ROOM_RESERVATION deposit for apply/refund/reverse.
+ *
+ * Rules:
+ * - Exclude BOOKING_GROUP deposits (read-only in 1A)
+ * - Exclude non-active deposits (CANCELLED and CLOSED are inactive)
+ * - Pick the first non-group, active deposit (deterministic, order-independent of group presence)
+ * - Returns undefined if only group deposits exist or no active deposits at all
+ */
+export function selectActionableRoomDeposit(deposits: Deposit[]): Deposit | undefined {
+  return deposits.find(d => !isGroupDeposit(d) && isActiveDeposit(d));
+}
+
+/**
+ * Select the deterministic actionable ROOM_RESERVATION custody for return.
+ *
+ * Rules:
+ * - Exclude BOOKING_GROUP custody records (read-only in 1A)
+ * - Only HELD status is actionable for return
+ * - Returns undefined if only group custody exists or no active custody
+ */
+export function selectActionableRoomCustody(custody: IdentityCustodyRecord[]): IdentityCustodyRecord | undefined {
+  return custody.find(c => !isGroupCustody(c) && isActiveCustody(c));
+}
+
+/**
+ * Whether the generic "+ Tambah Jaminan" chooser should be visible.
+ *
+ * - Single-room: always allowed (subject to canReceiveDeposit capability)
+ * - Multi-room: allowed only when at least one category remains creatable
+ *   (i.e., not both a active group deposit AND an active group custody exist)
+ */
+export function canShowCreateChooser(
+  isMultiRoomBooking: boolean,
+  deposits: Deposit[],
+  custody: IdentityCustodyRecord[]
+): boolean {
+  if (!isMultiRoomBooking) return true;
+  const groupDepositActive = hasActiveGroupDeposit(deposits);
+  const groupCustodyActive = hasActiveGroupCustody(custody);
+  // Hide only when BOTH categories are already occupied
+  return !(groupDepositActive && groupCustodyActive);
+}
+
+/**
+ * Whether a new group deposit can be created.
+ * Single-room: always true (scope will be ROOM_RESERVATION).
+ * Multi-room: true only when no active BOOKING_GROUP deposit exists.
+ */
+export function canCreateGroupDeposit(
+  isMultiRoomBooking: boolean,
+  deposits: Deposit[]
+): boolean {
+  if (!isMultiRoomBooking) return true;
+  return !hasActiveGroupDeposit(deposits);
+}
+
+/**
+ * Whether a new group custody can be created.
+ * Single-room: always true (scope will be ROOM_RESERVATION).
+ * Multi-room: true only when no HELD BOOKING_GROUP custody exists.
+ */
+export function canCreateGroupCustody(
+  isMultiRoomBooking: boolean,
+  custody: IdentityCustodyRecord[]
+): boolean {
+  if (!isMultiRoomBooking) return true;
+  return !hasActiveGroupCustody(custody);
+}

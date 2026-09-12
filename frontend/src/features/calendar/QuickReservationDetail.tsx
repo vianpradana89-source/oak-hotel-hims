@@ -504,6 +504,7 @@ export default function QuickReservationDetail({
               reservationStatus={data.status}
               remainingBalance={remainingBalance}
               compact
+              isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={handleRefresh}
             />
           )}

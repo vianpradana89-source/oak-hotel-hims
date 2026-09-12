@@ -1,6 +1,7 @@
 export type DepositStatus = 'RECEIVED' | 'PARTIALLY_USED' | 'CLOSED' | 'CANCELLED';
 export type DepositEventType = 'RECEIVED' | 'APPLY' | 'REFUND' | 'REVERSAL';
 export type IdentityDocumentType = 'KTP' | 'SIM' | 'PASSPORT' | 'OTHER';
+export type GuaranteeScope = 'ROOM_RESERVATION' | 'BOOKING_GROUP';
 
 export interface DepositBalance {
   effective_received: number;
@@ -26,6 +27,8 @@ export interface Deposit {
   id: number;
   property_id: number;
   reservation_id: number;
+  booking_id?: number | null;
+  scope?: GuaranteeScope | null;
   deposit_number: string;
   original_amount: number;
   payment_method: string;
@@ -42,6 +45,8 @@ export interface IdentityCustodyRecord {
   id: number;
   property_id: number;
   reservation_id: number;
+  booking_id?: number | null;
+  scope?: GuaranteeScope | null;
   document_type: IdentityDocumentType;
   document_holder_name: string;
   document_number_masked?: string | null;
@@ -82,6 +87,7 @@ export const depositApi = {
     property_id: number; reservation_id: number; amount: number;
     payment_method: string; idempotency_key: string; notes?: string;
     file?: File; evidence_note?: string;
+    scope?: GuaranteeScope;
   }) => {
     const fd = new FormData();
     fd.append('property_id', String(data.property_id));
@@ -92,6 +98,7 @@ export const depositApi = {
     if (data.notes) fd.append('notes', data.notes);
     if (data.file) fd.append('file', data.file);
     if (data.evidence_note) fd.append('evidence_note', data.evidence_note);
+    if (data.scope) fd.append('scope', data.scope);
     return apiFetch<any>('/api/deposits', {
       method: 'POST', body: fd, headers: authHeaders(),
     });
@@ -148,6 +155,7 @@ export const identityCustodyApi = {
     property_id: number; reservation_id: number;
     document_type: IdentityDocumentType; document_holder_name: string;
     storage_location?: string; notes?: string;
+    scope?: GuaranteeScope;
   }) =>
     apiFetch<IdentityCustodyRecord>('/api/identity-custody', {
       method: 'POST',
