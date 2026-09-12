@@ -165,7 +165,15 @@ async function main() {
           return { rows: [], rowCount: 0 };
         }
         return { rows: [] };
-      }
+      },
+      connect: async () => ({
+        query: async (sql, params) => {
+          const text = String(sql);
+          if (text.includes('FROM bookings') || text.includes('FROM reservations')) return { rows: [] };
+          return { rows: [] };
+        },
+        release: () => {}
+      })
     };
     const result = await getIdentityCustodyByReservation(pool, 1, 20);
     assert.deepStrictEqual(result, []);

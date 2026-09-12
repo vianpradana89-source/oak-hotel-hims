@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { enrichGroupRowsWithReleaseMetadata } from '../guarantees/bookingGroupReleaseEligibility';
 
 export type IdentityDocumentType = 'KTP' | 'SIM' | 'PASSPORT' | 'OTHER';
 export type IdentityScope = 'ROOM_RESERVATION' | 'BOOKING_GROUP';
@@ -198,6 +199,13 @@ export async function getIdentityCustodyByReservation(
     if (!seen.has(id)) { seen.add(id); rows.push(row); }
   }
   rows.sort((a, b) => Number(a.id) - Number(b.id));
+  // Enrich group-scope rows with release metadata (read-only, no lock required).
+  const client = await pool.connect();
+  try {
+    await enrichGroupRowsWithReleaseMetadata(rows, client, propertyId);
+  } finally {
+    client.release();
+  }
   return rows;
 }
 

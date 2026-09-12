@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { deleteEvidenceFile, saveEvidenceFile, validateEvidenceUpload } from '../payments/evidenceStorageService';
 import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
 import { generateDepositNumber } from './depositNumberService';
+import { enrichGroupRowsWithReleaseMetadata } from '../guarantees/bookingGroupReleaseEligibility';
 import type {
   ApplyDepositInput,
   DepositBalanceSummary,
@@ -814,5 +815,14 @@ export async function getDepositsByReservation(pool: Pool, propertyId: number, r
     if (!seen.has(id)) { seen.add(id); ids.push(id); }
   }
   ids.sort((a, b) => a - b);
-  return Promise.all(ids.map(id => hydrateDeposit(pool, id)));
+  // Enrich group-scope rows with release metadata (read-only, no lock required).
+  const hydrated = await Promise.all(ids.map(id => hydrateDeposit(pool, id)));
+  // Use a new client for the eligibility query so we don't hold locks on the main pool.
+  const client = await pool.connect();
+  try {
+    await enrichGroupRowsWithReleaseMetadata(hydrated, client, propertyId);
+  } finally {
+    client.release();
+  }
+  return hydrated;
 }
