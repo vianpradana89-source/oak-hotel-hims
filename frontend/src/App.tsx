@@ -4255,6 +4255,7 @@ function AppContent() {
 
       {selectedRes && (
         <ReservationDetailDrawer
+          key={selectedRes.id}
           reservation={selectedRes}
           propertyId={propertyId ?? selectedRes?.property_id ?? null}
           onClose={() => {
