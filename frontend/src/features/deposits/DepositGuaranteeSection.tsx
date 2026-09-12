@@ -11,6 +11,8 @@ import {
   getGuaranteeScope,
   selectActionableRoomDeposit,
   selectActionableRoomCustody,
+  selectActionableGroupDeposit,
+  selectActionableGroupCustody,
   summarizeDepositBalances,
   canShowCreateChooser,
   canCreateGroupDeposit,
@@ -119,6 +121,8 @@ export default function DepositGuaranteeSection({
   // The SAME record is used for visibility, amount/balance calculation, and mutation API.
   const actionableRoomDeposit = selectActionableRoomDeposit(deposits);
   const actionableRoomCustody = selectActionableRoomCustody(custody);
+  const actionableGroupDeposit = selectActionableGroupDeposit(deposits);
+  const actionableGroupCustody = selectActionableGroupCustody(custody);
   const guaranteeScope: GuaranteeScope = getGuaranteeScope(isMultiRoomBooking);
 
   // Creation gating: category-specific, not global
@@ -130,18 +134,19 @@ export default function DepositGuaranteeSection({
   // non-CANCELLED rows. Mutation target remains exclusively actionableRoomDeposit.
   const balance: DepositBalance = summarizeDepositBalances(deposits);
   const guaranteeStatus = deriveStatus(deposits, custody);
-  // Use actionableRoomCustody for mutable operations; kept as heldIdentity for display
+  // For compact mode fallback display of held identity
   const heldIdentity = actionableRoomCustody || custody.find(c => c.status === 'HELD');
-  const returnedCustody = custody.filter(c => c.status === 'RETURNED');
   const isClosed = ['CHECKED_OUT', 'CANCELLED'].includes(reservationStatus);
 
   const [showChooser, setShowChooser] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showApply, setShowApply] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
+  const [showGroupRefund, setShowGroupRefund] = useState(false);
   const [showReverse, setShowReverse] = useState(false);
   const [showHoldId, setShowHoldId] = useState(false);
   const [showReturnId, setShowReturnId] = useState(false);
+  const [showGroupReturnId, setShowGroupReturnId] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -234,23 +239,46 @@ export default function DepositGuaranteeSection({
       {deposits.length > 0 && (
         <div className="px-4 py-3 border-t border-stone-100">
           <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-2">Riwayat Deposit</div>
-          <div className="space-y-1.5 max-h-40 overflow-y-auto">
-            {deposits.filter(d => d.status !== 'CANCELLED').flatMap(d =>
-              (d.events || []).map(ev => (
-                <div key={ev.id} className="flex items-center justify-between text-xs py-1 px-2 bg-stone-50 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    {statusBadge(ev.event_type)}
-                    <span className="text-stone-600">{eventTypeLabel(ev.event_type)}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className={`font-semibold ${ev.event_type === 'APPLY' ? 'text-emerald-700' : ev.event_type === 'REFUND' ? 'text-amber-700' : 'text-stone-900'}`}>
-                      {ev.event_type === 'APPLY' ? '-' : '+'}{fmtRp(ev.amount)}
-                    </span>
-                    <span className="text-stone-400 ml-1.5">{fmtDt(ev.created_at)}</span>
-                  </div>
+          <div className="space-y-1.5 max-h-64 overflow-y-auto">
+            {deposits.filter(d => d.status !== 'CANCELLED').map(d => (
+              <div key={d.id} className="border border-stone-200 rounded-lg overflow-hidden">
+                <div className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                  d.scope === 'BOOKING_GROUP' ? 'bg-violet-50 text-violet-700 border-b border-violet-200' : 'bg-emerald-50 text-emerald-700 border-b border-emerald-200'
+                }`}>
+                  {d.scope === 'BOOKING_GROUP' ? 'Deposit Grup' : 'Deposit Kamar'}
                 </div>
-              ))
-            )}
+                <div className="px-3 py-2 bg-white space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-stone-500">Status:</span>
+                    <span className="font-semibold">{statusBadge(d.status)}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
+                    <div><span className="text-stone-400">Diterima:</span> <span className="font-semibold text-stone-700">{fmtRp(d.balance?.effective_received)}</span></div>
+                    <div><span className="text-stone-400">Digunakan:</span> <span className="font-semibold text-emerald-700">{fmtRp(d.balance?.applied)}</span></div>
+                    <div><span className="text-stone-400">Dikembalikan:</span> <span className="font-semibold text-amber-700">{fmtRp(d.balance?.refunded)}</span></div>
+                    <div><span className="text-stone-400">Sisa:</span> <span className={`font-bold ${d.balance?.remaining > 0 ? 'text-emerald-600' : 'text-stone-500'}`}>{fmtRp(d.balance?.remaining)}</span></div>
+                  </div>
+                  {(d.events?.length ?? 0) > 0 && (
+                    <div className="border-t border-stone-100 mt-1.5 pt-1.5 space-y-0.5">
+                      {d.events.map(ev => (
+                        <div key={ev.id} className="flex items-center justify-between text-[10px] py-0.5">
+                          <div className="flex items-center gap-1.5">
+                            {statusBadge(ev.event_type)}
+                            <span className="text-stone-500">{eventTypeLabel(ev.event_type)}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`font-semibold ${ev.event_type === 'APPLY' ? 'text-emerald-700' : ev.event_type === 'REFUND' ? 'text-amber-700' : 'text-stone-900'}`}>
+                              {ev.event_type === 'APPLY' ? '-' : '+'}{fmtRp(ev.amount)}
+                            </span>
+                            <span className="text-stone-400">{fmtDt(ev.created_at)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -284,56 +312,141 @@ export default function DepositGuaranteeSection({
               Batalkan Penerimaan
             </button>
           )}
+          {isMultiRoomBooking && actionableGroupDeposit && actionableGroupDeposit.balance?.remaining > 0 && (
+            <button onClick={() => { setError(null); setShowGroupRefund(true); }}
+              className="px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 transition">
+              Kembalikan Deposit Grup
+            </button>
+          )}
         </div>
       )}
 
       {/* Identity Section */}
       <div className="px-4 py-3 border-t border-stone-100">
         <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-2">Jaminan Identitas</div>
-        {heldIdentity ? (
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-xs font-bold text-amber-800">Ditahan</span>
-                <span className="text-xs text-amber-700 ml-2">{heldIdentity.document_type}</span>
-                {heldIdentity.document_number_masked && (
-                  <span className="text-xs text-amber-600 ml-1.5 font-mono">{heldIdentity.document_number_masked}</span>
-                )}
-              </div>
-              {!isClosed && capabilities.canReturnIdentity && actionableRoomCustody && (
-                <button onClick={() => { setError(null); setShowReturnId(true); }}
-                  className="px-2.5 py-1 bg-white text-amber-700 text-xs font-semibold rounded-lg border border-amber-300 hover:bg-amber-100 transition">
-                  Kembalikan
-                </button>
-              )}
+
+        {/* Room Custody */}
+        {actionableRoomCustody && (
+          <div className="mb-2 border border-amber-200 rounded-lg overflow-hidden">
+            <div className="px-3 py-1.5 bg-amber-50 text-[10px] font-bold uppercase tracking-wider text-amber-700 border-b border-amber-200">
+              KTP Kamar
             </div>
-            <div className="text-[10px] text-amber-600 mt-1.5">
-              Diterima: {fmtDt(heldIdentity.created_at)} • Oleh: {heldIdentity.received_by}
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-stone-400">Tidak ada identitas ditahan</span>
-          </div>
-        )}
-        {/* Identity Custody History */}
-        {returnedCustody.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {returnedCustody.map(c => (
-              <div key={c.id} className="flex items-center justify-between text-[11px] py-1 px-2 bg-stone-50 rounded-lg">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-stone-400">Dikembalikan</span>
-                  <span className="font-semibold text-stone-600">{c.document_type}</span>
-                  {c.document_number_masked && (
-                    <span className="text-stone-400 font-mono">{c.document_number_masked}</span>
+            <div className="p-3 bg-white">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-amber-800">Ditahan</span>
+                  <span className="text-xs text-amber-700 ml-2">{actionableRoomCustody.document_type}</span>
+                  {actionableRoomCustody.document_number_masked && (
+                    <span className="text-xs text-amber-600 ml-1.5 font-mono">{actionableRoomCustody.document_number_masked}</span>
+                  )}
+                  {actionableRoomCustody.document_holder_name && (
+                    <span className="text-xs text-stone-500 ml-2">milik {actionableRoomCustody.document_holder_name}</span>
                   )}
                 </div>
-                <div className="text-right text-stone-400">
-                  {c.returned_at && fmtDt(c.returned_at)}
-                  {c.returned_by && <span className="ml-1">• {c.returned_by}</span>}
-                </div>
+                {!isClosed && capabilities.canReturnIdentity && (
+                  <button onClick={() => { setError(null); setShowReturnId(true); }}
+                    className="px-2.5 py-1 bg-white text-amber-700 text-xs font-semibold rounded-lg border border-amber-300 hover:bg-amber-100 transition">
+                    Kembalikan
+                  </button>
+                )}
               </div>
-            ))}
+              <div className="text-[10px] text-amber-600 mt-1.5">
+                Diterima: {fmtDt(actionableRoomCustody.created_at)} • Oleh: {actionableRoomCustody.received_by}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Group Custody */}
+        {actionableGroupCustody && (
+          <div className="mb-2 border border-violet-200 rounded-lg overflow-hidden">
+            <div className="px-3 py-1.5 bg-violet-50 text-[10px] font-bold uppercase tracking-wider text-violet-700 border-b border-violet-200">
+              KTP Grup
+            </div>
+            <div className="p-3 bg-white">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-violet-800">Ditahan</span>
+                  <span className="text-xs text-violet-700 ml-2">{actionableGroupCustody.document_type}</span>
+                  {actionableGroupCustody.document_number_masked && (
+                    <span className="text-xs text-violet-600 ml-1.5 font-mono">{actionableGroupCustody.document_number_masked}</span>
+                  )}
+                  {actionableGroupCustody.document_holder_name && (
+                    <span className="text-xs text-stone-500 ml-2">milik {actionableGroupCustody.document_holder_name}</span>
+                  )}
+                </div>
+                {capabilities.canReturnIdentity && (
+                  <button onClick={() => { setError(null); setShowGroupReturnId(true); }}
+                    className="px-2.5 py-1 bg-white text-violet-700 text-xs font-semibold rounded-lg border border-violet-300 hover:bg-violet-100 transition">
+                    Kembalikan KTP Grup
+                  </button>
+                )}
+              </div>
+              <div className="text-[10px] text-violet-600 mt-1.5">
+                Diterima: {fmtDt(actionableGroupCustody.created_at)} • Oleh: {actionableGroupCustody.received_by}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Room Returned Custody */}
+        {custody.filter(c => (!c.scope || c.scope === 'ROOM_RESERVATION') && c.status === 'RETURNED').length > 0 && (
+          <div className="mt-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-1">Riwayat KTP Kamar</div>
+            <div className="space-y-1">
+              {custody.filter(c => (!c.scope || c.scope === 'ROOM_RESERVATION') && c.status === 'RETURNED').map(c => (
+                <div key={c.id} className="flex items-center justify-between text-[11px] py-1 px-2 bg-stone-50 rounded-lg border border-stone-200">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-stone-400">Dikembalikan</span>
+                    <span className="font-semibold text-stone-600">{c.document_type}</span>
+                    {c.document_number_masked && (
+                      <span className="text-stone-400 font-mono">{c.document_number_masked}</span>
+                    )}
+                    {c.document_holder_name && (
+                      <span className="text-stone-500">— {c.document_holder_name}</span>
+                    )}
+                  </div>
+                  <div className="text-right text-stone-400">
+                    {c.returned_at && fmtDt(c.returned_at)}
+                    {c.returned_by && <span className="ml-1">• {c.returned_by}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Group Returned Custody */}
+        {custody.filter(c => c.scope === 'BOOKING_GROUP' && c.status === 'RETURNED').length > 0 && (
+          <div className="mt-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-1">Riwayat KTP Grup</div>
+            <div className="space-y-1">
+              {custody.filter(c => c.scope === 'BOOKING_GROUP' && c.status === 'RETURNED').map(c => (
+                <div key={c.id} className="flex items-center justify-between text-[11px] py-1 px-2 bg-violet-50 rounded-lg border border-violet-200">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-violet-400">Dikembalikan</span>
+                    <span className="font-semibold text-violet-700">{c.document_type}</span>
+                    {c.document_number_masked && (
+                      <span className="text-violet-500 font-mono">{c.document_number_masked}</span>
+                    )}
+                    {c.document_holder_name && (
+                      <span className="text-violet-500">— {c.document_holder_name}</span>
+                    )}
+                  </div>
+                  <div className="text-right text-violet-400">
+                    {c.returned_at && fmtDt(c.returned_at)}
+                    {c.returned_by && <span className="ml-1">• {c.returned_by}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Fallback: no custody at all */}
+        {!actionableRoomCustody && !actionableGroupCustody && custody.length === 0 && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-stone-400">Tidak ada identitas ditahan</span>
           </div>
         )}
       </div>
@@ -408,6 +521,11 @@ export default function DepositGuaranteeSection({
         reservationId={reservationId} propertyId={propertyId}
         onSuccess={refreshAll} deposit={actionableRoomDeposit} />
 
+      {/* Group Refund Deposit Modal */}
+      <RefundDepositModal isOpen={showGroupRefund} onClose={() => setShowGroupRefund(false)}
+        reservationId={reservationId} propertyId={propertyId}
+        onSuccess={refreshAll} deposit={actionableGroupDeposit} />
+
       {/* Reverse Deposit Confirmation */}
       {showReverse && (
         <Modal isOpen title="Batalkan Penerimaan Deposit" onClose={() => { setShowReverse(false); setError(null); }}>
@@ -455,7 +573,7 @@ export default function DepositGuaranteeSection({
 
       {/* Return Identity Confirmation */}
       {showReturnId && actionableRoomCustody && (
-        <Modal isOpen title="Kembalikan Identitas" onClose={() => { setShowReturnId(false); setError(null); }} size="sm">
+        <Modal isOpen title="Kembalikan KTP Kamar" onClose={() => { setShowReturnId(false); setError(null); }} size="sm">
           <p className="text-sm text-stone-600 mb-4">
             Mengembalikan {actionableRoomCustody.document_type} milik {actionableRoomCustody.document_holder_name}.
           </p>
@@ -472,6 +590,30 @@ export default function DepositGuaranteeSection({
             }}
               className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition">
               {busy ? 'Memproses...' : 'Kembalikan'}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Return Group Identity Confirmation */}
+      {showGroupReturnId && actionableGroupCustody && (
+        <Modal isOpen title="Kembalikan KTP Grup" onClose={() => { setShowGroupReturnId(false); setError(null); }} size="sm">
+          <p className="text-sm text-stone-600 mb-4">
+            Mengembalikan {actionableGroupCustody.document_type} milik {actionableGroupCustody.document_holder_name} (KTP Grup).
+          </p>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => { setShowGroupReturnId(false); setError(null); }}
+              className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+            <button disabled={busy} onClick={async () => {
+              setBusy(true); setError(null);
+              try {
+                await identityCustodyApi.returnDoc(actionableGroupCustody.id, propertyId);
+                setShowGroupReturnId(false); await refreshAll();
+              } catch (e: any) { setError(e.message || 'Gagal mengembalikan KTP grup'); }
+              finally { setBusy(false); }
+            }}
+              className="px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 transition">
+              {busy ? 'Memproses...' : 'Kembalikan KTP Grup'}
             </button>
           </div>
         </Modal>

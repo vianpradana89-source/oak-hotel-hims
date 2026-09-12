@@ -79,6 +79,32 @@ export function selectActionableRoomCustody(custody: IdentityCustodyRecord[]): I
 }
 
 /**
+ * Select the deterministic actionable BOOKING_GROUP deposit for apply/refund/reverse.
+ *
+ * Rules:
+ * - Must be scope === 'BOOKING_GROUP'
+ * - Must be active (RECEIVED or PARTIALLY_USED)
+ * - Returns undefined if no active group deposit exists
+ * - Distinct from ROOM_RESERVATION selector — never returns a room deposit
+ */
+export function selectActionableGroupDeposit(deposits: Deposit[]): Deposit | undefined {
+  return deposits.find(d => isGroupDeposit(d) && isActiveDeposit(d));
+}
+
+/**
+ * Select the deterministic actionable BOOKING_GROUP custody for return.
+ *
+ * Rules:
+ * - Must be scope === 'BOOKING_GROUP'
+ * - Only HELD status is actionable for return
+ * - Returns undefined if no held group custody exists
+ * - Distinct from ROOM_RESERVATION selector — never returns a room custody
+ */
+export function selectActionableGroupCustody(custody: IdentityCustodyRecord[]): IdentityCustodyRecord | undefined {
+  return custody.find(c => isGroupCustody(c) && isActiveCustody(c));
+}
+
+/**
  * Whether the generic "+ Tambah Jaminan" chooser should be visible.
  *
  * - Single-room: always allowed (subject to canReceiveDeposit capability)
