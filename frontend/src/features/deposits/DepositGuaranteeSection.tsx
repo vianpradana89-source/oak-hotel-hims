@@ -17,6 +17,7 @@ import {
   canShowCreateChooser,
   canCreateGroupDeposit,
   canCreateGroupCustody,
+  hasUnresolvedGroupGuarantee,
 } from './guaranteeScopePolicy';
 
 const PAYMENT_METHODS = [
@@ -89,11 +90,15 @@ interface Props {
   compact?: boolean;
   onRefresh?: () => void;
   isMultiRoomBooking?: boolean;
+  /** Reports whether the associated BOOKING_GROUP guarantee is unresolved so the parent drawer
+   * can surface a close-warning / status banner without re-fetching. */
+  onUnresolvedGroupGuaranteeChange?: (unresolved: boolean) => void;
 }
 
 export default function DepositGuaranteeSection({
   reservationId, propertyId, reservationStatus, remainingBalance, compact, onRefresh,
   isMultiRoomBooking = false,
+  onUnresolvedGroupGuaranteeChange,
 }: Props) {
   const { user } = useAuth();
   const capabilities = useMemo(() => getDepositGuaranteeCapabilities(user?.role), [user?.role]);
@@ -151,6 +156,16 @@ export default function DepositGuaranteeSection({
   const [error, setError] = useState<string | null>(null);
 
   const refreshAll = async () => { await loadData(); onRefresh?.(); };
+
+  // Report unresolved GROUP guarantee state upward so the drawer can warn on close.
+  // MUST send false explicitly when not a multi-room booking to avoid stale
+  // unresolved state from a previous multi-room child after navigation.
+  useEffect(() => {
+    if (!onUnresolvedGroupGuaranteeChange) return;
+    onUnresolvedGroupGuaranteeChange(
+      isMultiRoomBooking ? hasUnresolvedGroupGuarantee(deposits, custody) : false
+    );
+  }, [deposits, custody, isMultiRoomBooking, onUnresolvedGroupGuaranteeChange]);
 
   if (loading) {
     return (

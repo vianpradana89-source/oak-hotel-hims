@@ -11,6 +11,7 @@ import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { useAuth } from '../auth/AuthContext';
+import { Modal } from '../../design-system/Modal';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 import {
   canEditReservationSpecialRequests,
@@ -90,6 +91,9 @@ export default function ReservationDetailDrawer({
     const [replacingEvidencePaymentId, setReplacingEvidencePaymentId] = useState<number | null>(null);
     const [evidenceUploadError, setEvidenceUploadError] = useState<string | null>(null);
     const [evidenceUploadSuccess, setEvidenceUploadSuccess] = useState<string | null>(null);
+    // GROUP-GUARANTEE-CLOSE-WARNING: track unresolved BOOKING_GROUP guarantee from the section
+    const [hasUnresolvedGroupGuarantee, setHasUnresolvedGroupGuarantee] = useState(false);
+    const [showGroupGuaranteeWarning, setShowGroupGuaranteeWarning] = useState(false);
     const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -444,6 +448,19 @@ export default function ReservationDetailDrawer({
   const isCheckedOut = data.status === 'CHECKED_OUT';
   const isCancelled = data.status === 'CANCELLED';
 
+  // GROUP-GUARANTEE-CLOSE-WARNING: group is terminal ONLY when BOTH:
+  //   - the currently opened reservation is terminal (CHECKED_OUT or CANCELLED)
+  //   - every sibling reservation is also terminal
+  // Strict AND — never infer terminality from the opened child alone, and never
+  // assume sibling_reservations includes the current reservation.
+  // Unknown statuses fail-closed (non-terminal).
+  const groupSiblings: any[] = data.sibling_reservations ?? [];
+  const isCurrentTerminal = isCheckedOut || isCancelled;
+  const areGroupSiblingsTerminal = groupSiblings.every(
+    (s: any) => s.status === 'CHECKED_OUT' || s.status === 'CANCELLED'
+  );
+  const isGroupTerminal = isCurrentTerminal && areGroupSiblingsTerminal;
+
   const precheckinEligibility = data.precheckin_eligibility;
   const isCheckinReady = precheckinEligibility?.eligible === true;
   const missingRequirements = precheckinEligibility?.missing ?? [];
@@ -468,6 +485,18 @@ export default function ReservationDetailDrawer({
   const amountPaid = Number(data.amount_paid || 0);
   const appliedDeposit = Number(data.applied_deposit || 0);
   const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
+
+  // GROUP-GUARANTEE-CLOSE-WARNING: warn on close only when group is terminal AND guarantee is unresolved.
+  // A soft warning — never blocks checkout, never mutates data.
+  const handleGroupGuaranteeWarningClose = () => setShowGroupGuaranteeWarning(false);
+  const handleGroupGuaranteeConfirmClose = () => { handleGroupGuaranteeWarningClose(); onClose(); };
+  const requestClose = useCallback(() => {
+    if (isGroupTerminal && hasUnresolvedGroupGuarantee) {
+      setShowGroupGuaranteeWarning(true);
+    } else {
+      onClose();
+    }
+  }, [isGroupTerminal, hasUnresolvedGroupGuarantee, onClose]);
 
   const handleCopyBid = async () => {
     try {
@@ -581,7 +610,7 @@ export default function ReservationDetailDrawer({
               {remainingBalance === 0 ? 'Lunas' : amountPaid > 0 ? 'Sebagian' : 'Belum Bayar'}
             </span>
             <button
-              onClick={onClose}
+              onClick={requestClose}
               className="text-emerald-300 hover:text-white p-1.5 rounded-lg hover:bg-emerald-800/40 cursor-pointer ml-1"
               aria-label="Tutup"
             >
@@ -1389,6 +1418,15 @@ export default function ReservationDetailDrawer({
             </form>
           )}
 
+          {/* GROUP-GUARANTEE-CLOSE-WARNING: persistent banner when group terminal + unresolved */}
+          {isGroupTerminal && hasUnresolvedGroupGuarantee && (
+            <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex items-center gap-2">
+              <span className="text-base">⚠️</span>
+              <span className="font-semibold">Jaminan Grup Belum Selesai</span>
+              <span>— KTP Grup masih ditahan atau Deposit Grup belum dikembalikan.</span>
+            </div>
+          )}
+
           {/* Section: Deposit & Jaminan */}
           {data.id && activePropId && (
             <DepositGuaranteeSection
@@ -1398,6 +1436,7 @@ export default function ReservationDetailDrawer({
               remainingBalance={remainingBalance}
               isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
+              onUnresolvedGroupGuaranteeChange={setHasUnresolvedGroupGuarantee}
             />
           )}
 
@@ -1607,7 +1646,7 @@ export default function ReservationDetailDrawer({
             {/* General Close Button */}
             <button
               type="button"
-              onClick={onClose}
+              onClick={requestClose}
               className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
             >
               Tutup
@@ -2019,6 +2058,38 @@ export default function ReservationDetailDrawer({
         )}
       </div>
       {activePropId && <RoomMoveModal isOpen={isRoomMoveModalOpen} reservation={data} propertyId={activePropId} onClose={() => setIsRoomMoveModalOpen(false)} onSuccess={() => { loadFullReservation(); onRefresh(); }} />}
+
+      {/* GROUP-GUARANTEE-CLOSE-WARNING: confirmation dialog before closing terminal group with unresolved guarantee */}
+      <Modal
+        isOpen={showGroupGuaranteeWarning}
+        onClose={handleGroupGuaranteeWarningClose}
+        title="Jaminan Grup Belum Selesai"
+        size="sm"
+        closeOnOverlayClick={false}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={handleGroupGuaranteeWarningClose}
+              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+            >
+              Kembali
+            </button>
+            <button
+              type="button"
+              onClick={handleGroupGuaranteeConfirmClose}
+              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              Tetap Tutup
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-stone-700">
+          Masih ada KTP Grup yang ditahan atau Deposit Grup yang belum dikembalikan.
+          Tetap tutup detail reservasi?
+        </p>
+      </Modal>
     </div>
   );
 }

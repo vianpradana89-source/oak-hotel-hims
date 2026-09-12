@@ -150,6 +150,28 @@ export function canCreateGroupCustody(
 }
 
 /**
+ * Whether a group (BOOKING_GROUP) guarantee is still unresolved — i.e. the
+ * operator has not yet completed settlement of KTP Grup / Deposit Grup.
+ *
+ * Returned true when ANY of:
+ *   - HELD BOOKING_GROUP identity custody exists, OR
+ *   - active (non-CLOSED/CANCELLED) BOOKING_GROUP deposit has remaining > 0
+ *
+ * False when both groups are settled (ALL group custody RETURNED + no
+ * outstanding group deposit balance).
+ */
+export function hasUnresolvedGroupGuarantee(
+  deposits: Deposit[],
+  custody: IdentityCustodyRecord[]
+): boolean {
+  const heldGroupCustody = custody.some(c => isGroupCustody(c) && c.status === 'HELD');
+  const openGroupDeposit = deposits.some(
+    d => isGroupDeposit(d) && isActiveDeposit(d) && (d.balance?.remaining ?? 0) > 0
+  );
+  return heldGroupCustody || openGroupDeposit;
+}
+
+/**
  * Aggregate deposit balances across ALL non-CANCELLED deposits for DISPLAY summary.
  *
  * Includes both BOOKING_GROUP and ROOM_RESERVATION rows — a group deposit is

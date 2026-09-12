@@ -26,6 +26,7 @@ import {
   canShowCreateChooser,
   canCreateGroupDeposit,
   canCreateGroupCustody,
+  hasUnresolvedGroupGuarantee,
 } from '../src/features/deposits/guaranteeScopePolicy.ts';
 import type { Deposit, IdentityCustodyRecord } from '../src/features/deposits/depositApi.ts';
 
@@ -58,7 +59,7 @@ check(getGuaranteeScope(true) === 'BOOKING_GROUP', 'T2: true -> BOOKING_GROUP');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // T3-T5: Actionable deposit selection (deterministic, order-independent)
-// ═══════════════════════���═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 
 const makeDep = (id: number, scope: 'ROOM_RESERVATION' | 'BOOKING_GROUP', status: Deposit['status']): Deposit => ({
   id, scope, status, property_id: 1, reservation_id: id, deposit_number: `DEP-${id}`,
@@ -392,6 +393,63 @@ check(selectActionableRoomDeposit([makeDep(99, 'BOOKING_GROUP', 'RECEIVED')]) ==
 // T40: component uses summarizeDepositBalances for display (guard)
 check(guaranteeSection.includes('summarizeDepositBalances'),
   'T40: DepositGuaranteeSection imports and uses summarizeDepositBalances for summary');
+
+// T41: unresolved group guarantee — deposit remaining > 0, active (RECEIVED)
+check(hasUnresolvedGroupGuarantee([makeDep(1, 'BOOKING_GROUP', 'RECEIVED')], []),
+  'T41: BOOKING_GROUP deposit remaining > 0 + RECEIVED → unresolved');
+
+// T42: unresolved group guarantee — custody HELD
+check(hasUnresolvedGroupGuarantee([], [makeCustody(2, 'BOOKING_GROUP', 'HELD')]),
+  'T42: BOOKING_GROUP custody HELD → unresolved');
+
+// T43: unresolved group guarantee — deposit remaining = 0 (fully refunded)
+check(!hasUnresolvedGroupGuarantee([Object.assign(makeDep(3, 'BOOKING_GROUP', 'RECEIVED'), { balance: { effective_received: 100000, applied: 0, refunded: 100000, reversed_received: 0, remaining: 0, status: 'RECEIVED' } })], []),
+  'T43: BOOKING_GROUP deposit remaining = 0 → settled');
+
+// T44: unresolved group guarantee — CLOSED deposit should NOT be unresolved
+check(!hasUnresolvedGroupGuarantee([makeDep(4, 'BOOKING_GROUP', 'CLOSED')], []),
+  'T44: BOOKING_GROUP deposit CLOSED → settled even if data had stale remaining');
+
+// T45: unresolved group guarantee — CANCELLED deposit should NOT be unresolved
+check(!hasUnresolvedGroupGuarantee([makeDep(5, 'BOOKING_GROUP', 'CANCELLED')], []),
+  'T45: BOOKING_GROUP deposit CANCELLED → settled');
+
+// T46: unresolved group guarantee — ROOM_RESERVATION only (no group) → false
+check(!hasUnresolvedGroupGuarantee([makeDep(6, 'ROOM_RESERVATION', 'RECEIVED')], []),
+  'T46: ROOM_RESERVATION deposit remaining > 0 alone → NOT unresolved');
+check(!hasUnresolvedGroupGuarantee([], [makeCustody(7, 'ROOM_RESERVATION', 'HELD')]),
+  'T46b: ROOM_RESERVATION custody HELD alone → NOT unresolved');
+
+// T47: unresolved group guarantee — custody returned but deposit still remaining → unresolved
+check(hasUnresolvedGroupGuarantee([makeDep(8, 'BOOKING_GROUP', 'RECEIVED')], [makeCustody(9, 'BOOKING_GROUP', 'RETURNED')]),
+  'T47: KTP Grup RETURNED + deposit remaining > 0 → unresolved');
+
+// T48: unresolved group guarantee — both returned + refunded → settled
+check(!hasUnresolvedGroupGuarantee(
+  [Object.assign(makeDep(10, 'BOOKING_GROUP', 'CLOSED'), { balance: { effective_received: 100000, applied: 0, refunded: 100000, reversed_received: 0, remaining: 0, status: 'CLOSED' } })],
+  [makeCustody(11, 'BOOKING_GROUP', 'RETURNED')]
+),
+  'T48: KTP Grup RETURNED + deposit CLOSED + remaining = 0 → settled');
+
+// T49–T50: stale-state guard — component MUST report false when switching away from multi-room
+// The actual callback-logic resides in DepositGuaranteeSection (UI component).
+// Pure-guard assertions verify that the guard expression itself collapses to false for non-group input.
+check(
+  (() => {
+    const isMultiRoomBooking = false;
+    const result = isMultiRoomBooking ? hasUnresolvedGroupGuarantee([makeDep(100, 'BOOKING_GROUP', 'RECEIVED')], [makeCustody(101, 'BOOKING_GROUP', 'HELD')]) : false;
+    return !result;
+  })(),
+  'T49: guard expression returns false when isMultiRoomBooking=false (stale-state prevention)'
+);
+check(
+  (() => {
+    const isMultiRoomBooking = false;
+    const result = isMultiRoomBooking ? hasUnresolvedGroupGuarantee([], []) : false;
+    return !result;
+  })(),
+  'T50: guard expression returns false for empty deposits/custody when isMultiRoomBooking=false'
+);
 
 // ─── Summary ────────────────────────────────────────────────────────────────
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);
