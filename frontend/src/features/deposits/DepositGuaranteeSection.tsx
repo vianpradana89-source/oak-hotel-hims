@@ -11,6 +11,7 @@ import {
   getGuaranteeScope,
   selectActionableRoomDeposit,
   selectActionableRoomCustody,
+  summarizeDepositBalances,
   canShowCreateChooser,
   canCreateGroupDeposit,
   canCreateGroupCustody,
@@ -125,8 +126,9 @@ export default function DepositGuaranteeSection({
   const groupDepositBlocked = !canCreateGroupDeposit(isMultiRoomBooking, deposits);
   const groupCustodyBlocked = !canCreateGroupCustody(isMultiRoomBooking, custody);
 
-  const balance: DepositBalance = actionableRoomDeposit?.balance
-    || { effective_received: 0, applied: 0, refunded: 0, reversed_received: 0, remaining: 0, status: 'RECEIVED' };
+  // DISPLAY-ONLY aggregate summary: includes both BOOKING_GROUP + ROOM_RESERVATION
+  // non-CANCELLED rows. Mutation target remains exclusively actionableRoomDeposit.
+  const balance: DepositBalance = summarizeDepositBalances(deposits);
   const guaranteeStatus = deriveStatus(deposits, custody);
   // Use actionableRoomCustody for mutable operations; kept as heldIdentity for display
   const heldIdentity = actionableRoomCustody || custody.find(c => c.status === 'HELD');

@@ -4,7 +4,7 @@
  * All logic lives here so production code and tests share the same implementation.
  */
 
-import type { Deposit, IdentityCustodyRecord, GuaranteeScope } from './depositApi';
+import type { Deposit, IdentityCustodyRecord, GuaranteeScope, DepositBalance } from './depositApi';
 
 export type { GuaranteeScope };
 
@@ -121,4 +121,43 @@ export function canCreateGroupCustody(
 ): boolean {
   if (!isMultiRoomBooking) return true;
   return !hasActiveGroupCustody(custody);
+}
+
+/**
+ * Aggregate deposit balances across ALL non-CANCELLED deposits for DISPLAY summary.
+ *
+ * Includes both BOOKING_GROUP and ROOM_RESERVATION rows — a group deposit is
+ * read-only for lifecycle mutations but still represents real money that must
+ * appear in the financial summary cards.
+ *
+ * Canonical semantics: each deposit.balance already reflects that row's own
+ * lifecycle state (applied/refunded/reversed per row), so we sum those values
+ * directly. CANCELLED rows are excluded (a reversed/cancelled receipt has zero
+ * effective contribution — matching the pre-existing single-row display rule
+ * `deposits.find(d => d.status !== 'CANCELLED')`).
+ *
+ * IMPORTANT: This is DISPLAY-ONLY aggregation. It must NEVER be used to select
+ * the Apply/Refund/Reverse mutation target — that remains exclusively
+ * selectActionableRoomDeposit(...).
+ */
+export function summarizeDepositBalances(deposits: Deposit[]): DepositBalance {
+  const summary: DepositBalance = {
+    effective_received: 0,
+    applied: 0,
+    refunded: 0,
+    reversed_received: 0,
+    remaining: 0,
+    status: 'RECEIVED',
+  };
+  for (const d of deposits) {
+    if (d.status === 'CANCELLED') continue;
+    const b = d.balance;
+    if (!b) continue;
+    summary.effective_received += b.effective_received ?? 0;
+    summary.applied += b.applied ?? 0;
+    summary.refunded += b.refunded ?? 0;
+    summary.reversed_received += b.reversed_received ?? 0;
+    summary.remaining += b.remaining ?? 0;
+  }
+  return summary;
 }

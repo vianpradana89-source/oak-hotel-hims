@@ -22,6 +22,7 @@ import {
   hasActiveGroupCustody,
   selectActionableRoomDeposit,
   selectActionableRoomCustody,
+  summarizeDepositBalances,
   canShowCreateChooser,
   canCreateGroupDeposit,
   canCreateGroupCustody,
@@ -259,6 +260,7 @@ check(policySrc.includes('export function canShowCreateChooser'), 'Guard: policy
 check(policySrc.includes('export function canCreateGroupDeposit'), 'Guard: policy exports canCreateGroupDeposit');
 check(policySrc.includes('export function canCreateGroupCustody'), 'Guard: policy exports canCreateGroupCustody');
 check(policySrc.includes('export function selectActionableRoomCustody'), 'Guard: policy exports selectActionableRoomCustody');
+check(policySrc.includes('export function summarizeDepositBalances'), 'Guard: policy exports summarizeDepositBalances');
 
 // Production component imports from policy
 check(guaranteeSection.includes("from './guaranteeScopePolicy'"),
@@ -327,6 +329,69 @@ check(guaranteeSection.includes('deposit={actionableRoomDeposit}'),
 // T33: Reverse submit uses actionableRoomDeposit.id directly
 check(guaranteeSection.includes('actionableRoomDeposit.id'),
   'T33: reverse submit uses actionableRoomDeposit.id directly');
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T34-T40: Summary aggregation — display includes group, mutation stays exclusive
+// ═══════════════════════════════════════════════════════════════════════════
+
+// T34: one ROOM_RESERVATION deposit → summary matches its balance
+const singleRoomDep = [makeDep(90, 'ROOM_RESERVATION', 'RECEIVED')];
+const s34 = summarizeDepositBalances(singleRoomDep);
+check(s34.effective_received === 100000, 'T34a: single ROOM deposit effective_received aggregates correctly');
+check(s34.remaining === 100000, 'T34b: single ROOM deposit remaining matches');
+check(selectActionableRoomDeposit(singleRoomDep)?.id === 90,
+  'T34c: same record is actionable target');
+
+// T35: one BOOKING_GROUP deposit → summary shows non-zero, but NO actionable target
+const singleGroupDep = [makeDep(91, 'BOOKING_GROUP', 'RECEIVED')];
+const s35 = summarizeDepositBalances(singleGroupDep);
+check(s35.effective_received === 100000, 'T35a: group-only deposit appears in summary');
+check(s35.remaining === 100000, 'T35b: group-only deposit remaining displayed');
+check(selectActionableRoomDeposit(singleGroupDep) === undefined,
+  'T35c: group-only deposit is NOT actionable for mutations');
+
+// T36: ROOM + GROUP coexist → summary aggregates both
+const mixedDep = [
+  makeDep(92, 'ROOM_RESERVATION', 'RECEIVED'),
+  makeDep(93, 'BOOKING_GROUP', 'RECEIVED'),
+];
+const s36 = summarizeDepositBalances(mixedDep);
+check(s36.effective_received === 200000, 'T36a: mixed deposits aggregate effective_received');
+check(s36.remaining === 200000, 'T36b: mixed deposits aggregate remaining');
+check(selectActionableRoomDeposit(mixedDep) !== undefined,
+  'T36c: room row remains actionable alongside group');
+check(selectActionableRoomDeposit(mixedDep)?.scope === 'ROOM_RESERVATION',
+  'T36d: actionable target is ROOM_RESERVATION, not GROUP');
+
+// T37: applied/refunded aggregate correctly
+const mixedUsedDep = [
+  makeDep(94, 'ROOM_RESERVATION', 'PARTIALLY_USED'),
+  makeDep(95, 'BOOKING_GROUP', 'RECEIVED'),
+];
+// Override the fixture to simulate an applied portion
+Object.assign(mixedUsedDep[0].balance, { applied: 30000, remaining: 70000 });
+const s37 = summarizeDepositBalances(mixedUsedDep);
+check(s37.applied === 30000, 'T37a: applied aggregates from partially_used row');
+check(s37.remaining === 170000, 'T37b: remaining reflects applied deduction (100k+70k)');
+
+// T38: CANCELLED excluded, CLOSED included (balance semantics)
+const mixedHistorical = [
+  makeDep(96, 'ROOM_RESERVATION', 'CANCELLED'),
+  makeDep(97, 'BOOKING_GROUP', 'CLOSED'),
+  makeDep(98, 'ROOM_RESERVATION', 'RECEIVED'),
+];
+const s38 = summarizeDepositBalances(mixedHistorical);
+check(s38.effective_received === 200000, 'T38: CANCELLED excluded, CLOSED+ROOM included');
+
+// T39: group-only summary non-zero + no actionable target (proves display ≠ mutation)
+const s39 = summarizeDepositBalances([makeDep(99, 'BOOKING_GROUP', 'RECEIVED')]);
+check(s39.remaining > 0, 'T39a: group-only summary shows non-zero remaining');
+check(selectActionableRoomDeposit([makeDep(99, 'BOOKING_GROUP', 'RECEIVED')]) === undefined,
+  'T39b: group-only has no actionable target for mutations');
+
+// T40: component uses summarizeDepositBalances for display (guard)
+check(guaranteeSection.includes('summarizeDepositBalances'),
+  'T40: DepositGuaranteeSection imports and uses summarizeDepositBalances for summary');
 
 // ─── Summary ────────────────────────────────────────────────────────────────
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);
