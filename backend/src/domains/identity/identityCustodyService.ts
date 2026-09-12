@@ -166,16 +166,39 @@ export async function getIdentityCustodyByReservation(
   propertyId: number,
   reservationId: number
 ): Promise<any[]> {
-  const result = await pool.query(
-    `SELECT ic.*
-     FROM identity_custody ic
-     JOIN reservations r ON r.id = ic.reservation_id
-     JOIN bookings b ON b.id = r.booking_id
-     WHERE ic.property_id = $1 AND ic.reservation_id = $2 AND b.property_id = $1
-     ORDER BY ic.id`,
+  // Canonical ownership: reservation -> booking -> property (INNER JOIN; schema enforces booking_id NOT NULL)
+  const ownership = await pool.query(
+    `SELECT b.id AS booking_id FROM reservations r
+     INNER JOIN bookings b ON b.id = r.booking_id
+     WHERE r.id = $1 AND b.property_id = $2`,
+    [reservationId, propertyId]
+  );
+  if ((ownership.rowCount ?? 0) === 0) throw domainError(404, 'RESERVATION_NOT_FOUND', 'Reservation not found for this property');
+  const targetBookingId = ownership.rows[0].booking_id;
+  // ROOM_RESERVATION: direct custody for this reservation
+  const resCustody = await pool.query(
+    `SELECT ic.* FROM identity_custody ic
+     WHERE ic.property_id = $1 AND ic.reservation_id = $2 AND ic.scope = 'ROOM_RESERVATION'`,
     [propertyId, reservationId]
   );
-  return result.rows;
+  // BOOKING_GROUP: shared custody for this booking
+  let groupCustody: any = { rows: [] };
+  if (targetBookingId != null && Number(targetBookingId) > 0) {
+    groupCustody = await pool.query(
+      `SELECT ic.* FROM identity_custody ic
+       WHERE ic.property_id = $1 AND ic.booking_id = $2 AND ic.scope = 'BOOKING_GROUP'`,
+      [propertyId, targetBookingId]
+    );
+  }
+  // Merge, deduplicate, and globally sort by numeric id ascending
+  const seen = new Set<number>();
+  const rows: any[] = [];
+  for (const row of [...resCustody.rows, ...groupCustody.rows]) {
+    const id = Number(row.id);
+    if (!seen.has(id)) { seen.add(id); rows.push(row); }
+  }
+  rows.sort((a, b) => Number(a.id) - Number(b.id));
+  return rows;
 }
 
 export async function getHeldIdentityCustodyForCheckout(

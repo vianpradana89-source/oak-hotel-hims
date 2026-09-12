@@ -13,15 +13,25 @@
  * T28 – no sibling deposit/custody duplication
  * T29 – group deposit does NOT alter sibling reservations.applied_deposit
  * T30 – real single-room booking with ROOM_RESERVATION deposit passes guarantee
- * T31 – invalid deposit scope rejects with INVALID_SCOPE
- * T32 – invalid custody scope rejects with INVALID_SCOPE
+ * T33 – ROOM_RESERVATION deposit visible only to its own reservation
+ * T34 – BOOKING_GROUP deposit visible from BOTH child reservations
+ * T35 – sibling ROOM_RESERVATION deposit NOT leaked to other bookings
+ * T36 – unrelated same-property booking cannot see group deposit (read)
+ * T37 – cross-property cannot see group deposit (read)
+ * T38 – ROOM_RESERVATION custody visible only to its own reservation
+ * T39 – BOOKING_GROUP custody visible from BOTH child reservations
+ * T40 – sibling does NOT receive sibling ROOM_RESERVATION custody
+ * T41 – unrelated same-property booking cannot see group custody (read)
+ * T42 – cross-property cannot see group custody (read)
+ * T43 – no duplicate canonical rows in returned arrays
  */
 
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Pool } = require('pg');
-const { receiveDeposit, deriveDepositBalance } = require('../dist/domains/deposits/depositService');
-const { holdIdentity, returnIdentity } = require('../dist/domains/identity/identityCustodyService');
+const assert = require('node:assert');
+const { receiveDeposit, deriveDepositBalance, getDepositsByReservation } = require('../dist/domains/deposits/depositService');
+const { holdIdentity, returnIdentity, getIdentityCustodyByReservation } = require('../dist/domains/identity/identityCustodyService');
 const { evaluatePreCheckinEligibility } = require('../dist/domains/checkin/checkinGateService');
 const { generateToken } = require('../dist/domains/auth/authService');
 
@@ -516,6 +526,179 @@ async function main() {
         if (e.code !== 'INVALID_SCOPE') throw new Error(`Expected INVALID_SCOPE for scope=${JSON.stringify(badScope)}, got ${e.code}: ${e.message}`);
       }
     }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T33 — Direct ROOM_RESERVATION deposit on grpRes1 visible only to grpRes1
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T33 — direct ROOM_RESERVATION deposit on sibling is NOT shared', async () => {
+    // Create a ROOM_RESERVATION deposit on grpRes1 (sibling of grpRes2)
+    const directDep = await receiveDeposit(pool, {
+      propertyId: pid1, reservationId: grpRes1,
+      amount: 100000, paymentMethod: 'CASH',
+      idempotencyKey: `t33-${runId}`, actor: actor(),
+      scope: 'ROOM_RESERVATION'
+    });
+    artifacts.depIds.push(directDep.id);
+    // grpRes1: should see BOTH its direct deposit AND the group deposit
+    const depsRes1 = await getDepositsByReservation(pool, pid1, grpRes1);
+    const directInRes1 = depsRes1.filter(d => d.id === directDep.id);
+    if (directInRes1.length !== 1) throw new Error('grpRes1 must see its own direct deposit');
+    const grpInRes1 = depsRes1.filter(d => d.scope === 'BOOKING_GROUP');
+    if (grpInRes1.length !== 1) throw new Error('grpRes1 must still see the BOOKING_GROUP deposit');
+    // grpRes2: should see ONLY the group deposit, NOT the direct one
+    const depsRes2 = await getDepositsByReservation(pool, pid1, grpRes2);
+    const directInRes2 = depsRes2.filter(d => d.id === directDep.id);
+    if (directInRes2.length !== 0) throw new Error(`grpRes2 must NOT see sibling's direct deposit, got ${directInRes2.length}`);
+    const grpInRes2 = depsRes2.filter(d => d.scope === 'BOOKING_GROUP');
+    if (grpInRes2.length !== 1) throw new Error('grpRes2 must still see the BOOKING_GROUP deposit');
+    // Global sort: ids must be ascending
+    const ids1 = depsRes1.map(d => Number(d.id));
+    const ids2 = depsRes2.map(d => Number(d.id));
+    for (let i = 1; i < ids1.length; i++) if (ids1[i] < ids1[i - 1]) throw new Error('Deposit ids not globally sorted in grpRes1');
+    for (let i = 1; i < ids2.length; i++) if (ids2[i] < ids2[i - 1]) throw new Error('Deposit ids not globally sorted in grpRes2');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T34 — BOOKING_GROUP deposit visible from BOTH child reservations (re-verify)
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T34 — BOOKING_GROUP deposit visible from BOTH child reservations', async () => {
+    const depsRes1 = await getDepositsByReservation(pool, pid1, grpRes1);
+    const grpDepInRes1 = depsRes1.filter(d => d.scope === 'BOOKING_GROUP');
+    if (grpDepInRes1.length !== 1) throw new Error(`Expected 1 BOOKING_GROUP deposit for grpRes1, got ${grpDepInRes1.length}`);
+    const depsRes2 = await getDepositsByReservation(pool, pid1, grpRes2);
+    const grpDepInRes2 = depsRes2.filter(d => d.scope === 'BOOKING_GROUP');
+    if (grpDepInRes2.length !== 1) throw new Error(`Expected 1 BOOKING_GROUP deposit for grpRes2, got ${grpDepInRes2.length}`);
+    if (grpDepInRes1[0].id !== grpDepInRes2[0].id) throw new Error('Group deposit ids differ between children');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T35 — sibling does NOT receive sibling ROOM_RESERVATION deposit (re-verify)
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T35 — sibling ROOM_RESERVATION deposit NOT leaked to other bookings', async () => {
+    const depsUnrel = await getDepositsByReservation(pool, pid1, unrelRes);
+    if (depsUnrel.length !== 0) throw new Error(`Expected 0 deposits for unrelRes, got ${depsUnrel.length}`);
+  });
+
+  // ══════════════════════════════════════════════════���═══════════════════════
+  // T36 — unrelated booking in SAME property cannot see group deposit
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T36 — unrelated same-property booking cannot see group deposit', async () => {
+    const depsUnrel = await getDepositsByReservation(pool, pid1, unrelRes);
+    if (depsUnrel.some(d => d.scope === 'BOOKING_GROUP')) throw new Error('Unrelated booking should not see BOOKING_GROUP deposit');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T37 — cross-property cannot see group deposit
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T37 — cross-property cannot see group deposit', async () => {
+    const depsXprop = await getDepositsByReservation(pool, pid2, xRes);
+    if (depsXprop.some(d => d.scope === 'BOOKING_GROUP')) throw new Error('Cross-property should not see BOOKING_GROUP deposit');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T38 — Direct ROOM_RESERVATION custody on grpRes1 visible only to grpRes1
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T38 — direct ROOM_RESERVATION custody on sibling is NOT shared', async () => {
+    // Create a ROOM_RESERVATION custody on grpRes1
+    const directCust = await holdIdentity(pool, {
+      propertyId: pid1, reservationId: grpRes1,
+      documentType: 'KTP', documentHolderName: 'Group Guest',
+      storageLocation: 'Safe B', notes: 'Direct KTP', actor: actor(),
+      scope: 'ROOM_RESERVATION'
+    });
+    artifacts.custIds.push(directCust.id);
+    // grpRes1: should see BOTH its direct custody AND the group custody
+    const custRes1 = await getIdentityCustodyByReservation(pool, pid1, grpRes1);
+    const directInRes1 = custRes1.filter(c => c.id === directCust.id);
+    if (directInRes1.length !== 1) throw new Error('grpRes1 must see its own direct custody');
+    const grpInRes1 = custRes1.filter(c => c.scope === 'BOOKING_GROUP');
+    if (grpInRes1.length !== 1) throw new Error('grpRes1 must still see the BOOKING_GROUP custody');
+    // grpRes2: should see ONLY the group custody, NOT the direct one
+    const custRes2 = await getIdentityCustodyByReservation(pool, pid1, grpRes2);
+    const directInRes2 = custRes2.filter(c => c.id === directCust.id);
+    if (directInRes2.length !== 0) throw new Error(`grpRes2 must NOT see sibling's direct custody, got ${directInRes2.length}`);
+    const grpInRes2 = custRes2.filter(c => c.scope === 'BOOKING_GROUP');
+    if (grpInRes2.length !== 1) throw new Error('grpRes2 must still see the BOOKING_GROUP custody');
+    // Global sort: ids must be ascending
+    const ids1 = custRes1.map(c => Number(c.id));
+    const ids2 = custRes2.map(c => Number(c.id));
+    for (let i = 1; i < ids1.length; i++) if (ids1[i] < ids1[i - 1]) throw new Error('Custody ids not globally sorted in grpRes1');
+    for (let i = 1; i < ids2.length; i++) if (ids2[i] < ids2[i - 1]) throw new Error('Custody ids not globally sorted in grpRes2');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T39 — BOOKING_GROUP custody visible from BOTH child reservations (re-verify)
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T39 — BOOKING_GROUP custody visible from BOTH child reservations', async () => {
+    const custRes1 = await getIdentityCustodyByReservation(pool, pid1, grpRes1);
+    const grpCustInRes1 = custRes1.filter(c => c.scope === 'BOOKING_GROUP');
+    if (grpCustInRes1.length !== 1) throw new Error(`Expected 1 BOOKING_GROUP custody for grpRes1, got ${grpCustInRes1.length}`);
+    const custRes2 = await getIdentityCustodyByReservation(pool, pid1, grpRes2);
+    const grpCustInRes2 = custRes2.filter(c => c.scope === 'BOOKING_GROUP');
+    if (grpCustInRes2.length !== 1) throw new Error(`Expected 1 BOOKING_GROUP custody for grpRes2, got ${grpCustInRes2.length}`);
+    if (grpCustInRes1[0].id !== grpCustInRes2[0].id) throw new Error('Group custody ids differ between children');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T40 — sibling does NOT receive sibling ROOM_RESERVATION custody (re-verify)
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T40 — sibling does NOT receive sibling ROOM_RESERVATION custody', async () => {
+    const custRes2 = await getIdentityCustodyByReservation(pool, pid1, grpRes2);
+    const roomCustRes2 = custRes2.filter(c => c.scope === 'ROOM_RESERVATION');
+    if (roomCustRes2.length !== 0) throw new Error('grpRes2 should have 0 ROOM_RESERVATION custody records');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T41 — unrelated booking in SAME property cannot see group custody
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T41 — unrelated same-property booking cannot see group custody', async () => {
+    const custUnrel = await getIdentityCustodyByReservation(pool, pid1, unrelRes);
+    if (custUnrel.some(c => c.scope === 'BOOKING_GROUP')) throw new Error('Unrelated booking should not see BOOKING_GROUP custody');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T42 — cross-property cannot see group custody
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T42 — cross-property cannot see group custody', async () => {
+    const custXprop = await getIdentityCustodyByReservation(pool, pid2, xRes);
+    if (custXprop.some(c => c.scope === 'BOOKING_GROUP')) throw new Error('Cross-property should not see BOOKING_GROUP custody');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T43 — no duplicate canonical rows in returned arrays
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T43 — no duplicate canonical rows in returned arrays', async () => {
+    const depsRes1 = await getDepositsByReservation(pool, pid1, grpRes1);
+    const idsRes1 = depsRes1.map(d => d.id);
+    if (idsRes1.length !== new Set(idsRes1).size) throw new Error('Duplicate deposit ids in grpRes1 result');
+    const depsRes2 = await getDepositsByReservation(pool, pid1, grpRes2);
+    const idsRes2 = depsRes2.map(d => d.id);
+    if (idsRes2.length !== new Set(idsRes2).size) throw new Error('Duplicate deposit ids in grpRes2 result');
+    const custRes1 = await getIdentityCustodyByReservation(pool, pid1, grpRes1);
+    const custIdsRes1 = custRes1.map(c => c.id);
+    if (custIdsRes1.length !== new Set(custIdsRes1).size) throw new Error('Duplicate custody ids in grpRes1 result');
+    const custRes2 = await getIdentityCustodyByReservation(pool, pid1, grpRes2);
+    const custIdsRes2 = custRes2.map(c => c.id);
+    if (custIdsRes2.length !== new Set(custIdsRes2).size) throw new Error('Duplicate custody ids in grpRes2 result');
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // T44 — Global ordering: deposit and custody results are ascending by id
+  // ══════════════════════════════════════════════════════════════════════════
+  await test('T44 — global ordering: returned ids are ascending', async () => {
+    const depsRes1 = await getDepositsByReservation(pool, pid1, grpRes1);
+    const ids1 = depsRes1.map(d => Number(d.id));
+    for (let i = 1; i < ids1.length; i++) if (ids1[i] < ids1[i - 1]) throw new Error(`Deposit order violation at index ${i}: ${ids1[i-1]} > ${ids1[i]}`);
+    const depsRes2 = await getDepositsByReservation(pool, pid1, grpRes2);
+    const ids2 = depsRes2.map(d => Number(d.id));
+    for (let i = 1; i < ids2.length; i++) if (ids2[i] < ids2[i - 1]) throw new Error(`Deposit order violation at index ${i}: ${ids2[i-1]} > ${ids2[i]}`);
+    const custRes1 = await getIdentityCustodyByReservation(pool, pid1, grpRes1);
+    const cids1 = custRes1.map(c => Number(c.id));
+    for (let i = 1; i < cids1.length; i++) if (cids1[i] < cids1[i - 1]) throw new Error(`Custody order violation at index ${i}: ${cids1[i-1]} > ${cids1[i]}`);
+    const custRes2 = await getIdentityCustodyByReservation(pool, pid1, grpRes2);
+    const cids2 = custRes2.map(c => Number(c.id));
+    for (let i = 1; i < cids2.length; i++) if (cids2[i] < cids2[i - 1]) throw new Error(`Custody order violation at index ${i}: ${cids2[i-1]} > ${cids2[i]}`);
   });
 
   // ─── Summary ─────────────────────────────────────────────────────────────

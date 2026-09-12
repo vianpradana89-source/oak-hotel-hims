@@ -784,16 +784,35 @@ export async function reconcileDeposit(client: PoolClient | Pool, depositId: num
 export async function getDepositsByReservation(pool: Pool, propertyId: number, reservationId: number): Promise<any[]> {
   requirePositiveInteger(propertyId, 'property_id');
   requirePositiveInteger(reservationId, 'reservation_id');
+  // Canonical ownership: reservation -> booking -> property (INNER JOIN; schema enforces booking_id NOT NULL)
   const ownership = await pool.query(
-    `SELECT r.id FROM reservations r
-     JOIN bookings b ON b.id = r.booking_id
+    `SELECT b.id AS booking_id FROM reservations r
+     INNER JOIN bookings b ON b.id = r.booking_id
      WHERE r.id = $1 AND b.property_id = $2`,
     [reservationId, propertyId]
   );
   if ((ownership.rowCount ?? 0) === 0) throw domainError(404, 'RESERVATION_NOT_FOUND', 'Reservation not found for this property');
-  const result = await pool.query(
-    'SELECT id FROM deposits WHERE property_id = $1 AND reservation_id = $2 ORDER BY id',
+  const targetBookingId = ownership.rows[0].booking_id;
+  // ROOM_RESERVATION: direct deposit for this reservation
+  const resDeposits = await pool.query(
+    'SELECT id FROM deposits WHERE property_id = $1 AND reservation_id = $2 AND scope = \'ROOM_RESERVATION\'',
     [propertyId, reservationId]
   );
-  return Promise.all(result.rows.map(row => hydrateDeposit(pool, Number(row.id))));
+  // BOOKING_GROUP: shared deposit for this booking
+  let groupDeposits: any = { rows: [] };
+  if (targetBookingId != null && Number(targetBookingId) > 0) {
+    groupDeposits = await pool.query(
+      'SELECT id FROM deposits WHERE property_id = $1 AND booking_id = $2 AND scope = \'BOOKING_GROUP\'',
+      [propertyId, targetBookingId]
+    );
+  }
+  // Merge, deduplicate, and globally sort by numeric id ascending
+  const seen = new Set<number>();
+  const ids: number[] = [];
+  for (const row of [...resDeposits.rows, ...groupDeposits.rows]) {
+    const id = Number(row.id);
+    if (!seen.has(id)) { seen.add(id); ids.push(id); }
+  }
+  ids.sort((a, b) => a - b);
+  return Promise.all(ids.map(id => hydrateDeposit(pool, id)));
 }

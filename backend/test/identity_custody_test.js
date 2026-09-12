@@ -151,12 +151,28 @@ async function main() {
     assert.ok(!fixture.calls.some(call => call.text.includes('UPDATE identity_custody')));
   });
   await test('reservation listing is property scoped through custody, reservation, and booking', async () => {
-    let observed;
-    const pool = { query: async (sql, params) => { observed = { sql: String(sql), params }; return { rows: [{ id: 50 }] }; } };
-    assert.deepStrictEqual(await getIdentityCustodyByReservation(pool, 1, 20), [{ id: 50 }]);
-    assert.ok(observed.sql.includes('ic.property_id = $1'));
-    assert.ok(observed.sql.includes('b.property_id = $1'));
-    assert.deepStrictEqual(observed.params, [1, 20]);
+    const queries = [];
+    const pool = {
+      query: async (sql, params) => {
+        queries.push({ sql: String(sql), params });
+        if (String(sql).includes('FROM reservations r')) {
+          return { rows: [{ booking_id: 99, prop_id: 1 }], rowCount: 1 };
+        }
+        if (String(sql).includes("scope = 'ROOM_RESERVATION'")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (String(sql).includes("scope = 'BOOKING_GROUP'")) {
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [] };
+      }
+    };
+    const result = await getIdentityCustodyByReservation(pool, 1, 20);
+    assert.deepStrictEqual(result, []);
+    assert.strictEqual(queries.length, 3);
+    assert.ok(queries.some(q => q.sql.includes('SELECT b.id AS booking_id')), 'must include ownership query');
+    assert.ok(queries.some(q => q.sql.includes("scope = 'ROOM_RESERVATION'")), 'must include ROOM_RESERVATION query');
+    assert.ok(queries.some(q => q.sql.includes("scope = 'BOOKING_GROUP'")), 'must include BOOKING_GROUP query');
   });
   await test('checkout locks and returns only HELD identity records', async () => {
     let observed;
