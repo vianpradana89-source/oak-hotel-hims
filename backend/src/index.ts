@@ -779,6 +779,39 @@ function buildBookingChildStatusSummary(children: any[]): BookingChildStatusSumm
   return summary;
 }
 
+// Returns a read-only check-in progress snapshot for multi-room bookings.
+// Used by GET /reservations/:id so the frontend can show "X/N kamar check-in"
+// without any persisted booking-level status change.
+function buildCheckinProgressSummary(children: any[]): {
+  totalChildren: number;
+  checkedInCount: number;
+  bookedCount: number;
+  checkedOutCount: number;
+  cancelledCount: number;
+  pendingCount: number;
+} | null {
+  if (!children || children.length < 2) return null;
+  let checkedIn = 0;
+  let booked = 0;
+  let checkedOut = 0;
+  let cancelled = 0;
+  for (const child of children) {
+    const s = String(child.status || '').toUpperCase();
+    if (s === 'CHECKED_IN') checkedIn++;
+    else if (s === 'BOOKED') booked++;
+    else if (s === 'CHECKED_OUT') checkedOut++;
+    else if (s === 'CANCELLED') cancelled++;
+  }
+  return {
+    totalChildren: children.length,
+    checkedInCount: checkedIn,
+    bookedCount: booked,
+    checkedOutCount: checkedOut,
+    cancelledCount: cancelled,
+    pendingCount: children.length - checkedIn - checkedOut - cancelled
+  };
+}
+
 function deriveBookingLifecycleStatus(currentBookingStatus: any, summary: BookingChildStatusSummary): 'ACTIVE' | 'CANCELLED' | 'COMPLETED' {
   const normalizedCurrent = String(currentBookingStatus || '').toUpperCase();
   if (normalizedCurrent === 'CANCELLED') {
@@ -3188,10 +3221,11 @@ app.get('/api/reservations/:id', async (req, res) => {
         readiness,
         checkout_inspection,
         require_checkout_inspection: requireCheckoutInspection,
-        sibling_reservations,
-        rate_snapshot,
-        primary_guest: primary_guest_data,
-        precheckin_eligibility
+         sibling_reservations,
+         rate_snapshot,
+         primary_guest: primary_guest_data,
+         precheckin_eligibility,
+         checkin_progress: buildCheckinProgressSummary(sibling_reservations)
       }
     });
   } catch (err: any) {

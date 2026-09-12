@@ -9,7 +9,11 @@
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Pool } = require('pg');
+const http = require('http');
 const { createCanonicalBooking } = require('../dist/index');
+const { generateToken } = require('../dist/domains/auth/authService');
+
+let authToken = '';
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -23,6 +27,50 @@ const runId = `1B3C-${String(Date.now()).slice(-8)}`;
 let passed = 0;
 let failed = 0;
 
+// ─── HTTP helper for check-in endpoint (used by T14–T20) ────────────────────
+let testServer = null;
+let testPort = null;
+
+async function startTestServer() {
+  const { app } = require('../dist/index');
+  return new Promise((resolve) => {
+    testServer = http.createServer(app);
+    testServer.listen(0, () => {
+      testPort = testServer.address().port;
+      resolve(testServer);
+    });
+  });
+}
+
+async function stopTestServer() {
+  if (testServer) {
+    await new Promise((r) => testServer.close(r));
+    testServer = null;
+    testPort = null;
+  }
+}
+
+function apiRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = { 'Content-Type': 'application/json', ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}) };
+    const req = http.request(
+      { hostname: '127.0.0.1', port: testPort, path, method, headers },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        });
+      }
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 function check(condition, message) {
   if (condition) {
     passed++;
@@ -31,6 +79,45 @@ function check(condition, message) {
     failed++;
     console.error(`FAIL | ${message}`);
   }
+}
+
+// ─── Auth token setup (for HTTP API tests T14–T20) ───────────────────────────
+async function setupAuthToken(pool) {
+  const authSuffix = Date.now();
+  // Get or create a test super admin user
+  const userRes = await pool.query(
+    `SELECT u.id, u.username, r.id as role_id, r.name as role_name
+     FROM users u JOIN roles r ON r.id = u.role_id
+     WHERE r.is_system_role = true AND r.name ILIKE '%super%'
+     LIMIT 1`
+  );
+  let userId;
+  if (userRes.rows.length > 0) {
+    userId = Number(userRes.rows[0].id);
+  } else {
+    // Create a test super admin with unique username to avoid constraint hits
+    const roleIdRes = await pool.query(
+      `SELECT id FROM roles WHERE name ILIKE '%super%' AND is_system_role = true LIMIT 1`
+    );
+    const roleId = Number(roleIdRes.rows[0]?.id || 1);
+    const insertRes = await pool.query(
+      `INSERT INTO users (username, email, password_hash, role_id, property_id, is_active)
+       VALUES ($1,$2,'dummy','$3',1,true) RETURNING id`,
+      [`FO.TEST.${authSuffix}`, `fo.test.${authSuffix}@test.com`, roleId]
+    );
+    userId = Number(insertRes.rows[0].id);
+  }
+  authToken = generateToken({
+    id: userId,
+    email: `fo.test.${authSuffix}@test.com`,
+    username: `FO.TEST.${authSuffix}`,
+    full_name: 'Test FO Staff',
+    role: 'Super Admin',
+    role_id: 1,
+    property_id: 1,
+    scope: 'FULL'
+  });
+  console.log(`  [AUTH] token generated for user ${userId}`);
 }
 
 // ─── Fixture setup (following booking_payment_allocation_contract_test pattern) ─
@@ -46,10 +133,39 @@ async function setupFixtures() {
   roomIds = [];
   roomTypeIds = [];
   // Create property and rooms with proper rates (500000 per room)
-  const propRes = await pool.query(
-    `INSERT INTO properties (name, property_code) VALUES ($1, $2) RETURNING id`,
-    [`1B3C-${suffix}`, `P${String(suffix).slice(-4)}`]
-  );
+  // Generate a collision-resistant property_code within varchar(6) limit.
+  // Use "T1" prefix + 4 base36 chars → up to 36⁴ = 1.68M candidates.
+  const base36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const randChars = () => {
+    let r = '';
+    for (let i = 0; i < 4; i++) {
+      r += base36.charAt(Math.floor(Math.random() * base36.length));
+    }
+    return r;
+  };
+  let propCode;
+  let propRes;
+  let collisions = 0;
+  const maxAttempts = 20;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    propCode = `T1${randChars()}`;
+    try {
+      propRes = await pool.query(
+        `INSERT INTO properties (name, property_code) VALUES ($1, $2) RETURNING id`,
+        [`1B3C-${suffix}`, propCode]
+      );
+      break; // Success
+    } catch (err) {
+      if (err?.code === '23505') {
+        collisions++;
+        if (collisions >= maxAttempts) {
+          throw new Error(`Test setup failed: unable to generate unique property_code after ${maxAttempts} attempts`);
+        }
+        continue; // Collision — retry with new random suffix
+      }
+      throw err;
+    }
+  }
   propertyId = Number(propRes.rows[0].id);
 
   for (let i = 0; i < 2; i++) {
@@ -939,38 +1055,6 @@ async function test12_anchorRegression() {
   }
 }
 
-// ─── Run tests ─────────────────────────────────────────────────────────────────
-async function main() {
-  console.log(`=== RUNNING MULTI-BOOKING-SCOPE-1B3C TESTS [runId=${runId}] ===\n`);
-
-  try {
-    await runWithFixtures(test1_singleRoomWithPayment);
-    await runWithFixtures(test2_twoRoomFullPayment);
-    await runWithFixtures(test3_twoRoomPartialPayment);
-    await runWithFixtures(test4_twoRoomNoPayment);
-    await runWithFixtures(test5_overpayment);
-    await runWithFixtures(test6_groupFolioBehavior);
-    await runWithFixtures(test7_canonicalPaidRemaining);
-    await runWithFixtures(test8_evidenceLinkedToGroupParent);
-    await runWithFixtures(test9_singleRoomEvidenceRegression);
-    await runWithFixtures(test10_zeroValueChild);
-    await runWithFixtures(test11_nonAnchorSharedEvidenceRead);
-    await runWithFixtures(test12_anchorRegression);
-    await runWithFixtures(test13_legacy_null_property_id);
-  } finally {
-    await pool.end();
-  }
-
-  console.log(`\n=== RESULTS: ${passed} passed, ${failed} failed ===`);
-  process.exit(failed > 0 ? 1 : 0);
-}
-
-main().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
-
-// ─── T13: Legacy NULL property_id regression ──────────────────────────────────
 async function test13_legacy_null_property_id() {
   console.log('\n--- T13: Legacy direct ROOM_RESERVATION payment with NULL property_id ---');
   let bookingId = null;
@@ -1014,3 +1098,421 @@ async function test13_legacy_null_property_id() {
     if (bookingId) await cleanupBooking(bookingId);
   }
 }
+
+// ─── T14–T20: Multi-room check-in isolation + derived summary ────────────────
+
+async function test14_multi_room_checkin_isolation() {
+  console.log('\n--- T14: Multi-room check-in — first child checks in, sibling stays BOOKED ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t14.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T14.1: 2-room booking created with group payment');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      check(resIds.rowCount === 2, 'T14.2: two reservations created');
+      childResIds = resIds.rows.map(r => Number(r.id));
+
+      // Check in child A only
+      const ciARes = await apiRequest('POST', `/api/reservations/${childResIds[0]}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+      check(ciARes.status === 200, 'T14.3: child A check-in returns 200');
+      check(ciARes.body?.data?.status === 'CHECKED_IN', 'T14.4: child A status is CHECKED_IN');
+
+      // Child B remains BOOKED
+      const checkB = await pool.query(
+        `SELECT status, room_id, checked_in_at FROM reservations WHERE id = $1`,
+        [childResIds[1]]
+      );
+      check(checkB.rows[0].status === 'BOOKED', 'T14.5: child B remains BOOKED after sibling CI');
+      check(checkB.rows[0].checked_in_at === null, 'T14.6: child B checked_in_at is null');
+
+      // Booking status still ACTIVE (not COMPLETED)
+      const bookCheck = await pool.query(
+        `SELECT booking_status FROM bookings WHERE id = $1`,
+        [bookingId]
+      );
+      check(bookCheck.rows[0].booking_status === 'ACTIVE', 'T14.7: booking stays ACTIVE after 1/2 CI');
+
+      // Room statuses: A → OCCUPIED_CLEAN, B unchanged
+      const roomACheck = await pool.query(
+        `SELECT status FROM rooms WHERE id = (SELECT room_id FROM reservations WHERE id = $1)`,
+        [childResIds[0]]
+      );
+      check(roomACheck.rows[0].status === 'OCCUPIED_CLEAN', 'T14.8: room A → OCCUPIED_CLEAN');
+
+      const roomBCheck = await pool.query(
+        `SELECT status FROM rooms WHERE id = (SELECT room_id FROM reservations WHERE id = $1)`,
+        [childResIds[1]]
+      );
+      check(roomBCheck.rows[0].status !== 'OCCUPIED_CLEAN', 'T14.9: room B NOT OCCUPIED (sibling isolation)');
+    }
+  } catch (err) {
+    check(false, `T14: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test15_sequential_checkin() {
+  console.log('\n--- T15: Sequential check-in — both children checked in ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t15.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T15.1: 2-room booking created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      childResIds = resIds.rows.map(r => Number(r.id));
+
+      // Check in both children sequentially
+      for (const resId of childResIds) {
+        const ciRes = await apiRequest('POST', `/api/reservations/${resId}/checkin`, {
+          property_id: propertyId,
+          force: true,
+          override_guest_identity: true,
+          override_housekeeping: true
+        });
+        check(ciRes.status === 200, `T15.2: reservation ${resId} check-in returns 200`);
+      }
+
+      // Both CHECKED_IN
+      const bothCheck = await pool.query(
+        `SELECT status FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      check(bothCheck.rows.every(r => r.status === 'CHECKED_IN'), 'T15.3: both children CHECKED_IN');
+
+      // Booking still ACTIVE (COMPLETED only after checkout)
+      const bookCheck = await pool.query(
+        `SELECT booking_status FROM bookings WHERE id = $1`,
+        [bookingId]
+      );
+      check(bookCheck.rows[0].booking_status === 'ACTIVE', 'T15.4: booking stays ACTIVE while all checked in');
+    }
+  } catch (err) {
+    check(false, `T15: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test16_sibling_isolation_after_checkin() {
+  console.log('\n--- T16: Sibling isolation — untouched sibling unchanged after first check-in ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t16.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T16.1: 2-room booking created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id, room_id, guest_name, status FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      childResIds = resIds.rows.map(r => ({ id: Number(r.id), roomId: Number(r.room_id), name: r.guest_name }));
+
+      // Snapshot before check-in
+      const beforeB = await pool.query(
+        `SELECT id, room_id, status, checked_in_at FROM reservations WHERE id = $1`,
+        [childResIds[1].id]
+      );
+      const bRoomBefore = beforeB.rows[0].room_id;
+      const bStatusBefore = beforeB.rows[0].status;
+      const bCiAtBefore = beforeB.rows[0].checked_in_at;
+
+      // Check in child A
+      await apiRequest('POST', `/api/reservations/${childResIds[0].id}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+
+      // Sibling B must be unchanged
+      const afterB = await pool.query(
+        `SELECT id, room_id, status, checked_in_at FROM reservations WHERE id = $1`,
+        [childResIds[1].id]
+      );
+      check(Number(afterB.rows[0].room_id) === bRoomBefore, 'T16.2: sibling room_id unchanged');
+      check(afterB.rows[0].status === bStatusBefore, 'T16.3: sibling status unchanged (still BOOKED)');
+      check(afterB.rows[0].checked_in_at === bCiAtBefore, 'T16.4: sibling checked_in_at unchanged (null)');
+    }
+  } catch (err) {
+    check(false, `T16: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test17_group_payment_gate_both_children() {
+  console.log('\n--- T17: GROUP payment gate — both allocated children pass independently ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t17.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T17.1: 2-room booking with GROUP payment created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      childResIds = resIds.rows.map(r => Number(r.id));
+
+      // Query pre-check-in eligibility for both children
+      const { evaluatePreCheckinEligibility } = require('../dist/domains/checkin/checkinGateService');
+      for (const resId of childResIds) {
+        const elig = await evaluatePreCheckinEligibility(pool, propertyId, resId);
+        check(elig.payment_ok === true, `T17.2: child ${resId} payment_ok=true (GROUP allocation)`);
+        check(elig.payment_evidence_ok === true, `T17.3: child ${resId} payment_evidence_ok=true (GROUP evidence)`);
+        check(!elig.missing.some(m => m.code === 'PAYMENT_MISSING'), `T17.4: child ${resId} no PAYMENT_MISSING`);
+        check(!elig.missing.some(m => m.code === 'PAYMENT_EVIDENCE_MISSING'), `T17.5: child ${resId} no PAYMENT_EVIDENCE_MISSING`);
+      }
+    }
+  } catch (err) {
+    check(false, `T17: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test18_derived_summary_before_after() {
+  console.log('\n--- T18: Derived checkin_progress summary — evolves correctly ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t18.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T18.1: 2-room booking created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      childResIds = resIds.rows.map(r => Number(r.id));
+
+      // Before any check-in: 0/2
+      const beforeSummary = await apiRequest('GET', `/api/reservations/${childResIds[0]}?property_id=${propertyId}`);
+      check(beforeSummary.status === 200, 'T18.2: GET reservation returns 200');
+      const progBefore = beforeSummary.body?.data?.checkin_progress;
+      check(progBefore !== null, 'T18.3: checkin_progress is present for multi-room booking');
+      check(progBefore.totalChildren === 2, 'T18.4: totalChildren = 2');
+      check(progBefore.checkedInCount === 0, 'T18.5: checkedInCount = 0 before any check-in');
+      check(progBefore.bookedCount === 2, 'T18.6: bookedCount = 2 before any check-in');
+      check(progBefore.pendingCount === 2, 'T18.7: pendingCount = 2 before any check-in');
+
+      // After first check-in: 1/2
+      await apiRequest('POST', `/api/reservations/${childResIds[0]}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+      const afterFirstSummary = await apiRequest('GET', `/api/reservations/${childResIds[0]}?property_id=${propertyId}`);
+      const progAfterFirst = afterFirstSummary.body?.data?.checkin_progress;
+      check(progAfterFirst.checkedInCount === 1, 'T18.8: checkedInCount = 1 after first check-in');
+      check(progAfterFirst.pendingCount === 1, 'T18.9: pendingCount = 1 after first check-in');
+
+      // After second check-in: 2/2
+      await apiRequest('POST', `/api/reservations/${childResIds[1]}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+      const afterAllSummary = await apiRequest('GET', `/api/reservations/${childResIds[0]}?property_id=${propertyId}`);
+      const progAfterAll = afterAllSummary.body?.data?.checkin_progress;
+      check(progAfterAll.checkedInCount === 2, 'T18.10: checkedInCount = 2 after all checked in');
+      check(progAfterAll.pendingCount === 0, 'T18.11: pendingCount = 0 after all checked in');
+      check(progAfterAll.bookedCount === 0, 'T18.12: bookedCount = 0 after all checked in');
+    }
+  } catch (err) {
+    check(false, `T18: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test19_single_room_regression() {
+  console.log('\n--- T19: Single-room check-in regression (no summary, unchanged behavior) ---');
+  let bookingId = null;
+  let childResId = null;
+  try {
+    const bookingPayload = buildBookingPayload(500000);
+    bookingPayload.reservations = [buildChildPayload(roomIds[0], 0)];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T19.1: single-room booking created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1`,
+        [bookingId]
+      );
+      childResId = Number(resIds.rows[0]?.id);
+
+      // Single-room: checkin_progress should be null (no multi-room context)
+      const beforeSummary = await apiRequest('GET', `/api/reservations/${childResId}?property_id=${propertyId}`);
+      check(beforeSummary.body?.data?.checkin_progress === null, 'T19.2: single-room checkin_progress is null');
+
+      // Check in
+      const ciRes = await apiRequest('POST', `/api/reservations/${childResId}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+      check(ciRes.status === 200, 'T19.3: single-room check-in succeeds');
+      check(ciRes.body?.data?.status === 'CHECKED_IN', 'T19.4: single-room status CHECKED_IN');
+    }
+  } catch (err) {
+    check(false, `T19: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test20_group_evidence_visibility_after_checkin() {
+  console.log('\n--- T20: Group evidence still visible after child check-in ---');
+  let bookingId = null;
+  let childResIds = [];
+  try {
+    const bookingPayload = buildBookingPayload(1000000, { bukti_bayar_path: '/test/evidence/t20.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T20.1: 2-room booking with GROUP evidence created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const resIds = await pool.query(
+        `SELECT id FROM reservations WHERE booking_id = $1 ORDER BY stay_sequence ASC`,
+        [bookingId]
+      );
+      childResIds = resIds.rows.map(r => Number(r.id));
+
+      // Check in child A
+      await apiRequest('POST', `/api/reservations/${childResIds[0]}/checkin`, {
+        property_id: propertyId,
+        force: true,
+        override_guest_identity: true,
+        override_housekeeping: true
+      });
+
+      // Child B should still see evidence via folio endpoint
+      const folioB = await apiRequest('GET', `/api/reservations/${childResIds[1]}/folio?property_id=${propertyId}`);
+      check(folioB.status === 200, 'T20.2: folio for child B returns 200 after sibling check-in');
+      const evids = folioB.body?.data?.evidences || [];
+      check(evids.length >= 1, 'T20.3: child B still sees shared evidence after sibling check-in');
+      check(evids[0].is_active === true, 'T20.4: evidence row is_active');
+    }
+  } catch (err) {
+    check(false, `T20: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+// ─── Run tests ─────────────────────────────────────────────────────────────────
+async function main() {
+  console.log(`=== RUNNING MULTI-BOOKING-SCOPE-1B3C TESTS [runId=${runId}] ===\n`);
+
+  // Generate auth token for HTTP API tests (T14–T20)
+  await setupAuthToken(pool);
+
+  // Start HTTP server for check-in endpoint tests (T14–T20)
+  await startTestServer();
+
+  try {
+    await runWithFixtures(test1_singleRoomWithPayment);
+    await runWithFixtures(test2_twoRoomFullPayment);
+    await runWithFixtures(test3_twoRoomPartialPayment);
+    await runWithFixtures(test4_twoRoomNoPayment);
+    await runWithFixtures(test5_overpayment);
+    await runWithFixtures(test6_groupFolioBehavior);
+    await runWithFixtures(test7_canonicalPaidRemaining);
+    await runWithFixtures(test8_evidenceLinkedToGroupParent);
+    await runWithFixtures(test9_singleRoomEvidenceRegression);
+    await runWithFixtures(test10_zeroValueChild);
+    await runWithFixtures(test11_nonAnchorSharedEvidenceRead);
+    await runWithFixtures(test12_anchorRegression);
+    await runWithFixtures(test13_legacy_null_property_id);
+    await runWithFixtures(test14_multi_room_checkin_isolation);
+    await runWithFixtures(test15_sequential_checkin);
+    await runWithFixtures(test16_sibling_isolation_after_checkin);
+    await runWithFixtures(test17_group_payment_gate_both_children);
+    await runWithFixtures(test18_derived_summary_before_after);
+    await runWithFixtures(test19_single_room_regression);
+    await runWithFixtures(test20_group_evidence_visibility_after_checkin);
+  } finally {
+    await stopTestServer();
+    await pool.end();
+  }
+
+  console.log(`\n=== RESULTS: ${passed} passed, ${failed} failed ===`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+main().catch(err => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});

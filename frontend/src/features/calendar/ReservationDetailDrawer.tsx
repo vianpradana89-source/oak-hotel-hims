@@ -653,6 +653,11 @@ export default function ReservationDetailDrawer({
                     Booking Multi-Kamar ({data.sibling_reservations.length} Kamar)
                   </span>
                 </div>
+                {data.checkin_progress && data.checkin_progress.totalChildren > 0 && (
+                  <span className="text-xs text-emerald-400 font-mono">
+                    {data.checkin_progress.checkedInCount}/{data.checkin_progress.totalChildren} kamar check-in
+                  </span>
+                )}
                 <span className="text-xs text-emerald-400 font-mono">
                   BID: {bid}
                 </span>
