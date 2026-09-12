@@ -182,11 +182,12 @@ async function main() {
     assert.ok(queries.some(q => q.sql.includes("scope = 'ROOM_RESERVATION'")), 'must include ROOM_RESERVATION query');
     assert.ok(queries.some(q => q.sql.includes("scope = 'BOOKING_GROUP'")), 'must include BOOKING_GROUP query');
   });
-  await test('checkout locks and returns only HELD identity records', async () => {
+  await test('checkout locks and returns only HELD ROOM_RESERVATION identity records', async () => {
     let observed;
     const client = { query: async (sql, params) => { observed = { sql: String(sql), params }; return { rows: [{ id: 50, document_type: 'KTP' }] }; } };
     assert.deepStrictEqual(await getHeldIdentityCustodyForCheckout(client, 1, 20), [{ id: 50, document_type: 'KTP' }]);
     assert.ok(observed.sql.includes("status = 'HELD'"));
+    assert.ok(observed.sql.includes("scope = 'ROOM_RESERVATION'"));
     assert.ok(observed.sql.includes('FOR UPDATE'));
     assert.deepStrictEqual(observed.params, [1, 20]);
   });

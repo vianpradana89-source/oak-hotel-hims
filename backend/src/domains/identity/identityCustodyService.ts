@@ -299,10 +299,13 @@ export async function getHeldIdentityCustodyForCheckout(
   propertyId: number,
   reservationId: number
 ): Promise<any[]> {
+  // Only ROOM_RESERVATION custody blocks a specific child reservation checkout.
+  // BOOKING_GROUP custody is scoped to the group lifecycle and must NOT block
+  // individual child checkouts — it is enforced separately at refund time.
   const result = await client.query(
     `SELECT id, document_type, document_holder_name, document_number_masked, storage_location
      FROM identity_custody
-     WHERE property_id = $1 AND reservation_id = $2 AND status = 'HELD'
+     WHERE property_id = $1 AND reservation_id = $2 AND scope = 'ROOM_RESERVATION' AND status = 'HELD'
      ORDER BY id
      FOR UPDATE`,
     [propertyId, reservationId]
