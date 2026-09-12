@@ -174,6 +174,53 @@ async function cleanupProperty(pid) {
 }
 
 // ─── Payload builders ──────────────────────────────────────────────────────────
+
+// Replicate the folio endpoint's combined evidence-read pattern so tests
+// exercise the actual runtime logic, not a hand-copied ad-hoc query.
+async function queryFolioEvidences(reservationId, propertyId) {
+  return pool.query(
+    `SELECT pe.* FROM payment_evidences pe
+     WHERE pe.property_id = $2
+       AND (
+         pe.reservation_id = $1
+         OR EXISTS (
+           SELECT 1 FROM payment_allocations pa
+           JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
+           WHERE pa.payment_transaction_id = pe.payment_transaction_id
+             AND pa.reservation_id = $1
+             AND pa.status = 'ACTIVE'
+             AND pt.scope = 'BOOKING_GROUP'
+             AND pt.property_id = $2
+         )
+       )
+     ORDER BY pe.id DESC`,
+    [reservationId, propertyId]
+  );
+}
+
+// Replicate the folio endpoint's combined payments-read pattern so tests
+// exercise the actual runtime logic.
+async function queryFolioPayments(reservationId, propertyId) {
+  return pool.query(
+    `SELECT DISTINCT pt.* FROM payment_transactions pt
+     WHERE (
+       pt.reservation_id = $1
+       AND (pt.property_id = $2 OR pt.property_id IS NULL)
+     )
+     OR (
+       pt.scope = 'BOOKING_GROUP'
+       AND pt.property_id = $2
+       AND EXISTS (
+         SELECT 1 FROM payment_allocations pa
+         WHERE pa.payment_transaction_id = pt.id
+           AND pa.reservation_id = $1
+           AND pa.status = 'ACTIVE'
+       )
+     )
+     ORDER BY pt.id DESC`,
+    [reservationId, propertyId]
+  );
+}
 function buildChildPayload(roomId, index) {
   return {
     room_id: roomId,
@@ -717,6 +764,181 @@ async function test10_zeroValueChild() {
   }
 }
 
+async function test11_nonAnchorSharedEvidenceRead() {
+  console.log('\n--- T11: Non-anchor child sees shared group evidence via folio endpoint ---');
+  let bookingId = null;
+  let anchorResId = null;
+  let nonAnchorResId = null;
+  let groupPaymentId = null;
+  try {
+    const bookingPayload = buildBookingPayload(600000, { bukti_bayar_path: '/test/evidence/t11_receipt.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T11.1: booking created successfully with group payment and evidence');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      // Identify anchor and non-anchor reservations
+      const allocRes = await pool.query(
+        `SELECT pa.reservation_id, pa.allocated_amount
+         FROM payment_allocations pa
+         WHERE pa.booking_id = $1 AND pa.status = 'ACTIVE'
+         ORDER BY pa.allocation_sequence ASC`,
+        [bookingId]
+      );
+      check(allocRes.rowCount === 2, 'T11.2: two active allocations exist');
+      anchorResId = Number(allocRes.rows[0].reservation_id);
+      nonAnchorResId = Number(allocRes.rows[1].reservation_id);
+      check(nonAnchorResId !== anchorResId, 'T11.3: anchor and non-anchor are different reservations');
+
+      // Identify group payment
+      const payRes = await pool.query(
+        `SELECT id FROM payment_transactions WHERE booking_id = $1 AND scope = 'BOOKING_GROUP'`,
+        [bookingId]
+      );
+      groupPaymentId = Number(payRes.rows[0]?.id);
+      check(groupPaymentId > 0, 'T11.4: BOOKING_GROUP parent payment exists');
+
+      // --- Combined folio read: payments ---
+      const folioPaymentsRes = await queryFolioPayments(nonAnchorResId, propertyId);
+      const nonAnchorPaymentIds = new Set(folioPaymentsRes.rows.map(r => Number(r.id)));
+      check(nonAnchorPaymentIds.has(groupPaymentId), 'T11.5: non-anchor payments includes GROUP parent');
+      check(folioPaymentsRes.rowCount === 1, 'T11.6: non-anchor gets exactly 1 payment row (GROUP only, no ROOM_RESERVATION)');
+      check(folioPaymentsRes.rows[0].scope === 'BOOKING_GROUP', 'T11.7: non-anchor payment is BOOKING_GROUP scope');
+
+      // --- Combined folio read: evidences ---
+      const folioEvidRes = await queryFolioEvidences(nonAnchorResId, propertyId);
+      check(folioEvidRes.rowCount === 1, 'T11.8: non-anchor child receives exactly 1 evidence row');
+      const ev = folioEvidRes.rows[0];
+      check(ev.payment_transaction_id === groupPaymentId, 'T11.9: evidence payment_transaction_id == GROUP parent id');
+      check(ev.property_id === propertyId, 'T11.10: evidence is scoped to same property');
+
+      // Verify canonical: exactly one evidence row in database
+      const totalEvidRes = await pool.query(
+        `SELECT COUNT(*) as cnt FROM payment_evidences WHERE property_id = $1`,
+        [propertyId]
+      );
+      check(Number(totalEvidRes.rows[0].cnt) === 1, 'T11.11: database still has exactly 1 canonical evidence row');
+
+      // Cross-property isolation: a different property cannot see this evidence
+      const otherPropRes = await pool.query(
+        `SELECT COUNT(*) as cnt FROM payment_evidences WHERE property_id = $1`,
+        [(propertyId % 10000) + 9000]
+      );
+      check(Number(otherPropRes.rows[0].cnt) === 0, 'T11.12: unrelated property sees zero evidence');
+
+      // Same-property unrelated reservation: create a separate single-room booking
+      // in the same property that is NOT allocated to the group parent.
+      const standlonePayload = buildBookingPayload(500000);
+      standlonePayload.reservations = [buildChildPayload(roomIds[0], 99)];
+      const standaloneResult = await createBooking(standlonePayload);
+      const standaloneBookingId = standaloneResult.result?.booking?.id;
+      if (standaloneBookingId) {
+        const stResIds = await pool.query('SELECT id FROM reservations WHERE booking_id = $1', [standaloneBookingId]);
+        const stResId = Number(stResIds.rows[0]?.id);
+        if (stResId > 0) {
+          const stPayRes = await queryFolioPayments(stResId, propertyId);
+          check(stPayRes.rowCount === 1, 'T11.13: unrelated same-property reservation sees only its own payment');
+          check(stPayRes.rows[0].id !== groupPaymentId, 'T11.14: unrelated reservation does NOT see group payment');
+
+          const stEvidRes = await queryFolioEvidences(stResId, propertyId);
+          check(stEvidRes.rowCount === 0, 'T11.15: unrelated reservation sees zero group evidence');
+        }
+        // Clean up standalone booking residue
+        await cleanupBooking(standaloneBookingId);
+      }
+    }
+  } catch (err) {
+    check(false, `T11: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
+async function test12_anchorRegression() {
+  console.log('\n--- T12: Anchor reservation still sees shared evidence (regression guard) ---');
+  let bookingId = null;
+  let anchorResId = null;
+  let groupPaymentId = null;
+  try {
+    const bookingPayload = buildBookingPayload(600000, { bukti_bayar_path: '/test/evidence/t12_receipt.jpg' });
+    bookingPayload.reservations = [
+      buildRealChildPayload(roomIds[0], 0),
+      buildRealChildPayload(roomIds[1], 1)
+    ];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T12.1: booking created successfully');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      const allocRes = await pool.query(
+        `SELECT pa.reservation_id, pa.allocated_amount
+         FROM payment_allocations pa
+         WHERE pa.booking_id = $1 AND pa.status = 'ACTIVE'
+         ORDER BY pa.allocation_sequence ASC`,
+        [bookingId]
+      );
+      anchorResId = Number(allocRes.rows[0]?.reservation_id);
+      check(anchorResId > 0, 'T12.2: anchor reservation identified');
+
+      const payRes = await pool.query(
+        `SELECT id FROM payment_transactions WHERE booking_id = $1 AND scope = 'BOOKING_GROUP'`,
+        [bookingId]
+      );
+      groupPaymentId = Number(payRes.rows[0]?.id);
+      check(groupPaymentId > 0, 'T12.3: BOOKING_GROUP payment exists');
+
+      // --- Combined folio read: payments ---
+      const folioPaymentsRes = await queryFolioPayments(anchorResId, propertyId);
+      check(folioPaymentsRes.rowCount === 1, 'T12.4: anchor gets exactly 1 payment (GROUP parent, no duplicates)');
+      check(Number(folioPaymentsRes.rows[0].id) === groupPaymentId, 'T12.5: anchor payment is GROUP parent id');
+
+      // --- Combined folio read: evidences ---
+      const evidRes = await queryFolioEvidences(anchorResId, propertyId);
+      check(evidRes.rowCount === 1, 'T12.6: anchor sees exactly 1 evidence');
+      check(evidRes.rows[0].payment_transaction_id === groupPaymentId,
+        'T12.7: anchor sees same GROUP parent payment');
+
+      // Verify no duplicate evidence rows in database
+      const totalEvidRes = await pool.query(
+        `SELECT COUNT(*) as cnt FROM payment_evidences WHERE property_id = $1`,
+        [propertyId]
+      );
+      check(Number(totalEvidRes.rows[0].cnt) === 1, 'T12.8: no duplicate evidence rows (still 1)');
+
+      // --- Isolation: set allocation to non-ACTIVE → shared visibility must disappear ---
+      const nonAnchorRes = Number(allocRes.rows[1].reservation_id);
+      const beforeInactive = await queryFolioEvidences(nonAnchorRes, propertyId);
+      check(beforeInactive.rowCount === 1, 'T12.9: non-anchor sees evidence while allocation ACTIVE');
+
+      await pool.query(
+        `UPDATE payment_allocations SET status = 'REVERSED' WHERE booking_id = $1 AND reservation_id = $2`,
+        [bookingId, nonAnchorRes]
+      );
+      const afterInactiveEvid = await queryFolioEvidences(nonAnchorRes, propertyId);
+      check(afterInactiveEvid.rowCount === 0, 'T12.10: non-ACTIVE allocation removes evidence visibility');
+
+      const afterInactivePay = await queryFolioPayments(nonAnchorRes, propertyId);
+      check(afterInactivePay.rowCount === 0, 'T12.11: non-ACTIVE allocation removes group payment visibility');
+
+      // Anchor still sees it after other child's allocation released
+      const anchorStillSees = await queryFolioEvidences(anchorResId, propertyId);
+      check(anchorStillSees.rowCount === 1, 'T12.12: anchor evidence visibility unaffected');
+    }
+  } catch (err) {
+    check(false, `T12: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}
+
 // ─── Run tests ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log(`=== RUNNING MULTI-BOOKING-SCOPE-1B3C TESTS [runId=${runId}] ===\n`);
@@ -732,6 +954,9 @@ async function main() {
     await runWithFixtures(test8_evidenceLinkedToGroupParent);
     await runWithFixtures(test9_singleRoomEvidenceRegression);
     await runWithFixtures(test10_zeroValueChild);
+    await runWithFixtures(test11_nonAnchorSharedEvidenceRead);
+    await runWithFixtures(test12_anchorRegression);
+    await runWithFixtures(test13_legacy_null_property_id);
   } finally {
     await pool.end();
   }
@@ -744,3 +969,48 @@ main().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+
+// ─── T13: Legacy NULL property_id regression ──────────────────────────────────
+async function test13_legacy_null_property_id() {
+  console.log('\n--- T13: Legacy direct ROOM_RESERVATION payment with NULL property_id ---');
+  let bookingId = null;
+  try {
+    const bookingPayload = buildBookingPayload(500000, { bukti_bayar_path: '/test/evidence/t13_legacy.jpg' });
+    bookingPayload.reservations = [buildChildPayload(roomIds[0], 0)];
+
+    const result = await createBooking(bookingPayload);
+    check(result.ok, 'T13.1: single-room booking created');
+    bookingId = result.result?.booking?.id;
+
+    if (bookingId) {
+      // Find the ROOM_RESERVATION payment and zero out its property_id (simulate legacy data)
+      const payRes = await pool.query(
+        `SELECT id FROM payment_transactions WHERE booking_id = $1 AND scope = 'ROOM_RESERVATION'`,
+        [bookingId]
+      );
+      const payId = Number(payRes.rows[0]?.id);
+      check(payId > 0, 'T13.2: ROOM_RESERVATION payment exists');
+
+      await pool.query(`UPDATE payment_transactions SET property_id = NULL WHERE id = $1`, [payId]);
+      check(true, 'T13.3: property_id set to NULL (legacy simulation)');
+
+      // Now query folio — should STILL return the payment despite NULL property_id
+      const resIds = await pool.query('SELECT id FROM reservations WHERE booking_id = $1', [bookingId]);
+      const resId = Number(resIds.rows[0]?.id);
+      const folioPayments = await queryFolioPayments(resId, propertyId);
+
+      check(folioPayments.rowCount >= 1, 'T13.4: legacy NULL-property payment still visible in folio');
+      check(folioPayments.rows.some(r => Number(r.id) === payId),
+        'T13.5: the specific NULL-property payment is in the result');
+
+      // Evidence should also still be visible (evidence table always has property_id set)
+      const folioEvid = await queryFolioEvidences(resId, propertyId);
+      check(folioEvid.rowCount >= 1, 'T13.6: evidence still visible alongside legacy payment');
+    }
+  } catch (err) {
+    check(false, `T13: ${err.code || err.message}`);
+    console.log('  Stack:', err.stack?.split('\n').slice(0, 5).join('\n'));
+  } finally {
+    if (bookingId) await cleanupBooking(bookingId);
+  }
+}

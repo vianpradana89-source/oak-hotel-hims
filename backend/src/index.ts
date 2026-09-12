@@ -7136,10 +7136,43 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
       return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' });
     }
 
-    const payments = await pool.query('SELECT * FROM payment_transactions WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
+    const payments = await pool.query(
+      `SELECT DISTINCT pt.* FROM payment_transactions pt
+       WHERE (
+         pt.reservation_id = $1
+         AND (pt.property_id = $2 OR pt.property_id IS NULL)
+       )
+       OR (
+         pt.scope = 'BOOKING_GROUP'
+         AND pt.property_id = $2
+         AND EXISTS (
+           SELECT 1 FROM payment_allocations pa
+           WHERE pa.payment_transaction_id = pt.id
+             AND pa.reservation_id = $1
+             AND pa.status = 'ACTIVE'
+         )
+       )
+       ORDER BY pt.id DESC`,
+      [reservationId, propertyId]
+    );
     const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
     const evidences = await pool.query(
-      'SELECT * FROM payment_evidences WHERE reservation_id = $1 AND property_id = $2 ORDER BY id DESC',
+      `SELECT pe.* FROM payment_evidences pe
+       WHERE pe.property_id = $2
+         AND (
+           pe.reservation_id = $1
+           OR EXISTS (
+             SELECT 1
+             FROM payment_allocations pa
+             JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
+             WHERE pa.payment_transaction_id = pe.payment_transaction_id
+               AND pa.reservation_id = $1
+               AND pa.status = 'ACTIVE'
+               AND pt.scope = 'BOOKING_GROUP'
+               AND pt.property_id = $2
+           )
+         )
+       ORDER BY pe.id DESC`,
       [reservationId, propertyId]
     );
 
