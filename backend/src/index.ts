@@ -7767,7 +7767,6 @@ app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
-app.use('/api', createUnresolvedGuaranteeRouter(pool));
 app.use('/api/settings/purchases', createPurchaseSettingsRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
