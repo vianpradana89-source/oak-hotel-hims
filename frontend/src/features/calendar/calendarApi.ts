@@ -171,7 +171,7 @@ export function parseAvailabilityKey(key: string): {
   }
   return { roomTypeId: null, roomTypeName: identity, checkIn, checkOut };
 }
-import type { TapechartResponse } from './calendarTypes';
+import type { TapechartResponse, UnresolvedGuaranteeItem } from './calendarTypes';
 
 export interface DailyKpiResponse {
   status: string;
@@ -219,6 +219,70 @@ export async function fetchDailyKpis(
     throw new Error(result.errorMessage || `Daily KPI request failed (${result.status})`);
   }
   return result.data.data;
+}
+
+export interface UnresolvedGuaranteesResponse {
+  status: string;
+  data: { items: UnresolvedGuaranteeItem[] };
+}
+
+/**
+ * GET /api/reservations/unresolved-guarantees?property_id=<id>
+ *
+ * Returns the unresolved guarantee work queue for the property.
+ * READ-ONLY - the queue is a triage surface; all mutations remain in
+ * ReservationDetailDrawer.
+ */
+export async function fetchUnresolvedGuarantees(
+  propertyId: number,
+  fetchImpl: FetchLike = fetch
+): Promise<UnresolvedGuaranteeItem[]> {
+  const params = new URLSearchParams({ property_id: String(propertyId) });
+  const result = await safeFetchJson<UnresolvedGuaranteesResponse>(
+    `/api/reservations/unresolved-guarantees?${params.toString()}`,
+    undefined,
+    'Daftar jaminan belum dapat dimuat.',
+    fetchImpl
+  );
+  if (!result.ok) {
+    throw new Error(result.errorMessage || `Unresolved guarantees request failed (${result.status})`);
+  }
+  const items = result.data?.data?.items;
+  // Malformed payload guard: a successful response without a well-formed
+  // items array is treated as an error, never silently as "all settled".
+  if (!Array.isArray(items)) {
+    throw new Error('Daftar jaminan belum dapat dimuat.');
+  }
+
+  // Validate every item strictly; any malformed entry aborts the entire
+  // queue so it never renders as "all settled" with missing data.
+  const validateGuaranteeItem = (item: unknown): item is UnresolvedGuaranteeItem => {
+    if (item === null || typeof item !== 'object') return false;
+    const r = item as Record<string, unknown>;
+    if (r.scope !== 'ROOM_RESERVATION' && r.scope !== 'BOOKING_GROUP') return false;
+    if (!Number.isInteger(Number(r.reservation_id)) || Number(r.reservation_id) <= 0) return false;
+    if (!Number.isInteger(Number(r.anchor_reservation_id)) || Number(r.anchor_reservation_id) <= 0) return false;
+    if (!Number.isInteger(Number(r.booking_id)) || Number(r.booking_id) <= 0) return false;
+    if (typeof r.bid !== 'string' || !r.bid) return false;
+    if (typeof r.guest_name !== 'string' || !r.guest_name) return false;
+    if (r.room_number !== null && typeof r.room_number !== 'string') return false;
+    if (r.room_type_name !== null && typeof r.room_type_name !== 'string') return false;
+    if (r.room_count !== null && (!Number.isInteger(Number(r.room_count)) || Number(r.room_count) < 0)) return false;
+    if (typeof r.reservation_status !== 'string' || !r.reservation_status) return false;
+    if (typeof r.unresolved_deposit_amount !== 'number' || !Number.isFinite(r.unresolved_deposit_amount) || r.unresolved_deposit_amount < 0) return false;
+    if (typeof r.identity_held !== 'boolean') return false;
+    if (!Number.isInteger(Number(r.deposit_count)) || Number(r.deposit_count) < 0) return false;
+    if (!Number.isInteger(Number(r.custody_count)) || Number(r.custody_count) < 0) return false;
+    if (r.last_activity_at !== null && typeof r.last_activity_at !== 'string') return false;
+    return true;
+  };
+
+  for (const item of items) {
+    if (!validateGuaranteeItem(item)) {
+      throw new Error('Daftar jaminan belum dapat dimuat.');
+    }
+  }
+  return items as UnresolvedGuaranteeItem[];
 }
 
 export const DAILY_KPI_DRILLDOWN_TYPES = [

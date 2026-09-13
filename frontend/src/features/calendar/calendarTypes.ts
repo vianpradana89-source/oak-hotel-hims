@@ -162,6 +162,25 @@ export interface TapechartResponse {
 export type CalendarOperationalFilter = '' | 'Ready' | 'Cleaning' | 'Kotor' | 'Occupied' | 'Maintenance';
 export type ReservationLifecycleStatus = 'BOOKED' | 'CHECKED_IN' | 'CHECKED_OUT' | 'CANCELLED';
 
+export interface UnresolvedGuaranteeItem {
+  scope: 'ROOM_RESERVATION' | 'BOOKING_GROUP';
+  reservation_id: number;
+  anchor_reservation_id: number;
+  booking_id: number;
+  bid: string;
+  guest_name: string;
+  room_number: string | null;
+  room_type_name: string | null;
+  /** Only set for BOOKING_GROUP - number of children in the booking. */
+  room_count: number | null;
+  reservation_status: string;
+  unresolved_deposit_amount: number;
+  identity_held: boolean;
+  deposit_count: number;
+  custody_count: number;
+  last_activity_at: string | null;
+}
+
 export function normalizeReservationLifecycle(raw: unknown): {
   status: ReservationLifecycleStatus;
   legacy: boolean;

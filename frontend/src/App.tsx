@@ -67,8 +67,10 @@ import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
-import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, parseAvailabilityKey } from './features/calendar/calendarApi';
+import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, fetchUnresolvedGuarantees, parseAvailabilityKey } from './features/calendar/calendarApi';
 import type { DailyKpiData, DailyKpiDrilldownData } from './features/calendar/calendarApi';
+import type { UnresolvedGuaranteeItem } from './features/calendar/calendarTypes';
+import GuaranteeQueuePanel from './features/calendar/GuaranteeQueuePanel';
 import { buildDailyKpiCards, DRAWER_TYPE_TO_KPI_DRILLDOWN } from './features/calendar/dailyKpiFormat';
 import { DailyKpiDrilldownList } from './features/calendar/DailyKpiDrilldownList';
 import {
@@ -361,6 +363,107 @@ function AppContent() {
   const [calendarOperationalFilter, setCalendarOperationalFilter] = useState<CalendarOperationalFilter>('');
   const [calendarIncludeInactive, setCalendarIncludeInactive] = useState(false);
   const [collapsedCalendarGroups, setCollapsedCalendarGroups] = useState<Set<string>>(() => new Set());
+
+  // Guarantee queue (GUARANTEE-QUEUE-1B)
+  const [showUnresolvedGuarantees, setShowUnresolvedGuarantees] = useState(false);
+  const [unresolvedGuaranteeItems, setUnresolvedGuaranteeItems] = useState<UnresolvedGuaranteeItem[]>([]);
+  const [unresolvedGuaranteeLoading, setUnresolvedGuaranteeLoading] = useState(false);
+  const [unresolvedGuaranteeError, setUnresolvedGuaranteeError] = useState<string | null>(null);
+  const unresolvedGuaranteeRequestVersionRef = useRef(0);
+  const showUnresolvedGuaranteesRef = useRef(showUnresolvedGuarantees);
+  showUnresolvedGuaranteesRef.current = showUnresolvedGuarantees;
+
+  // Visibility: Super Admin / General Manager / Front Office only.
+  // Backend requireRole remains the authority; this is UX gating.
+  const canViewGuaranteeQueue = (() => {
+    const role = String(user?.role || '').trim();
+    return role === 'Super Admin' || role === 'General Manager' || role === 'Front Office';
+  })();
+
+  const fetchUnresolvedGuaranteeQueue = useCallback(async () => {
+    if (propertyId === null) return;
+    const requestVersion = ++unresolvedGuaranteeRequestVersionRef.current;
+    setUnresolvedGuaranteeLoading(true);
+    setUnresolvedGuaranteeError(null);
+    try {
+      const items = await fetchUnresolvedGuarantees(propertyId, authFetch);
+      // Stale-response guard: discard if a newer request has started.
+      if (requestVersion !== unresolvedGuaranteeRequestVersionRef.current) return;
+      setUnresolvedGuaranteeItems(items);
+    } catch (err: any) {
+      if (requestVersion !== unresolvedGuaranteeRequestVersionRef.current) return;
+      setUnresolvedGuaranteeItems([]);
+      setUnresolvedGuaranteeError(err?.message || 'Daftar jaminan belum dapat dimuat.');
+    } finally {
+      if (requestVersion === unresolvedGuaranteeRequestVersionRef.current) {
+        setUnresolvedGuaranteeLoading(false);
+      }
+    }
+  }, [propertyId, authFetch]);
+
+  // Load when the toggle turns ON (and after property change while ON).
+  // Single effect handles both property switch and toggle-ON to prevent
+  // a stale-property fetch from committing after a newer property reset.
+  useEffect(() => {
+    if (!canViewGuaranteeQueue) return;
+    if (!showUnresolvedGuarantees) return;
+    if (propertyId === null) return;
+
+    // Atomically: clear old data and invalidate any in-flight request
+    // BEFORE starting the new fetch for the current propertyId.
+    setUnresolvedGuaranteeItems([]);
+    setUnresolvedGuaranteeError(null);
+    unresolvedGuaranteeRequestVersionRef.current += 1;
+    fetchUnresolvedGuaranteeQueue();
+  }, [showUnresolvedGuarantees, propertyId, canViewGuaranteeQueue, fetchUnresolvedGuaranteeQueue]);
+
+  const handleToggleUnresolvedGuarantees = useCallback((value: boolean) => {
+    setShowUnresolvedGuarantees(value);
+    if (!value) {
+      setUnresolvedGuaranteeItems([]);
+      setUnresolvedGuaranteeError(null);
+      unresolvedGuaranteeRequestVersionRef.current += 1;
+    }
+  }, []);
+
+  // Refetch after the ReservationDetailDrawer closes (mutations may have
+  // settled a deposit / returned KTP). Guarded to avoid loops.
+  const handleGuaranteeQueueDrawerClose = useCallback(() => {
+    setSelectedRes(null);
+    setSelectedFolio(null);
+    setPaymentDraft('');
+    setPaymentFeedback(null);
+    setPaymentSubmitting(false);
+    if (showUnresolvedGuaranteesRef.current) {
+      fetchUnresolvedGuaranteeQueue();
+    }
+  }, [fetchUnresolvedGuaranteeQueue]);
+
+  // Open reservation detail from the guarantee queue using the canonical
+  // reservation-detail endpoint (works for CHECKED_OUT/CANCELLED rows that
+  // are absent from the current tapechart window).
+  const openReservationFromGuaranteeQueue = useCallback(async (reservationId: number) => {
+    if (propertyId === null) return;
+    try {
+      const response = await authFetch(`/api/reservations/${reservationId}?property_id=${propertyId}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.message || 'Gagal memuat detail reservasi');
+      if (body?.data) {
+        setSelectedRes(body.data);
+        // Fetch folio inline to avoid forward-reference issue with fetchReservationFolio
+        try {
+          const folioRes = await authFetch(`/api/reservations/${reservationId}/folio?property_id=${propertyId}`);
+          if (folioRes.ok) {
+            const folioData = await folioRes.json();
+            setSelectedFolio(folioData.data || null);
+          }
+        } catch (_) { /* folio fetch is best-effort */ }
+      }
+    } catch (error) {
+      console.error('[GuaranteeQueue] failed to open reservation:', error);
+      alert(`Gagal membuka reservasi: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [propertyId, authFetch]);
 
   const [transactionReservations, setTransactionReservations] = useState<any[]>([]);
   const [transactionLoading, setTransactionLoading] = useState<boolean>(false);
@@ -3432,7 +3535,22 @@ function AppContent() {
                 onRoomTypeId={setCalendarRoomTypeFilter}
                 onOperationalStatus={setCalendarOperationalFilter}
                 onIncludeInactive={setCalendarIncludeInactive}
+                showUnresolvedGuarantees={canViewGuaranteeQueue ? showUnresolvedGuarantees : false}
+                onToggleUnresolvedGuarantees={canViewGuaranteeQueue ? handleToggleUnresolvedGuarantees : undefined}
+                unresolvedGuaranteeCount={canViewGuaranteeQueue ? unresolvedGuaranteeItems.length : undefined}
+                unresolvedGuaranteeLoading={unresolvedGuaranteeLoading}
               />
+
+              {canViewGuaranteeQueue && showUnresolvedGuarantees && (
+                <GuaranteeQueuePanel
+                  items={unresolvedGuaranteeItems}
+                  loading={unresolvedGuaranteeLoading}
+                  error={unresolvedGuaranteeError}
+                  propertyId={propertyId}
+                  onOpenReservation={openReservationFromGuaranteeQueue}
+                  onRetry={fetchUnresolvedGuaranteeQueue}
+                />
+              )}
 
               <div className="overflow-x-auto calendar-grid-shell">
                 <table className="w-full border-collapse text-xs" style={{ tableLayout: 'fixed' }}>
@@ -4259,11 +4377,7 @@ function AppContent() {
           reservation={selectedRes}
           propertyId={propertyId ?? selectedRes?.property_id ?? null}
           onClose={() => {
-            setSelectedRes(null);
-            setSelectedFolio(null);
-            setPaymentDraft('');
-            setPaymentFeedback(null);
-            setPaymentSubmitting(false);
+            handleGuaranteeQueueDrawerClose();
           }}
           onRefresh={() => {
             fetchData();
