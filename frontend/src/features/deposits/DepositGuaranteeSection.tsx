@@ -365,7 +365,7 @@ export default function DepositGuaranteeSection({
             Gunakan ke Tagihan
           </button>
         )}
-        {!isClosed && capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
+        {capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
           <button onClick={() => { setError(null); setShowRefund(true); }}
             className="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 transition">
             Refund Deposit
@@ -410,7 +410,7 @@ export default function DepositGuaranteeSection({
                     <span className="text-xs text-stone-500 ml-2">milik {actionableRoomCustody.document_holder_name}</span>
                   )}
                 </div>
-                {!isClosed && capabilities.canReturnIdentity && (
+                {capabilities.canReturnIdentity && (
                   <button onClick={() => { setError(null); setShowReturnId(true); }}
                     className="px-2.5 py-1 bg-white text-amber-700 text-xs font-semibold rounded-lg border border-amber-300 hover:bg-amber-100 transition">
                     Kembalikan
