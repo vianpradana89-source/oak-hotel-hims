@@ -108,6 +108,7 @@ import {
 import { createIdentityCustodyRouter } from './domains/identity/identityCustodyRouter';
 import { getHeldIdentityCustodyForCheckout } from './domains/identity/identityCustodyService';
 import { createDepositRouter } from './domains/deposits/depositRouter';
+import { createUnresolvedGuaranteeRouter } from './domains/guarantees/guaranteeQueueRouter';
 import { createFrontOfficeSettingsRouter } from './domains/frontOffice/frontOfficeSettingsRouter';
 import { getQuickBookingRules } from './domains/frontOffice/frontOfficeSettingsService';
 import { getReservationEditAvailability, getBookingCreateAvailability, previewReservationEdit, executeReservationEdit, executeReservationEditWithPayment } from './domains/reservations/reservationEditService';
@@ -7762,6 +7763,7 @@ app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
+app.use('/api', createUnresolvedGuaranteeRouter(pool));
 app.use('/api/settings/purchases', createPurchaseSettingsRouter(pool));
 app.use('/api/settings/role-permissions', createRolePermissionsRouter(pool));
 app.use('/api/hrd/role-permissions', createRolePermissionsRouter(pool));
