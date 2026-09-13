@@ -150,6 +150,80 @@ export function canCreateGroupCustody(
 }
 
 /**
+ * Whether a room (ROOM_RESERVATION) guarantee is still unresolved — i.e. the
+ * operator has not yet completed settlement of KTP Kamar / Deposit Kamar.
+ *
+ * Returned true when ANY of:
+ *   - HELD ROOM_RESERVATION identity custody exists, OR
+ *   - active (non-CLOSED/CANCELLED) ROOM_RESERVATION deposit has remaining > 0
+ *
+ * False when both categories are settled (ALL room custody RETURNED + no
+ * outstanding room deposit balance).
+ *
+ * BOOKING_GROUP records are explicitly excluded — they are managed separately.
+ */
+export function hasUnresolvedRoomGuarantee(
+  deposits: Deposit[],
+  custody: IdentityCustodyRecord[]
+): boolean {
+  const heldRoomCustody = custody.some(
+    c => !isGroupCustody(c) && c.status === 'HELD'
+  );
+  const openRoomDeposit = deposits.some(
+    d => !isGroupDeposit(d) && isActiveDeposit(d) && (d.balance?.remaining ?? 0) > 0
+  );
+  return heldRoomCustody || openRoomDeposit;
+}
+
+/**
+ * Decision helper for the close-warning flow.
+ *
+ * Typed decision outcomes:
+ *   - CLOSE          — close the drawer immediately, no warning
+ *   - WAIT           — guarantee data still loading; keep close queued, do nothing yet
+ *   - WARN_ROOM      — terminal + ROOM_RESERVATION guarantee unresolved
+ *   - WARN_GROUP     — multi-room group terminal + BOOKING_GROUP guarantee unresolved
+ *   - WARN_BOTH      — both room and group guarantees unresolved
+ *   - WARN_UNVERIFIED— guarantee load FAILED; state unknown, must not be treated as settled
+ */
+export type GuaranteeCloseAction =
+  | 'CLOSE'
+  | 'WAIT'
+  | 'WARN_ROOM'
+  | 'WARN_GROUP'
+  | 'WARN_BOTH'
+  | 'WARN_UNVERIFIED';
+
+export interface GuaranteeCloseDecision {
+  action: GuaranteeCloseAction;
+}
+
+/** Load status of guarantee (deposit/custody) data. */
+export type GuaranteeLoadStatus = 'loading' | 'ready' | 'error';
+
+export function deriveGuaranteeCloseDecision(params: {
+  terminal: boolean;
+  status: GuaranteeLoadStatus;
+  roomUnresolved: boolean;
+  groupEligible: boolean;
+  groupUnresolved: boolean;
+}): GuaranteeCloseDecision {
+  // Non-terminal reservations: always close immediately.
+  if (!params.terminal) return { action: 'CLOSE' };
+  // Load failed: unknown state must NOT be treated as settled — conservative warning.
+  if (params.status === 'error') return { action: 'WARN_UNVERIFIED' };
+  // Data not yet loaded: wait — do not close, do not show a false warning.
+  if (params.status === 'loading') return { action: 'WAIT' };
+  // status === 'ready': canonical unresolved predicates.
+  const roomWarn = params.roomUnresolved;
+  const groupWarn = params.groupEligible && params.groupUnresolved;
+  if (roomWarn && groupWarn) return { action: 'WARN_BOTH' };
+  if (roomWarn) return { action: 'WARN_ROOM' };
+  if (groupWarn) return { action: 'WARN_GROUP' };
+  return { action: 'CLOSE' };
+}
+
+/**
  * Whether a group (BOOKING_GROUP) guarantee is still unresolved — i.e. the
  * operator has not yet completed settlement of KTP Grup / Deposit Grup.
  *
@@ -208,4 +282,38 @@ export function summarizeDepositBalances(deposits: Deposit[]): DepositBalance {
     summary.remaining += b.remaining ?? 0;
   }
   return summary;
+}
+
+/**
+ * Request-sequence guard: whether a completed async response is still the LATEST request.
+ *
+ * A response may only commit state (deposits/custody/loadedSourceKey/loadError/loading)
+ * when its request id still equals the latest issued request id. Any older response
+ * must be discarded — it has ZERO authority over current state.
+ */
+export function isCurrentGuaranteeRequest(requestId: number, latestRequestId: number): boolean {
+  return requestId === latestRequestId;
+}
+
+/**
+ * Derives the guarantee load status from observable component state.
+ *
+ * Production truth: `loadError` is the authoritative failure flag (set only by the
+ * LATEST request), `loading` is the authoritative in-flight flag (cleared only by
+ * the LATEST request), and `sourceMatches` verifies the committed data belongs to
+ * the current reservation+property.
+ *
+ * @param loading       — whether the latest request is still in flight
+ * @param loadError     — whether the latest request completed with failure
+ * @param sourceMatches — whether committed data belongs to current reservation+property
+ */
+export function deriveGuaranteeLoadStatus(params: {
+  loading: boolean;
+  loadError: boolean;
+  sourceMatches: boolean;
+}): GuaranteeLoadStatus {
+  if (params.loading) return 'loading';
+  if (params.loadError) return 'error';
+  if (!params.sourceMatches) return 'loading';
+  return 'ready';
 }

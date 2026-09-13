@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Modal } from '../../design-system/Modal';
 import { useAuth } from '../auth/AuthContext';
 import { getDepositGuaranteeCapabilities } from './depositCapabilities';
@@ -18,6 +18,10 @@ import {
   canCreateGroupDeposit,
   canCreateGroupCustody,
   hasUnresolvedGroupGuarantee,
+  hasUnresolvedRoomGuarantee,
+  deriveGuaranteeLoadStatus,
+  isCurrentGuaranteeRequest,
+  type GuaranteeLoadStatus,
 } from './guaranteeScopePolicy';
 
 const PAYMENT_METHODS = [
@@ -90,32 +94,66 @@ interface Props {
   compact?: boolean;
   onRefresh?: () => void;
   isMultiRoomBooking?: boolean;
-  /** Reports whether the associated BOOKING_GROUP guarantee is unresolved so the parent drawer
-   * can surface a close-warning / status banner without re-fetching. */
-  onUnresolvedGroupGuaranteeChange?: (unresolved: boolean) => void;
+  /** Reports guarantee state (load status + unresolved flags) upward so the parent
+   * drawer can surface close-warnings without re-fetching.
+   * Emits `{status:'loading',...}` immediately on mount/switch, then the canonical
+   * state after data loads — parent must not treat loading/error as settled. */
+  onGuaranteeStateChange?: (state: {
+    status: GuaranteeLoadStatus;
+    roomUnresolved: boolean;
+    groupUnresolved: boolean;
+  }) => void;
 }
 
 export default function DepositGuaranteeSection({
   reservationId, propertyId, reservationStatus, remainingBalance, compact, onRefresh,
   isMultiRoomBooking = false,
-  onUnresolvedGroupGuaranteeChange,
+  onGuaranteeStateChange,
 }: Props) {
   const { user } = useAuth();
   const capabilities = useMemo(() => getDepositGuaranteeCapabilities(user?.role), [user?.role]);
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [custody, setCustody] = useState<IdentityCustodyRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  // Tracks which reservation+property the SUCCESSFUL deposit/custody data belongs to.
+  // Prevents stale-response race: if A's response arrives after switching to B,
+  // the source key from A will NOT match B, so READY is never emitted for B using A's data.
+  const [loadedSourceKey, setLoadedSourceKey] = useState<string | null>(null);
+  // Monotonic request-sequence ref. Guards against stale async responses from
+  // a previous reservation/property request overwriting current state.
+  const loadRequestSeqRef = useRef(0);
+
+  const currentSourceKey = `${propertyId}:${reservationId}`;
 
   const loadData = useCallback(async () => {
+    const requestSourceKey = `${propertyId}:${reservationId}`;
+    // Atomically claim this as the latest request. Stale responses from prior
+    // requests can identify themselves by comparing their id against this ref.
+    const requestId = ++loadRequestSeqRef.current;
     setLoading(true);
+    setLoadError(false);
+    setLoadedSourceKey(null); // invalidate before new fetch starts
     try {
       const [dep, cust] = await Promise.all([
-        depositApi.list(reservationId, propertyId).catch(() => []),
-        identityCustodyApi.list(reservationId, propertyId).catch(() => []),
+        depositApi.list(reservationId, propertyId).catch(() => null),
+        identityCustodyApi.list(reservationId, propertyId).catch(() => null),
       ]);
+      // STALE-RESPONSE GUARD: a newer request has already started. Discard —
+      // this response has ZERO authority over current state (data OR error).
+      if (!isCurrentGuaranteeRequest(requestId, loadRequestSeqRef.current)) return;
+      if (dep === null || cust === null) {
+        setLoadError(true);
+        return;
+      }
       setDeposits(dep);
       setCustody(cust);
-    } finally { setLoading(false); }
+      setLoadedSourceKey(requestSourceKey);
+    } finally {
+      // STALE-FINALLY GUARD: only the latest request may flip loading off,
+      // so a stale request cannot cancel a newer request's in-flight state.
+      if (isCurrentGuaranteeRequest(requestId, loadRequestSeqRef.current)) setLoading(false);
+    }
   }, [reservationId, propertyId]);
 
   useEffect(() => { loadData(); }, [loadData]);
@@ -157,15 +195,28 @@ export default function DepositGuaranteeSection({
 
   const refreshAll = async () => { await loadData(); onRefresh?.(); };
 
-  // Report unresolved GROUP guarantee state upward so the drawer can warn on close.
-  // MUST send false explicitly when not a multi-room booking to avoid stale
-  // unresolved state from a previous multi-room child after navigation.
+  // Report guarantee state upward (tri-state status prevents false "settled" on load/error).
+  // READY is emitted ONLY when loading is done, no error occurred, AND the successful
+  // data belongs to the CURRENT reservation+property. The request-sequence ref ensures
+  // stale async responses from a previous reservation cannot mutate state; the source
+  // key ensures the committed data is authoritative for the current reservation.
   useEffect(() => {
-    if (!onUnresolvedGroupGuaranteeChange) return;
-    onUnresolvedGroupGuaranteeChange(
-      isMultiRoomBooking ? hasUnresolvedGroupGuarantee(deposits, custody) : false
-    );
-  }, [deposits, custody, isMultiRoomBooking, onUnresolvedGroupGuaranteeChange]);
+    if (!onGuaranteeStateChange) return;
+    const sourceMatches = loadedSourceKey === currentSourceKey;
+    const status = deriveGuaranteeLoadStatus({ loading, loadError, sourceMatches });
+    if (status === 'ready') {
+      onGuaranteeStateChange({
+        status: 'ready',
+        roomUnresolved: hasUnresolvedRoomGuarantee(deposits, custody),
+        groupUnresolved: isMultiRoomBooking ? hasUnresolvedGroupGuarantee(deposits, custody) : false,
+      });
+    } else if (loadError) {
+      onGuaranteeStateChange({ status: 'error', roomUnresolved: false, groupUnresolved: false });
+    } else {
+      // loading OR source key mismatch (stale response) — both map to 'loading' externally.
+      onGuaranteeStateChange({ status: 'loading', roomUnresolved: false, groupUnresolved: false });
+    }
+  }, [deposits, custody, isMultiRoomBooking, loadError, loading, loadedSourceKey, currentSourceKey, onGuaranteeStateChange]);
 
   if (loading) {
     return (

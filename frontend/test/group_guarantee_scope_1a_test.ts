@@ -27,6 +27,11 @@ import {
   canCreateGroupDeposit,
   canCreateGroupCustody,
   hasUnresolvedGroupGuarantee,
+  hasUnresolvedRoomGuarantee,
+  deriveGuaranteeCloseDecision,
+  deriveGuaranteeLoadStatus,
+  isCurrentGuaranteeRequest,
+  type GuaranteeLoadStatus,
 } from '../src/features/deposits/guaranteeScopePolicy.ts';
 import type { Deposit, IdentityCustodyRecord } from '../src/features/deposits/depositApi.ts';
 
@@ -450,6 +455,156 @@ check(
   })(),
   'T50: guard expression returns false for empty deposits/custody when isMultiRoomBooking=false'
 );
+
+// ─── T51–T60: hasUnresolvedRoomGuarantee (ROOM_RESERVATION scope) ─────────
+// (hasUnresolvedRoomGuarantee already imported above — no duplicate import)
+
+const makeDepR = (id: number, scope: 'ROOM_RESERVATION' | 'BOOKING_GROUP', status: Deposit['status'], remaining?: number): Deposit =>
+  Object.assign(makeDep(id, scope, status), { balance: { effective_received: remaining ?? 100000, applied: 0, refunded: 0, reversed_received: 0, remaining: remaining ?? 100000, status } });
+
+const makeCustodyR = (id: number, scope: 'ROOM_RESERVATION' | 'BOOKING_GROUP', status: 'HELD' | 'RETURNED'): IdentityCustodyRecord =>
+  Object.assign(makeCustody(id, scope, status), { document_type: 'KTP', document_number_masked: '3***45' });
+
+check(hasUnresolvedRoomGuarantee([makeDepR(200, 'ROOM_RESERVATION', 'RECEIVED')], []) === true,
+  'T51: ROOM_RESERVATION deposit remaining>0 → room unresolved true');
+check(hasUnresolvedRoomGuarantee([], [makeCustodyR(201, 'ROOM_RESERVATION', 'HELD')]) === true,
+  'T52: ROOM_RESERVATION custody HELD → room unresolved true');
+check(hasUnresolvedRoomGuarantee([makeDepR(202, 'ROOM_RESERVATION', 'RECEIVED', 0)], []) === false,
+  'T53: ROOM_RESERVATION deposit remaining=0 → room unresolved false');
+check(hasUnresolvedRoomGuarantee([makeDepR(203, 'ROOM_RESERVATION', 'CLOSED')], []) === false,
+  'T54: ROOM_RESERVATION deposit CLOSED → room unresolved false');
+check(hasUnresolvedRoomGuarantee([makeDepR(204, 'ROOM_RESERVATION', 'CANCELLED')], []) === false,
+  'T55: ROOM_RESERVATION deposit CANCELLED → room unresolved false');
+check(hasUnresolvedRoomGuarantee([makeDep(205, 'BOOKING_GROUP', 'RECEIVED')], []) === false,
+  'T56: BOOKING_GROUP-only deposit → room unresolved false');
+check(hasUnresolvedRoomGuarantee([], [makeCustody(206, 'BOOKING_GROUP', 'HELD')]) === false,
+  'T57: BOOKING_GROUP-only custody → room unresolved false');
+check(hasUnresolvedRoomGuarantee([makeDepR(207, 'ROOM_RESERVATION', 'RECEIVED')], [makeCustodyR(208, 'ROOM_RESERVATION', 'RETURNED')]) === true,
+  'T58: returned room custody + open room deposit → room unresolved true');
+check(hasUnresolvedRoomGuarantee([makeDepR(209, 'ROOM_RESERVATION', 'CLOSED')], [makeCustodyR(210, 'ROOM_RESERVATION', 'RETURNED')]) === false,
+  'T59: room deposit CLOSED + room custody RETURNED → room unresolved false');
+check(hasUnresolvedRoomGuarantee([], []) === false,
+  'T60: empty deposits+custody → room unresolved false');
+
+// ─── T61–T70: deriveGuaranteeCloseDecision ─────────────────────────────────
+check(deriveGuaranteeCloseDecision({ terminal: false, status: 'ready', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'CLOSE',
+  'T61: non-terminal → CLOSE regardless of unresolved');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'loading', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WAIT',
+  'T62: terminal + loading → WAIT (no close, no warning)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: false, groupUnresolved: false }).action === 'WARN_ROOM',
+  'T63: terminal + ready + room unresolved → WARN_ROOM');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: true }).action === 'WARN_GROUP',
+  'T64: terminal + ready + group unresolved → WARN_GROUP');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'WARN_BOTH',
+  'T65: terminal + ready + both unresolved → WARN_BOTH');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'CLOSE',
+  'T66: terminal + ready + all settled → CLOSE');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: false, groupUnresolved: true }).action === 'CLOSE',
+  'T67: terminal + ready + group ineligible but unresolved flag true → CLOSE (group not eligible)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: false, groupUnresolved: false }).action === 'WARN_ROOM',
+  'T68: terminal + ready + room unresolved + group ineligible → WARN_ROOM only');
+check(deriveGuaranteeCloseDecision({ terminal: false, status: 'loading', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'CLOSE',
+  'T69: non-terminal + loading → CLOSE immediately (terminality wins)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'CLOSE',
+  'T70: terminal + ready + no unresolved → CLOSE, no warning');
+
+// ─── T71–T80: error status and pending-close resolution ──────────────────────
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T71: terminal + error → WARN_UNVERIFIED (unknown state, never settled)');
+check(deriveGuaranteeCloseDecision({ terminal: false, status: 'error', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'CLOSE',
+  'T72: non-terminal + error → CLOSE (terminality wins over error)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'loading', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WAIT',
+  'T73: terminal + loading + pending close → WAIT (no premature close)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: true, groupUnresolved: false }).action === 'WARN_ROOM',
+  'T74: pending close resolves to WARN_ROOM when load succeeds unresolved');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'CLOSE',
+  'T75: pending close resolves to CLOSE when load succeeds settled');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T76: pending close resolves to WARN_UNVERIFIED when load errors');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'WARN_BOTH',
+  'T77: mixed scopes — room unresolved + group unresolved → WARN_BOTH');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: false, groupUnresolved: true }).action === 'WARN_ROOM',
+  'T78: scope isolation — room unresolved + group ineligible → WARN_ROOM only');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'CLOSE',
+  'T79: CANCELLED terminal + ready + all settled → CLOSE (CANCELLED is terminal)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'loading', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'WAIT',
+  'T80: unknown status preserves WAIT even if flags are pre-populated');
+
+// ─── T81–T88: partial-failure semantics (BOTH sources required for READY) ──────
+// These tests verify the invariants that drive DepositGuaranteeSection.loadData()
+// and guarantee the drawer cannot derive settled state from incomplete data.
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'CLOSE',
+  'T81: both sources success → READY → settled → CLOSE');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T82: deposits fail + custody success → ERROR → terminal → WARN_UNVERIFIED');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T83: deposits success + custody fail → ERROR → terminal → WARN_UNVERIFIED');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T84: both fail → ERROR → terminal → WARN_UNVERIFIED');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'WARN_UNVERIFIED',
+  'T85: partial failure must NEVER derive settled state (flags ignored on error)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WARN_UNVERIFIED',
+  'T86: terminal + partial failure → WARN_UNVERIFIED (not CLOSE)');
+check(deriveGuaranteeCloseDecision({ terminal: false, status: 'error', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'CLOSE',
+  'T87: non-terminal + partial failure → CLOSE (terminality wins)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'loading', roomUnresolved: false, groupEligible: true, groupUnresolved: false }).action === 'WAIT',
+  'T88: pending close + partial failure → stays WAIT until load completes → WARN_UNVERIFIED');
+
+// ─── T89–T94: deriveGuaranteeLoadStatus (new 3-param contract: loading, loadError, sourceMatches) ──
+check(deriveGuaranteeLoadStatus({ loading: true, loadError: false, sourceMatches: true }) === 'loading',
+  'T89: loading=true → loading');
+check(deriveGuaranteeLoadStatus({ loading: false, loadError: false, sourceMatches: true }) === 'ready',
+  'T90: loading=false + no error + sourceMatches → ready');
+check(deriveGuaranteeLoadStatus({ loading: false, loadError: true, sourceMatches: true }) === 'error',
+  'T91: loadError=true → error');
+check(deriveGuaranteeLoadStatus({ loading: false, loadError: false, sourceMatches: false }) === 'loading',
+  'T92: source mismatch → loading (never ready)');
+check(deriveGuaranteeLoadStatus({ loading: true, loadError: true, sourceMatches: false }) === 'loading',
+  'T93: loading masks error → still loading');
+check(deriveGuaranteeLoadStatus({ loading: false, loadError: true, sourceMatches: false }) === 'error',
+  'T94: error wins over mismatch → error');
+
+// ─── T95–T101: isCurrentGuaranteeRequest — stale-response guard ────────
+check(isCurrentGuaranteeRequest(1, 1) === true,
+  'T95: requestA id=1, latest=1 → may commit (current request)');
+check(isCurrentGuaranteeRequest(1, 2) === false,
+  'T96: requestA id=1, latest=2 (B started) → A may NOT commit');
+check(isCurrentGuaranteeRequest(2, 2) === true,
+  'T97: requestB id=2, latest=2 → may commit');
+check(isCurrentGuaranteeRequest(0, 1) === false,
+  'T98: stale id=0, latest=1 → cannot commit');
+check(isCurrentGuaranteeRequest(5, 5) === true,
+  'T99: any matching id → current');
+check(isCurrentGuaranteeRequest(5, 6) === false,
+  'T100: older id → stale');
+
+// ─── T102–T107: isCurrentGuaranteeRequest failure/stale semantics ────
+check(isCurrentGuaranteeRequest(1, 2) === false,
+  'T102: stale A failure must NOT set current error (requestId !== latestRef)');
+check(isCurrentGuaranteeRequest(1, 2) === false,
+  'T103: stale A finally must NOT clear B loading (requestId !== latestRef)');
+check(isCurrentGuaranteeRequest(2, 2) === true,
+  'T104: current B success → commits');
+check(isCurrentGuaranteeRequest(2, 2) === true,
+  'T105: current B error → sets loadError');
+check(isCurrentGuaranteeRequest(2, 2) === true,
+  'T106: current B finally → clears loading');
+check(isCurrentGuaranteeRequest(3, 2) === false,
+  'T107: future-id (should not happen) → stale');
+
+// ─── T102–T108: group eligibility via isGroupTerminal (not isMultiRoomBooking) ──
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: false, groupUnresolved: true }).action === 'CLOSE',
+  'T102: current terminal + sibling active (groupIneligible=false) + group unresolved → CLOSE (no group warning)');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: false, groupUnresolved: true }).action === 'WARN_ROOM',
+  'T103: current terminal + sibling active + room unresolved + group unresolved → WARN_ROOM only');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: false, groupEligible: true, groupUnresolved: true }).action === 'WARN_GROUP',
+  'T104: all children terminal (groupEligible=true) + group unresolved → WARN_GROUP');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'ready', roomUnresolved: true, groupEligible: true, groupUnresolved: true }).action === 'WARN_BOTH',
+  'T105: all children terminal + room + group unresolved → WARN_BOTH');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'loading', roomUnresolved: true, groupEligible: false, groupUnresolved: true }).action === 'WAIT',
+  'T106: terminal + loading → WAIT regardless of groupEligible');
+check(deriveGuaranteeCloseDecision({ terminal: true, status: 'error', roomUnresolved: false, groupEligible: false, groupUnresolved: true }).action === 'WARN_UNVERIFIED',
+  'T107: terminal + error → WARN_UNVERIFIED regardless of groupEligible');
 
 // ─── Summary ────────────────────────────────────────────────────────────────
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);

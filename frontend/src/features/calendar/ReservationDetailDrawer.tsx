@@ -13,6 +13,7 @@ import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentU
 import { useAuth } from '../auth/AuthContext';
 import { Modal } from '../../design-system/Modal';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import { deriveGuaranteeCloseDecision, type GuaranteeLoadStatus } from '../deposits/guaranteeScopePolicy';
 import {
   canEditReservationSpecialRequests,
   formatReservationRatePlanLabel,
@@ -91,9 +92,10 @@ export default function ReservationDetailDrawer({
     const [replacingEvidencePaymentId, setReplacingEvidencePaymentId] = useState<number | null>(null);
     const [evidenceUploadError, setEvidenceUploadError] = useState<string | null>(null);
     const [evidenceUploadSuccess, setEvidenceUploadSuccess] = useState<string | null>(null);
-    // GROUP-GUARANTEE-CLOSE-WARNING: track unresolved BOOKING_GROUP guarantee from the section
-    const [hasUnresolvedGroupGuarantee, setHasUnresolvedGroupGuarantee] = useState(false);
-    const [showGroupGuaranteeWarning, setShowGroupGuaranteeWarning] = useState(false);
+    const [guaranteeState, setGuaranteeState] = useState<{ status: GuaranteeLoadStatus; roomUnresolved: boolean; groupUnresolved: boolean }>({ status: 'loading', roomUnresolved: false, groupUnresolved: false });
+    const [showGuaranteeWarning, setShowGuaranteeWarning] = useState(false);
+    const [showGuaranteeVerificationWarning, setShowGuaranteeVerificationWarning] = useState(false);
+    const [pendingGuaranteeClose, setPendingGuaranteeClose] = useState(false);
     const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -488,15 +490,73 @@ export default function ReservationDetailDrawer({
 
   // GROUP-GUARANTEE-CLOSE-WARNING: warn on close only when group is terminal AND guarantee is unresolved.
   // A soft warning — never blocks checkout, never mutates data.
-  const handleGroupGuaranteeWarningClose = () => setShowGroupGuaranteeWarning(false);
-  const handleGroupGuaranteeConfirmClose = () => { handleGroupGuaranteeWarningClose(); onClose(); };
+  // Common dismiss that clears ALL warning/pending state so no modal remains logically open.
+  const handleGuaranteeDismiss = () => {
+    setShowGuaranteeWarning(false);
+    setShowGuaranteeVerificationWarning(false);
+    setPendingGuaranteeClose(false);
+  };
+  const handleGuaranteeWarningClose = handleGuaranteeDismiss;
+  const handleGuaranteeConfirmClose = () => { handleGuaranteeDismiss(); onClose(); };
+
+  // Guard: reset pending/close state whenever the opened reservation or its terminal status changes,
+  // so stale pending state from a previous reservation cannot leak.
+  useEffect(() => {
+    setPendingGuaranteeClose(false);
+    setShowGuaranteeWarning(false);
+    setShowGuaranteeVerificationWarning(false);
+  }, [data.id, isCurrentTerminal]);
+
   const requestClose = useCallback(() => {
-    if (isGroupTerminal && hasUnresolvedGroupGuarantee) {
-      setShowGroupGuaranteeWarning(true);
+    if (!isCurrentTerminal) {
+      onClose();
+      return;
+    }
+    // Reservation is terminal: defer to the decision helper.
+    // Group warning eligibility requires isGroupTerminal (all children terminal),
+    // NOT merely isMultiRoomBooking.
+    const decision = deriveGuaranteeCloseDecision({
+      terminal: isCurrentTerminal,
+      status: guaranteeState.status,
+      roomUnresolved: guaranteeState.roomUnresolved,
+      groupEligible: isGroupTerminal,
+      groupUnresolved: guaranteeState.groupUnresolved,
+    });
+    if (decision.action === 'CLOSE') {
+      onClose();
+    } else if (decision.action === 'WARN_UNVERIFIED') {
+      setPendingGuaranteeClose(false);
+      setShowGuaranteeVerificationWarning(true);
+    } else if (decision.action.startsWith('WARN')) {
+      setPendingGuaranteeClose(false);
+      setShowGuaranteeWarning(true);
+    } else {
+      // status === 'loading': queue the close until guarantee data arrives.
+      setPendingGuaranteeClose(true);
+    }
+  }, [isCurrentTerminal, isGroupTerminal, guaranteeState, onClose]);
+
+  // When guarantee data finishes loading while a close is pending, resolve immediately.
+  // Group eligibility derives from isGroupTerminal (not isMultiRoomBooking) — a single
+  // child within an active multi-room booking does NOT trigger group-level warnings.
+  useEffect(() => {
+    if (!pendingGuaranteeClose || guaranteeState.status === 'loading') return;
+    const decision = deriveGuaranteeCloseDecision({
+      terminal: isCurrentTerminal,
+      status: guaranteeState.status,
+      roomUnresolved: guaranteeState.roomUnresolved,
+      groupEligible: isGroupTerminal,
+      groupUnresolved: guaranteeState.groupUnresolved,
+    });
+    if (decision.action === 'WARN_UNVERIFIED') {
+      setShowGuaranteeVerificationWarning(true);
+    } else if (decision.action.startsWith('WARN')) {
+      setShowGuaranteeWarning(true);
     } else {
       onClose();
     }
-  }, [isGroupTerminal, hasUnresolvedGroupGuarantee, onClose]);
+    setPendingGuaranteeClose(false);
+  }, [guaranteeState, pendingGuaranteeClose, isCurrentTerminal, isGroupTerminal, onClose]);
 
   const handleCopyBid = async () => {
     try {
@@ -1418,13 +1478,27 @@ export default function ReservationDetailDrawer({
             </form>
           )}
 
-          {/* GROUP-GUARANTEE-CLOSE-WARNING: persistent banner when group terminal + unresolved */}
-          {isGroupTerminal && hasUnresolvedGroupGuarantee && (
-            <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex items-center gap-2">
-              <span className="text-base">⚠️</span>
-              <span className="font-semibold">Jaminan Grup Belum Selesai</span>
-              <span>— KTP Grup masih ditahan atau Deposit Grup belum dikembalikan.</span>
-            </div>
+          {/* GUARANTEE-CLOSE-WARNING: persistent banner when terminal + unresolved guarantee */}
+          {guaranteeState.status === 'ready' && (
+            ((isCurrentTerminal && guaranteeState.roomUnresolved) || (isGroupTerminal && guaranteeState.groupUnresolved)) && (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex items-center gap-2">
+                <span className="text-base">⚠️</span>
+                <span className="font-semibold">
+                  {isGroupTerminal && guaranteeState.groupUnresolved
+                    ? (isCurrentTerminal && guaranteeState.roomUnresolved
+                        ? 'Jaminan Kamar & Grup Belum Selesai'
+                        : 'Jaminan Grup Belum Selesai')
+                    : 'Jaminan Kamar Belum Selesai'}
+                </span>
+                <span>
+                  {isGroupTerminal && guaranteeState.groupUnresolved
+                    ? (isCurrentTerminal && guaranteeState.roomUnresolved
+                        ? 'Masih ada jaminan kamar atau grup yang belum diselesaikan.'
+                        : '— KTP Grup masih ditahan atau Deposit Grup belum dikembalikan.')
+                    : '— KTP Kamar masih ditahan atau Deposit Kamar belum dikembalikan.'}
+                </span>
+              </div>
+            )
           )}
 
           {/* Section: Deposit & Jaminan */}
@@ -1436,7 +1510,7 @@ export default function ReservationDetailDrawer({
               remainingBalance={remainingBalance}
               isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
-              onUnresolvedGroupGuaranteeChange={setHasUnresolvedGroupGuarantee}
+              onGuaranteeStateChange={setGuaranteeState}
             />
           )}
 
@@ -2059,25 +2133,31 @@ export default function ReservationDetailDrawer({
       </div>
       {activePropId && <RoomMoveModal isOpen={isRoomMoveModalOpen} reservation={data} propertyId={activePropId} onClose={() => setIsRoomMoveModalOpen(false)} onSuccess={() => { loadFullReservation(); onRefresh(); }} />}
 
-      {/* GROUP-GUARANTEE-CLOSE-WARNING: confirmation dialog before closing terminal group with unresolved guarantee */}
+      {/* GUARANTEE-CLOSE-WARNING: confirmation dialog before closing terminal reservation with unresolved guarantee */}
       <Modal
-        isOpen={showGroupGuaranteeWarning}
-        onClose={handleGroupGuaranteeWarningClose}
-        title="Jaminan Grup Belum Selesai"
+        isOpen={showGuaranteeWarning}
+        onClose={handleGuaranteeWarningClose}
+        title={
+          isGroupTerminal && guaranteeState.groupUnresolved
+            ? (isCurrentTerminal && guaranteeState.roomUnresolved
+                ? 'Jaminan Kamar & Grup Belum Selesai'
+                : 'Jaminan Grup Belum Selesai')
+            : 'Jaminan Kamar Belum Selesai'
+        }
         size="sm"
         closeOnOverlayClick={false}
         footer={
           <>
             <button
               type="button"
-              onClick={handleGroupGuaranteeWarningClose}
+              onClick={handleGuaranteeWarningClose}
               className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
             >
               Kembali
             </button>
             <button
               type="button"
-              onClick={handleGroupGuaranteeConfirmClose}
+              onClick={handleGuaranteeConfirmClose}
               className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
               Tetap Tutup
@@ -2086,8 +2166,42 @@ export default function ReservationDetailDrawer({
         }
       >
         <p className="text-sm text-stone-700">
-          Masih ada KTP Grup yang ditahan atau Deposit Grup yang belum dikembalikan.
-          Tetap tutup detail reservasi?
+          {isGroupTerminal && guaranteeState.groupUnresolved
+            ? (isCurrentTerminal && guaranteeState.roomUnresolved
+                ? 'Masih ada jaminan kamar atau grup yang belum diselesaikan. Tetap tutup detail reservasi?'
+                : 'Masih ada KTP Grup yang ditahan atau Deposit Grup yang belum dikembalikan. Tetap tutup detail reservasi?')
+            : 'Masih ada KTP Kamar yang ditahan atau Deposit Kamar yang belum dikembalikan. Tetap tutup detail reservasi?'}
+        </p>
+      </Modal>
+
+      {/* GUARANTEE-CLOSE-WARNING: verification-error modal — shown when guarantee data could not be fetched */}
+      <Modal
+        isOpen={showGuaranteeVerificationWarning}
+        onClose={handleGuaranteeWarningClose}
+        title="Status Jaminan Belum Dapat Diverifikasi"
+        size="sm"
+        closeOnOverlayClick={false}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={handleGuaranteeWarningClose}
+              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+            >
+              Kembali
+            </button>
+            <button
+              type="button"
+              onClick={handleGuaranteeConfirmClose}
+              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              Tetap Tutup
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-stone-700">
+          Data deposit atau identitas belum dapat diperiksa. Pastikan jaminan sudah diselesaikan sebelum menutup detail reservasi.
         </p>
       </Modal>
     </div>
