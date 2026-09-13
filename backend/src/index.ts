@@ -3045,6 +3045,10 @@ app.get('/api/reservations', async (req, res) => {
   }
 });
 
+// Guarantee queue must be registered BEFORE /api/reservations/:id to avoid
+// the sub-path '/unresolved-guarantees' being captured as ':id' param.
+app.use('/api', createUnresolvedGuaranteeRouter(pool));
+
 app.get('/api/reservations/:id', async (req, res) => {
   const reservationId = Number(req.params.id);
   try {

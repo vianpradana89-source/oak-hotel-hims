@@ -1,10 +1,16 @@
 import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
-import { requireAuth, requireRole } from '../auth/authMiddleware';
+import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth/authMiddleware';
 import { isPlatformSuperAdmin } from '../auth/authService';
 import { getUnresolvedGuaranteesByProperty } from './unresolvedGuaranteeService';
 
 function positiveInt(value: unknown, field: string): number {
+  if (value === undefined || value === null) {
+    const err: any = new Error(`${field} is required`);
+    err.statusCode = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw Object.assign(new Error(`${field} must be a positive integer`), {
@@ -15,9 +21,17 @@ function positiveInt(value: unknown, field: string): number {
   return parsed;
 }
 
-async function propertyIdFor(req: any, pool: Pool): Promise<number> {
+async function propertyIdFor(req: AuthenticatedRequest, pool: Pool): Promise<number> {
   const requested = positiveInt(req.body?.property_id ?? req.query?.property_id, 'property_id');
-  if (requested !== Number(req.user?.property_id) && !(await isPlatformSuperAdmin(pool, req.user?.id))) {
+  // Guard against missing/malformed user: undefined property_id produces NaN comparison.
+  // A properly authenticated user must have a numeric property_id.
+  if (!req.user || typeof req.user.property_id !== 'number') {
+    const err: any = new Error('Akses ditolak: Autentikasi diperlukan.');
+    err.statusCode = 401;
+    err.code = 'UNAUTHORIZED';
+    throw err;
+  }
+  if (requested !== req.user.property_id && !(await isPlatformSuperAdmin(pool, req.user.id))) {
     throw Object.assign(new Error('Cross-property access is not allowed'), {
       statusCode: 403,
       code: 'CROSS_PROPERTY_ACCESS',
@@ -50,20 +64,20 @@ export function createUnresolvedGuaranteeRouter(pool: Pool): Router {
   // Role guard: Front Office, General Manager, Super Admin only
   const roleGuard = requireRole(['Front Office', 'General Manager', 'Super Admin']);
 
-  router.get(
-    '/reservations/unresolved-guarantees',
-    requireAuth,
-    roleGuard,
-    async (req: any, res: Response) => {
-      try {
-        const propertyId = await propertyIdFor(req, pool);
-        const items = await getUnresolvedGuaranteesByProperty(pool, propertyId);
-        return res.json({ status: 'SUCCESS', data: { items } });
-      } catch (error) {
-        return sendError(res, error);
+    router.get(
+      '/reservations/unresolved-guarantees',
+      requireAuth,
+      roleGuard,
+      async (req: any, res: Response) => {
+        try {
+          const propertyId = await propertyIdFor(req, pool);
+          const items = await getUnresolvedGuaranteesByProperty(pool, propertyId);
+          return res.json({ status: 'SUCCESS', data: { items } });
+        } catch (error: any) {
+          return sendError(res, error);
+        }
       }
-    }
-  );
+    );
 
   return router;
 }
