@@ -314,4 +314,33 @@ check(calendarApiSrc2.includes('validateGuaranteeItem') || calendarApiSrc2.inclu
 check(calendarApiSrc2.includes('room_number !== null') && calendarApiSrc2.includes('typeof r.reservation_status !=='),
   'T42c: full field-level validation present');
 
+// ---------------------------------------------------------------------------
+// T43-T48: Compact UI (GUARANTEE-QUEUE-1C)
+// ---------------------------------------------------------------------------
+const stylesSrc = readSrc('src/styles.css');
+
+// T43: Compact scroll container exists with max-height
+check(stylesSrc.includes('.guarantee-queue-panel__table-wrap') && stylesSrc.includes('max-height') && stylesSrc.includes('overflow-y'),
+  'T43: compact scroll container (.guarantee-queue-panel__table-wrap) with max-height and overflow-y present');
+
+// T44: Sticky table header
+check(stylesSrc.includes('.guarantee-queue-table thead th') && stylesSrc.includes('position: sticky'),
+  'T44: sticky table header via position:sticky on thead th');
+
+// T45: Compact row/col spacing — padding reduced from defaults
+check(stylesSrc.includes('padding: 4px 8px') || stylesSrc.includes('padding:5px 8px'),
+  'T45: compact cell padding applied to table td');
+
+// T46: All queue items remain in DOM data flow — no filtering/truncation
+check(panelSrc.includes('sortedItems.map') && !panelSrc.includes('slice(') && !panelSrc.includes('.slice('),
+  'T46: all items rendered via sortedItems.map (no truncation/slicing)');
+
+// T47: Empty state unchanged
+check(panelSrc.includes('Semua jaminan sudah selesai') || panelSrc.includes('Semua jaminan'),
+  'T47: empty state text unchanged');
+
+// T48: Lihat Detail still calls correct reservation id via anchor_reservation_id
+check(panelSrc.includes('anchor_reservation_id') && panelSrc.includes('onOpenReservation'),
+  'T48: Lihat Detail passes anchor_reservation_id to onOpenReservation');
+
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);
