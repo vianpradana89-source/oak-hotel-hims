@@ -453,17 +453,20 @@ app.get('/api/events', requireAuth, async (req, res) => {
   const clientEntry = { res, lastActivity: Date.now() };
   clients.push(clientEntry);
 
-  // Heartbeat / keepalive every 15 seconds
   const heartbeatInterval = setInterval(() => {
     try {
       res.write(': heartbeat\n\n');
       clientEntry.lastActivity = Date.now();
     } catch {
       clearInterval(heartbeatInterval);
+      cleanup();
     }
   }, 15000);
 
-  req.on('close', () => {
+  let _cleaned = false;
+  function cleanup() {
+    if (_cleaned) return;
+    _cleaned = true;
     clearInterval(heartbeatInterval);
     const idx = clients.indexOf(clientEntry);
     if (idx !== -1) clients.splice(idx, 1);
@@ -471,7 +474,10 @@ app.get('/api/events', requireAuth, async (req, res) => {
     if (clients.length === 0) {
       sseClients.delete(propertyId);
     }
-  });
+  }
+
+  res.on('close', cleanup);
+  res.on('error', cleanup);
 });
 
 async function startServer() {
