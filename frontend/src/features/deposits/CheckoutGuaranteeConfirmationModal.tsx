@@ -16,7 +16,7 @@ export interface CheckoutGuaranteeConfirmationModalProps {
   propertyId: number | null;
   reservationData?: any;
   onClose: () => void;
-  onConfirmCheckout: (reservationId: number) => Promise<void> | void;
+  onConfirmCheckout: (reservationId: number) => Promise<any> | any;
   onOpenGuaranteeSection?: (reservationId: number) => void;
 }
 

@@ -27,7 +27,11 @@ interface Props {
   onClose: () => void;
   onRefresh: () => void;
   onCheckin: (reservationId: number, expectedPrimaryGuestId?: number | null) => void;
-  onCheckout: (reservationId: number, reservationHint?: any) => void;
+  onCheckout: (
+    reservationId: number,
+    reservationHint?: any,
+    onSuccess?: (updatedDto?: any) => Promise<void> | void
+  ) => void;
   onCancel: (reservationId: number) => void;
   onRequestCheckoutInspection?: (reservationId: number) => void;
   onToggleRoomStatus?: (roomId: string) => void;
@@ -1710,7 +1714,17 @@ export default function ReservationDetailDrawer({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => onCheckout(data.id, data)}
+                    onClick={() => {
+                      const targetId = Number(data.id);
+                      onCheckout(targetId, data, async (updatedDto) => {
+                        if (updatedDto) {
+                          setDetailData(updatedDto);
+                        }
+                        await loadFullReservation(targetId);
+                        await loadFolio(targetId);
+                        onRefresh();
+                      });
+                    }}
                     className="px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
                   >
                     Check-out Tamu

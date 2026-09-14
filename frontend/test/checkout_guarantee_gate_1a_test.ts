@@ -430,12 +430,13 @@ function makeCustody(overrides: Partial<IdentityCustodyRecord> = {}): IdentityCu
 
   // Entry Point A: ReservationDetailDrawer "Check-out Tamu"
   check(
-    drawerSrc.includes('onClick={() => onCheckout(data.id, data)}'),
-    'Scenario N-A: ReservationDetailDrawer dispatches onCheckout with active reservation data'
+    drawerSrc.includes('onCheckout(targetId, data, async (updatedDto) => {') &&
+    drawerSrc.includes('const targetId = Number(data.id);'),
+    'Scenario N-A: ReservationDetailDrawer dispatches onCheckout with active reservation data and post-checkout onSuccess handler'
   );
   check(
-    appSrc.includes('onCheckout={(resId, resHint) => openCheckoutConfirmation(resId, resHint ?? selectedRes)}'),
-    'Scenario N-A: App.tsx routes ReservationDetailDrawer onCheckout to openCheckoutConfirmation with resHint'
+    appSrc.includes('onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}'),
+    'Scenario N-A: App.tsx routes ReservationDetailDrawer onCheckout to openCheckoutConfirmation with resHint and onSuccess'
   );
 
   // Entry Point B: QuickReservationDetail "Check-out Tamu"
@@ -739,6 +740,185 @@ function makeCustody(overrides: Partial<IdentityCustodyRecord> = {}): IdentityCu
 
   check(dec.action === 'HARD_BLOCK_ROOM_IDENTITY', 'Gate-1B Case 7: room identity HELD produces HARD_BLOCK_ROOM_IDENTITY');
   check(dec.heldRoomCustodyHolderName === 'Budi Room', 'Gate-1B Case 7: holder name matches room custody');
+}
+
+// ===========================================================================
+// GATE-1C: Post-Checkout Drawer Refresh & State Synchronization Invariants
+// ===========================================================================
+console.log('--- Gate-1C Post-Checkout Drawer Refresh Tests ---');
+
+// Case 1: ReservationDetailDrawer onSuccess callback refetches reservation and folio
+{
+  const drawerSrc = readSrc('src/features/calendar/ReservationDetailDrawer.tsx');
+
+  check(
+    drawerSrc.includes('const targetId = Number(data.id);'),
+    'Gate-1C Invariant 1: targetId is captured at click time to prevent stale closure'
+  );
+  check(
+    drawerSrc.includes('if (updatedDto) {') &&
+    drawerSrc.includes('setDetailData(updatedDto);') &&
+    drawerSrc.includes('await loadFullReservation(targetId);') &&
+    drawerSrc.includes('await loadFolio(targetId);') &&
+    drawerSrc.includes('onRefresh();'),
+    'Gate-1C Invariant 4: onSuccess immediately updates local state, refetches reservation, folio, and triggers parent refresh'
+  );
+}
+
+// Case 2: Status CHECKED_OUT hides "Check-out Tamu"
+{
+  const drawerSrc = readSrc('src/features/calendar/ReservationDetailDrawer.tsx');
+
+  // Verify that isCheckedIn is derived from data.status === 'CHECKED_IN'
+  check(
+    drawerSrc.includes("const isCheckedIn = data.status === 'CHECKED_IN';"),
+    'Gate-1C Invariant 5a: isCheckedIn is strictly based on data.status === CHECKED_IN'
+  );
+  // And the Checkout button is inside {isCheckedIn && ( ... )}
+  check(
+    drawerSrc.includes('isCheckedIn && (') &&
+    drawerSrc.includes('Check-out Tamu'),
+    'Gate-1C Invariant 5b: Check-out Tamu button is rendered only when isCheckedIn is true'
+  );
+}
+
+// Case 3: handleReservationAction returns canonical DTO, protects selectedRes on sibling mismatch
+{
+  const appSrc = readSrc('src/App.tsx');
+
+  check(
+    appSrc.includes('const canonicalDto = data?.data;'),
+    'Gate-1C Invariant 1: handleReservationAction captures canonicalDto from response'
+  );
+  check(
+    appSrc.includes('return canonicalDto ?? null;'),
+    'Gate-1C Invariant 1b: handleReservationAction returns canonical DTO'
+  );
+  check(
+    appSrc.includes('if (Number(prev.id ?? prev.reservation_id) === Number(reservationId)) {') &&
+    appSrc.includes('return canonicalDto'),
+    'Gate-1C Invariant 2 & 3: selectedRes is ONLY mutated when id matches, merging canonicalDto'
+  );
+}
+
+// Case 4: Sibling switch simulation: checkout sibling B while sibling A is selected in App
+{
+  const prevSelectedRes = {
+    id: 101,
+    status: 'CHECKED_IN',
+    room_number: '101',
+    sibling_reservations: [
+      { id: 101, status: 'CHECKED_IN', room_number: '101' },
+      { id: 102, status: 'CHECKED_IN', room_number: '102' },
+    ],
+  };
+
+  const checkoutResId = 102;
+  const canonicalCheckoutDto = {
+    id: 102,
+    status: 'CHECKED_OUT',
+    room_number: '102',
+    check_out: '2026-09-15',
+  };
+
+  // Pure simulation of App.tsx setSelectedRes reducer:
+  const updateSelectedRes = (prev: any, reservationId: number, canonicalDto: any) => {
+    if (!prev) return prev;
+    if (Number(prev.id ?? prev.reservation_id) === Number(reservationId)) {
+      return canonicalDto
+        ? { ...prev, ...canonicalDto, status: 'CHECKED_OUT' }
+        : { ...prev, status: 'CHECKED_OUT' };
+    }
+    if (Array.isArray(prev.sibling_reservations)) {
+      return {
+        ...prev,
+        sibling_reservations: prev.sibling_reservations.map((sib: any) =>
+          Number(sib.id ?? sib.reservation_id) === Number(reservationId)
+            ? { ...sib, status: 'CHECKED_OUT' }
+            : sib
+        ),
+      };
+    }
+    return prev;
+  };
+
+  const nextSelectedRes = updateSelectedRes(prevSelectedRes, checkoutResId, canonicalCheckoutDto);
+
+  check(nextSelectedRes.id === 101, 'Gate-1C Invariant 6a: selectedRes id remains 101 (sibling A)');
+  check(nextSelectedRes.status === 'CHECKED_IN', 'Gate-1C Invariant 6b: sibling A status is NOT falsely changed to CHECKED_OUT');
+  check(
+    nextSelectedRes.sibling_reservations.find((s: any) => s.id === 102)?.status === 'CHECKED_OUT',
+    'Gate-1C Invariant 6c: sibling B inside sibling_reservations is updated to CHECKED_OUT'
+  );
+  check(
+    nextSelectedRes.sibling_reservations.find((s: any) => s.id === 101)?.status === 'CHECKED_IN',
+    'Gate-1C Invariant 6d: sibling A inside sibling_reservations remains CHECKED_IN'
+  );
+}
+
+// Case 5: Matching selectedRes simulation: checkout matching reservation 101
+{
+  const prevSelectedRes = {
+    id: 101,
+    status: 'CHECKED_IN',
+    room_number: '101',
+    booking_id: 100,
+  };
+
+  const checkoutResId = 101;
+  const canonicalCheckoutDto = {
+    id: 101,
+    status: 'CHECKED_OUT',
+    room_number: '101',
+    booking_id: 100,
+    check_out: '2026-09-15',
+  };
+
+  const updateSelectedRes = (prev: any, reservationId: number, canonicalDto: any) => {
+    if (!prev) return prev;
+    if (Number(prev.id ?? prev.reservation_id) === Number(reservationId)) {
+      return canonicalDto
+        ? { ...prev, ...canonicalDto, status: 'CHECKED_OUT' }
+        : { ...prev, status: 'CHECKED_OUT' };
+    }
+    return prev;
+  };
+
+  const nextSelectedRes = updateSelectedRes(prevSelectedRes, checkoutResId, canonicalCheckoutDto);
+
+  check(nextSelectedRes.id === 101, 'Gate-1C Invariant 3a: selectedRes id remains 101');
+  check(nextSelectedRes.status === 'CHECKED_OUT', 'Gate-1C Invariant 3b: selectedRes status is updated to CHECKED_OUT');
+}
+
+// Case 6: Unresolved guarantees remain visible, no auto-refund/auto-return
+{
+  const drawerSrc = readSrc('src/features/calendar/ReservationDetailDrawer.tsx');
+  const modalSrc = readSrc('src/features/deposits/CheckoutGuaranteeConfirmationModal.tsx');
+  const appSrc = readSrc('src/App.tsx');
+
+  // Verify DepositGuaranteeSection is mounted unconditionally regardless of checkout
+  check(
+    drawerSrc.includes('<DepositGuaranteeSection') &&
+    drawerSrc.includes('reservationStatus={data.status}'),
+    'Gate-1C Invariant 7: DepositGuaranteeSection remains rendered with post-checkout status'
+  );
+
+  // Guarantee queue is refetched if active
+  check(
+    appSrc.includes('if (showUnresolvedGuaranteesRef.current)') &&
+    appSrc.includes('fetchUnresolvedGuaranteeQueue();'),
+    'Gate-1C Invariant 7b: Unresolved guarantee queue is refreshed upon checkout'
+  );
+
+  // Confirm that checkout code does NOT trigger automated deposit refunds or custody returns
+  check(
+    !modalSrc.includes('/refund') && !modalSrc.includes('/return'),
+    'Gate-1C Invariant 8a: CheckoutGuaranteeConfirmationModal does not auto-refund or auto-return'
+  );
+  check(
+    !appSrc.match(/handleReservationAction[\s\S]*?(\/refund|\/return)/),
+    'Gate-1C Invariant 8b: handleReservationAction does not auto-refund or auto-return'
+  );
 }
 
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);

@@ -540,6 +540,7 @@ function AppContent() {
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState<boolean>(false);
   const [checkoutPendingId, setCheckoutPendingId] = useState<number | null>(null);
   const [checkoutModalReservation, setCheckoutModalReservation] = useState<any>(null);
+  const checkoutSuccessCallbackRef = useRef<((updatedDto?: any) => Promise<void> | void) | null>(null);
   const [dirtyConfirmOpen, setDirtyConfirmOpen] = useState<boolean>(false);
   const [dirtyConfirmRoomId, setDirtyConfirmRoomId] = useState<number | null>(null);
   const [dirtyConfirmDate, setDirtyConfirmDate] = useState<string | null>(null);
@@ -1486,45 +1487,81 @@ function AppContent() {
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify(body)
        });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.message || 'Action failed');
-      }
+       const data = await response.json();
+       if (!response.ok) {
+         throw new Error(data.message || 'Action failed');
+       }
 
-      const updatedStatus = action === 'checkin' ? 'CHECKED_IN' : 'CHECKED_OUT';
-      fetchData();
-      fetchOperationsData();
+       const updatedStatus = action === 'checkin' ? 'CHECKED_IN' : 'CHECKED_OUT';
+       fetchData();
+       fetchOperationsData();
 
-      if (selectedRes) {
-        setSelectedRes({ ...selectedRes, status: updatedStatus });
-        fetchReservationFolio(reservationId);
-      }
+       if (showUnresolvedGuaranteesRef.current) {
+         fetchUnresolvedGuaranteeQueue();
+       }
 
-      if (action === 'checkout') {
-        const checkoutReservation = reservations.find((item) => Number(item.id) === reservationId) || selectedRes;
-        const checkoutDate = normalizeHotelDate(checkoutReservation?.check_out) || hotelDateFromInstant(new Date());
+       const canonicalDto = data?.data;
 
-        if (checkoutReservation?.room_id) {
-          const roomIdKey = String(checkoutReservation.room_id);
-          const roomNumber = checkoutReservation.room_number || rooms.find((room: any) => String(room.id) === roomIdKey)?.room_number;
-          if (!roomNumber) {
-            throw new Error('Nomor kamar tidak ditemukan, housekeeping task tidak dapat dibuat.');
-          }
-          await addHousekeepingTask(
-            roomNumber,
-            'PENDING',
-            'Kamar perlu dibersihkan setelah checkout tamu.',
-            checkoutDate
-          );
-        }
-      }
+       if (action === 'checkout') {
+         setSelectedRes((prev: any) => {
+           if (!prev) return prev;
+           if (Number(prev.id ?? prev.reservation_id) === Number(reservationId)) {
+             return canonicalDto
+               ? { ...prev, ...canonicalDto, status: 'CHECKED_OUT' }
+               : { ...prev, status: 'CHECKED_OUT' };
+           }
+           if (Array.isArray(prev.sibling_reservations)) {
+             return {
+               ...prev,
+               sibling_reservations: prev.sibling_reservations.map((sib: any) =>
+                 Number(sib.id ?? sib.reservation_id) === Number(reservationId)
+                   ? { ...sib, status: 'CHECKED_OUT' }
+                   : sib
+               ),
+             };
+           }
+           return prev;
+         });
+         if (selectedRes && Number(selectedRes.id ?? selectedRes.reservation_id) === Number(reservationId)) {
+           fetchReservationFolio(reservationId);
+         }
+       } else {
+         if (selectedRes) {
+           setSelectedRes({ ...selectedRes, status: updatedStatus });
+           fetchReservationFolio(reservationId);
+         }
+       }
 
-      alert(action === 'checkin' ? 'Check-in berhasil' : 'Check-out berhasil');
-    } catch (error) {
-      console.error(`Reservation ${action} failed`, error);
-      alert(`Gagal ${action === 'checkin' ? 'check-in' : 'check-out'}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
+       if (action === 'checkout') {
+         const checkoutReservation =
+           canonicalDto ||
+           reservations.find((item) => Number(item.id) === reservationId) ||
+           (selectedRes && Number(selectedRes.id ?? selectedRes.reservation_id) === Number(reservationId) ? selectedRes : null);
+         const checkoutDate = normalizeHotelDate(checkoutReservation?.check_out) || hotelDateFromInstant(new Date());
+
+         if (checkoutReservation?.room_id) {
+           const roomIdKey = String(checkoutReservation.room_id);
+           const roomNumber = checkoutReservation.room_number || rooms.find((room: any) => String(room.id) === roomIdKey)?.room_number;
+           if (!roomNumber) {
+             throw new Error('Nomor kamar tidak ditemukan, housekeeping task tidak dapat dibuat.');
+           }
+           await addHousekeepingTask(
+             roomNumber,
+             'PENDING',
+             'Kamar perlu dibersihkan setelah checkout tamu.',
+             checkoutDate
+           );
+         }
+       }
+
+       alert(action === 'checkin' ? 'Check-in berhasil' : 'Check-out berhasil');
+       return canonicalDto ?? null;
+     } catch (error) {
+       console.error(`Reservation ${action} failed`, error);
+       alert(`Gagal ${action === 'checkin' ? 'check-in' : 'check-out'}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+       throw error;
+     }
+   };
 
   const handleRequestCheckoutRoomCheck = async () => {
     if (!selectedRes || !selectedRes.id || propertyId === null) return;
@@ -1553,8 +1590,13 @@ function AppContent() {
     }
   };
 
-  const openCheckoutConfirmation = (reservationId: number, resHint?: any) => {
+  const openCheckoutConfirmation = (
+    reservationId: number,
+    resHint?: any,
+    onSuccess?: (updatedDto?: any) => Promise<void> | void
+  ) => {
     setCheckoutPendingId(reservationId);
+    checkoutSuccessCallbackRef.current = onSuccess || null;
     const effectiveHint =
       resHint !== undefined
         ? resHint
@@ -1569,12 +1611,14 @@ function AppContent() {
     setCheckoutConfirmOpen(false);
     setCheckoutPendingId(null);
     setCheckoutModalReservation(null);
+    checkoutSuccessCallbackRef.current = null;
   };
 
   const handleOpenGuaranteeSectionFromCheckout = (reservationId: number) => {
     setCheckoutConfirmOpen(false);
     setCheckoutPendingId(null);
     setCheckoutModalReservation(null);
+    checkoutSuccessCallbackRef.current = null;
     const target = reservations.find((item) => Number(item.id) === reservationId)
       || (selectedRes && Number(selectedRes.id) === reservationId ? selectedRes : { id: reservationId, property_id: propertyId });
     setSelectedRes(target);
@@ -4403,7 +4447,7 @@ function AppContent() {
             fetchOperationsData();
           }}
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
-          onCheckout={(resId, resHint) => openCheckoutConfirmation(resId, resHint ?? selectedRes)}
+          onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
         />
@@ -4416,7 +4460,11 @@ function AppContent() {
         reservationData={checkoutModalReservation}
         onClose={cancelCheckoutConfirmation}
         onConfirmCheckout={async (resId) => {
-          await handleReservationAction(resId, 'checkout');
+          const updatedDto = await handleReservationAction(resId, 'checkout');
+          if (checkoutSuccessCallbackRef.current) {
+            await checkoutSuccessCallbackRef.current(updatedDto);
+          }
+          return updatedDto;
         }}
         onOpenGuaranteeSection={handleOpenGuaranteeSectionFromCheckout}
       />
