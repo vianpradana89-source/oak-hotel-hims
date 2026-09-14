@@ -416,14 +416,22 @@ function getOrCreatePropertyClients(propertyId: number) {
 }
 function broadcastEvent(eventType: string, payload: any, propertyId?: number) {
   if (propertyId == null || !Number.isInteger(propertyId) || propertyId <= 0) {
-    console.warn('broadcastEvent called with invalid propertyId, skipping', propertyId);
+    console.warn('[SSE_DIAG_BROADCAST] skipped', { eventType, propertyId });
     return;
   }
   const clients = sseClients.get(propertyId);
-  if (!clients || clients.length === 0) return;
+  if (!clients || clients.length === 0) {
+    console.log('[SSE_DIAG_BROADCAST] no clients', { eventType, propertyId, clientCount: 0 });
+    return;
+  }
   const data = `event: ${eventType}\ndata: ${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n\n`;
   for (const client of clients) {
-    try { client.res.write(data); } catch (e) { console.error('Error writing to SSE client', e); }
+    try {
+      client.res.write(data);
+      console.log('[SSE_DIAG_WRITE_OK]', { eventType, propertyId });
+    } catch (e: any) {
+      console.error('[SSE_DIAG_WRITE_ERROR]', { eventType, propertyId, error: e?.message || String(e) });
+    }
   }
 }
 
@@ -452,6 +460,7 @@ app.get('/api/events', requireAuth, async (req, res) => {
   const clients = getOrCreatePropertyClients(propertyId);
   const clientEntry = { res, lastActivity: Date.now() };
   clients.push(clientEntry);
+  console.log('[SSE_DIAG_REGISTER]', { propertyId, clientCount: clients.length });
 
   const heartbeatInterval = setInterval(() => {
     try {
@@ -474,6 +483,7 @@ app.get('/api/events', requireAuth, async (req, res) => {
     if (clients.length === 0) {
       sseClients.delete(propertyId);
     }
+    console.log('[SSE_DIAG_CLEANUP]', { propertyId, clientCount: clients.length });
   }
 
   res.on('close', cleanup);
