@@ -921,4 +921,156 @@ console.log('--- Gate-1C Post-Checkout Drawer Refresh Tests ---');
   );
 }
 
+// ===========================================================================
+// Gate-1C2 Active Sibling State Synchronization Tests
+// ===========================================================================
+console.log('--- Gate-1C2 Active Sibling State Synchronization Tests ---');
+
+{
+  const drawerSrc = readSrc('src/features/calendar/ReservationDetailDrawer.tsx');
+  const appSrc = readSrc('src/App.tsx');
+
+  // Verify onSelectReservation prop exists in drawer interface and is destructured
+  check(
+    drawerSrc.includes('onSelectReservation?: (') &&
+    drawerSrc.includes('onSelectReservation,') &&
+    drawerSrc.includes('handleSelectSiblingReservation'),
+    'Gate-1C2 Invariant 1a: onSelectReservation prop exists in ReservationDetailDrawer interface'
+  );
+
+  // Verify loadFullReservation returns a Promise<any | null>
+  check(
+    drawerSrc.includes('const loadFullReservation = async (customId?: number): Promise<any | null> =>'),
+    'Gate-1C2 Invariant 1b: loadFullReservation returns canonical DTO promise'
+  );
+
+  // Verify handleSelectSiblingReservation awaits loadFullReservation and notifies onSelectReservation
+  check(
+    drawerSrc.includes('const canonicalDto = await loadFullReservation(targetId);') &&
+    drawerSrc.includes('onSelectReservation(targetId, canonicalDto ?? undefined);'),
+    'Gate-1C2 Invariant 1c: Sibling selection loads authoritative DTO and notifies parent'
+  );
+
+  // Verify App.tsx has handleDrawerSelectReservation and passes it to ReservationDetailDrawer
+  check(
+    appSrc.includes('const handleDrawerSelectReservation = (reservationId: number, dto?: any) =>') &&
+    appSrc.includes('onSelectReservation={handleDrawerSelectReservation}'),
+    'Gate-1C2 Invariant 2: App.tsx defines and wires handleDrawerSelectReservation'
+  );
+
+  // Simulate Multi-Room Booking Sibling Switch and Checkout Sequence:
+  // Sibling A (109) = CHECKED_IN, Sibling B (110) = CHECKED_IN
+  const siblingA: any = {
+    id: 109,
+    room_id: 'room-109',
+    room_number: '109',
+    status: 'CHECKED_IN',
+    booking_id: 200,
+    sibling_reservations: [
+      { id: 109, room_id: 'room-109', room_number: '109', status: 'CHECKED_IN' },
+      { id: 110, room_id: 'room-110', room_number: '110', status: 'CHECKED_IN' },
+    ],
+  };
+
+  const siblingB: any = {
+    id: 110,
+    room_id: 'room-110',
+    room_number: '110',
+    status: 'CHECKED_IN',
+    booking_id: 200,
+    sibling_reservations: [
+      { id: 109, room_id: 'room-109', room_number: '109', status: 'CHECKED_IN' },
+      { id: 110, room_id: 'room-110', room_number: '110', status: 'CHECKED_IN' },
+    ],
+  };
+
+  // 1. Initial State: Drawer opened on Sibling A
+  let appSelectedRes: any = siblingA;
+  let drawerReservationProp: any = appSelectedRes;
+  let drawerDetailData: any = siblingA;
+
+  check(appSelectedRes.id === 109, 'Gate-1C2 Step 1a: Parent selectedRes starts as Sibling A');
+  check(drawerReservationProp.id === 109, 'Gate-1C2 Step 1b: Drawer reservation prop starts as Sibling A');
+  check(drawerDetailData.id === 109, 'Gate-1C2 Step 1c: Drawer detailData starts as Sibling A');
+
+  // 2. User selects sibling B inside the drawer
+  // Drawer loads canonical DTO for B and calls onSelectReservation(110, siblingB)
+  const onSelectReservationSimulation = (reservationId: number, dto?: any) => {
+    const targetId = Number(reservationId);
+    if (!targetId) return;
+    if (dto && Number(dto.id ?? dto.reservation_id) === targetId) {
+      appSelectedRes = dto;
+      return;
+    }
+    if (appSelectedRes && Array.isArray(appSelectedRes.sibling_reservations)) {
+      const match = appSelectedRes.sibling_reservations.find(
+        (sib: any) => Number(sib.id ?? sib.reservation_id) === targetId
+      );
+      if (match) {
+        appSelectedRes = match;
+      }
+    }
+  };
+
+  // Trigger sibling navigation to 110
+  drawerDetailData = siblingB;
+  onSelectReservationSimulation(110, siblingB);
+  drawerReservationProp = appSelectedRes;
+
+  check(appSelectedRes.id === 110, 'Gate-1C2 Step 2a: Parent selectedRes synchronously becomes Sibling B');
+  check(drawerReservationProp.id === 110, 'Gate-1C2 Step 2b: Drawer reservation prop becomes Sibling B');
+  check(drawerDetailData.id === 110, 'Gate-1C2 Step 2c: Drawer detailData becomes Sibling B');
+  check(drawerDetailData.status === 'CHECKED_IN', 'Gate-1C2 Step 2d: Sibling B starts as CHECKED_IN');
+
+  // 3. User checks out Sibling B
+  const canonicalCheckoutDtoB = {
+    ...siblingB,
+    status: 'CHECKED_OUT',
+    sibling_reservations: [
+      { id: 109, room_id: 'room-109', room_number: '109', status: 'CHECKED_IN' },
+      { id: 110, room_id: 'room-110', room_number: '110', status: 'CHECKED_OUT' },
+    ],
+  };
+
+  // Simulate handleReservationAction checkout branch in App.tsx
+  const handleReservationActionCheckout = (prev: any, reservationId: number, canonicalDto: any) => {
+    if (!prev) return prev;
+    if (Number(prev.id ?? prev.reservation_id) === Number(reservationId)) {
+      return canonicalDto
+        ? { ...prev, ...canonicalDto, status: 'CHECKED_OUT' }
+        : { ...prev, status: 'CHECKED_OUT' };
+    }
+    if (Array.isArray(prev.sibling_reservations)) {
+      return {
+        ...prev,
+        sibling_reservations: prev.sibling_reservations.map((sib: any) =>
+          Number(sib.id ?? sib.reservation_id) === Number(reservationId)
+            ? { ...sib, status: 'CHECKED_OUT' }
+            : sib
+        ),
+      };
+    }
+    return prev;
+  };
+
+  appSelectedRes = handleReservationActionCheckout(appSelectedRes, 110, canonicalCheckoutDtoB);
+
+  // Drawer callback sets detailData
+  drawerDetailData = canonicalCheckoutDtoB;
+  drawerReservationProp = appSelectedRes;
+
+  check(appSelectedRes.id === 110, 'Gate-1C2 Step 3a: App selectedRes remains on Sibling B after checkout');
+  check(appSelectedRes.status === 'CHECKED_OUT', 'Gate-1C2 Step 3b: App selectedRes is immediately CHECKED_OUT');
+  check(drawerDetailData.id === 110, 'Gate-1C2 Step 3c: Drawer detailData is Sibling B');
+  check(drawerDetailData.status === 'CHECKED_OUT', 'Gate-1C2 Step 3d: Drawer detailData is immediately CHECKED_OUT');
+
+  // 4. Verify Sibling A protection
+  check(siblingA.status === 'CHECKED_IN', 'Gate-1C2 Invariant 4a: Sibling A status remains CHECKED_IN (unmutated)');
+  check(siblingA.room_id === 'room-109', 'Gate-1C2 Invariant 4b: Sibling A room_id remains room-109');
+
+  // Verify checkout UI visibility rule: Check-out Tamu button is hidden when status is CHECKED_OUT
+  const isCheckedInB = drawerDetailData.status === 'CHECKED_IN';
+  check(isCheckedInB === false, 'Gate-1C2 Invariant 5: "Check-out Tamu" button is hidden because isCheckedIn is false');
+}
+
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);

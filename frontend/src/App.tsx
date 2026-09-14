@@ -1631,6 +1631,34 @@ function AppContent() {
     }, 300);
   };
 
+  const handleDrawerSelectReservation = (reservationId: number, dto?: any) => {
+    const targetId = Number(reservationId);
+    if (!targetId) return;
+
+    if (dto && Number(dto.id ?? dto.reservation_id) === targetId) {
+      setSelectedRes(dto);
+      fetchReservationFolio(targetId);
+      return;
+    }
+
+    // Fallback: resolve safely from existing state without fabricating reservation data
+    let matchingRes: any = null;
+    if (selectedRes && Array.isArray(selectedRes.sibling_reservations)) {
+      matchingRes = selectedRes.sibling_reservations.find(
+        (sib: any) => Number(sib.id ?? sib.reservation_id) === targetId
+      );
+    }
+    if (!matchingRes) {
+      matchingRes = reservations.find(
+        (r: any) => Number(r.id ?? r.reservation_id) === targetId
+      );
+    }
+    if (matchingRes) {
+      setSelectedRes(matchingRes);
+      fetchReservationFolio(targetId);
+    }
+  };
+
   const closeDirtyConfirmation = () => {
     setDirtyConfirmOpen(false);
     setDirtyConfirmRoomId(null);
@@ -4446,6 +4474,7 @@ function AppContent() {
             fetchData();
             fetchOperationsData();
           }}
+          onSelectReservation={handleDrawerSelectReservation}
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
           onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}
           onCancel={(resId) => handleReservationCancel(resId)}

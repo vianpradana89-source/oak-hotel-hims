@@ -26,6 +26,10 @@ interface Props {
   propertyId?: number | null;
   onClose: () => void;
   onRefresh: () => void;
+  onSelectReservation?: (
+    reservationId: number,
+    reservationData?: any
+  ) => void;
   onCheckin: (reservationId: number, expectedPrimaryGuestId?: number | null) => void;
   onCheckout: (
     reservationId: number,
@@ -45,6 +49,7 @@ export default function ReservationDetailDrawer({
   propertyId,
   onClose,
   onRefresh,
+  onSelectReservation,
   onCheckin,
   onCheckout,
   onCancel,
@@ -162,9 +167,9 @@ export default function ReservationDetailDrawer({
   }, [detailData?.room_id, activePropId, reservation?.room_id, authFetch]);
 
   // Load complete reservation details
-  const loadFullReservation = async (customId?: number) => {
-    const targetId = customId || reservation?.id;
-    if (!targetId || !activePropId) return;
+  const loadFullReservation = async (customId?: number): Promise<any | null> => {
+    const targetId = customId || detailData?.id || reservation?.id;
+    if (!targetId || !activePropId) return null;
     try {
       setLoading(true);
       const result = await safeFetchJson<{ data?: any }>(
@@ -178,18 +183,21 @@ export default function ReservationDetailDrawer({
         if (result.data.data.room_id) {
           loadRoomFindings(result.data.data.room_id, result.data.data.property_id || activePropId);
         }
+        return result.data.data;
       }
+      return null;
     } catch (err) {
       console.warn('Failed to load full reservation data', err);
+      return null;
     } finally {
       setLoading(false);
     }
   };
 
   // Load folio entries & balance
-  const loadFolio = async (customId?: number) => {
-    const targetId = customId || reservation?.id;
-    if (!targetId || !activePropId) return;
+  const loadFolio = async (customId?: number): Promise<any | null> => {
+    const targetId = customId || detailData?.id || reservation?.id;
+    if (!targetId || !activePropId) return null;
     try {
       const result = await safeFetchJson<{ data?: any }>(
         `/api/reservations/${targetId}/folio?property_id=${activePropId}`,
@@ -199,15 +207,23 @@ export default function ReservationDetailDrawer({
       );
       if (result.ok && result.data?.data) {
         setFolioData(result.data.data);
+        return result.data.data;
       }
+      return null;
     } catch (err) {
       console.warn('Failed to load folio', err);
+      return null;
     }
   };
 
-  const handleSelectSiblingReservation = (siblingId: number) => {
-    loadFullReservation(siblingId);
-    loadFolio(siblingId);
+  const handleSelectSiblingReservation = async (siblingId: number) => {
+    const targetId = Number(siblingId);
+    if (!targetId) return;
+    const canonicalDto = await loadFullReservation(targetId);
+    await loadFolio(targetId);
+    if (onSelectReservation) {
+      onSelectReservation(targetId, canonicalDto ?? undefined);
+    }
   };
 
   const handleRequestCheckoutInspection = async () => {
