@@ -11,6 +11,8 @@ export interface ModalProps {
   footer?: React.ReactNode;
   size?: ModalSize;
   closeOnOverlayClick?: boolean;
+  closeOnEscape?: boolean;
+  closeOnCloseClick?: boolean;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -22,10 +24,12 @@ export const Modal: React.FC<ModalProps> = ({
   footer,
   size = 'md',
   closeOnOverlayClick = true,
+  closeOnEscape = true,
+  closeOnCloseClick = true,
 }) => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape' && isOpen && closeOnEscape) {
         onClose();
       }
     };
@@ -37,7 +41,7 @@ export const Modal: React.FC<ModalProps> = ({
       document.removeEventListener('keydown', handleKeyDown);
       document.body.style.overflow = 'unset';
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, closeOnEscape]);
 
   if (!isOpen) return null;
 
@@ -72,9 +76,10 @@ export const Modal: React.FC<ModalProps> = ({
           </div>
           <button
             type="button"
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer shrink-0"
+            onClick={closeOnCloseClick ? onClose : undefined}
+            className={`p-1.5 rounded-lg transition-colors shrink-0 ${closeOnCloseClick ? 'cursor-pointer text-slate-400 hover:text-slate-700 hover:bg-slate-100' : 'cursor-not-allowed text-slate-200 pointer-events-none'}`}
             aria-label="Tutup dialog"
+            disabled={!closeOnCloseClick}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />

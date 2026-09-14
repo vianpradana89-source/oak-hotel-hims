@@ -116,16 +116,28 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
             undefined,
             authFetch
           );
-          if (!folioResp.ok || !folioResp.data?.data?.reservation) {
+          if (!folioResp.ok || !folioResp.data?.data) {
             folioError = true;
           } else {
-            const fr = folioResp.data.data.reservation;
-            totalCharges = Number(fr.total_price || 0);
-            appliedDeposit = Number(fr.applied_deposit || 0);
-            const ordinaryPaid = Number(fr.amount_paid || 0);
-            // Compute from authoritative fields to match backend recalculateReservationFinancials:
-            // remainingBalance = max(0, netTotalCharges - (ordinaryAmountPaid + appliedDeposit))
-            folioBalance = Math.max(0, totalCharges - ordinaryPaid - appliedDeposit);
+            // Use authoritative_financials from backend — single source of truth.
+            // Do NOT recompute from reservation fields; GET /folio calls
+            // calculateReservationFinancials() (read-only). POST /checkout calls
+            // recalculateReservationFinancials() (mutation path) separately.
+            const fin = folioResp.data.data.authoritative_financials;
+            if (!fin || fin.remaining_balance === null || fin.remaining_balance === undefined) {
+              folioError = true;
+            } else {
+              const remainingBalance = Number(fin.remaining_balance);
+              const totalPrice = Number(fin.total_price);
+              const appliedDepositValue = Number(fin.applied_deposit);
+              if (!Number.isFinite(remainingBalance) || !Number.isFinite(totalPrice) || !Number.isFinite(appliedDepositValue)) {
+                folioError = true;
+              } else {
+                totalCharges = totalPrice;
+                appliedDeposit = appliedDepositValue;
+                folioBalance = Math.max(0, remainingBalance);
+              }
+            }
           }
         } catch (e) {
           console.warn('[CheckoutGuaranteeModal] Folio fetch failed:', e);
@@ -217,6 +229,14 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
       setSubmitting(false);
     }
   }, [reservationId, submitting, onConfirmCheckout]);
+
+  // Guarded close: once the checkout mutation has started, the confirmation
+  // modal must NOT be dismissible — the POST is already in-flight and cannot
+  // be cancelled from the frontend.
+  const handleModalClose = useCallback(() => {
+    if (submitting) return;
+    onClose();
+  }, [submitting, onClose]);
 
   const currentRes = hydratedRes;
   const roomNumber = currentRes?.room_number ?? '—';
@@ -433,15 +453,18 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     return (
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={handleModalClose}
         title="Konfirmasi Check-out"
         size="sm"
+        closeOnOverlayClick={submitting ? false : undefined}
+        closeOnEscape={submitting ? false : undefined}
+        closeOnCloseClick={submitting ? false : undefined}
         footer={
           <div className="flex gap-2">
             <button
               type="button"
               className="btn btn-ghost text-xs"
-              onClick={onClose}
+              onClick={handleModalClose}
               disabled={submitting}
             >
               Batal
@@ -490,16 +513,18 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     return (
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={handleModalClose}
         title="Peringatan: Jaminan Kamar Belum Selesai"
         size="sm"
         closeOnOverlayClick={false}
+        closeOnEscape={submitting ? false : undefined}
+        closeOnCloseClick={submitting ? false : undefined}
         footer={
           <div className="flex gap-2">
             <button
               type="button"
               className="btn btn-ghost text-xs"
-              onClick={onClose}
+              onClick={handleModalClose}
               disabled={submitting}
             >
               Batal
@@ -518,7 +543,7 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
               onClick={handleCheckout}
               disabled={submitting}
             >
-              Tetap Lanjutkan
+              {submitting ? 'Memproses…' : 'Tetap Lanjutkan'}
             </button>
           </div>
         }
@@ -547,16 +572,18 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     return (
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={handleModalClose}
         title="Check-out Kamar Terakhir — Jaminan Grup Siap Diselesaikan"
         size="sm"
         closeOnOverlayClick={false}
+        closeOnEscape={submitting ? false : undefined}
+        closeOnCloseClick={submitting ? false : undefined}
         footer={
           <div className="flex gap-2">
             <button
               type="button"
               className="btn btn-ghost text-xs"
-              onClick={onClose}
+              onClick={handleModalClose}
               disabled={submitting}
             >
               Batal
@@ -575,7 +602,7 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
               onClick={handleCheckout}
               disabled={submitting}
             >
-              Tetap Lanjutkan
+              {submitting ? 'Memproses…' : 'Tetap Lanjutkan'}
             </button>
           </div>
         }
@@ -602,16 +629,18 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     return (
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={handleModalClose}
         title="Check-out Kamar Terakhir — Jaminan Kamar & Grup Belum Selesai"
         size="sm"
         closeOnOverlayClick={false}
+        closeOnEscape={submitting ? false : undefined}
+        closeOnCloseClick={submitting ? false : undefined}
         footer={
           <div className="flex gap-2">
             <button
               type="button"
               className="btn btn-ghost text-xs"
-              onClick={onClose}
+              onClick={handleModalClose}
               disabled={submitting}
             >
               Batal
@@ -630,7 +659,7 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
               onClick={handleCheckout}
               disabled={submitting}
             >
-              Tetap Lanjutkan
+              {submitting ? 'Memproses…' : 'Tetap Lanjutkan'}
             </button>
           </div>
         }
