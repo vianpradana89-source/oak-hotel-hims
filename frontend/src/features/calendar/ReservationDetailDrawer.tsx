@@ -1219,7 +1219,7 @@ export default function ReservationDetailDrawer({
           </div>
 
           {/* Section 6: Folio & Ringkasan Pembayaran (Authoritative Derived Output, No Direct Edit) */}
-          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+          <div id="folio-section" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
             <div className="flex items-center justify-between border-b border-stone-100 pb-2">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-stone-500">

@@ -412,7 +412,17 @@ export async function deleteStayChargeRule(
 // CENTRALIZED FINANCIAL RECALCULATION ENGINE
 // ============================================================================
 
-export async function recalculateReservationFinancials(
+/**
+ * Read-only canonical financial calculator.
+ *
+ * Computes total_price, amount_paid, applied_deposit, remaining_balance,
+ * and payment_status from folio_entries + payment_transactions without
+ * mutating any rows. Used by GET /api/reservations/:id/folio.
+ *
+ * Same canonical rules as recalculateReservationFinancials but NO FOR UPDATE,
+ * NO UPDATE/INSERT/DELETE.
+ */
+export async function calculateReservationFinancials(
   client: PoolClient | Pool,
   reservationId: number,
   propertyId: number,
@@ -425,13 +435,12 @@ export async function recalculateReservationFinancials(
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
   reservation: any;
 }> {
-  // 1. Fetch current reservation details
+  // 1. Fetch current reservation details (read-only, no lock)
   const resCheck = await client.query(
     `SELECT r.*, b.property_id AS booking_property_id
      FROM reservations r
      LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1
-     FOR UPDATE OF r`,
+     WHERE r.id = $1`,
     [reservationId]
   );
   if ((resCheck.rowCount ?? 0) === 0) {
@@ -584,10 +593,66 @@ export async function recalculateReservationFinancials(
     newPaymentStatus = 'PARTIAL';
   }
 
-  // 5. Update reservations row atomically
-  // amount_paid = ordinary settlement payments ONLY (PAYMENT + CORRECTION_REPLACEMENT)
-  // applied_deposit = effective DEPOSIT_APPLY folio credits
-  // remaining_balance = total_price - amount_paid - applied_deposit
+  return {
+    total_price: netTotalCharges,
+    amount_paid: ordinaryAmountPaid,
+    applied_deposit: appliedDeposit,
+    remaining_balance: remainingBalance,
+    payment_status: newPaymentStatus,
+    reservation: resRow
+  };
+}
+
+/**
+ * Write variant: acquires FOR UPDATE lock, persists canonical financials
+ * into the reservations row, then returns the result.
+ *
+ * Delegates the read-only calculation to calculateReservationFinancials
+ * and only adds the persistence step.
+ */
+export async function recalculateReservationFinancials(
+  client: PoolClient | Pool,
+  reservationId: number,
+  propertyId: number,
+  ordinaryFallbackOverride?: number
+): Promise<{
+  total_price: number;
+  amount_paid: number;
+  applied_deposit: number;
+  remaining_balance: number;
+  payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  reservation: any;
+}> {
+  // 1. Fetch and lock the reservation row
+  const resCheck = await client.query(
+    `SELECT r.*, b.property_id AS booking_property_id
+     FROM reservations r
+     LEFT JOIN bookings b ON b.id = r.booking_id
+     WHERE r.id = $1
+     FOR UPDATE OF r`,
+    [reservationId]
+  );
+  if ((resCheck.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Reservasi #${reservationId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+  const lockedResRow = resCheck.rows[0];
+  const bookingPropId = Number(lockedResRow.booking_property_id || lockedResRow.property_id || propertyId);
+  if (propertyId && bookingPropId && bookingPropId !== propertyId) {
+    const err: any = new Error('Reservasi milik properti yang berbeda');
+    err.statusCode = 403;
+    err.code = 'CROSS_PROPERTY_ACCESS';
+    throw err;
+  }
+
+  // 2. Delegate to the read-only canonical calculator, passing the locked row
+  //    as the reservation so fallback logic can read persisted values.
+  const calc = await calculateReservationFinancials(
+    client, reservationId, propertyId, ordinaryFallbackOverride
+  );
+
+  // 3. Persist canonical financials into the reservations row
   const updatedRes = await client.query(
     `UPDATE reservations SET
        total_price = $1,
@@ -597,15 +662,11 @@ export async function recalculateReservationFinancials(
        payment_status = $5
      WHERE id = $6
      RETURNING *`,
-    [netTotalCharges, ordinaryAmountPaid, appliedDeposit, remainingBalance, newPaymentStatus, reservationId]
+    [calc.total_price, calc.amount_paid, calc.applied_deposit, calc.remaining_balance, calc.payment_status, reservationId]
   );
 
   return {
-    total_price: netTotalCharges,
-    amount_paid: ordinaryAmountPaid,
-    applied_deposit: appliedDeposit,
-    remaining_balance: remainingBalance,
-    payment_status: newPaymentStatus,
+    ...calc,
     reservation: updatedRes.rows[0]
   };
 }

@@ -95,6 +95,7 @@ import {
 } from './domains/pricing/bookingPricingAuthority';
 import type { PriceQuoteResult } from './domains/pricing/pricingTypes';
 import { createStayChargesRouter } from './domains/stayCharges/stayChargesRouter';
+import { recalculateReservationFinancials, calculateReservationFinancials } from './domains/stayCharges/stayChargesService';
 import { createTransactionsRouter } from './domains/transactions/transactionsRouter';
 import { createPurchaseSettingsRouter } from './domains/transactions/purchaseSettingsRouter';
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
@@ -6371,6 +6372,28 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         });
       }
 
+      // CHECKOUT-FOLIO-GATE-1B: Authoritative folio balance verification.
+      // Must pass before any status mutation. Fail-closed on unverifiable data.
+      const folioFinancial = await recalculateReservationFinancials(client, reservationId, propertyId);
+      const validatedBalance = Number(folioFinancial?.remaining_balance);
+      if (!folioFinancial || !Number.isFinite(validatedBalance)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'FOLIO_BALANCE_UNVERIFIED',
+          message: 'Data keuangan reservasi tidak dapat diverifikasi. Silakan periksa folio terlebih dahulu sebelum check-out.'
+        });
+      }
+      if (validatedBalance > 0.01) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'FOLIO_BALANCE_OUTSTANDING',
+          message: 'Tagihan reservasi belum lunas. Selesaikan sisa tagihan pada folio sebelum check-out.',
+          remaining_balance: validatedBalance,
+        });
+      }
+
       const updated = await client.query(
         `UPDATE reservations
          SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
@@ -7215,6 +7238,12 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
       [reservationId, propertyId]
     );
 
+    // Read-only authoritative financial calculation for this reservation.
+    const folioFinancial = await calculateReservationFinancials(pool, reservationId, propertyId);
+    const authoritativeRemainingBalance = Number.isFinite(folioFinancial?.remaining_balance)
+      ? Number(folioFinancial.remaining_balance)
+      : null;
+
     res.json({
       status: 'OK',
       data: {
@@ -7222,7 +7251,14 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
         payments: payments.rows,
         folio: folio.rows,
         entries: folio.rows,
-        evidences: evidences.rows.map(toEvidenceMetadata)
+        evidences: evidences.rows.map(toEvidenceMetadata),
+        authoritative_financials: {
+          total_price: folioFinancial?.total_price ?? null,
+          amount_paid: folioFinancial?.amount_paid ?? null,
+          applied_deposit: folioFinancial?.applied_deposit ?? null,
+          remaining_balance: authoritativeRemainingBalance,
+          payment_status: folioFinancial?.payment_status ?? null,
+        }
       }
     });
   } catch (err: any) {

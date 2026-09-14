@@ -1631,6 +1631,23 @@ function AppContent() {
     }, 300);
   };
 
+  const handleOpenFolioSectionFromCheckout = (reservationId: number) => {
+    setCheckoutConfirmOpen(false);
+    setCheckoutPendingId(null);
+    setCheckoutModalReservation(null);
+    checkoutSuccessCallbackRef.current = null;
+    const target = reservations.find((item) => Number(item.id) === reservationId)
+      || (selectedRes && Number(selectedRes.id) === reservationId ? selectedRes : { id: reservationId, property_id: propertyId });
+    setSelectedRes(target);
+    fetchReservationFolio(reservationId);
+    setTimeout(() => {
+      const el = document.getElementById('folio-section');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 300);
+  };
+
   const handleDrawerSelectReservation = (reservationId: number, dto?: any) => {
     const targetId = Number(reservationId);
     if (!targetId) return;
@@ -4496,6 +4513,7 @@ function AppContent() {
           return updatedDto;
         }}
         onOpenGuaranteeSection={handleOpenGuaranteeSectionFromCheckout}
+        onOpenFolioSection={handleOpenFolioSectionFromCheckout}
       />
 
       {stayChangeState.open && (

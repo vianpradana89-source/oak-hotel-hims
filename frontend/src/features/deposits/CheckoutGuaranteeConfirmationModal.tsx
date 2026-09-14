@@ -6,9 +6,32 @@ import type { Deposit, IdentityCustodyRecord } from './depositApi';
 import {
   deriveCheckoutGateDecision,
   formatGroupGuaranteeSummary,
-  type CheckoutGateDecision,
   type GuaranteeLoadStatus,
 } from './guaranteeScopePolicy';
+
+export interface CheckoutGateState {
+  action:
+    | 'ALLOW'
+    | 'HARD_BLOCK_ROOM_IDENTITY'
+    | 'HARD_BLOCK_FOLIO_OUTSTANDING'
+    | 'HARD_BLOCK_FOLIO_UNVERIFIED'
+    | 'WARN_ROOM_DEPOSIT'
+    | 'WARN_FINAL_GROUP_GUARANTEE'
+    | 'WARN_ROOM_AND_FINAL_GROUP'
+    | 'WARN_UNVERIFIED';
+  reasonCode?: string;
+  // room identity
+  heldRoomCustodyHolderName?: string;
+  // folio
+  remainingBalance?: number;
+  appliedDeposit?: number;
+  totalCharges?: number;
+  // room deposit
+  roomDepositRemaining?: number;
+  // group guarantee
+  groupGuaranteeSummary?: any;
+  groupDepositRemaining?: number;
+}
 
 export interface CheckoutGuaranteeConfirmationModalProps {
   isOpen: boolean;
@@ -18,6 +41,7 @@ export interface CheckoutGuaranteeConfirmationModalProps {
   onClose: () => void;
   onConfirmCheckout: (reservationId: number) => Promise<any> | any;
   onOpenGuaranteeSection?: (reservationId: number) => void;
+  onOpenFolioSection?: (reservationId: number) => void;
 }
 
 export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfirmationModalProps> = ({
@@ -28,12 +52,13 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
   onClose,
   onConfirmCheckout,
   onOpenGuaranteeSection,
+  onOpenFolioSection,
 }) => {
   const { authFetch } = useAuth();
   const [loading, setLoading] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [hydratedRes, setHydratedRes] = useState<any>(null);
-  const [decision, setDecision] = useState<CheckoutGateDecision | null>(null);
+  const [decision, setDecision] = useState<CheckoutGateState | null>(null);
 
   const targetReservationMatch =
     reservationData &&
@@ -77,24 +102,46 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
         const deposits = depResp.ok && Array.isArray(depResp.data?.data) ? depResp.data.data : null;
         const custody = custResp.ok && Array.isArray(custResp.data?.data) ? custResp.data.data : null;
 
-        // Authoritative load status requires ALL:
-        // - resResp.ok
-        // - depResp.ok
-        // - custResp.ok
-        // - valid deposits payload
-        // - valid custody payload
-        // - valid siblingReservations from authoritative reservation detail fetch
+        // FOLIO GATE: authoritative financial verification via backend endpoint.
+        // Hard fail on any fetch error — no fallback to reservationData.
+        let folioBalance = 0;
+        let appliedDeposit = 0;
+        let totalCharges = 0;
+        let folioError = false;
+
+        try {
+          const folioResp = await safeFetchJson<{ data?: any }>(
+            `/api/reservations/${targetId}/folio${queryProp}`,
+            undefined,
+            undefined,
+            authFetch
+          );
+          if (!folioResp.ok || !folioResp.data?.data?.reservation) {
+            folioError = true;
+          } else {
+            const fr = folioResp.data.data.reservation;
+            totalCharges = Number(fr.total_price || 0);
+            appliedDeposit = Number(fr.applied_deposit || 0);
+            const ordinaryPaid = Number(fr.amount_paid || 0);
+            // Compute from authoritative fields to match backend recalculateReservationFinancials:
+            // remainingBalance = max(0, netTotalCharges - (ordinaryAmountPaid + appliedDeposit))
+            folioBalance = Math.max(0, totalCharges - ordinaryPaid - appliedDeposit);
+          }
+        } catch (e) {
+          console.warn('[CheckoutGuaranteeModal] Folio fetch failed:', e);
+          folioError = true;
+        }
+
+        // Set guarantee state first when possible; folio override below may replace it.
         const loadStatus: GuaranteeLoadStatus =
-          resResp.ok &&
-          depResp.ok &&
-          custResp.ok &&
+          currentRes !== null &&
+          siblingReservations !== null &&
           deposits !== null &&
-          custody !== null &&
-          siblingReservations !== null
+          custody !== null
             ? 'ready'
             : 'error';
 
-        const dec = deriveCheckoutGateDecision({
+        const guaranteeDecision = deriveCheckoutGateDecision({
           currentReservation: currentRes || { id: targetId, status: 'CHECKED_IN' },
           siblingReservations,
           deposits,
@@ -102,24 +149,45 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
           loadStatus,
         });
 
-        setDecision(dec);
+        // FOLIO GATE takes precedence over GUARANTEE GATE:
+        // HARD_BLOCK_FOLIO and HARD_BLOCK_FOLIO_UNVERIFIED prevent proceeding entirely.
+        if (folioError) {
+          setDecision({
+            action: 'HARD_BLOCK_FOLIO_UNVERIFIED',
+            reasonCode: 'FOLIO_BALANCE_UNVERIFIED',
+            remainingBalance: NaN,
+            appliedDeposit,
+            totalCharges,
+          });
+          return;
+        }
+
+        if (folioBalance > 0.01) {
+          setDecision({
+            action: 'HARD_BLOCK_FOLIO_OUTSTANDING',
+            reasonCode: 'FOLIO_BALANCE_OUTSTANDING',
+            remainingBalance: folioBalance,
+            appliedDeposit,
+            totalCharges,
+          });
+          return;
+        }
+
+        // Fall through to guarantee decisions when folio is clear.
+        // Preserve original action strings from guaranteeScopePolicy (ALLOW, WARN_*, etc.).
+        setDecision({
+          ...guaranteeDecision,
+          appliedDeposit,
+          totalCharges,
+        });
       } catch (err) {
         if (currentReq !== requestIdRef.current) return;
-        console.error('[CheckoutGuaranteeModal] Failed to evaluate guarantee state:', err);
-        const fallbackRes =
-          reservationData &&
-          Number(reservationData?.id ?? reservationData?.reservation_id) === targetId
-            ? reservationData
-            : { id: targetId, status: 'CHECKED_IN' };
-        setDecision(
-          deriveCheckoutGateDecision({
-            currentReservation: fallbackRes,
-            siblingReservations: null,
-            deposits: null,
-            custody: null,
-            loadStatus: 'error',
-          })
-        );
+        console.error('[CheckoutGuaranteeModal] Failed to evaluate state:', err);
+        setDecision({
+          action: 'HARD_BLOCK_FOLIO_UNVERIFIED',
+          reasonCode: 'FOLIO_BALANCE_UNVERIFIED',
+          remainingBalance: NaN,
+        });
       } finally {
         if (currentReq === requestIdRef.current) {
           setLoading(false);
@@ -135,82 +203,148 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
       evaluateData(reservationId, effectivePropId);
     } else {
       setDecision(null);
+      setLoading(false);
       setHydratedRes(null);
-      setSubmitting(false);
     }
-  }, [isOpen, reservationId, effectivePropId, evaluateData]);
+  }, [isOpen, reservationId, evaluateData, effectivePropId]);
 
-  if (!isOpen || !reservationId) return null;
-
-  const handleConfirm = async () => {
-    if (submitting) return;
+  const handleCheckout = useCallback(async () => {
+    if (!reservationId || submitting) return;
     setSubmitting(true);
     try {
       await onConfirmCheckout(reservationId);
-      onClose();
-    } catch (err) {
-      console.error('[CheckoutGuaranteeModal] Checkout confirmation failed:', err);
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [reservationId, submitting, onConfirmCheckout]);
 
-  const handleOpenGuarantee = () => {
-    onClose();
-    if (onOpenGuaranteeSection) {
-      onOpenGuaranteeSection(reservationId);
-    }
-  };
+  const currentRes = hydratedRes;
+  const roomNumber = currentRes?.room_number ?? '—';
+  const guestName = currentRes?.guest_name ?? '—';
 
-  const activeRes = hydratedRes || targetReservationMatch || {};
-  const roomNumber = activeRes.room_number || '-';
-  const guestName = activeRes.guest_name || activeRes.booker_name || 'Tamu';
-  const bidText = activeRes.bid ? `#${activeRes.bid}` : 'Grup';
+  if (!isOpen || reservationId === null) return null;
 
-  const formatAmount = (val: number) => {
-    return new Intl.NumberFormat('id-ID').format(Math.max(0, Math.round(val)));
-  };
-
-  // 1. Loading state
-  if (loading || !decision) {
+  if (loading) {
     return (
-      <Modal isOpen={isOpen} onClose={onClose} title="Memeriksa Status Jaminan..." size="sm" closeOnOverlayClick={false}>
-        <div className="py-6 flex flex-col items-center justify-center text-center space-y-3">
-          <div className="w-8 h-8 border-3 border-amber-600 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs text-stone-500 font-medium">
-            Sedang memeriksa jaminan kamar dan grup sebelum proses check-out...
+      <Modal isOpen={isOpen} onClose={onClose} title="Verifikasi Check-out" size="sm">
+        <div className="py-6 flex flex-col items-center gap-3 text-stone-600">
+          <svg className="w-8 h-8 animate-spin text-forest-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          <span className="text-xs">Memverifikasi folio dan jaminan…</span>
+        </div>
+      </Modal>
+    );
+  }
+
+  if (!decision) {
+    return (
+      <Modal isOpen={isOpen} onClose={onClose} title="Check-out Reservasi" size="sm">
+        <div className="space-y-4 text-xs text-stone-700 leading-relaxed">
+          <p>
+            <strong>Kamar:</strong> {roomNumber}
+          </p>
+          <p>
+            <strong>Tamu:</strong> {guestName}
+          </p>
+          <p>
+            <strong>Masa inap:</strong> {currentRes?.check_in ?? '—'} → {currentRes?.check_out ?? '—'}
+          </p>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            className="btn btn-ghost text-xs"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Batal
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary text-xs"
+            onClick={handleCheckout}
+            disabled={submitting}
+          >
+            {submitting ? 'Memproses…' : 'Proses Check-out'}
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  // 1. HARD BLOCK: Identity custody not returned
+  if (decision.action === 'HARD_BLOCK_ROOM_IDENTITY') {
+    return (
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title="Check-out Diblokir: Identitas Fisik Belum Dikembalikan"
+        size="sm"
+        closeOnOverlayClick={false}
+        footer={
+          <button
+            type="button"
+            className="btn btn-primary text-xs"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Tutup
+          </button>
+        }
+      >
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 flex items-start gap-2.5">
+            <span className="text-lg">🚫</span>
+            <div className="text-xs leading-relaxed">
+              <p className="font-semibold text-rose-950 mb-1">Dokumen Identitas Fisik Masih Ditahan</p>
+              <p>
+                Checkout untuk Kamar <strong className="font-semibold">{roomNumber}</strong> ({guestName}) tidak dapat diproses karena dokumen identitas fisik belum dikembalikan ke hotel.
+              </p>
+            </div>
+          </div>
+          <p className="text-stone-600">
+            Hubungi Front Office untuk menyelesaikan pengembalian dokumen sebelum melanjutkan check-out.
           </p>
         </div>
       </Modal>
     );
   }
 
-  // 2. HARD BLOCK: ROOM_RESERVATION physical identity custody is HELD
-  if (decision.action === 'HARD_BLOCK_ROOM_IDENTITY') {
-    const holderName = decision.heldRoomCustodyHolderName || guestName;
+  // 2. HARD BLOCK: Folio balance outstanding
+  if (decision.action === 'HARD_BLOCK_FOLIO_OUTSTANDING') {
+    const balance = Number(decision.remainingBalance ?? 0);
+    const formattedBalance = new Intl.NumberFormat('id-ID').format(balance);
+    const formattedApplied = decision.appliedDeposit
+      ? new Intl.NumberFormat('id-ID').format(Number(decision.appliedDeposit))
+      : null;
+
     return (
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title="Tidak Dapat Memproses Check-out"
+        title="Check-out Diblokir: Saldo Folio Belum Lunas"
         size="sm"
         closeOnOverlayClick={false}
         footer={
-          <div className="flex items-center justify-end gap-2 w-full">
+          <div className="flex gap-2">
             <button
               type="button"
+              className="btn btn-ghost text-xs"
               onClick={onClose}
-              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+              disabled={submitting}
             >
               Tutup
             </button>
-            {onOpenGuaranteeSection && (
+            {onOpenFolioSection && reservationId && (
               <button
                 type="button"
-                onClick={handleOpenGuarantee}
-                className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                className="btn btn-primary text-xs"
+                onClick={() => onOpenFolioSection(reservationId)}
+                disabled={submitting}
               >
-                Buka Bagian Jaminan
+                Buka Folio
               </button>
             )}
           </div>
@@ -220,9 +354,22 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
           <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 flex items-start gap-2.5">
             <span className="text-lg">🚫</span>
             <div className="text-xs leading-relaxed">
-              <p className="font-semibold text-rose-950 mb-1">Dokumen Identitas Fisik Masih Ditahan</p>
+              <p className="font-semibold text-rose-950 mb-1">Folio Reservasi Belum Seimbang</p>
               <p>
-                KTP/SIM fisik atas nama <strong className="font-semibold">{holderName}</strong> masih ditahan untuk kamar ini. Kembalikan identitas tamu terlebih dahulu pada bagian Jaminan sebelum memproses check-out.
+                Checkout untuk Kamar <strong className="font-semibold">{roomNumber}</strong> tidak dapat diproses karena masih ada sisa pembayaran sebesar{' '}
+                <strong className="font-semibold text-rose-950">Rp {formattedBalance}</strong>.
+                {Number(decision.appliedDeposit ?? 0) > 0 ? (
+                  <span className="mt-1 block">
+                    (Sudah terdapat deposit yang diterapkan: Rp {formattedApplied})
+                  </span>
+                ) : (
+                  <span className="mt-1 block">
+                    (Belum terdapat pembayaran atau deposit yang diterapkan.)
+                  </span>
+                )}
+              </p>
+              <p className="mt-2 text-rose-800">
+                Selesaikan pembayaran atau terapkan deposit yang tersedia di bagian Folio sebelum melakukan check-out.
               </p>
             </div>
           </div>
@@ -231,9 +378,115 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     );
   }
 
-  // 3. SOFT WARNING: ROOM DEPOSIT ONLY
+  // 3. HARD BLOCK: Folio unverified
+  if (decision.action === 'HARD_BLOCK_FOLIO_UNVERIFIED') {
+    return (
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title="Check-out Diblokir: Data Folio Tidak Dapat Diverifikasi"
+        size="sm"
+        closeOnOverlayClick={false}
+        footer={
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-ghost text-xs"
+              onClick={onClose}
+              disabled={submitting}
+            >
+              Tutup
+            </button>
+            {onOpenFolioSection && reservationId && (
+              <button
+                type="button"
+                className="btn btn-primary text-xs"
+                onClick={() => onOpenFolioSection(reservationId)}
+                disabled={submitting}
+              >
+                Buka Folio
+              </button>
+            )}
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
+            <span className="text-lg">⚠️</span>
+            <div className="text-xs leading-relaxed">
+              <p className="font-semibold text-amber-950 mb-1">Data Keuangan Reservasi Tidak Lengkap</p>
+              <p>
+                Checkout untuk Kamar <strong className="font-semibold">{roomNumber}</strong> ({guestName}) tidak dapat diproses karena data keuangan reservasi tidak dapat diverifikasi.
+              </p>
+              <p className="mt-2 text-amber-800">
+                Silakan periksa folio terlebih dahulu sebelum melakukan check-out.
+              </p>
+            </div>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  // 4. CLEAN ALLOW: No issues
+  if (decision.action === 'ALLOW') {
+    return (
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title="Konfirmasi Check-out"
+        size="sm"
+        footer={
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-ghost text-xs"
+              onClick={onClose}
+              disabled={submitting}
+            >
+              Batal
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={handleCheckout}
+              disabled={submitting}
+            >
+              {submitting ? 'Memproses…' : 'Proses Check-out'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <p>
+            Apakah Anda yakin ingin memproses check-out untuk Kamar <strong className="font-semibold text-stone-900">{roomNumber}</strong> ({guestName})?
+          </p>
+          {Number(decision.totalCharges ?? 0) > 0 && (
+            <div className="p-2.5 bg-stone-50 rounded-lg border border-stone-200 space-y-1">
+              <div className="flex justify-between">
+                <span className="text-stone-500">Total Tagihan:</span>
+                <strong className="text-stone-800">Rp {new Intl.NumberFormat('id-ID').format(Number(decision.totalCharges ?? 0))}</strong>
+              </div>
+              {Number(decision.appliedDeposit ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Deposit Diterapkan:</span>
+                  <span className="text-emerald-700 font-semibold">- Rp {new Intl.NumberFormat('id-ID').format(Number(decision.appliedDeposit ?? 0))}</span>
+                </div>
+              )}
+              <div className="flex justify-between border-t border-stone-200 pt-1 mt-1">
+                <span className="text-stone-500">Sisa Pembayaran:</span>
+                <strong className="text-emerald-700 font-semibold">Rp 0</strong>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
+    );
+  }
+
+  // 5. SOFT WARNING: ROOM DEPOSIT ONLY
   if (decision.action === 'WARN_ROOM_DEPOSIT') {
-    const formattedAmount = formatAmount(decision.roomDepositRemaining);
+    const formattedAmount = new Intl.NumberFormat('id-ID').format(Number(decision.roomDepositRemaining ?? 0));
     return (
       <Modal
         isOpen={isOpen}
@@ -242,45 +495,54 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
         size="sm"
         closeOnOverlayClick={false}
         footer={
-          <div className="flex items-center justify-end gap-2 w-full">
+          <div className="flex gap-2">
             <button
               type="button"
-              disabled={submitting}
+              className="btn btn-ghost text-xs"
               onClick={onClose}
-              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+              disabled={submitting}
             >
-              Batal / Periksa Jaminan
+              Batal
             </button>
             <button
               type="button"
+              className="btn btn-warning text-xs"
+              onClick={() => onOpenGuaranteeSection?.(reservationId ?? 0)}
               disabled={submitting}
-              onClick={handleConfirm}
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
-              {submitting ? 'Memproses...' : 'Tetap Check-out'}
+              Selesaikan Jaminan
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={handleCheckout}
+              disabled={submitting}
+            >
+              Tetap Lanjutkan
             </button>
           </div>
         }
       >
-        <div className="space-y-3">
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
-            <span className="text-lg">⚠️</span>
-            <div className="text-xs leading-relaxed">
-              <p>
-                Kamar ini masih memiliki saldo Deposit Kamar sebesar <strong className="font-semibold">Rp {formattedAmount}</strong>. Deposit tidak dikembalikan otomatis saat check-out dan tetap tersimpan di antrean jaminan untuk pengembalian manual. Lanjutkan check-out?
-              </p>
-            </div>
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900">
+            <p className="font-semibold mb-1">Jaminan Kamar: Belum Selesai</p>
+            <p>Sisa jaminan kamar sebesar <strong>Rp {formattedAmount}</strong> belum diselesaikan.</p>
           </div>
+          <p className="text-stone-600">
+            Anda dapat menyelesaikan jaminan terlebih dahulu atau melanjutkan check-out.
+          </p>
         </div>
       </Modal>
     );
   }
 
-  // 4. SOFT WARNING: FINAL GROUP GUARANTEE
+  // 6. SOFT WARNING: FINAL GROUP GUARANTEE
   if (decision.action === 'WARN_FINAL_GROUP_GUARANTEE') {
     const summaryText = formatGroupGuaranteeSummary(
       decision.groupGuaranteeSummary,
-      decision.groupDepositRemaining > 0 ? formatAmount(decision.groupDepositRemaining) : undefined
+      Number(decision.groupDepositRemaining ?? 0) > 0
+        ? new Intl.NumberFormat('id-ID').format(Number(decision.groupDepositRemaining ?? 0))
+        : undefined
     );
     return (
       <Modal
@@ -290,46 +552,52 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
         size="sm"
         closeOnOverlayClick={false}
         footer={
-          <div className="flex items-center justify-end gap-2 w-full">
+          <div className="flex gap-2">
             <button
               type="button"
-              disabled={submitting}
+              className="btn btn-ghost text-xs"
               onClick={onClose}
-              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+              disabled={submitting}
             >
               Batal
             </button>
             <button
               type="button"
+              className="btn btn-warning text-xs"
+              onClick={() => onOpenGuaranteeSection?.(reservationId ?? 0)}
               disabled={submitting}
-              onClick={handleConfirm}
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
-              {submitting ? 'Memproses...' : 'Lanjutkan Check-out'}
+              Selesaikan Jaminan
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={handleCheckout}
+              disabled={submitting}
+            >
+              Tetap Lanjutkan
             </button>
           </div>
         }
       >
-        <div className="space-y-3">
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
-            <span className="text-lg">👥</span>
-            <div className="text-xs leading-relaxed">
-              <p>
-                Ini adalah kamar terakhir yang aktif untuk pemesanan grup <strong className="font-semibold">{bidText}</strong>. Jaminan grup (<strong className="font-semibold">{summaryText}</strong>) akan tetap tercatat dan siap diselesaikan secara manual setelah check-out. Lanjutkan?
-              </p>
-            </div>
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900">
+            <p className="font-semibold mb-1">Jaminan Grup: Belum Selesai</p>
+            <p dangerouslySetInnerHTML={{ __html: summaryText }} />
           </div>
         </div>
       </Modal>
     );
   }
 
-  // 5. COMBINED WARNING: ROOM DEPOSIT + FINAL GROUP GUARANTEE
+  // 7. COMBINED WARNING: ROOM DEPOSIT + FINAL GROUP GUARANTEE
   if (decision.action === 'WARN_ROOM_AND_FINAL_GROUP') {
-    const formattedRoomAmount = formatAmount(decision.roomDepositRemaining);
+    const formattedRoomAmount = new Intl.NumberFormat('id-ID').format(Number(decision.roomDepositRemaining ?? 0));
     const summaryText = formatGroupGuaranteeSummary(
       decision.groupGuaranteeSummary,
-      decision.groupDepositRemaining > 0 ? formatAmount(decision.groupDepositRemaining) : undefined
+      Number(decision.groupDepositRemaining ?? 0) > 0
+        ? new Intl.NumberFormat('id-ID').format(Number(decision.groupDepositRemaining ?? 0))
+        : undefined
     );
     return (
       <Modal
@@ -339,118 +607,80 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
         size="sm"
         closeOnOverlayClick={false}
         footer={
-          <div className="flex items-center justify-end gap-2 w-full">
+          <div className="flex gap-2">
             <button
               type="button"
-              disabled={submitting}
+              className="btn btn-ghost text-xs"
               onClick={onClose}
-              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
+              disabled={submitting}
             >
               Batal
             </button>
             <button
               type="button"
+              className="btn btn-warning text-xs"
+              onClick={() => onOpenGuaranteeSection?.(reservationId ?? 0)}
               disabled={submitting}
-              onClick={handleConfirm}
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
-              {submitting ? 'Memproses...' : 'Lanjutkan Check-out'}
+              Selesaikan Jaminan
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={handleCheckout}
+              disabled={submitting}
+            >
+              Tetap Lanjutkan
             </button>
           </div>
         }
       >
-        <div className="space-y-3">
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
-            <span className="text-lg">⚠️</span>
-            <div className="text-xs leading-relaxed">
-              <p>
-                Kamar ini masih memiliki saldo Deposit Kamar sebesar <strong className="font-semibold">Rp {formattedRoomAmount}</strong>, dan merupakan kamar terakhir yang aktif untuk pemesanan grup <strong className="font-semibold">{bidText}</strong> dengan jaminan grup (<strong className="font-semibold">{summaryText}</strong>) yang belum diselesaikan. Seluruh jaminan akan tetap tercatat dan siap diselesaikan secara manual setelah check-out. Lanjutkan?
-              </p>
-            </div>
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900">
+            <p className="font-semibold mb-1">Jaminan Kamar: {formattedRoomAmount} Belum Selesai</p>
+          </div>
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900">
+            <p className="font-semibold mb-1">Jaminan Grup: Belum Selesai</p>
+            <p dangerouslySetInnerHTML={{ __html: summaryText }} />
           </div>
         </div>
       </Modal>
     );
   }
 
-  // 6. FAIL SAFE: UNVERIFIED GUARANTEE STATUS
+  // 8. WARN_UNVERIFIED: Fallback for unknown state
   if (decision.action === 'WARN_UNVERIFIED') {
     return (
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title="Status Jaminan Belum Dapat Diverifikasi"
+        title="Peringatan: Verifikasi Jaminan Gagal"
         size="sm"
         closeOnOverlayClick={false}
         footer={
-          <div className="flex items-center justify-end gap-2 w-full">
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={onClose}
-              className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
-            >
-              Batal
-            </button>
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={handleConfirm}
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-            >
-              {submitting ? 'Memproses...' : 'Tetap Check-out'}
-            </button>
-          </div>
+          <button
+            type="button"
+            className="btn btn-primary text-xs"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Tutup
+          </button>
         }
       >
-        <div className="space-y-3">
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
-            <span className="text-lg">⚠️</span>
-            <div className="text-xs leading-relaxed">
-              <p>
-                Data jaminan untuk kamar ini belum dapat diverifikasi dengan aman. Periksa status jaminan terlebih dahulu sebelum check-out untuk menghindari jaminan yang belum terselesaikan.
-              </p>
-            </div>
+        <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900">
+            <p className="font-semibold mb-1">Verifikasi Jaminan Gagal</p>
+            <p>
+              {decision.reasonCode === 'NO_GUARANTEE_CONFIGURED'
+                ? 'Tidak ada konfigurasi jaminan untuk properti ini.'
+                : 'Tidak dapat memverifikasi status jaminan. Silakan periksa pengaturan jaminan properti.'}
+            </p>
           </div>
         </div>
       </Modal>
     );
   }
 
-  // 7. CLEAN CONFIRMATION: ALLOW
-  return (
-    <Modal
-      isOpen={isOpen}
-      onClose={onClose}
-      title="Konfirmasi Check-out"
-      size="sm"
-      closeOnOverlayClick={false}
-      footer={
-        <div className="flex items-center justify-end gap-2 w-full">
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onClose}
-            className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-colors cursor-pointer"
-          >
-            Batal
-          </button>
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={handleConfirm}
-            className="px-3.5 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-          >
-            {submitting ? 'Memproses...' : 'Check-out'}
-          </button>
-        </div>
-      }
-    >
-      <div className="space-y-3 text-xs text-stone-700 leading-relaxed">
-        <p>
-          Apakah Anda yakin ingin memproses check-out untuk Kamar <strong className="font-semibold text-stone-900">{roomNumber}</strong> ({guestName})?
-        </p>
-      </div>
-    </Modal>
-  );
+  return null;
 };
