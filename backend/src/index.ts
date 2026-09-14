@@ -431,6 +431,9 @@ function getOrCreatePropertyClients(propertyId: number) {
  * Called either by the PostgreSQL bus after a cross-instance notification,
  * or as a fallback when the bus publish fails.
  */
+// TEMP REALTIME-2B DIAGNOSTICS
+const realtimeInstanceId = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
 function broadcastToLocalSseClients(eventType: string, payload: any, propertyId?: number): void {
   if (propertyId == null || !Number.isInteger(propertyId) || propertyId <= 0) {
     return;
@@ -439,14 +442,24 @@ function broadcastToLocalSseClients(eventType: string, payload: any, propertyId?
   if (!clients || clients.length === 0) {
     return;
   }
+  // TEMP REALTIME-2B DIAGNOSTICS
+  console.log(`[RT2_LOCAL_FANOUT] instance=${realtimeInstanceId} event=${eventType} property=${propertyId} clients=${clients.length}`);
+  let attempted = 0;
+  let written = 0;
+  let failed = 0;
   const data = `event: ${eventType}\ndata: ${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n\n`;
   for (const client of clients) {
+    attempted++;
     try {
       client.res.write(data);
+      written++;
     } catch (e: any) {
+      failed++;
       console.error(`[SSE] write error for ${eventType}: ${e?.message || String(e)}`);
     }
   }
+  // TEMP REALTIME-2B DIAGNOSTICS
+  console.log(`[RT2_LOCAL_RESULT] instance=${realtimeInstanceId} event=${eventType} property=${propertyId} attempted=${attempted} written=${written} failed=${failed}`);
 }
 
 // PostgreSQL LISTEN/NOTIFY event bus — enables multi-instance realtime
@@ -459,6 +472,8 @@ const realtimeBus = createPostgresRealtimeBus({
     password: process.env.DB_PASSWORD || 'secretpassword',
     database: process.env.DB_NAME || 'oak_hotel_db',
   },
+  // TEMP REALTIME-2B DIAGNOSTICS: share one instance ID across all RT2 log lines
+  diagnosticInstanceId: realtimeInstanceId,
 });
 
 /**
@@ -510,6 +525,8 @@ app.get('/api/events', requireAuth, async (req, res) => {
   const clients = getOrCreatePropertyClients(propertyId);
   const clientEntry = { res, lastActivity: Date.now() };
   clients.push(clientEntry);
+  // TEMP REALTIME-2B DIAGNOSTICS
+  console.log(`[RT2_SSE_CONNECT] instance=${realtimeInstanceId} property=${propertyId} clients=${clients.length}`);
 
   const heartbeatInterval = setInterval(() => {
     try {
@@ -532,6 +549,8 @@ app.get('/api/events', requireAuth, async (req, res) => {
     if (clients.length === 0) {
       sseClients.delete(propertyId);
     }
+    // TEMP REALTIME-2B DIAGNOSTICS
+    console.log(`[RT2_SSE_CLOSE] instance=${realtimeInstanceId} property=${propertyId} clients=${clients.length}`);
   }
 
   res.on('close', cleanup);
