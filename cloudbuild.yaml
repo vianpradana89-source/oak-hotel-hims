@@ -4,6 +4,8 @@ steps:
     id: 'build-image'
     args:
       - 'build'
+      - '--build-arg'
+      - 'VITE_REALTIME_BASE_URL=${_VITE_REALTIME_BASE_URL}'
       - '-t'
       - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
       - '-t'
@@ -39,7 +41,10 @@ steps:
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--port=8080'
-      - '--update-env-vars=NODE_ENV=production'
+      - '--update-env-vars=^|^NODE_ENV=production|CORS_ALLOWED_ORIGINS=https://hims.oaklawang.com,https://oak-hims-staging-bh5vdfv2ia-et.a.run.app'
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _VITE_REALTIME_BASE_URL: 'https://oak-hims-staging-bh5vdfv2ia-et.a.run.app'

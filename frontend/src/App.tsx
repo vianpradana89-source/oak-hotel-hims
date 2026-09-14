@@ -2289,6 +2289,10 @@ function AppContent() {
     fetchOperationsData();
 
     // Connect to SSE for realtime updates using authenticated fetch streaming
+    const realtimeBaseUrl = String(import.meta.env.VITE_REALTIME_BASE_URL || '')
+      .trim()
+      .replace(/\/+$/, '');
+
     let abortController: AbortController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 1000;
@@ -2313,8 +2317,9 @@ function AppContent() {
       abortController = new AbortController();
 
       try {
+        const eventsUrl = `${realtimeBaseUrl}/api/events?property_id=${propertyId}`;
         const response = await authenticatedFetch(
-          `/api/events?property_id=${propertyId}`,
+          eventsUrl,
           { signal: abortController.signal }
         );
 
