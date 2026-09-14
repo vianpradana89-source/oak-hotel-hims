@@ -391,7 +391,8 @@ export function deriveCheckoutGateDecision(
   const { currentReservation, siblingReservations, deposits, custody, loadStatus } = params;
 
   // 1. Fail safe: if reservation is missing or invalid
-  if (!currentReservation || typeof currentReservation.id !== 'number') {
+  const currentId = Number(currentReservation?.id ?? currentReservation?.reservation_id);
+  if (!currentReservation || !Number.isFinite(currentId) || currentId <= 0) {
     return {
       action: 'WARN_UNVERIFIED',
       roomDepositRemaining: 0,
@@ -484,15 +485,21 @@ export function deriveCheckoutGateDecision(
   let isFinalChild = false;
 
   if (Array.isArray(siblingReservations)) {
-    const otherSiblings = siblingReservations.filter(
-      s => s && s.id !== currentReservation.id
-    );
+    const otherSiblings = siblingReservations.filter(s => {
+      if (!s) return false;
+      const sibId = Number(s.id ?? s.reservation_id);
+      if (Number.isFinite(currentId) && Number.isFinite(sibId)) {
+        return sibId !== currentId;
+      }
+      return (s.id ?? s.reservation_id) !== (currentReservation?.id ?? currentReservation?.reservation_id);
+    });
     if (otherSiblings.length > 0) {
       isMultiRoom = true;
       // All other siblings must be terminal (CHECKED_OUT or CANCELLED)
-      const allOtherSiblingsTerminal = otherSiblings.every(
-        s => s && (s.status === 'CHECKED_OUT' || s.status === 'CANCELLED')
-      );
+      const allOtherSiblingsTerminal = otherSiblings.every(s => {
+        const st = String(s?.status || s?.reservation_status || '').trim().toUpperCase();
+        return st === 'CHECKED_OUT' || st === 'CANCELLED';
+      });
       isFinalChild = allOtherSiblingsTerminal;
     }
   }

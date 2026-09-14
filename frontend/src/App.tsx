@@ -1555,7 +1555,13 @@ function AppContent() {
 
   const openCheckoutConfirmation = (reservationId: number, resHint?: any) => {
     setCheckoutPendingId(reservationId);
-    setCheckoutModalReservation(resHint || null);
+    const effectiveHint =
+      resHint !== undefined
+        ? resHint
+        : (selectedRes && Number(selectedRes.id ?? selectedRes.reservation_id) === reservationId
+            ? selectedRes
+            : null);
+    setCheckoutModalReservation(effectiveHint || null);
     setCheckoutConfirmOpen(true);
   };
 
@@ -4397,7 +4403,7 @@ function AppContent() {
             fetchOperationsData();
           }}
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
-          onCheckout={(resId) => openCheckoutConfirmation(resId, selectedRes)}
+          onCheckout={(resId, resHint) => openCheckoutConfirmation(resId, resHint ?? selectedRes)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
         />

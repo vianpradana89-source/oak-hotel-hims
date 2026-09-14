@@ -430,12 +430,12 @@ function makeCustody(overrides: Partial<IdentityCustodyRecord> = {}): IdentityCu
 
   // Entry Point A: ReservationDetailDrawer "Check-out Tamu"
   check(
-    drawerSrc.includes('onClick={() => onCheckout(data.id)}'),
-    'Scenario N-A: ReservationDetailDrawer dispatches onCheckout'
+    drawerSrc.includes('onClick={() => onCheckout(data.id, data)}'),
+    'Scenario N-A: ReservationDetailDrawer dispatches onCheckout with active reservation data'
   );
   check(
-    appSrc.includes('onCheckout={(resId) => openCheckoutConfirmation(resId, selectedRes)}'),
-    'Scenario N-A: App.tsx routes ReservationDetailDrawer onCheckout to openCheckoutConfirmation'
+    appSrc.includes('onCheckout={(resId, resHint) => openCheckoutConfirmation(resId, resHint ?? selectedRes)}'),
+    'Scenario N-A: App.tsx routes ReservationDetailDrawer onCheckout to openCheckoutConfirmation with resHint'
   );
 
   // Entry Point B: QuickReservationDetail "Check-out Tamu"
@@ -564,6 +564,181 @@ function makeCustody(overrides: Partial<IdentityCustodyRecord> = {}): IdentityCu
     formatGroupGuaranteeSummary('CUSTODY_ONLY') === 'KTP Grup',
     'Helper 3: CUSTODY_ONLY formatted correctly'
   );
+}
+
+// ===========================================================================
+// REGRESSION SUITE: CHECKOUT-GUARANTEE-GATE-1B (FINAL CHILD GROUP WARNING HOTFIX)
+// ===========================================================================
+
+// Case 1: Sibling array includes current child + checked-out sibling:
+// current = CHECKED_IN, other = CHECKED_OUT, unresolved BOOKING_GROUP
+// => WARN_FINAL_GROUP_GUARANTEE
+{
+  const res = { id: 102, status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'CHECKED_OUT', booking_id: 200 },
+    { id: 102, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 200000, applied: 0, refunded: 0, remaining: 200000 } })];
+  const custody = [makeCustody({ scope: 'BOOKING_GROUP', status: 'HELD' })];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'WARN_FINAL_GROUP_GUARANTEE', 'Gate-1B Case 1: current in siblings + checked-out other => WARN_FINAL_GROUP_GUARANTEE');
+  check(dec.isMultiRoom === true, 'Gate-1B Case 1: isMultiRoom is true');
+  check(dec.isFinalChild === true, 'Gate-1B Case 1: isFinalChild is true');
+  check(dec.groupDepositRemaining === 200000, 'Gate-1B Case 1: groupDepositRemaining is 200000');
+  check(dec.groupCustodyHeld === true, 'Gate-1B Case 1: groupCustodyHeld is true');
+  check(dec.groupGuaranteeSummary === 'DEPOSIT_AND_CUSTODY', 'Gate-1B Case 1: summary is DEPOSIT_AND_CUSTODY');
+}
+
+// Case 2: currentReservation.id = "102" string, sibling id = 102 number
+// => current child excluded correctly
+{
+  const res = { id: "102", status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'CHECKED_OUT', booking_id: 200 },
+    { id: 102, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 150000, applied: 0, refunded: 0, remaining: 150000 } })];
+  const custody: IdentityCustodyRecord[] = [];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'WARN_FINAL_GROUP_GUARANTEE', 'Gate-1B Case 2: string ID coercion excludes current child => WARN_FINAL_GROUP_GUARANTEE');
+  check(dec.isFinalChild === true, 'Gate-1B Case 2: isFinalChild is true');
+}
+
+// Case 3: Sibling status normalization ("checked_out", "CHECKED_OUT ")
+// => terminal after normalization
+{
+  const res = { id: 103, status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'checked_out', booking_id: 200 },
+    { id: 102, status: 'CHECKED_OUT ', booking_id: 200 },
+    { id: 103, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 100000, applied: 0, refunded: 0, remaining: 100000 } })];
+  const custody: IdentityCustodyRecord[] = [];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'WARN_FINAL_GROUP_GUARANTEE', 'Gate-1B Case 3: case and whitespace normalized => WARN_FINAL_GROUP_GUARANTEE');
+  check(dec.isFinalChild === true, 'Gate-1B Case 3: isFinalChild is true');
+}
+
+// Case 4: Non-final child: another sibling CHECKED_IN, unresolved BOOKING_GROUP
+// => no group warning (ALLOW)
+{
+  const res = { id: 102, status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'CHECKED_IN', booking_id: 200 },
+    { id: 102, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 200000, applied: 0, refunded: 0, remaining: 200000 } })];
+  const custody = [makeCustody({ scope: 'BOOKING_GROUP', status: 'HELD' })];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'ALLOW', 'Gate-1B Case 4: non-final child with unresolved group produces ALLOW');
+  check(dec.isMultiRoom === true, 'Gate-1B Case 4: isMultiRoom is true');
+  check(dec.isFinalChild === false, 'Gate-1B Case 4: isFinalChild is false');
+}
+
+// Case 5: Failed reservation fetch / loadStatus='error'
+// => WARN_UNVERIFIED
+{
+  const res = { id: 102, status: 'CHECKED_IN' };
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: null,
+    deposits: null,
+    custody: null,
+    loadStatus: 'error',
+  });
+
+  check(dec.action === 'WARN_UNVERIFIED', 'Gate-1B Case 5: loadStatus error produces WARN_UNVERIFIED');
+}
+
+// Case 6: Room deposit + final unresolved group
+// => WARN_ROOM_AND_FINAL_GROUP
+{
+  const res = { id: 102, status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'CHECKED_OUT', booking_id: 200 },
+    { id: 102, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [
+    makeDeposit({ scope: 'ROOM_RESERVATION', balance: { received: 50000, applied: 0, refunded: 0, remaining: 50000 } }),
+    makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 200000, applied: 0, refunded: 0, remaining: 200000 } }),
+  ];
+  const custody: IdentityCustodyRecord[] = [];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'WARN_ROOM_AND_FINAL_GROUP', 'Gate-1B Case 6: room deposit + final group produces WARN_ROOM_AND_FINAL_GROUP');
+  check(dec.roomDepositRemaining === 50000, 'Gate-1B Case 6: roomDepositRemaining is 50000');
+  check(dec.groupDepositRemaining === 200000, 'Gate-1B Case 6: groupDepositRemaining is 200000');
+  check(dec.isFinalChild === true, 'Gate-1B Case 6: isFinalChild is true');
+}
+
+// Case 7: ROOM identity HELD still:
+// => HARD_BLOCK_ROOM_IDENTITY
+{
+  const res = { id: 102, status: 'CHECKED_IN', booking_id: 200 };
+  const siblings = [
+    { id: 101, status: 'CHECKED_OUT', booking_id: 200 },
+    { id: 102, status: 'CHECKED_IN', booking_id: 200 },
+  ];
+  const deposits = [
+    makeDeposit({ scope: 'ROOM_RESERVATION', balance: { received: 50000, applied: 0, refunded: 0, remaining: 50000 } }),
+    makeDeposit({ scope: 'BOOKING_GROUP', balance: { received: 200000, applied: 0, refunded: 0, remaining: 200000 } }),
+  ];
+  const custody = [
+    makeCustody({ scope: 'ROOM_RESERVATION', status: 'HELD', document_holder_name: 'Budi Room' }),
+    makeCustody({ scope: 'BOOKING_GROUP', status: 'HELD', document_holder_name: 'Budi Group' }),
+  ];
+
+  const dec = deriveCheckoutGateDecision({
+    currentReservation: res,
+    siblingReservations: siblings,
+    deposits,
+    custody,
+    loadStatus: 'ready',
+  });
+
+  check(dec.action === 'HARD_BLOCK_ROOM_IDENTITY', 'Gate-1B Case 7: room identity HELD produces HARD_BLOCK_ROOM_IDENTITY');
+  check(dec.heldRoomCustodyHolderName === 'Budi Room', 'Gate-1B Case 7: holder name matches room custody');
 }
 
 console.log(`\n=== RESULTS: ${assertions} passed, 0 failed ===\n`);

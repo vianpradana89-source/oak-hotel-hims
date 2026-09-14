@@ -7,6 +7,7 @@ import {
   deriveCheckoutGateDecision,
   formatGroupGuaranteeSummary,
   type CheckoutGateDecision,
+  type GuaranteeLoadStatus,
 } from './guaranteeScopePolicy';
 
 export interface CheckoutGuaranteeConfirmationModalProps {
@@ -34,7 +35,13 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
   const [hydratedRes, setHydratedRes] = useState<any>(null);
   const [decision, setDecision] = useState<CheckoutGateDecision | null>(null);
 
-  const effectivePropId = propertyId ?? reservationData?.property_id ?? null;
+  const targetReservationMatch =
+    reservationData &&
+    Number(reservationData?.id ?? reservationData?.reservation_id) === Number(reservationId)
+      ? reservationData
+      : null;
+
+  const effectivePropId = propertyId ?? targetReservationMatch?.property_id ?? null;
   const requestIdRef = useRef<number>(0);
 
   const evaluateData = useCallback(
@@ -53,17 +60,42 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
 
         if (currentReq !== requestIdRef.current) return;
 
-        const currentRes = resResp.ok && resResp.data?.data ? resResp.data.data : reservationData;
+        const currentResMatch =
+          reservationData &&
+          Number(reservationData?.id ?? reservationData?.reservation_id) === targetId
+            ? reservationData
+            : null;
+
+        const currentRes = resResp.ok && resResp.data?.data ? resResp.data.data : currentResMatch;
         setHydratedRes(currentRes);
 
-        const siblingReservations = currentRes?.sibling_reservations ?? [];
+        const siblingReservations =
+          resResp.ok && resResp.data?.data && Array.isArray(resResp.data.data.sibling_reservations)
+            ? resResp.data.data.sibling_reservations
+            : null;
+
         const deposits = depResp.ok && Array.isArray(depResp.data?.data) ? depResp.data.data : null;
         const custody = custResp.ok && Array.isArray(custResp.data?.data) ? custResp.data.data : null;
 
-        const loadStatus = depResp.ok && custResp.ok && deposits && custody ? 'ready' : 'error';
+        // Authoritative load status requires ALL:
+        // - resResp.ok
+        // - depResp.ok
+        // - custResp.ok
+        // - valid deposits payload
+        // - valid custody payload
+        // - valid siblingReservations from authoritative reservation detail fetch
+        const loadStatus: GuaranteeLoadStatus =
+          resResp.ok &&
+          depResp.ok &&
+          custResp.ok &&
+          deposits !== null &&
+          custody !== null &&
+          siblingReservations !== null
+            ? 'ready'
+            : 'error';
 
         const dec = deriveCheckoutGateDecision({
-          currentReservation: currentRes,
+          currentReservation: currentRes || { id: targetId, status: 'CHECKED_IN' },
           siblingReservations,
           deposits,
           custody,
@@ -74,9 +106,14 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
       } catch (err) {
         if (currentReq !== requestIdRef.current) return;
         console.error('[CheckoutGuaranteeModal] Failed to evaluate guarantee state:', err);
+        const fallbackRes =
+          reservationData &&
+          Number(reservationData?.id ?? reservationData?.reservation_id) === targetId
+            ? reservationData
+            : { id: targetId, status: 'CHECKED_IN' };
         setDecision(
           deriveCheckoutGateDecision({
-            currentReservation: reservationData || { id: targetId, status: 'CHECKED_IN' },
+            currentReservation: fallbackRes,
             siblingReservations: null,
             deposits: null,
             custody: null,
@@ -125,7 +162,7 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     }
   };
 
-  const activeRes = hydratedRes || reservationData || {};
+  const activeRes = hydratedRes || targetReservationMatch || {};
   const roomNumber = activeRes.room_number || '-';
   const guestName = activeRes.guest_name || activeRes.booker_name || 'Tamu';
   const bidText = activeRes.bid ? `#${activeRes.bid}` : 'Grup';
