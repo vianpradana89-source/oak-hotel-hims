@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { authenticatedFetch } from './lib/authenticatedFetch.ts';
 import { TransactionWorkspace } from './features/transactions/TransactionWorkspace.tsx';
 import {
   formatIdrInput,
@@ -2287,49 +2288,182 @@ function AppContent() {
   useEffect(() => {
     fetchOperationsData();
 
-    // connect to SSE for realtime updates
-    let es: EventSource | null = null;
-    try {
-      es = new EventSource('/api/events');
-      const calendarEvents = [
-        'ReservationCreated',
-        'ReservationUpdated',
-        'ReservationMoved',
-        'ReservationCancelled',
-        'ReservationCheckedIn',
-        'ReservationCheckedOut',
-        'BookingCreated',
-        'BookingCompleted',
-      ];
-      for (const eventName of calendarEvents) {
-        es.addEventListener(eventName, (ev: any) => {
-          console.log(`SSE ${eventName}`, ev.data);
+    // Connect to SSE for realtime updates using authenticated fetch streaming
+    let abortController: AbortController | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let backoffMs = 1000;
+    let disposed = false;
+
+    const scheduleReconnect = () => {
+      if (disposed || abortController?.signal.aborted) return;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const delay = backoffMs;
+      backoffMs = Math.min(backoffMs * 2, 15000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connectSSE();
+      }, delay);
+    };
+
+    const connectSSE = async () => {
+      // Only connect if we have a valid propertyId
+      if (disposed || !propertyId) return;
+
+      abortController?.abort();
+      abortController = new AbortController();
+
+      try {
+        const response = await authenticatedFetch(
+          `/api/events?property_id=${propertyId}`,
+          { signal: abortController.signal }
+        );
+
+        if (response.status === 401 || response.status === 403) {
+          console.error('SSE auth failure, not reconnecting');
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('No response body');
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+        let currentDataLines: string[] = [];
+
+        const calendarEvents = new Set([
+          'ReservationCreated',
+          'ReservationUpdated',
+          'ReservationMoved',
+          'ReservationCancelled',
+          'ReservationCheckedIn',
+          'ReservationCheckedOut',
+          'BookingCreated',
+          'BookingCompleted',
+          'RoomStatusUpdated',
+        ]);
+
+        const handleEvent = (eventName: string, data: any) => {
+          console.log(`SSE ${eventName}`, data);
+          if (!calendarEvents.has(eventName)) {
+            return;
+          }
           void fetchDataRef.current();
           void fetchTransactionReservationsRef.current();
           void fetchDailyOperationsRef.current();
           void loadDailyKpisRef.current();
-        });
+          if (eventName === 'RoomStatusUpdated') {
+            void fetchOperationsData();
+          }
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
+            if (line === '') {
+              // End of SSE frame
+              if (currentEvent && currentDataLines.length > 0) {
+                try {
+                  const rawData = currentDataLines.join('\n');
+                  const data = JSON.parse(rawData);
+                  handleEvent(currentEvent, data);
+                } catch (error) {
+                  console.warn('Failed to parse SSE event payload', error);
+                }
+              }
+              currentEvent = '';
+              currentDataLines = [];
+              continue;
+            }
+
+            if (line.startsWith(':')) {
+              // heartbeat/comment - reset backoff on healthy stream
+              if (line.trim() === ': heartbeat') {
+                backoffMs = 1000;
+              }
+              continue;
+            }
+
+            if (line.startsWith('retry:')) {
+              continue;
+            }
+
+            if (line.startsWith('event:')) {
+              currentEvent = line.slice(6).trim();
+              continue;
+            }
+
+            if (line.startsWith('data:')) {
+              let value = line.slice(5);
+              if (value.startsWith(' ')) value = value.slice(1);
+              currentDataLines.push(value);
+            }
+          }
+        }
+
+        // Flush decoder
+        buffer += decoder.decode();
+        if (buffer) {
+          const lines = buffer.split('\n');
+          for (const rawLine of lines) {
+            const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+            if (line === '') {
+              if (currentEvent && currentDataLines.length > 0) {
+                try {
+                  const rawData = currentDataLines.join('\n');
+                  const data = JSON.parse(rawData);
+                  handleEvent(currentEvent, data);
+                } catch (error) {
+                  console.warn('Failed to parse SSE event payload', error);
+                }
+              }
+              currentEvent = '';
+              currentDataLines = [];
+            } else if (!line.startsWith(':') && !line.startsWith('retry:')) {
+              if (line.startsWith('event:')) {
+                currentEvent = line.slice(6).trim();
+              } else if (line.startsWith('data:')) {
+                let value = line.slice(5);
+                if (value.startsWith(' ')) value = value.slice(1);
+                currentDataLines.push(value);
+              }
+            } else if (line.trim() === ': heartbeat') {
+              backoffMs = 1000;
+            }
+          }
+        }
+
+        // Normal EOF - reconnect if still alive
+        if (!disposed && !abortController?.signal.aborted) {
+          scheduleReconnect();
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        console.error('SSE connection error, reconnecting...', err.message);
+        scheduleReconnect();
       }
-      es.addEventListener('RoomStatusUpdated', (ev: any) => {
-        console.log('SSE RoomStatusUpdated', ev.data);
-        void fetchDataRef.current();
-        void fetchOperationsData();
-        void fetchTransactionReservationsRef.current();
-        void fetchDailyOperationsRef.current();
-        void loadDailyKpisRef.current();
-      });
-      es.onmessage = (m) => {
-        // generic messages
-        console.log('SSE message', m.data);
-      };
-    } catch (e) {
-      console.error('SSE connection failed', e);
-    }
+    };
+
+    connectSSE();
 
     return () => {
-      if (es) es.close();
+      disposed = true;
+      abortController?.abort();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, []);
+  }, [propertyId]);
 
   const addHousekeepingTask = async (
     roomNumber: string | number | null,

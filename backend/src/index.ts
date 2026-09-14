@@ -408,27 +408,69 @@ const pool = new Pool({
 
 app.use(createOperationalAccessGuard(pool));
 
-// Simple SSE clients registry
-const sseClients: Array<import('express').Response> = [];
-function broadcastEvent(eventType: string, payload: any) {
-  const data = `event: ${eventType}\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const client of sseClients) {
-    try {
-      client.write(data);
-    } catch (e) {
-      console.error('Error writing to SSE client', e);
-    }
+// Simple SSE clients registry - property-scoped
+const sseClients = new Map<number, Array<{ res: import('express').Response; lastActivity: number }>>();
+function getOrCreatePropertyClients(propertyId: number) {
+  if (!sseClients.has(propertyId)) sseClients.set(propertyId, []);
+  return sseClients.get(propertyId)!;
+}
+function broadcastEvent(eventType: string, payload: any, propertyId?: number) {
+  if (propertyId == null || !Number.isInteger(propertyId) || propertyId <= 0) {
+    console.warn('broadcastEvent called with invalid propertyId, skipping', propertyId);
+    return;
+  }
+  const clients = sseClients.get(propertyId);
+  if (!clients || clients.length === 0) return;
+  const data = `event: ${eventType}\ndata: ${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n\n`;
+  for (const client of clients) {
+    try { client.res.write(data); } catch (e) { console.error('Error writing to SSE client', e); }
   }
 }
 
-app.get('/api/events', (req, res) => {
+app.get('/api/events', requireAuth, async (req, res) => {
+  const userId = req.user?.id;
+  const userPropertyId = Number(req.user?.property_id);
+  const requestedPropertyId = Number(req.query.property_id);
+
+  // Require explicit valid property_id
+  if (!Number.isInteger(requestedPropertyId) || requestedPropertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'INVALID_PROPERTY_ID', message: 'property_id query parameter is required and must be a positive integer' });
+  }
+
+  // Validate property scope
+  const isSuperAdmin = userId ? await isPlatformSuperAdmin(pool, userId) : false;
+  if (!isSuperAdmin && requestedPropertyId !== userPropertyId) {
+    return res.status(403).json({ status: 'ERROR', code: 'PROPERTY_SCOPE_REQUIRED', message: 'Tidak memiliki akses ke properti ini' });
+  }
+
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.flushHeaders && res.flushHeaders();
   res.write('retry: 10000\n\n');
-  sseClients.push(res);
+  res.write(': connected\n\n'); // initial connection event
+
+  const propertyId = requestedPropertyId;
+  const clients = getOrCreatePropertyClients(propertyId);
+  const clientEntry = { res, lastActivity: Date.now() };
+  clients.push(clientEntry);
+
+  // Heartbeat / keepalive every 15 seconds
+  const heartbeatInterval = setInterval(() => {
+    try {
+      res.write(': heartbeat\n\n');
+      clientEntry.lastActivity = Date.now();
+    } catch {
+      clearInterval(heartbeatInterval);
+    }
+  }, 15000);
+
   req.on('close', () => {
-    const idx = sseClients.indexOf(res);
-    if (idx !== -1) sseClients.splice(idx, 1);
+    clearInterval(heartbeatInterval);
+    const idx = clients.indexOf(clientEntry);
+    if (idx !== -1) clients.splice(idx, 1);
+    // Clean up empty property entries
+    if (clients.length === 0) {
+      sseClients.delete(propertyId);
+    }
   });
 });
 
@@ -2844,7 +2886,8 @@ async function createReservationRecord(req: any, payload: any) {
     status: 'SUCCESS',
     data: reservationResponse,
     lock_expires_at: expiresAt.toISOString(),
-    canonical: canonicalResult
+    canonical: canonicalResult,
+    property_id: Number(roomRow.rows[0].property_id)
   };
 }
 
@@ -3841,7 +3884,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
       room_id: updated.rows[0].room_id,
       guest_name: guestName,
       timestamp: new Date().toISOString()
-    });
+    }, reservationPropertyId);
 
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
     res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(updated.rows[0]) });
@@ -3921,7 +3964,7 @@ app.post('/api/reservations/:id/reprice', requireAuth, async (req: any, res: any
       room_id: result.reservation.room_id,
       guest_name: result.reservation.guest_name,
       timestamp: new Date().toISOString()
-    });
+    }, propertyId);
     return res.json({
       status: 'SUCCESS',
       data: {
@@ -3967,7 +4010,7 @@ const handleReservationEdit = async (req: any, res: any) => {
       room_id: updated.room_id,
       guest_name: updated.guest_name,
       timestamp: new Date().toISOString()
-    });
+    }, Number(updated.property_id));
 
     res.json({ status: 'SUCCESS', data: withReservationHotelDates(updated) });
   } catch (err: any) {
@@ -4045,7 +4088,7 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUp
       room_id: result.reservation.room_id,
       guest_name: result.reservation.guest_name,
       timestamp: new Date().toISOString()
-    });
+    }, requestedPropertyId);
 
     res.json({
       status: 'SUCCESS',
@@ -4247,7 +4290,7 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
         room_id: current.room_id,
         guest_name: current.guest_name,
         timestamp: new Date().toISOString()
-      });
+      }, propertyId);
     }
     if (bookingTransition?.status === 'COMPLETED') {
       broadcastEvent('BookingCompleted', {
@@ -4255,7 +4298,7 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
         bid: bookingTransition.booking.bid,
         trigger_reservation_id: reservationId,
         timestamp: new Date().toISOString()
-      });
+      }, propertyId);
     }
 
     res.json({
@@ -4321,7 +4364,7 @@ app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('paymen
         reservation_count: result.reservations.length,
         correlation_id: result.correlationId,
         timestamp: new Date().toISOString()
-      });
+      }, result.booking.property_id);
       for (const reservation of result.reservations) {
         broadcastEvent('ReservationCreated', {
           reservation_id: reservation.id,
@@ -4335,7 +4378,7 @@ app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('paymen
           check_out: reservation.check_out,
           correlation_id: result.correlationId,
           timestamp: new Date().toISOString()
-        });
+        }, result.booking.property_id);
       }
     } catch (broadcastError) {
       console.error('Failed to broadcast booking create events', broadcastError);
@@ -4384,7 +4427,7 @@ app.post('/api/reservations', async (req, res) => {
         check_out: result.data.check_out,
         correlation_id: result.canonical.correlationId,
         timestamp: new Date().toISOString()
-      });
+      }, result.property_id);
     } catch (broadcastError) {
       console.error('Failed to broadcast ReservationCreated', broadcastError);
     }
@@ -4465,7 +4508,7 @@ app.post('/api/reservations/upload', requireAuth, upload.fields([
         check_out: result.data.check_out,
         correlation_id: result.canonical.correlationId,
         timestamp: new Date().toISOString()
-      });
+      }, result.property_id);
     } catch (broadcastError) {
       console.error('Failed to broadcast ReservationCreated', broadcastError);
     }
@@ -5378,7 +5421,7 @@ app.patch('/api/rooms/:id/status', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    broadcastEvent('RoomStatusUpdated', { room_id: roomId, status: mappedStatus, timestamp: new Date().toISOString() });
+    broadcastEvent('RoomStatusUpdated', { room_id: roomId, status: mappedStatus, timestamp: new Date().toISOString() }, propertyId);
     res.json({ status: 'SUCCESS', data: result.rows[0] });
   } catch (err: any) {
     await client.query('ROLLBACK');
@@ -5747,6 +5790,15 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     );
 
     await client.query('COMMIT');
+    broadcastEvent('ReservationUpdated', {
+      reservation_id: reservationId,
+      room_id: roomId,
+      guest_name: reservation.guest_name,
+      operation: 'EXTEND',
+      old_check_out: oldCheckOut,
+      new_check_out: requestedCheckOut,
+      timestamp: new Date().toISOString()
+    }, propertyId);
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
 
     return res.json({
@@ -6019,6 +6071,15 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     );
 
     await client.query('COMMIT');
+    broadcastEvent('ReservationUpdated', {
+      reservation_id: reservationId,
+      room_id: reservation.room_id,
+      guest_name: reservation.guest_name,
+      operation: 'SHORTEN',
+      old_check_out: oldCheckOut,
+      new_check_out: requestedCheckOut,
+      timestamp: new Date().toISOString()
+    }, propertyId);
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
 
     return res.json({
@@ -6231,7 +6292,7 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       guest_name: current.guest_name,
       checked_in_at: new Date().toISOString(),
       timestamp: new Date().toISOString()
-    });
+    }, propertyId);
 
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
     res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(updated.rows[0]) });
@@ -6480,7 +6541,7 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         guest_name: checkoutReservation.guest_name,
         checked_out_at: new Date().toISOString(),
         timestamp: new Date().toISOString()
-      });
+      }, propertyId);
     }
 
     if (bookingCompletionAuditPayload) {
@@ -6489,7 +6550,7 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
         bid: bookingRecord.bid,
         trigger_reservation_id: reservationId,
         timestamp: new Date().toISOString()
-      });
+      }, propertyId);
     }
 
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
@@ -7788,7 +7849,7 @@ app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool))
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));
-app.use('/api', createRoomMoveRouter(pool));
+app.use('/api', createRoomMoveRouter(pool, broadcastEvent));
 app.use('/api/housekeeping', createHousekeepingRouter(pool));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
