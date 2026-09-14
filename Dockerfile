@@ -12,6 +12,10 @@ COPY frontend/package.json frontend/package-lock.json ./frontend/
 # including Linux-specific optional binaries
 RUN npm --prefix frontend ci --include=optional
 
+# Inject build-time env vars for Vite
+ARG VITE_REALTIME_BASE_URL
+ENV VITE_REALTIME_BASE_URL=${VITE_REALTIME_BASE_URL}
+
 # Copy frontend source
 COPY frontend/ ./frontend/
 
