@@ -1476,7 +1476,7 @@ function AppContent() {
     }
   };
 
-   const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout', expectedPrimaryGuestId?: number | null) => {
+    const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout', expectedPrimaryGuestId?: number | null, suppressSuccessAlert?: boolean) => {
      try {
        const body: Record<string, any> = { property_id: propertyId };
        if (action === 'checkin' && expectedPrimaryGuestId !== null && expectedPrimaryGuestId !== undefined) {
@@ -1554,8 +1554,10 @@ function AppContent() {
          }
        }
 
-       alert(action === 'checkin' ? 'Check-in berhasil' : 'Check-out berhasil');
-       return canonicalDto ?? null;
+        if (!suppressSuccessAlert) {
+          alert(action === 'checkin' ? 'Check-in berhasil' : 'Check-out berhasil');
+        }
+        return canonicalDto ?? null;
      } catch (error) {
        console.error(`Reservation ${action} failed`, error);
        alert(`Gagal ${action === 'checkin' ? 'check-in' : 'check-out'}: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -4506,10 +4508,14 @@ function AppContent() {
         reservationData={checkoutModalReservation}
         onClose={cancelCheckoutConfirmation}
         onConfirmCheckout={async (resId) => {
-          const updatedDto = await handleReservationAction(resId, 'checkout');
+          const updatedDto = await handleReservationAction(resId, 'checkout', undefined, true);
           if (checkoutSuccessCallbackRef.current) {
             await checkoutSuccessCallbackRef.current(updatedDto);
           }
+          cancelCheckoutConfirmation();
+          setTimeout(() => {
+            alert('Check-out berhasil');
+          }, 0);
           return updatedDto;
         }}
         onOpenGuaranteeSection={handleOpenGuaranteeSectionFromCheckout}
