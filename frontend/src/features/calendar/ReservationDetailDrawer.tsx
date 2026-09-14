@@ -1503,15 +1503,17 @@ export default function ReservationDetailDrawer({
 
           {/* Section: Deposit & Jaminan */}
           {data.id && activePropId && (
-            <DepositGuaranteeSection
-              reservationId={data.id}
-              propertyId={activePropId}
-              reservationStatus={data.status}
-              remainingBalance={remainingBalance}
-              isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
-              onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
-              onGuaranteeStateChange={setGuaranteeState}
-            />
+            <div id="deposit-guarantee-section">
+              <DepositGuaranteeSection
+                reservationId={data.id}
+                propertyId={activePropId}
+                reservationStatus={data.status}
+                remainingBalance={remainingBalance}
+                isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
+                onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
+                onGuaranteeStateChange={setGuaranteeState}
+              />
+            </div>
           )}
 
           {/* Section 8: Catatan / Special Requests */}

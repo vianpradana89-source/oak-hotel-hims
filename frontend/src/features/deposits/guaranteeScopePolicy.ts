@@ -317,3 +317,280 @@ export function deriveGuaranteeLoadStatus(params: {
   if (!params.sourceMatches) return 'loading';
   return 'ready';
 }
+
+/**
+ * CHECKOUT-GUARANTEE-GATE-1A
+ *
+ * Pure decision outcomes for checkout guarantee gates.
+ *
+ * Distinguishes at minimum:
+ *   - ALLOW                      — no unresolved relevant guarantee, clean confirmation
+ *   - HARD_BLOCK_ROOM_IDENTITY   — physical ROOM_RESERVATION custody is HELD (strictly blocks checkout)
+ *   - WARN_ROOM_DEPOSIT          — unresolved ROOM_RESERVATION deposit balance > 0
+ *   - WARN_FINAL_GROUP_GUARANTEE — final active child of multi-room booking + unresolved group guarantee
+ *   - WARN_ROOM_AND_FINAL_GROUP  — room deposit unresolved AND final active child with unresolved group guarantee
+ *   - WARN_UNVERIFIED            — unknown or malformed guarantee payload / fetch error (fail safe)
+ */
+export type CheckoutGateAction =
+  | 'ALLOW'
+  | 'HARD_BLOCK_ROOM_IDENTITY'
+  | 'WARN_ROOM_DEPOSIT'
+  | 'WARN_FINAL_GROUP_GUARANTEE'
+  | 'WARN_ROOM_AND_FINAL_GROUP'
+  | 'WARN_UNVERIFIED';
+
+export type GroupGuaranteeSummaryKind =
+  | 'DEPOSIT_AND_CUSTODY'
+  | 'DEPOSIT_ONLY'
+  | 'CUSTODY_ONLY';
+
+export interface CheckoutGateDecision {
+  action: CheckoutGateAction;
+  heldRoomCustody?: IdentityCustodyRecord;
+  heldRoomCustodyHolderName?: string;
+  roomDepositRemaining: number;
+  groupDepositRemaining: number;
+  groupCustodyHeld: boolean;
+  groupGuaranteeSummary?: GroupGuaranteeSummaryKind;
+  isFinalChild: boolean;
+  isMultiRoom: boolean;
+  unverifiedReason?: string;
+}
+
+export interface CheckoutGateDecisionParams {
+  currentReservation: {
+    id: number;
+    status: string;
+    booking_id?: number | null;
+    [key: string]: any;
+  } | null | undefined;
+  siblingReservations?: Array<{
+    id: number;
+    status: string;
+    [key: string]: any;
+  }> | null;
+  deposits: Deposit[] | null | undefined;
+  custody: IdentityCustodyRecord[] | null | undefined;
+  loadStatus?: GuaranteeLoadStatus; // 'loading' | 'ready' | 'error'
+}
+
+/**
+ * Pure helper for evaluating checkout guarantee gate policy.
+ *
+ * Rules:
+ * 1. Malformed or failed state -> WARN_UNVERIFIED (fail safe).
+ * 2. ROOM_RESERVATION physical identity custody HELD -> HARD_BLOCK_ROOM_IDENTITY (takes precedence).
+ * 3. Multi-room NON-FINAL child: ignore unresolved BOOKING_GROUP guarantee (ALLOW or WARN_ROOM_DEPOSIT).
+ * 4. Multi-room FINAL child + unresolved BOOKING_GROUP guarantee -> WARN_FINAL_GROUP_GUARANTEE (or combined).
+ * 5. Room deposit unresolved + final group guarantee unresolved -> WARN_ROOM_AND_FINAL_GROUP.
+ * 6. Clean state -> ALLOW (ordinary checkout confirmation).
+ */
+export function deriveCheckoutGateDecision(
+  params: CheckoutGateDecisionParams
+): CheckoutGateDecision {
+  const { currentReservation, siblingReservations, deposits, custody, loadStatus } = params;
+
+  // 1. Fail safe: if reservation is missing or invalid
+  if (!currentReservation || typeof currentReservation.id !== 'number') {
+    return {
+      action: 'WARN_UNVERIFIED',
+      roomDepositRemaining: 0,
+      groupDepositRemaining: 0,
+      groupCustodyHeld: false,
+      isFinalChild: false,
+      isMultiRoom: false,
+      unverifiedReason: 'INVALID_RESERVATION',
+    };
+  }
+
+  // 2. Fail safe: if loadStatus is error, or deposits/custody are not arrays
+  if (
+    loadStatus === 'error' ||
+    !Array.isArray(deposits) ||
+    !Array.isArray(custody)
+  ) {
+    return {
+      action: 'WARN_UNVERIFIED',
+      roomDepositRemaining: 0,
+      groupDepositRemaining: 0,
+      groupCustodyHeld: false,
+      isFinalChild: false,
+      isMultiRoom: false,
+      unverifiedReason: 'MALFORMED_OR_FAILED_GUARANTEE_DATA',
+    };
+  }
+
+  // Verify elements inside deposits & custody are valid objects
+  for (const d of deposits) {
+    if (!d || typeof d !== 'object' || typeof d.status !== 'string') {
+      return {
+        action: 'WARN_UNVERIFIED',
+        roomDepositRemaining: 0,
+        groupDepositRemaining: 0,
+        groupCustodyHeld: false,
+        isFinalChild: false,
+        isMultiRoom: false,
+        unverifiedReason: 'MALFORMED_DEPOSIT_RECORD',
+      };
+    }
+  }
+
+  for (const c of custody) {
+    if (!c || typeof c !== 'object' || typeof c.status !== 'string') {
+      return {
+        action: 'WARN_UNVERIFIED',
+        roomDepositRemaining: 0,
+        groupDepositRemaining: 0,
+        groupCustodyHeld: false,
+        isFinalChild: false,
+        isMultiRoom: false,
+        unverifiedReason: 'MALFORMED_CUSTODY_RECORD',
+      };
+    }
+  }
+
+  // 3. Evaluate ROOM_RESERVATION physical identity custody HELD (Hard Block)
+  // Hard block strictly takes precedence over all other considerations.
+  const heldRoomCustodyList = custody.filter(
+    c => !isGroupCustody(c) && c.status === 'HELD'
+  );
+  if (heldRoomCustodyList.length > 0) {
+    const firstHeld = heldRoomCustodyList[0];
+    return {
+      action: 'HARD_BLOCK_ROOM_IDENTITY',
+      heldRoomCustody: firstHeld,
+      heldRoomCustodyHolderName: firstHeld.document_holder_name || undefined,
+      roomDepositRemaining: 0,
+      groupDepositRemaining: 0,
+      groupCustodyHeld: false,
+      isFinalChild: false,
+      isMultiRoom: false,
+    };
+  }
+
+  // 4. Evaluate ROOM_RESERVATION deposit balance
+  const activeRoomDeposits = deposits.filter(
+    d => !isGroupDeposit(d) && isActiveDeposit(d) && (d.balance?.remaining ?? 0) > 0
+  );
+  const roomDepositRemaining = activeRoomDeposits.reduce(
+    (sum, d) => sum + (d.balance?.remaining ?? 0),
+    0
+  );
+  const hasUnresolvedRoomDeposit = roomDepositRemaining > 0;
+
+  // 5. Evaluate Multi-Room & Final-Child Status
+  // Sibling reservations must be evaluated considering current reservation becomes terminal.
+  let isMultiRoom = false;
+  let isFinalChild = false;
+
+  if (Array.isArray(siblingReservations)) {
+    const otherSiblings = siblingReservations.filter(
+      s => s && s.id !== currentReservation.id
+    );
+    if (otherSiblings.length > 0) {
+      isMultiRoom = true;
+      // All other siblings must be terminal (CHECKED_OUT or CANCELLED)
+      const allOtherSiblingsTerminal = otherSiblings.every(
+        s => s && (s.status === 'CHECKED_OUT' || s.status === 'CANCELLED')
+      );
+      isFinalChild = allOtherSiblingsTerminal;
+    }
+  }
+
+  // 6. Evaluate BOOKING_GROUP guarantees
+  const heldGroupCustodyList = custody.filter(
+    c => isGroupCustody(c) && c.status === 'HELD'
+  );
+  const groupCustodyHeld = heldGroupCustodyList.length > 0;
+
+  const activeGroupDeposits = deposits.filter(
+    d => isGroupDeposit(d) && isActiveDeposit(d) && (d.balance?.remaining ?? 0) > 0
+  );
+  const groupDepositRemaining = activeGroupDeposits.reduce(
+    (sum, d) => sum + (d.balance?.remaining ?? 0),
+    0
+  );
+  const hasUnresolvedGroupDeposit = groupDepositRemaining > 0;
+  const hasUnresolvedGroupGuarantee = groupCustodyHeld || hasUnresolvedGroupDeposit;
+
+  let groupGuaranteeSummary: GroupGuaranteeSummaryKind | undefined;
+  if (groupCustodyHeld && hasUnresolvedGroupDeposit) {
+    groupGuaranteeSummary = 'DEPOSIT_AND_CUSTODY';
+  } else if (hasUnresolvedGroupDeposit) {
+    groupGuaranteeSummary = 'DEPOSIT_ONLY';
+  } else if (groupCustodyHeld) {
+    groupGuaranteeSummary = 'CUSTODY_ONLY';
+  }
+
+  // 7. Synthesize outcome based on domain rules
+  // Rule 3: For multi-room NON-FINAL child, unresolved BOOKING_GROUP guarantee is ignored for checkout warning.
+  // Rule 4: For multi-room FINAL child, unresolved BOOKING_GROUP guarantee produces a warning.
+  const relevantGroupWarning = isMultiRoom && isFinalChild && hasUnresolvedGroupGuarantee;
+
+  if (hasUnresolvedRoomDeposit && relevantGroupWarning) {
+    return {
+      action: 'WARN_ROOM_AND_FINAL_GROUP',
+      roomDepositRemaining,
+      groupDepositRemaining,
+      groupCustodyHeld,
+      groupGuaranteeSummary,
+      isFinalChild,
+      isMultiRoom,
+    };
+  }
+
+  if (hasUnresolvedRoomDeposit) {
+    return {
+      action: 'WARN_ROOM_DEPOSIT',
+      roomDepositRemaining,
+      groupDepositRemaining,
+      groupCustodyHeld,
+      groupGuaranteeSummary,
+      isFinalChild,
+      isMultiRoom,
+    };
+  }
+
+  if (relevantGroupWarning) {
+    return {
+      action: 'WARN_FINAL_GROUP_GUARANTEE',
+      roomDepositRemaining,
+      groupDepositRemaining,
+      groupCustodyHeld,
+      groupGuaranteeSummary,
+      isFinalChild,
+      isMultiRoom,
+    };
+  }
+
+  return {
+    action: 'ALLOW',
+    roomDepositRemaining,
+    groupDepositRemaining,
+    groupCustodyHeld,
+    groupGuaranteeSummary,
+    isFinalChild,
+    isMultiRoom,
+  };
+}
+
+/** Format group guarantee summary kind into human-readable Indonesian text. */
+export function formatGroupGuaranteeSummary(
+  summary?: GroupGuaranteeSummaryKind,
+  formattedDepositAmount?: string
+): string {
+  if (summary === 'DEPOSIT_AND_CUSTODY') {
+    return formattedDepositAmount
+      ? `Deposit Grup (Rp ${formattedDepositAmount}) & KTP Grup`
+      : 'Deposit Grup & KTP Grup';
+  }
+  if (summary === 'DEPOSIT_ONLY') {
+    return formattedDepositAmount
+      ? `Deposit Grup (Rp ${formattedDepositAmount})`
+      : 'Deposit Grup';
+  }
+  if (summary === 'CUSTODY_ONLY') {
+    return 'KTP Grup';
+  }
+  return 'Jaminan Grup';
+}

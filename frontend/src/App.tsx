@@ -71,6 +71,7 @@ import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilld
 import type { DailyKpiData, DailyKpiDrilldownData } from './features/calendar/calendarApi';
 import type { UnresolvedGuaranteeItem } from './features/calendar/calendarTypes';
 import GuaranteeQueuePanel from './features/calendar/GuaranteeQueuePanel';
+import { CheckoutGuaranteeConfirmationModal } from './features/deposits/CheckoutGuaranteeConfirmationModal';
 import { buildDailyKpiCards, DRAWER_TYPE_TO_KPI_DRILLDOWN } from './features/calendar/dailyKpiFormat';
 import { DailyKpiDrilldownList } from './features/calendar/DailyKpiDrilldownList';
 import {
@@ -538,6 +539,7 @@ function AppContent() {
   const [createResOpen, setCreateResOpen] = useState<boolean>(false);
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState<boolean>(false);
   const [checkoutPendingId, setCheckoutPendingId] = useState<number | null>(null);
+  const [checkoutModalReservation, setCheckoutModalReservation] = useState<any>(null);
   const [dirtyConfirmOpen, setDirtyConfirmOpen] = useState<boolean>(false);
   const [dirtyConfirmRoomId, setDirtyConfirmRoomId] = useState<number | null>(null);
   const [dirtyConfirmDate, setDirtyConfirmDate] = useState<string | null>(null);
@@ -1551,21 +1553,32 @@ function AppContent() {
     }
   };
 
-  const openCheckoutConfirmation = (reservationId: number) => {
+  const openCheckoutConfirmation = (reservationId: number, resHint?: any) => {
     setCheckoutPendingId(reservationId);
+    setCheckoutModalReservation(resHint || null);
     setCheckoutConfirmOpen(true);
   };
 
   const cancelCheckoutConfirmation = () => {
     setCheckoutConfirmOpen(false);
     setCheckoutPendingId(null);
+    setCheckoutModalReservation(null);
   };
 
-  const confirmCheckout = async () => {
-    if (checkoutPendingId === null) return;
+  const handleOpenGuaranteeSectionFromCheckout = (reservationId: number) => {
     setCheckoutConfirmOpen(false);
-    await handleReservationAction(checkoutPendingId, 'checkout');
     setCheckoutPendingId(null);
+    setCheckoutModalReservation(null);
+    const target = reservations.find((item) => Number(item.id) === reservationId)
+      || (selectedRes && Number(selectedRes.id) === reservationId ? selectedRes : { id: reservationId, property_id: propertyId });
+    setSelectedRes(target);
+    fetchReservationFolio(reservationId);
+    setTimeout(() => {
+      const el = document.getElementById('deposit-guarantee-section');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 300);
   };
 
   const closeDirtyConfirmation = () => {
@@ -3285,7 +3298,7 @@ function AppContent() {
       variant: 'success',
        onClick: () => handleReservationAction(Number(selectedRes?.id), 'checkin', selectedRes?.primary_guest?.primary_guest_id || null)
     },
-    { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id)) },
+    { key: 'checkout', label: 'Checkout', enabled: canCheckOut, disabled: false, title: undefined, variant: 'warn', onClick: () => openCheckoutConfirmation(Number(selectedRes?.id), selectedRes) },
     { key: 'checkout-date', label: CHECKOUT_DATE_CHANGE_LABEL, enabled: canChangeCheckoutDate, disabled: false, title: undefined, variant: 'primary', onClick: () => selectedRes && openStayChangePrompt(Number(selectedRes.id), undefined, selectedRes) },
     { key: 'cancel', label: 'Cancel', enabled: canCancel, disabled: false, title: undefined, variant: 'danger', onClick: () => handleReservationCancel(Number(selectedRes?.id)) },
     {
@@ -3887,7 +3900,7 @@ function AppContent() {
             reservationError={transactionError}
             onRefreshReservations={(start, end) => fetchTransactionReservations(propertyId, start, end)}
              onCheckIn={(res) => handleReservationAction(Number(res.id), 'checkin', res?.primary_guest?.primary_guest_id || null)}
-            onCheckout={(res) => openCheckoutConfirmation(Number(res.id))}
+            onCheckout={(res) => openCheckoutConfirmation(Number(res.id), res)}
             onOpenReservationDetail={(res) => {
               setSelectedRes(res);
               fetchReservationFolio(Number(res.id));
@@ -4361,7 +4374,7 @@ function AppContent() {
             fetchReservationFolio(Number(target.id));
           }}
            onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
-           onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
+           onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
            onCancel={(resId) => handleReservationCancel(resId)}
            onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
            onRefresh={() => {
@@ -4384,29 +4397,23 @@ function AppContent() {
             fetchOperationsData();
           }}
           onCheckin={(resId) => handleReservationAction(resId, 'checkin')}
-          onCheckout={(resId) => handleReservationAction(resId, 'checkout')}
+          onCheckout={(resId) => openCheckoutConfirmation(resId, selectedRes)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
         />
       )}
 
-      {checkoutConfirmOpen && (
-        <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
-          <div className="checkout-confirm-modal">
-            <div className="checkout-confirm-icon">?</div>
-            <h3 className="checkout-confirm-title">Konfirmasi Check-out</h3>
-            <p className="checkout-confirm-text">Apakah jaminan deposit sudah dikembalikan kepada tamu?</p>
-            <div className="checkout-confirm-actions">
-              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--secondary" onClick={cancelCheckoutConfirmation}>
-                Belum
-              </button>
-              <button type="button" className="checkout-confirm-btn checkout-confirm-btn--primary" onClick={confirmCheckout}>
-                Sudah
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <CheckoutGuaranteeConfirmationModal
+        isOpen={checkoutConfirmOpen}
+        reservationId={checkoutPendingId}
+        propertyId={propertyId}
+        reservationData={checkoutModalReservation}
+        onClose={cancelCheckoutConfirmation}
+        onConfirmCheckout={async (resId) => {
+          await handleReservationAction(resId, 'checkout');
+        }}
+        onOpenGuaranteeSection={handleOpenGuaranteeSectionFromCheckout}
+      />
 
       {stayChangeState.open && (
         <div className="booking-modal-backdrop" role="dialog" aria-modal="true">
