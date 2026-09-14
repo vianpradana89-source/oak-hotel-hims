@@ -1030,7 +1030,7 @@ export async function executeReservationEdit(
       actor
     });
     await client.query('COMMIT');
-    return result.reservation;
+    return { ...result.reservation, property_id: result.property_id };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
