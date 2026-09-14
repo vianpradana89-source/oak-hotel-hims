@@ -4156,7 +4156,7 @@ export async function initializeDatabase(pool: Pool) {
       };
 
       const props = await auditMigrationClient.query('SELECT id FROM properties');
-      const propertyIds = props.rows.length > 0 ? props.rows.map(r => r.id) : [1];
+      const propertyIds = props.rows.map((r: { id: number }) => r.id);
 
       for (const propId of propertyIds) {
         for (const dept of canonicalDepts) {

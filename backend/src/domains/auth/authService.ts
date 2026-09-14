@@ -393,17 +393,19 @@ export async function seedSuperAdmin(pool: Pool): Promise<void> {
   try {
     // 1. Ensure all standard roles exist
     await pool.query(`
-      INSERT INTO roles (id, name, description)
+      INSERT INTO roles (id, name, description, property_id, is_system_role, is_active)
       VALUES 
-        (1, 'Super Admin', 'Full system access'),
-        (2, 'Front Office', 'Manages check-in, check-out, and reservations'),
-        (3, 'Accounting', 'Manages finance, ledger, and reconciliation'),
-        (4, 'Housekeeping', 'Manages room cleaning and turnover'),
-        (5, 'General Manager', 'Management and operations oversight'),
-        (6, 'POS / Resto', 'Manages POS and restaurant inventory')
+        (1, 'Super Admin', 'Full system access', NULL, TRUE, TRUE),
+        (2, 'Front Office', 'Manages check-in, check-out, and reservations', NULL, TRUE, TRUE),
+        (3, 'Accounting', 'Manages finance, ledger, and reconciliation', NULL, TRUE, TRUE),
+        (4, 'Housekeeping', 'Manages room cleaning and turnover', NULL, TRUE, TRUE),
+        (5, 'General Manager', 'Management and operations oversight', NULL, TRUE, TRUE),
+        (6, 'POS / Resto', 'Manages POS and restaurant inventory', NULL, TRUE, TRUE)
       ON CONFLICT (id) DO UPDATE SET 
         name = EXCLUDED.name,
-        description = EXCLUDED.description;
+        description = EXCLUDED.description,
+        property_id = NULL,
+        is_system_role = TRUE;
     `);
 
     // 2. Define standard accounts to seed / upsert

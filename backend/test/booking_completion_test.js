@@ -1,8 +1,12 @@
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Pool } = require('pg');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 const baseUrl = (process.argv[2] || 'http://localhost:5000').replace(/\/$/, '');
 const runId = `BOOKING-COMP-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 let propertyId = null;
+let authToken = null;
 
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
@@ -14,12 +18,16 @@ if (!fetchFn) {
   }
 }
 
+const targetDbName = process.env.DB_NAME && process.env.DB_NAME !== 'oak_hotel_db'
+  ? process.env.DB_NAME
+  : 'oak_booking_completion_test';
+
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
+  host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'secretpassword',
-  database: process.env.DB_NAME || 'oak_hotel_db'
+  database: targetDbName
 });
 
 function expect(condition, message) {
@@ -32,6 +40,35 @@ async function discoverProperty() {
   const result = await pool.query('SELECT id FROM properties ORDER BY id LIMIT 1');
   expect(result.rows.length >= 1, 'No properties found');
   propertyId = Number(result.rows[0].id);
+
+  const saRes = await pool.query(`
+    SELECT u.id, u.email, u.username, u.full_name, r.id AS role_id, r.name AS role, u.access_type, u.account_status, u.must_change_password
+    FROM users u
+    JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'Super Admin'
+      AND (r.property_id IS NULL OR r.property_id = $1)
+      AND COALESCE(r.is_active, TRUE) = TRUE
+      AND COALESCE(u.is_active, TRUE) = TRUE
+    ORDER BY r.is_system_role DESC NULLS LAST, u.id ASC
+    LIMIT 1
+  `, [propertyId]);
+
+  expect(saRes.rows.length >= 1, 'Platform Super Admin not found in DB');
+  const saUser = saRes.rows[0];
+
+  authToken = generateToken({
+    id: Number(saUser.id),
+    email: saUser.email || 'admin@oakhotel.com',
+    username: saUser.username || 'admin',
+    full_name: saUser.full_name || 'Super Admin',
+    role: 'Super Admin',
+    role_id: Number(saUser.role_id),
+    property_id: propertyId,
+    scope: 'FULL',
+    account_status: saUser.account_status || 'READY',
+    must_change_password: Boolean(saUser.must_change_password),
+    access_type: saUser.access_type || 'ADMIN'
+  });
 }
 
 function toDateKey(value) {
@@ -81,12 +118,16 @@ async function request(method, path, body, suffix = '') {
   } else if (method === 'POST' && (effectiveBody === null || effectiveBody === undefined) && propertyId) {
     effectiveBody = { property_id: propertyId, skip_inspection: true };
   }
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Correlation-Id': correlationId
+  };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
   const resp = await fetchFn(`${baseUrl}${path}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Correlation-Id': correlationId
-    },
+    headers,
     body: effectiveBody ? JSON.stringify(effectiveBody) : undefined
   });
   const text = await resp.text();
@@ -223,16 +264,35 @@ async function insertSiblingReservation(baseReservation, room, start, suffix, in
       );
     }
 
+    const roomRes = await client.query(
+      `SELECT r.id, r.property_id, r.room_type_id, rt.name AS room_type_name, rt.code AS room_type_code
+       FROM rooms r
+       JOIN room_types rt ON rt.id = r.room_type_id
+       WHERE r.id = $1`,
+      [room.id]
+    );
+    expect(roomRes.rows.length === 1, `Room ${room.id} with associated room_type not found`);
+    const roomRow = roomRes.rows[0];
+    const roomTypeId = Number(roomRow.room_type_id);
+    expect(Number.isInteger(roomTypeId) && roomTypeId > 0, `Invalid room_type_id for room ${room.id}`);
+    expect(Boolean(roomRow.room_type_name), `Room type name missing for room ${room.id}`);
+    expect(Boolean(roomRow.room_type_code), `Room type code missing for room ${room.id}`);
+    if (propertyId && roomRow.property_id) {
+      expect(Number(roomRow.property_id) === propertyId, `Room ${room.id} does not belong to property ${propertyId}`);
+    }
+
     const bookingNumber = `${String(baseReservation.booking_number || baseReservation.legacy_booking_number || `LEG-${baseReservation.id}`)}-${suffix}`;
     const inserted = await client.query(
       `INSERT INTO reservations (
          room_id, guest_name, guest_phone, guest_segment, check_in, check_out,
          total_price, payment_status, discount_amount, discount_percent, amount_paid, remaining_balance,
          booking_number, booking_type, booking_id, stay_sequence, status, stay_status, correlation_id,
-         ktp_path, bukti_bayar_path
+         ktp_path, bukti_bayar_path,
+         booked_room_type_id_snapshot, booked_room_type_name_snapshot, booked_room_type_code_snapshot
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 0, $7,
-               $9, $10, $11, $12, $13, $14, $15, NULL, NULL)
+               $9, $10, $11, $12, $13, $14, $15, NULL, NULL,
+               $16, $17, $18)
        RETURNING *`,
       [
         room.id,
@@ -250,6 +310,9 @@ async function insertSiblingReservation(baseReservation, room, start, suffix, in
         initialStatus,
         initialStatus === 'CANCELLED' ? 'CANCELLED' : 'RESERVED',
         `${runId}-${suffix}`,
+        roomTypeId,
+        roomRow.room_type_name,
+        roomRow.room_type_code
       ]
     );
 
