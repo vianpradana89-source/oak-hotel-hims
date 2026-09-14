@@ -6,6 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { Pool } from 'pg';
+import { createPostgresRealtimeBus } from './infrastructure/realtime/postgresRealtimeBus';
 import { generateBid } from './utils/bid';
 import { initializeDatabase } from './db/schema_v3';
 import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
@@ -424,7 +425,13 @@ function getOrCreatePropertyClients(propertyId: number) {
   if (!sseClients.has(propertyId)) sseClients.set(propertyId, []);
   return sseClients.get(propertyId)!;
 }
-function broadcastEvent(eventType: string, payload: any, propertyId?: number) {
+
+/**
+ * Fan-out an event to local in-memory SSE clients only.
+ * Called either by the PostgreSQL bus after a cross-instance notification,
+ * or as a fallback when the bus publish fails.
+ */
+function broadcastToLocalSseClients(eventType: string, payload: any, propertyId?: number): void {
   if (propertyId == null || !Number.isInteger(propertyId) || propertyId <= 0) {
     return;
   }
@@ -440,6 +447,42 @@ function broadcastEvent(eventType: string, payload: any, propertyId?: number) {
       console.error(`[SSE] write error for ${eventType}: ${e?.message || String(e)}`);
     }
   }
+}
+
+// PostgreSQL LISTEN/NOTIFY event bus — enables multi-instance realtime
+const realtimeBus = createPostgresRealtimeBus({
+  pool,
+  listenerConfig: {
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: Number(process.env.DB_PORT) || 5432,
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || 'secretpassword',
+    database: process.env.DB_NAME || 'oak_hotel_db',
+  },
+});
+
+/**
+ * Public broadcast entry point used by all mutation routes.
+ * Publishes to the PostgreSQL bus asynchronously; falls back to local SSE fan-out on failure.
+ * Never blocks the caller — business mutations must not wait for realtime delivery.
+ * Never throws — realtime failures are never surfaced to the client.
+ */
+function broadcastEvent(eventType: string, payload: any, propertyId?: number): void {
+  if (propertyId == null || !Number.isInteger(propertyId) || propertyId <= 0) {
+    return;
+  }
+  void realtimeBus.publish(eventType, payload, propertyId)
+    .then((published) => {
+      if (!published) {
+        // Publish validation or pg_notify failed — fall back to local-only fan-out
+        broadcastToLocalSseClients(eventType, payload, propertyId);
+      }
+    })
+    .catch(() => {
+      // Defensive fallback — should never happen given publish() never throws,
+      // but protects callers from an unexpected rejection.
+      broadcastToLocalSseClients(eventType, payload, propertyId);
+    });
 }
 
 app.get('/api/events', requireAuth, async (req, res) => {
@@ -504,10 +547,28 @@ async function startServer() {
     sweepSummary,
     reconciliation
   });
+
+  // Start the PostgreSQL LISTEN/NOTIFY bus
+  await realtimeBus.start((event) => {
+    broadcastToLocalSseClients(event.eventType, event.payload, event.propertyId);
+  });
+
   const port = Number(process.env.PORT) || 5000;
   app.listen(port, '0.0.0.0', () => {
     console.log(`Backend running on port ${port}`);
   });
+
+  // Clean shutdown: stop the LISTEN client so PostgreSQL releases the channel
+  let shuttingDown = false;
+  async function gracefulShutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('SIGTERM/SIGINT received. Stopping realtime bus...');
+    await realtimeBus.stop();
+    process.exit(0);
+  }
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
 }
 
 if (require.main === module) {
@@ -517,7 +578,7 @@ if (require.main === module) {
   });
 }
 
-export { app, pool, createCanonicalBooking };
+export { app, pool, createCanonicalBooking, realtimeBus };
 
 // Helper generate booking identifier with source-based prefix.
 // Example: WALKIN-20260821-0001 or OTA-20260821-0001.
