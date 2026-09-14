@@ -412,7 +412,7 @@ export default function DepositGuaranteeSection({
                 </div>
                 {capabilities.canReturnIdentity && (
                   <button onClick={() => { setError(null); setShowReturnId(true); }}
-                    className="px-2.5 py-1 bg-white text-amber-700 text-xs font-semibold rounded-lg border border-amber-300 hover:bg-amber-100 transition">
+                    className="px-2.5 py-1 bg-blue-600 text-white text-xs font-semibold rounded-lg border border-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors">
                     Kembalikan
                   </button>
                 )}
@@ -444,7 +444,7 @@ export default function DepositGuaranteeSection({
                 </div>
                 {capabilities.canReturnIdentity && (
                   <button onClick={() => { setError(null); setShowGroupReturnId(true); }}
-                    className="px-2.5 py-1 bg-white text-violet-700 text-xs font-semibold rounded-lg border border-violet-300 hover:bg-violet-100 transition">
+                    className="px-2.5 py-1 bg-blue-600 text-white text-xs font-semibold rounded-lg border border-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors">
                     Kembalikan KTP Grup
                   </button>
                 )}
@@ -655,7 +655,7 @@ export default function DepositGuaranteeSection({
               } catch (e: any) { setError(e.message || 'Gagal mengembalikan'); }
               finally { setBusy(false); }
             }}
-              className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition">
+              className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
               {busy ? 'Memproses...' : 'Kembalikan'}
             </button>
           </div>
@@ -679,7 +679,7 @@ export default function DepositGuaranteeSection({
               } catch (e: any) { setError(e.message || 'Gagal mengembalikan KTP grup'); }
               finally { setBusy(false); }
             }}
-              className="px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 transition">
+              className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
               {busy ? 'Memproses...' : 'Kembalikan KTP Grup'}
             </button>
           </div>
