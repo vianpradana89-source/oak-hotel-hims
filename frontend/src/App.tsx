@@ -147,6 +147,13 @@ function AppContent() {
   const [reservations, setReservations] = useState<any[]>([]);
   const [rooms, setRooms] = useState<any[]>([]);
   const [selectedRes, setSelectedRes] = useState<any>(null);
+  // CHECKOUT-INSPECTION REALTIME: parent-owned invalidation signal. Bumped on each
+  // CheckoutInspectionUpdated SSE event; the open drawer refetches its own detail
+  // only when the signaled reservation id matches the drawer it is showing.
+  const [checkoutInspectionRefresh, setCheckoutInspectionRefresh] = useState<{
+    version: number;
+    reservationId: number | null;
+  }>({ version: 0, reservationId: null });
   const [quickReservation, setQuickReservation] = useState<{
     reservation: any;
     anchorRect: DOMRect | null;
@@ -2350,6 +2357,7 @@ function AppContent() {
           'BookingCreated',
           'BookingCompleted',
           'RoomStatusUpdated',
+          'CheckoutInspectionUpdated',
         ]);
 
         const handleEvent = (eventName: string, data: any) => {
@@ -2363,6 +2371,15 @@ function AppContent() {
           void loadDailyKpisRef.current();
           if (eventName === 'RoomStatusUpdated') {
             void fetchOperationsData();
+          }
+          if (eventName === 'CheckoutInspectionUpdated') {
+            const signaledResId = Number(data?.reservation_id);
+            if (Number.isInteger(signaledResId) && signaledResId > 0) {
+              setCheckoutInspectionRefresh((prev) => ({
+                version: prev.version + 1,
+                reservationId: signaledResId,
+              }));
+            }
           }
         };
 
@@ -4637,6 +4654,8 @@ function AppContent() {
           onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
+          checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
+          checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
         />
       )}
 

@@ -42,6 +42,10 @@ interface Props {
   onOpenStayChange?: (reservation: any) => void;
   roomStatuses?: Record<string, string>;
   propertyFeatures?: Record<string, any>;
+  // CHECKOUT-INSPECTION REALTIME: parent-owned refresh signal for inspection-clearance changes.
+  // Version bump + matching reservation id triggers a targeted refetch of THIS drawer's detail.
+  checkoutInspectionRefreshVersion?: number;
+  checkoutInspectionRefreshReservationId?: number | null;
 }
 
 export default function ReservationDetailDrawer({
@@ -54,6 +58,8 @@ export default function ReservationDetailDrawer({
   onCheckout,
   onCancel,
   onOpenStayChange,
+  checkoutInspectionRefreshVersion,
+  checkoutInspectionRefreshReservationId,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -453,6 +459,25 @@ export default function ReservationDetailDrawer({
       }
     }
   }, [reservation?.id, reservation?.room_id, reservation?.status, activePropId]);
+
+  // CHECKOUT-INSPECTION REALTIME: refetch THIS drawer's detail (including
+  // checkout_inspection) when the parent signals an inspection-clearance change
+  // for the SAME reservation this drawer is showing.
+  // - version 0 / absent signal is ignored (initial mount, not a realtime event)
+  // - only fires when the signaled reservation id matches this drawer's id
+  // - reloads reservation detail only (NOT folio); the drawer is not remounted
+  // - keyed on the version counter so unrelated prop churn does not retrigger
+  const checkoutInspectionVersion = Number(checkoutInspectionRefreshVersion) || 0;
+  const checkoutInspectionSignalResId = Number(checkoutInspectionRefreshReservationId);
+  const currentDrawerResId = Number(detailData?.id || reservation?.id);
+  useEffect(() => {
+    if (checkoutInspectionVersion <= 0) return;
+    if (!Number.isInteger(checkoutInspectionSignalResId) || checkoutInspectionSignalResId <= 0) return;
+    if (!Number.isInteger(currentDrawerResId) || currentDrawerResId <= 0) return;
+    if (checkoutInspectionSignalResId !== currentDrawerResId) return;
+    void loadFullReservation(currentDrawerResId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkoutInspectionVersion]);
 
   if (!reservation) return null;
 
