@@ -61,7 +61,13 @@ function parsePropertyId(raw: any, fieldName = 'property_id'): number {
   return parsed;
 }
 
-export function createHousekeepingRouter(pool: Pool): Router {
+export type HousekeepingBroadcastEvent = (
+  eventType: string,
+  payload: any,
+  propertyId?: number
+) => void;
+
+export function createHousekeepingRouter(pool: Pool, broadcastEvent?: HousekeepingBroadcastEvent): Router {
   const router = Router();
 
   // Helper for assert property
@@ -837,6 +843,36 @@ export function createHousekeepingRouter(pool: Pool): Router {
         actor
       );
       await client.query('COMMIT');
+
+      // Post-COMMIT realtime projection: read canonical room state and broadcast
+      // so Calendar/KPI subscribers refresh without waiting for the next poll.
+      // A failure here must NOT turn a successful task completion into an error.
+      const roomId = Number(task.room_id);
+      if (broadcastEvent && Number.isInteger(roomId) && roomId > 0) {
+        try {
+          const roomRes = await pool.query(
+            'SELECT id, status FROM rooms WHERE id = $1 AND property_id = $2',
+            [roomId, propertyId]
+          );
+          const room = roomRes.rows[0];
+          if (room && room.status) {
+            broadcastEvent(
+              'RoomStatusUpdated',
+              {
+                room_id: roomId,
+                status: room.status,
+                source: 'HOUSEKEEPING_TASK_COMPLETED',
+                task_id: task.id,
+                task_type: task.task_type,
+                timestamp: new Date().toISOString(),
+              },
+              propertyId,
+            );
+          }
+        } catch (rtErr: any) {
+          console.warn(`[Housekeeping] post-commit RoomStatusUpdated broadcast failed for room ${roomId}: ${rtErr?.message || String(rtErr)}`);
+        }
+      }
 
       res.json({ status: 'OK', success: true, data: task });
     } catch (err: any) {

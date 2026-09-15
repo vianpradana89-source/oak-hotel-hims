@@ -7951,7 +7951,7 @@ app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));
 app.use('/api', createRoomMoveRouter(pool, broadcastEvent));
-app.use('/api/housekeeping', createHousekeepingRouter(pool));
+app.use('/api/housekeeping', createHousekeepingRouter(pool, broadcastEvent));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
 app.use('/api/employee-mobile', createEmployeeMobileRouter(pool));
