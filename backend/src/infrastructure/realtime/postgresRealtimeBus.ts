@@ -118,11 +118,7 @@ export function createPostgresRealtimeBus(config: {
     password: string;
     database: string;
   };
-  /** TEMP REALTIME-2B DIAGNOSTICS — same value shared across all bus log lines. */
-  diagnosticInstanceId?: string;
 }): PostgresRealtimeBus {
-  // TEMP REALTIME-2B DIAGNOSTICS: use caller-provided ID so all logs in one process share the same ID
-  const diagnosticInstanceId = config.diagnosticInstanceId || `pid-${process.pid}`;
   let inner: BusInner = {
     phase: 'idle',
     client: null,
@@ -224,8 +220,6 @@ export function createPostgresRealtimeBus(config: {
           console.warn('[SSE] malformed notification payload ignored');
           return;
         }
-        // TEMP REALTIME-2B DIAGNOSTICS
-        console.log(`[RT2_NOTIFY_RX] instance=${diagnosticInstanceId} event=${event.eventType} property=${event.propertyId}`);
         inner.onEvent(event);
       });
 
@@ -292,13 +286,9 @@ export function createPostgresRealtimeBus(config: {
 
     try {
       await config.pool.query('SELECT pg_notify($1, $2)', [CHANNEL, payloadStr]);
-      // TEMP REALTIME-2B DIAGNOSTICS
-      console.log(`[RT2_PUBLISH_OK] instance=${diagnosticInstanceId} event=${eventType} property=${propertyId}`);
       return true;
     } catch (err: any) {
       console.warn(`[SSE] publish failed: ${err?.message || String(err)}`);
-      // TEMP REALTIME-2B DIAGNOSTICS
-      console.log(`[RT2_PUBLISH_FAIL] instance=${diagnosticInstanceId} event=${eventType} property=${propertyId} error=${err?.message || String(err)}`);
       return false;
     }
   }
