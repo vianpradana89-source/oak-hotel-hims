@@ -624,6 +624,31 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
       const task = await requestCheckoutRoomCheck(client, propertyId, reservationId, roomId, actor);
       await client.query('COMMIT');
 
+      // Post-COMMIT realtime projection: canonical inspection state now = REQUESTED.
+      // Fire-and-forget; a realtime failure must NOT fail the request.
+      const taskId = Number(task?.id);
+      const taskRoomId = Number(task?.room_id);
+      const taskReservationId = Number(task?.reservation_id || reservationId);
+      if (broadcastEvent && Number.isInteger(taskId) && taskId > 0 && Number.isInteger(taskReservationId) && taskReservationId > 0) {
+        try {
+          broadcastEvent(
+            'CheckoutInspectionUpdated',
+            {
+              reservation_id: taskReservationId,
+              room_id: Number.isInteger(taskRoomId) && taskRoomId > 0 ? taskRoomId : null,
+              task_id: taskId,
+              clearance_state: 'REQUESTED',
+              inspection_result: null,
+              source: 'FO_REQUEST',
+              timestamp: new Date().toISOString()
+            },
+            propertyId
+          );
+        } catch (_e) {
+          // realtime failure must not surface as a request failure
+        }
+      }
+
       res.status(201).json({ status: 'OK', success: true, data: task });
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
@@ -871,6 +896,34 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
           }
         } catch (rtErr: any) {
           console.warn(`[Housekeeping] post-commit RoomStatusUpdated broadcast failed for room ${roomId}: ${rtErr?.message || String(rtErr)}`);
+        }
+      }
+
+      // Post-COMMIT realtime projection: emit canonical inspection-clearance
+      // event ONLY for checkout room checks (RoomStatusUpdated above remains
+      // exclusively for canonical room operational state).
+      if (broadcastEvent && task.task_type === 'CHECKOUT_ROOM_CHECK') {
+        const taskReservationId = Number(task.reservation_id);
+        const completedTaskId = Number(task.id);
+        if (Number.isInteger(taskReservationId) && taskReservationId > 0 && Number.isInteger(completedTaskId) && completedTaskId > 0) {
+          try {
+            const inspectionResult = task.inspection_result || 'CLEAR';
+            broadcastEvent(
+              'CheckoutInspectionUpdated',
+              {
+                reservation_id: taskReservationId,
+                room_id: Number.isInteger(roomId) && roomId > 0 ? roomId : null,
+                task_id: completedTaskId,
+                clearance_state: inspectionResult === 'ISSUE_FOUND' ? 'ISSUE_FOUND' : 'CLEAR',
+                inspection_result: inspectionResult,
+                source: 'HOUSEKEEPING_TASK_COMPLETED',
+                timestamp: new Date().toISOString(),
+              },
+              propertyId,
+            );
+          } catch (rtErr: any) {
+            console.warn(`[Housekeeping] post-commit CheckoutInspectionUpdated broadcast failed for task ${completedTaskId}: ${rtErr?.message || String(rtErr)}`);
+          }
         }
       }
 
