@@ -5083,13 +5083,17 @@ app.post('/api/pos/orders', async (req, res) => {
       [totalAmount, orderId]
     );
 
-    // Auto-project to canonical SALE transaction if order is in posted/paid state
+    // Auto-project to canonical SALE transaction if order is in posted/paid state.
+    // The success flag gates the post-COMMIT TransactionUpdated invalidation so a
+    // failed projection never emits a misleading "sync completed" event.
+    let transactionProjectionSucceeded = false;
     if (['PAID', 'COMPLETED', 'POSTED', 'CLOSED'].includes(initialStatus)) {
       try {
         await projectPosOrderToTransaction(client, orderId, {
           propertyId,
           actorName: req.body.actor_name || 'Staff POS'
         });
+        transactionProjectionSucceeded = true;
       } catch (pErr: any) {
         console.warn('[Transactions] POS order creation projection warning:', pErr.message);
       }
@@ -5102,7 +5106,31 @@ app.post('/api/pos/orders', async (req, res) => {
       guest_name: guest_name || 'Guest',
       total_amount: totalAmount,
       timestamp: new Date().toISOString()
-    });
+    }, propertyId);
+
+    // Post-COMMIT realtime invalidation: emit canonical transaction-domain
+    // event ONLY when the projection actually completed successfully.
+    // "TransactionUpdated" means the sync finished and consumers should refetch;
+    // it must never mean "an attempt was made".
+    if (transactionProjectionSucceeded) {
+      try {
+        broadcastEvent(
+          'TransactionUpdated',
+          {
+            source_type: 'POS_ORDER',
+            source_id: orderId,
+            transaction_type: 'SALE',
+            mutation: 'PROJECTED',
+            order_id: orderId,
+            order_number: orderNumber,
+            timestamp: new Date().toISOString()
+          },
+          propertyId
+        );
+      } catch (_e) {
+        // realtime failure must not fail POS order creation
+      }
+    }
 
     res.status(201).json({ status: 'SUCCESS', data: updatedOrder.rows[0] });
   } catch (err: any) {
@@ -5145,14 +5173,41 @@ app.patch('/api/pos/orders/:id/status', async (req, res) => {
       [targetStatus, orderId]
     );
 
-    // Auto-project or reverse canonical transaction based on updated status
+    // Auto-project or reverse canonical transaction based on updated status.
+    // The success flag gates the TransactionUpdated invalidation so a failed
+    // projection/reversal never emits a misleading "sync completed" event.
+    let transactionSyncSucceeded = false;
     try {
       await projectPosOrderToTransaction(pool, orderId, {
         propertyId,
         actorName: req.body.actor_name || 'Staff POS'
       });
+      transactionSyncSucceeded = true;
     } catch (pErr: any) {
       console.warn('[Transactions] POS order status change projection warning:', pErr.message);
+    }
+
+    // Post-projection realtime invalidation: canonical transaction state (SALE
+    // projection or reversal) has changed AND the sync completed successfully.
+    // The SSE stream is property-scoped, so no entity-id matching is needed.
+    if (transactionSyncSucceeded) {
+      try {
+        broadcastEvent(
+          'TransactionUpdated',
+          {
+            source_type: 'POS_ORDER',
+            source_id: orderId,
+            transaction_type: 'SALE',
+            mutation: 'SYNCED',
+            order_id: orderId,
+            target_status: targetStatus,
+            timestamp: new Date().toISOString()
+          },
+          propertyId
+        );
+      } catch (_e) {
+        // realtime failure must not fail POS status change
+      }
     }
 
     res.json({ status: 'SUCCESS', data: result.rows[0] });

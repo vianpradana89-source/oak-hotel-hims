@@ -59,6 +59,10 @@ interface TransactionWorkspaceProps {
   getPaymentBadgeClass?: (status: string) => string;
   onNavigateToReservation?: (reservationId: number) => void;
   onOpenQuickBooking?: () => void;
+  // REALTIME-3B: parent-owned invalidation counter. Bumped on each
+  // TransactionUpdated SSE event; the workspace refetches its canonical
+  // transaction list without remounting or resetting local filters.
+  realtimeRefreshVersion?: number;
 }
 
 export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
@@ -67,7 +71,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   currentUserId = null,
   onViewReservationFolio,
   onNavigateToReservation,
-  onOpenQuickBooking
+  onOpenQuickBooking,
+  realtimeRefreshVersion
 }) => {
   // Editor View Mode (null = table view, 'PURCHASE' | 'EXPENSE' | 'INCOME' = dedicated full editors)
   const [activeEditor, setActiveEditor] = useState<'PURCHASE' | 'EXPENSE' | 'INCOME' | null>(null);
@@ -289,6 +294,17 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       loadTransactions();
     }
   }, [loadTransactions, activeEditor]);
+
+  // REALTIME-3B: refetch the canonical transaction list when the parent signals
+  // a TransactionUpdated invalidation. Preserves the user's current tab, date
+  // range, search, and page; only the query is re-run. Version 0 / absent
+  // signal is ignored (initial mount already triggers via the effect above).
+  const refreshVersion = Number(realtimeRefreshVersion) || 0;
+  useEffect(() => {
+    if (refreshVersion <= 0) return;
+    void loadTransactions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshVersion]);
 
   useEffect(() => {
     setPage(1);

@@ -154,6 +154,10 @@ function AppContent() {
     version: number;
     reservationId: number | null;
   }>({ version: 0, reservationId: null });
+  // REALTIME-3B: canonical transaction-domain invalidation counter. Bumped on each
+  // TransactionUpdated SSE event; passed to TransactionWorkspace which refetches
+  // its own /api/transactions list without remounting or resetting local filters.
+  const [transactionRefreshVersion, setTransactionRefreshVersion] = useState(0);
   const [quickReservation, setQuickReservation] = useState<{
     reservation: any;
     anchorRect: DOMRect | null;
@@ -2358,6 +2362,7 @@ function AppContent() {
           'BookingCompleted',
           'RoomStatusUpdated',
           'CheckoutInspectionUpdated',
+          'TransactionUpdated',
         ]);
 
         const handleEvent = (eventName: string, data: any) => {
@@ -2380,6 +2385,9 @@ function AppContent() {
                 reservationId: signaledResId,
               }));
             }
+          }
+          if (eventName === 'TransactionUpdated') {
+            setTransactionRefreshVersion((v) => v + 1);
           }
         };
 
@@ -4183,6 +4191,7 @@ function AppContent() {
                 fetchReservationFolio(Number(resId));
               }
             }}
+            realtimeRefreshVersion={transactionRefreshVersion}
           />
         )}
 
