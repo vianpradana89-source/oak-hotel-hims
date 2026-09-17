@@ -539,7 +539,13 @@ app.get('/api/events', requireAuth, async (req, res) => {
 });
 
 async function startServer() {
-  await initializeDatabase(pool);
+  const schemaInit = (process.env.RUN_SCHEMA_INITIALIZATION || '').trim().toLowerCase() === 'true';
+  if (schemaInit) {
+    console.log('Database schema initialization enabled');
+    await initializeDatabase(pool);
+  } else {
+    console.log('Database schema initialization skipped');
+  }
   await seedSuperAdmin(pool);
   const sweepSummary = await sweepExpiredLocks();
   const reconciliation = await reconcileCanonicalAvailability(pool);
