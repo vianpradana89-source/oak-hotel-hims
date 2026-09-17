@@ -77,6 +77,8 @@ export default function IdentityExtractionModal({
   const [nameMismatch, setNameMismatch] = useState<NameMismatchInfo | null>(null);
   const [infoBanner, setInfoBanner] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // manualMode: OCR produced no usable data; user fills form by hand
+  const [manualMode, setManualMode] = useState(false);
 
   // Camera state
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -145,6 +147,7 @@ export default function IdentityExtractionModal({
     setFormPekerjaan('');
     setFormCitizenship('');
     setFormValidUntil('');
+    setManualMode(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (cameraInputRef.current) cameraInputRef.current.value = '';
   }, []);
@@ -201,8 +204,6 @@ export default function IdentityExtractionModal({
         setFile(capturedFile);
         setPreviewUrl(URL.createObjectURL(blob));
         stopCamera();
-        // Immediately start extraction
-        processFileExtraction(capturedFile);
       }
     }, 'image/jpeg', 0.95);
   };
@@ -218,8 +219,6 @@ export default function IdentityExtractionModal({
       setDuplicateCandidate(null);
       setNameMismatch(null);
       stopCamera();
-      // Auto start extraction
-      processFileExtraction(selected);
     }
   };
 
@@ -288,7 +287,7 @@ export default function IdentityExtractionModal({
       const json = await res.json();
 
       if (!res.ok && !json.success) {
-        throw new Error(json.message || 'Gagal mengekstrak identitas dari file.');
+         throw new Error(json.message || 'Gagal mengekstrak identitas dari file.');
       }
 
       const cand = json.data || json.candidate || {};
@@ -298,8 +297,15 @@ export default function IdentityExtractionModal({
       const rawLines = json.raw_lines || [];
 
       // Calculate recognized fields
-      const recognizedCount = cand.recognized_fields_count ?? 
-        [cand.full_name || cand.nama, cand.identity_number || cand.nik, cand.birth_place || cand.tempat_lahir, cand.birth_date || cand.tanggal_lahir, cand.gender || cand.jenis_kelamin, cand.address || cand.alamat, cand.rt_rw, cand.village_kelurahan || cand.kelurahan, cand.district_kecamatan || cand.kecamatan, cand.religion || cand.agama, cand.marital_status || cand.status_perkawinan, cand.occupation || cand.pekerjaan, cand.citizenship || cand.kewarganegaraan].filter(Boolean).length;
+      const recognizedCount = cand.recognized_fields_count ??
+         [cand.full_name || cand.nama, cand.identity_number || cand.nik, cand.birth_place || cand.tempat_lahir, cand.birth_date || cand.tanggal_lahir, cand.gender || cand.jenis_kelamin, cand.address || cand.alamat, cand.rt_rw, cand.village_kelurahan || cand.kelurahan, cand.district_kecamatan || cand.kecamatan, cand.religion || cand.agama, cand.marital_status || cand.status_perkawinan, cand.occupation || cand.pekerjaan, cand.citizenship || cand.kewarganegaraan].filter(Boolean).length;
+
+      // If no fields recognized, enter manual mode so user can fill in manually
+      if (recognizedCount === 0) {
+         setInfoBanner('Pemindaian otomatis gagal atau belum menghasilkan data yang dapat digunakan. Silakan isi data KTP secara manual.');
+         setManualMode(true);
+         return;
+      }
 
       const rawGender = cand.gender || cand.jenis_kelamin;
       const parsedGender = (rawGender === 'FEMALE' || rawGender === 'PEREMPUAN') ? 'FEMALE' : ((rawGender === 'MALE' || rawGender === 'LAKI-LAKI') ? 'MALE' : '');
@@ -368,6 +374,9 @@ export default function IdentityExtractionModal({
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Terjadi kesalahan saat memindai KTP.');
+      // Enter manual mode on any OCR failure so the workflow is not blocked
+      setInfoBanner('Pemindaian otomatis gagal atau belum menghasilkan data yang dapat digunakan. Silakan isi data KTP secara manual.');
+      setManualMode(true);
     } finally {
       setExtracting(false);
     }
@@ -378,10 +387,24 @@ export default function IdentityExtractionModal({
       setErrorMsg('Silakan pilih file KTP terlebih dahulu.');
       return;
     }
-    processFileExtraction(file);
+    // Landscape orientation gate: verify preview dimensions are landscape (width >= height)
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalHeight > img.naturalWidth) {
+        setErrorMsg('Posisikan KTP secara landscape terlebih dahulu. Gunakan tombol Putar hingga KTP mendatar dan tidak terbalik.');
+        return;
+      }
+      processFileExtraction(file);
+    };
+    img.onerror = () => {
+      setErrorMsg('Ukuran/orientasi gambar tidak dapat diperiksa. Silakan pilih atau ambil ulang foto KTP sebelum memindai.');
+    };
+    img.src = previewUrl || '';
   };
 
   const getFinalData = (): ExtractedIdentityData => {
+    const manualCount = [formName.trim(), formNik.trim(), formBirthPlace.trim(), formBirthDate.trim(), formGender, formAddress.trim(), formRtRw.trim(), formKelurahan.trim(), formKecamatan.trim(), formAgama.trim(), formStatus.trim(), formPekerjaan.trim(), formCitizenship.trim()].filter(Boolean).length;
+    const isManual = manualMode && !extractedData;
     return {
       full_name: formName.trim().toUpperCase() || extractedData?.full_name || '',
       identity_number: formNik.trim() || extractedData?.identity_number || '',
@@ -397,10 +420,10 @@ export default function IdentityExtractionModal({
       occupation: formPekerjaan.trim() || extractedData?.occupation || undefined,
       citizenship: formCitizenship.trim() || extractedData?.citizenship || 'WNI',
       valid_until: formValidUntil.trim() || extractedData?.valid_until || 'SEUMUR HIDUP',
-      confidence: extractedData?.confidence || 1.0,
-      recognized_fields_count: extractedData?.recognized_fields_count,
+      confidence: isManual ? 0 : (extractedData?.confidence || 1.0),
+      recognized_fields_count: isManual ? manualCount : extractedData?.recognized_fields_count,
       total_fields_count: 13,
-      provider: extractedData?.provider || 'GOOGLE_VISION',
+      provider: isManual ? 'MANUAL' : (extractedData?.provider || 'GOOGLE_VISION'),
       file_path: extractedData?.file_path || '',
       document_upload_id: extractedData?.document_upload_id || null,
       raw_lines: extractedData?.raw_lines || []
@@ -732,34 +755,62 @@ export default function IdentityExtractionModal({
                       Memindai ID...
                     </button>
                   )}
+
+                  {/* Manual mode toggle: shown after OCR failure with no recognized fields */}
+                  {previewUrl && !extracting && !extractedData && !manualMode && (
+                    <button
+                      type="button"
+                      onClick={() => setManualMode(true)}
+                      className="px-4 py-1.5 bg-stone-600 hover:bg-stone-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors"
+                    >
+                      Isi Manual
+                    </button>
+                  )}
                 </div>
               </div>
             )}
+
+            {previewUrl && !extracting && (
+              <p className="text-[11px] text-stone-500 px-1">
+                Pastikan KTP mendatar (landscape), tegak, tidak terbalik, tidak blur, dan seluruh sisi kartu terlihat sebelum memindai.
+              </p>
+            )}
           </div>
 
-          {/* Extracted Review Form */}
-          {extractedData && (
+          {/* Extracted Review Form - shown after successful OCR OR in manual mode */}
+          {(extractedData || manualMode) && (
             <div className="space-y-4">
-              <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between">
-                <span className="font-semibold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
-                  Hasil Pembacaan Dokumen ({extractedData.provider})
-                  <span className="text-[11px] font-normal text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-full ml-1">
-                    Akurasi: {Math.round((extractedData.confidence || 0) * 100)}% • {extractedData.recognized_fields_count || 0}/{extractedData.total_fields_count || 13} data terisi
+              {extractedData && (
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
+                    Hasil Pembacaan Dokumen ({extractedData.provider})
+                    <span className="text-[11px] font-normal text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-full ml-1">
+                      Akurasi: {Math.round((extractedData.confidence || 0) * 100)}% | {extractedData.recognized_fields_count || 0}/{extractedData.total_fields_count || 13} data terisi
+                    </span>
                   </span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExtractedData(null);
-                    setDuplicateCandidate(null);
-                    setNameMismatch(null);
-                  }}
-                  className="text-stone-500 hover:text-stone-800 text-xs underline font-medium"
-                >
-                  Ganti Foto / Ulangi
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExtractedData(null);
+                      setManualMode(false);
+                      setDuplicateCandidate(null);
+                      setNameMismatch(null);
+                    }}
+                    className="text-stone-500 hover:text-stone-800 text-xs underline font-medium"
+                  >
+                    Ganti Foto / Ulangi
+                  </button>
+                </div>
+              )}
+              {manualMode && !extractedData && (
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 flex items-center gap-2">
+                  <svg className="w-4 h-4 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>Mode manual - silakan isi data KTP di bawah ini. Preview gambar tetap tersimpan.</span>
+                </div>
+              )}
 
               {/* Duplicate NIK Warning Card */}
               {duplicateCandidate && (
@@ -1033,7 +1084,7 @@ export default function IdentityExtractionModal({
           >
             Batal
           </button>
-          {extractedData && (
+          {(extractedData || manualMode) && (
             <button
               type="button"
               disabled={saving}

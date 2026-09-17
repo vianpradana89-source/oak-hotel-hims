@@ -179,12 +179,13 @@ def run_ocr_with_auto_orientation(image_path):
         w, h = base_img.size
 
         # Determine rotation candidate angles
-        # If portrait (H > W), test [90, 270, 0, 180]
-        # If landscape (W >= H), test [0, 180, 90, 270]
+        # KTP is a landscape card; portrait images are sideways cards needing
+        # only 90/270 tests, landscape images need only upright/upside-down tests.
+        # Limits one OCR process to at most two full Paddle inference passes.
         if h > w:
-            test_angles = [90, 270, 0, 180]
+            test_angles = [90, 270]
         else:
-            test_angles = [0, 180, 90, 270]
+            test_angles = [0, 180]
 
         best_angle = test_angles[0]
         best_score = -999
