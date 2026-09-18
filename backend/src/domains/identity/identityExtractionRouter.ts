@@ -176,6 +176,86 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
   router.post('/extract', handleExtract);
   router.post('/extract-ktp', handleExtract);
 
+  // Non-OCR document upload: stores KTP image and returns document_upload_id for manual entry.
+  // Used when OCR is temporarily disabled; the frontend captures this ID and passes it to /confirm.
+  router.post('/upload-identity', async (req: Request, res: Response) => {
+    upload.any()(req as any, res as any, async (err: any) => {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          error: 'UPLOAD_ERROR',
+          message: err.message || 'Gagal mengunggah file identitas'
+        });
+      }
+
+      try {
+        const user = (req as any).user as AuthUserPayload | undefined;
+        const propertyId = await resolveAuthoritativeIdentityPropertyId(pool, user, req.body?.property_id);
+        if (!user?.id) {
+          return res.status(401).json({
+            success: false,
+            error: 'UNAUTHORIZED',
+            message: 'Akses ditolak. Silakan login terlebih dahulu.'
+          });
+        }
+
+        let buffer: Buffer | null = null;
+        let mimeType = 'image/jpeg';
+        let originalFilename: string | null = null;
+
+        const files = (req as any).files as Express.Multer.File[];
+        if (files && files.length > 0) {
+          const mainFile = files[0];
+          buffer = mainFile.buffer;
+          mimeType = mainFile.mimetype || mimeType;
+          originalFilename = mainFile.originalname || null;
+        } else if (req.body.image_base64 || req.body.base64_image || req.body.image) {
+          const decoded = decodeIdentityBase64Payload(
+            String(req.body.image_base64 || req.body.base64_image || req.body.image)
+          );
+          buffer = decoded.buffer;
+          mimeType = decoded.mimeType || mimeType;
+          originalFilename = mimeType.includes('png') ? 'identity.png' : 'identity.jpg';
+        }
+
+        if (!buffer || buffer.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'FILE_REQUIRED',
+            message: 'File identitas KTP wajib diunggah'
+          });
+        }
+
+        const persisted = await persistIdentityDocument({
+          propertyId,
+          buffer,
+          mimeType,
+          originalFilename,
+          size: buffer.length
+        });
+
+        const receipt = await createPendingIdentityDocumentUpload(pool, {
+          propertyId,
+          uploadedByUserId: Number(user.id),
+          persistResult: persisted
+        });
+
+        return res.json({
+          success: true,
+          document_upload_id: receipt.documentUploadId,
+          file_path: receipt.apiPath
+        });
+      } catch (uploadErr: any) {
+        console.error('[IdentityExtractionRouter] upload-identity error:', uploadErr.message);
+        return res.status(uploadErr.statusCode || 500).json({
+          success: false,
+          error: uploadErr.code || 'UPLOAD_ERROR',
+          message: uploadErr.message || 'Gagal menyimpan dokumen identitas'
+        });
+      }
+    });
+  });
+
   router.post('/confirm', async (req: AuthenticatedRequest, res: Response) => {
     try {
       const user = req.user;
@@ -202,6 +282,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
          confidence,
          ocr_provider,
          document_upload_id,
+         ktp_regency_id,
          context
        } = req.body;
 
@@ -237,6 +318,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
          identity_type: String(identity_type || 'KTP'),
          confidence: confidence ? Number(confidence) : 1.0,
          ocr_provider: ocr_provider ? String(ocr_provider) : undefined,
+         ktp_regency_id: ktp_regency_id ? Number(ktp_regency_id) : null,
          context: context || 'CRM_EDIT'
        });
 

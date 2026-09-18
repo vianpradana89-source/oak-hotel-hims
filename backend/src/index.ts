@@ -102,6 +102,7 @@ import { createPurchaseSettingsRouter } from './domains/transactions/purchaseSet
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
+import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
 import {
   createPendingIdentityDocumentUpload,
@@ -8005,6 +8006,7 @@ app.use('/api/suppliers', createSuppliersRouter(pool));
 app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
+app.use('/api/regions', createRegionMasterRouter(pool));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
 app.use('/api/settings/purchases', createPurchaseSettingsRouter(pool));

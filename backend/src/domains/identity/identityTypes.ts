@@ -101,6 +101,8 @@ export interface ConfirmIdentityInput {
    identity_type?: string;
    confidence?: number;
    ocr_provider?: string;
+   /** Foreign key to regencies.id — canonical KTP city/regency */
+   ktp_regency_id?: number | null;
    /** When 'CHECKIN_IDENTITY_SCAN', phone-based guest resolution is disabled to prevent CRM mutation of existing Guest A by KTP B. */
    context?: 'CRM_EDIT' | 'CHECKIN_IDENTITY_SCAN';
  }

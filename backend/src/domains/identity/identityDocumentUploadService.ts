@@ -306,6 +306,24 @@ export async function confirmVerifiedIdentity(
 
     const apiPath = buildIdentityDocumentApiPath(String(upload.storage_key));
     const previousStorageKey = targetGuest?.identity_storage_key || null;
+    // Validate ktp_regency_id when provided
+    const rawKtpRegencyId = input.ktp_regency_id;
+    const ktpRegencyId = rawKtpRegencyId != null ? Number(rawKtpRegencyId) : null;
+
+    if (ktpRegencyId != null && (!Number.isInteger(ktpRegencyId) || ktpRegencyId <= 0)) {
+      httpError('ID kabupaten/kota KTP tidak valid.', 400, 'INVALID_KTP_REGENCY_ID');
+    }
+
+    if (ktpRegencyId != null) {
+      const regencyCheck = await client.query(
+        'SELECT 1 FROM regencies WHERE id = $1 LIMIT 1',
+        [ktpRegencyId]
+      );
+
+      if ((regencyCheck.rowCount ?? 0) === 0) {
+        httpError('Kota/Kabupaten KTP tidak ditemukan.', 400, 'INVALID_KTP_REGENCY_ID');
+      }
+    }
 
     const updateSql = `
       UPDATE guests
@@ -338,10 +356,11 @@ export async function confirmVerifiedIdentity(
           valid_until = COALESCE(NULLIF($24, ''), valid_until),
           ktp_ocr_confidence = COALESCE($25, ktp_ocr_confidence),
           ktp_ocr_provider = COALESCE(NULLIF($26, ''), ktp_ocr_provider),
+          ktp_regency_id = COALESCE($27, ktp_regency_id),
           ktp_extracted_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = $27
-        AND created_property_id = $28
+      WHERE id = $28
+        AND created_property_id = $29
       RETURNING *`;
 
     const updateParams = (guestId: number) => [
@@ -371,6 +390,7 @@ export async function confirmVerifiedIdentity(
       input.valid_until || null,
       numConfidence,
       input.ocr_provider || null,
+      ktpRegencyId,
       guestId,
       propertyId
     ];
@@ -390,7 +410,7 @@ export async function confirmVerifiedIdentity(
            rt_rw, village_kelurahan, district_kecamatan, religion, marital_status, occupation, citizenship, valid_until,
            ktp_ocr_confidence, ktp_ocr_provider, ktp_extracted_at, created_property_id,
            identity_storage_key, identity_mime_type, identity_file_hash, identity_original_filename,
-           identity_uploaded_at, identity_uploaded_by
+           identity_uploaded_at, identity_uploaded_by, ktp_regency_id
          )
          VALUES (
            $1, $2, $3, $4, $5, $6,
@@ -398,7 +418,7 @@ export async function confirmVerifiedIdentity(
            $13, $14, $15, $16, $17, $18, $19, $20,
            $21, $22, CURRENT_TIMESTAMP, $23,
            $24, $25, $26, $27,
-           NOW(), $28
+           NOW(), $28, $29
          )
          RETURNING *`,
         [
@@ -429,7 +449,8 @@ export async function confirmVerifiedIdentity(
           upload.mime_type,
           upload.file_hash,
           upload.original_filename,
-          Number(upload.uploaded_by_user_id)
+          Number(upload.uploaded_by_user_id),
+          ktpRegencyId
         ]
       );
       const newGuest = inserted.rows[0];

@@ -55,17 +55,241 @@ interface Props {
    onSelectExistingGuest?: (candidate: DuplicateCandidateInfo) => void;
  }
 
+/** Generic Autocomplete component with full keyboard navigation */
+interface AutocompleteProps {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (val: string) => void;
+  onFocus?: () => void;
+  required?: boolean;
+  options: string[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  highlightedIndex: number;
+  onHighlightedIndexChange: (idx: number) => void;
+  onSelect: (value: string) => void;
+}
+
+function Autocomplete({
+  label, placeholder, value, onChange, onFocus, required,
+  options, open, onOpenChange, highlightedIndex, onHighlightedIndexChange, onSelect
+}: AutocompleteProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open || options.length === 0) return;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        onHighlightedIndexChange(highlightedIndex < options.length - 1 ? highlightedIndex + 1 : 0);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        onHighlightedIndexChange(highlightedIndex > 0 ? highlightedIndex - 1 : options.length - 1);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (highlightedIndex >= 0 && highlightedIndex < options.length) {
+          onSelect(options[highlightedIndex]);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        onOpenChange(false);
+        break;
+    }
+  };
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        onOpenChange(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [onOpenChange]);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <label className="block text-xs font-semibold text-stone-700 mb-1">
+        {label} {required && <span className="text-rose-500">*</span>}
+      </label>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onFocus={() => { onFocus?.(); onOpenChange(true); }}
+        onBlur={() => setTimeout(() => onOpenChange(false), 200)}
+        placeholder={placeholder}
+        className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+      />
+      {open && options.length > 0 && (
+        <ul className="absolute z-20 left-0 right-0 mt-1 bg-white border border-stone-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {options.map((opt, idx) => (
+            <li
+              key={`${label}-${opt}`}
+              className={`px-3 py-2 text-xs cursor-pointer transition-colors ${
+                idx === highlightedIndex
+                  ? 'bg-emerald-100 text-emerald-900 font-semibold'
+                  : 'text-stone-700 hover:bg-emerald-50'
+              }`}
+              onMouseDown={() => onSelect(opt)}
+              onMouseEnter={() => onHighlightedIndexChange(idx)}
+            >
+              {opt}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Region autocomplete: searches nationally, shows "NAME — PROVINCE" */
+interface RegionAutocompleteProps {
+  id: string;
+  label: string;
+  placeholder: string;
+  /** When truthy, input shows canonical name (read-only visual); editing clears it. */
+  selectedId: number | null;
+  onIdChange: (id: number | null) => void;
+  provinceMap: Record<string, string>;
+  required?: boolean;
+}
+
+function RegionAutocomplete({
+  label, placeholder, selectedId, onIdChange, provinceMap, required
+}: RegionAutocompleteProps) {
+  const [filter, setFilter] = useState('');
+  const [suggestions, setSuggestions] = useState<Array<{ id: number; name: string; province_bps_code: string; bps_code: string }>>([]);
+  const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Display: show canonical name if selected, else filter text
+  const displayValue = selectedId ? suggestions.find(s => s.id === selectedId)?.name || '' : filter;
+
+  const fetchSuggestions = useCallback(async (q: string) => {
+    if (q.length < 2) { setSuggestions([]); return; }
+    try {
+      const res = await authenticatedFetch(`/api/regions/regencies/search?q=${encodeURIComponent(q)}&limit=10`);
+      const data = await res.json();
+      if (data.success) setSuggestions(data.data || []);
+      else setSuggestions([]);
+    } catch { setSuggestions([]); }
+  }, []);
+
+  const handleInputChange = (val: string) => {
+    setFilter(val);
+    // Editing after selection clears canonical ID
+    if (selectedId !== null) {
+      onIdChange(null);
+    }
+    setOpen(true);
+    setHighlightedIndex(-1);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => fetchSuggestions(val), 250);
+  };
+
+  const handleSelect = (s: { id: number; name: string; province_bps_code: string }) => {
+    setFilter(s.name);
+    setHighlightedIndex(-1);
+    setOpen(false);
+    onIdChange(s.id);
+  };
+
+  // Keyboard nav for suggestion list
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open || suggestions.length === 0) return;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightedIndex(i => i < suggestions.length - 1 ? i + 1 : 0);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightedIndex(i => i > 0 ? i - 1 : suggestions.length - 1);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (highlightedIndex >= 0 && highlightedIndex < suggestions.length) {
+          handleSelect(suggestions[highlightedIndex]);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setOpen(false);
+        break;
+    }
+  };
+
+  // Refocus input after selecting from mouse to keep keyboard working
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div className="relative">
+      <label className="block text-xs font-semibold text-stone-700 mb-1">
+        {label} {required && <span className="text-rose-500">*</span>}
+      </label>
+      <input
+        ref={inputRef}
+        type="text"
+        value={displayValue}
+        onChange={(e) => handleInputChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 200)}
+        placeholder={placeholder}
+        className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+      />
+      {/* Helper text showing province when selected */}
+      {selectedId && (
+        <div className="mt-0.5 text-[10px] text-emerald-700 font-medium">
+          {provinceMap[suggestions.find(s => s.id === selectedId)?.province_bps_code || ''] || ''}
+        </div>
+      )}
+      {open && suggestions.length > 0 && (
+        <ul className="absolute z-20 left-0 right-0 mt-1 bg-white border border-stone-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {suggestions.map((s, idx) => {
+            const provName = provinceMap[s.province_bps_code] || '';
+            return (
+              <li
+                key={s.id}
+                className={`px-3 py-2 text-xs cursor-pointer transition-colors flex items-center justify-between gap-2 ${
+                  idx === highlightedIndex
+                    ? 'bg-emerald-100 text-emerald-900 font-semibold'
+                    : 'text-stone-700 hover:bg-emerald-50'
+                }`}
+                onMouseDown={() => handleSelect(s)}
+                onMouseEnter={() => setHighlightedIndex(idx)}
+              >
+                <span>{s.name}</span>
+                <span className="text-[10px] text-stone-400 shrink-0">{provName}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function IdentityExtractionModal({
    isOpen,
    onClose,
-   guestName = '',
-   guestPhone,
-   guestId,
-   propertyId = 1,
-   context = 'CRM_EDIT',
-   onIdentityConfirmed,
-   onScanSuccess,
-   onSelectExistingGuest
+    guestName: _guestName = '',
+    guestPhone,
+    guestId,
+    propertyId = 1,
+    context = 'CRM_EDIT',
+    onIdentityConfirmed,
+    onScanSuccess: _onScanSuccess,
+    onSelectExistingGuest
  }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -77,12 +301,16 @@ export default function IdentityExtractionModal({
   const [nameMismatch, setNameMismatch] = useState<NameMismatchInfo | null>(null);
   const [infoBanner, setInfoBanner] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  // manualMode: OCR produced no usable data; user fills form by hand
-  const [manualMode, setManualMode] = useState(false);
+
+  // Province map for display
+  const [provinces, setProvinces] = useState<Array<{ id: number; name: string; bps_code: string }>>([]);
 
   // Camera state
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+
+  // KTP image rotation (0, 90, 180, 270)
+  const [ktpRotation, setKtpRotation] = useState(0);
 
   // Editable Form state (Initialized strictly empty without fake defaults)
   const [formName, setFormName] = useState('');
@@ -99,6 +327,7 @@ export default function IdentityExtractionModal({
   const [formPekerjaan, setFormPekerjaan] = useState('');
   const [formCitizenship, setFormCitizenship] = useState('');
   const [formValidUntil, setFormValidUntil] = useState('');
+  const [formKtpRegencyId, setFormKtpRegencyId] = useState<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -119,9 +348,7 @@ export default function IdentityExtractionModal({
   const resetModalState = useCallback(() => {
     stopCamera();
     if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
-      try {
-        URL.revokeObjectURL(previewUrlRef.current);
-      } catch {}
+      try { URL.revokeObjectURL(previewUrlRef.current); } catch {}
     }
     setFile(null);
     setPreviewUrl(null);
@@ -147,7 +374,8 @@ export default function IdentityExtractionModal({
     setFormPekerjaan('');
     setFormCitizenship('');
     setFormValidUntil('');
-    setManualMode(false);
+    setFormKtpRegencyId(null);
+    setKtpRotation(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (cameraInputRef.current) cameraInputRef.current.value = '';
   }, []);
@@ -155,6 +383,16 @@ export default function IdentityExtractionModal({
   useEffect(() => {
     if (isOpen) {
       resetModalState();
+
+      // Fetch provinces on open
+      authenticatedFetch('/api/regions/provinces')
+        .then(r => r.json())
+        .then(data => {
+          if (data.success && Array.isArray(data.data)) {
+            setProvinces(data.data);
+          }
+        })
+        .catch(() => {});
     } else {
       resetModalState();
     }
@@ -204,6 +442,7 @@ export default function IdentityExtractionModal({
         setFile(capturedFile);
         setPreviewUrl(URL.createObjectURL(blob));
         stopCamera();
+        processFileExtraction(capturedFile);
       }
     }, 'image/jpeg', 0.95);
   };
@@ -211,43 +450,91 @@ export default function IdentityExtractionModal({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
+      // If manual form is already visible, replace photo in-place without resetting form values.
+      if (extractedData) {
+        processReplacementUpload(selected);
+        return;
+      }
       setFile(selected);
       setPreviewUrl(URL.createObjectURL(selected));
       setErrorMsg(null);
       setInfoBanner(null);
-      setExtractedData(null);
       setDuplicateCandidate(null);
       setNameMismatch(null);
       stopCamera();
+      processFileExtraction(selected);
     }
   };
 
-  // Manual 90-degree clockwise image rotation on canvas
-  const handleRotateImage = () => {
-    if (!previewUrl || !file) return;
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.height;
-      canvas.height = img.width;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((90 * Math.PI) / 180);
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
-      canvas.toBlob(
-        (blob) => {
-          if (blob) {
-            const rotatedFile = new File([blob], file.name, { type: file.type || 'image/jpeg' });
-            setFile(rotatedFile);
-            setPreviewUrl(URL.createObjectURL(blob));
-          }
-        },
-        file.type || 'image/jpeg',
-        0.95
+  // Uploads a replacement KTP image without touching form values.
+  const processReplacementUpload = async (targetFile: File) => {
+    try {
+      setExtracting(true);
+      setErrorMsg(null);
+      setInfoBanner(null);
+      setDuplicateCandidate(null);
+      setNameMismatch(null);
+
+      const uploadPayload = new FormData();
+      uploadPayload.append('image', targetFile);
+      uploadPayload.append('ktp', targetFile);
+      if (_guestName) uploadPayload.append('guest_name', _guestName);
+      if (propertyId) uploadPayload.append('property_id', String(propertyId));
+
+      const uploadRes = await authenticatedFetch('/api/identity/upload-identity', {
+        method: 'POST',
+        body: uploadPayload
+      });
+
+      if (!uploadRes.ok) {
+        throw new Error('Gagal menyimpan dokumen KTP ke server. Silakan coba lagi.');
+      }
+
+      const contentType = uploadRes.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await uploadRes.text();
+        throw new Error(`Server mengembalikan respon tidak valid (${uploadRes.status}): ${text.slice(0, 100)}`);
+      }
+
+      const uploadJson = await uploadRes.json();
+      if (!uploadJson.success) {
+        throw new Error(uploadJson.message || 'Gagal menyimpan dokumen KTP.');
+      }
+
+      const newDocumentUploadId = uploadJson.document_upload_id || null;
+      const newFilePath = uploadJson.file_path || '';
+
+      if (!newDocumentUploadId) {
+        throw new Error('ID dokumen tidak diterima dari server. Ganti foto gagal.');
+      }
+
+      const nextPreviewUrl = URL.createObjectURL(targetFile);
+      if (previewUrlRef.current && previewUrlRef.current.startsWith('blob:')) {
+        try { URL.revokeObjectURL(previewUrlRef.current); } catch {}
+      }
+      setFile(targetFile);
+      setPreviewUrl(nextPreviewUrl);
+      previewUrlRef.current = nextPreviewUrl;
+
+      setExtractedData((prev) =>
+        prev
+          ? {
+              ...prev,
+              document_upload_id: newDocumentUploadId,
+              file_path: newFilePath,
+              provider: 'MANUAL',
+            }
+          : prev
       );
-    };
-    img.src = previewUrl;
+      setScanSuccessBanner(null);
+      setInfoBanner(
+        `Foto KTP berhasil diperbarui (ID baru: ${newDocumentUploadId.slice(0, 8)}…).`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal mengganti foto KTP.');
+    } finally {
+      setExtracting(false);
+    }
   };
 
   const processFileExtraction = async (targetFile: File) => {
@@ -258,153 +545,77 @@ export default function IdentityExtractionModal({
       setDuplicateCandidate(null);
       setNameMismatch(null);
 
-      const formData = new FormData();
-      formData.append('image', targetFile);
-      formData.append('ktp', targetFile);
-      if (guestName) formData.append('guest_name', guestName);
-      if (guestId) formData.append('guest_id', String(guestId));
-      if (propertyId) formData.append('property_id', String(propertyId));
+      const uploadPayload = new FormData();
+      uploadPayload.append('image', targetFile);
+      uploadPayload.append('ktp', targetFile);
+      if (_guestName) uploadPayload.append('guest_name', _guestName);
+      if (propertyId) uploadPayload.append('property_id', String(propertyId));
 
-      let res = await authenticatedFetch('/api/ocr/scan-id', {
+      const uploadRes = await authenticatedFetch('/api/identity/upload-identity', {
         method: 'POST',
-        body: formData
+        body: uploadPayload
       });
 
-      if (!res.ok) {
-        // Fallback to /api/identity/extract-ktp
-        res = await authenticatedFetch('/api/identity/extract-ktp', {
-          method: 'POST',
-          body: formData
-        });
+      if (!uploadRes.ok) {
+        throw new Error('Gagal menyimpan dokumen KTP ke server. Silakan coba lagi.');
       }
 
-      const contentType = res.headers.get('content-type') || '';
+      const contentType = uploadRes.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        const text = await res.text();
-        throw new Error(`Server mengembalikan respon tidak valid (${res.status}): ${text.slice(0, 100)}`);
+        const text = await uploadRes.text();
+        throw new Error(`Server mengembalikan respon tidak valid (${uploadRes.status}): ${text.slice(0, 100)}`);
       }
 
-      const json = await res.json();
-
-      if (!res.ok && !json.success) {
-         throw new Error(json.message || 'Gagal mengekstrak identitas dari file.');
+      const uploadJson = await uploadRes.json();
+      if (!uploadJson.success) {
+        throw new Error(uploadJson.message || 'Gagal menyimpan dokumen KTP.');
       }
 
-      const cand = json.data || json.candidate || {};
-      const status = json.status || 'REVIEW_REQUIRED';
-      const provider = json.provider || 'GOOGLE_VISION';
-      const filePath = json.file_path || '';
-      const rawLines = json.raw_lines || [];
+      const documentUploadId = uploadJson.document_upload_id || null;
+      const filePath = uploadJson.file_path || '';
 
-      // Calculate recognized fields
-      const recognizedCount = cand.recognized_fields_count ??
-         [cand.full_name || cand.nama, cand.identity_number || cand.nik, cand.birth_place || cand.tempat_lahir, cand.birth_date || cand.tanggal_lahir, cand.gender || cand.jenis_kelamin, cand.address || cand.alamat, cand.rt_rw, cand.village_kelurahan || cand.kelurahan, cand.district_kecamatan || cand.kecamatan, cand.religion || cand.agama, cand.marital_status || cand.status_perkawinan, cand.occupation || cand.pekerjaan, cand.citizenship || cand.kewarganegaraan].filter(Boolean).length;
-
-      // If no fields recognized, enter manual mode so user can fill in manually
-      if (recognizedCount === 0) {
-         setInfoBanner('Pemindaian otomatis gagal atau belum menghasilkan data yang dapat digunakan. Silakan isi data KTP secara manual.');
-         setManualMode(true);
-         return;
+      if (!documentUploadId) {
+        throw new Error('ID dokumen tidak diterima dari server. Konfirmasi identitas tidak dapat dilanjutkan.');
       }
 
-      const rawGender = cand.gender || cand.jenis_kelamin;
-      const parsedGender = (rawGender === 'FEMALE' || rawGender === 'PEREMPUAN') ? 'FEMALE' : ((rawGender === 'MALE' || rawGender === 'LAKI-LAKI') ? 'MALE' : '');
-
-      const data: ExtractedIdentityData = {
-        full_name: cand.full_name || cand.nama || '',
-        identity_number: cand.identity_number || cand.nik || '',
-        birth_place: cand.birth_place || cand.tempat_lahir || '',
-        birth_date: cand.birth_date || cand.tanggal_lahir || '',
-        gender: parsedGender,
-        address: cand.address || cand.alamat || '',
-        rt_rw: cand.rt_rw || '',
-        village_kelurahan: cand.village_kelurahan || cand.kelurahan || '',
-        district_kecamatan: cand.district_kecamatan || cand.kecamatan || '',
-        religion: cand.religion || cand.agama || '',
-        marital_status: cand.marital_status || cand.status_perkawinan || '',
-        occupation: cand.occupation || cand.pekerjaan || '',
-        citizenship: cand.citizenship || cand.kewarganegaraan || '',
-        valid_until: cand.valid_until || cand.berlaku_hingga || '',
-        confidence: cand.confidence ?? (recognizedCount > 0 ? 0.98 : 0.0),
-        recognized_fields_count: recognizedCount,
-        total_fields_count: cand.total_fields_count || 13,
-        provider,
+      const manualData: ExtractedIdentityData = {
+        full_name: '',
+        identity_number: '',
+        birth_place: undefined,
+        birth_date: undefined,
+        gender: undefined,
+        address: undefined,
+        rt_rw: undefined,
+        village_kelurahan: undefined,
+        district_kecamatan: undefined,
+        religion: undefined,
+        marital_status: undefined,
+        occupation: undefined,
+        citizenship: undefined,
+        valid_until: undefined,
+        confidence: 0,
+        recognized_fields_count: 0,
+        total_fields_count: 13,
+        provider: 'MANUAL',
         file_path: filePath,
-        document_upload_id: json.document_upload_id || null,
-        raw_lines: rawLines
+        document_upload_id: documentUploadId,
+        raw_lines: []
       };
 
-      setExtractedData(data);
-      if (recognizedCount > 0) {
-        setScanSuccessBanner('Data KTP berhasil dipindai!');
-      } else {
-        setScanSuccessBanner(null);
-      }
-
-      // Auto-fill form state
-      setFormName(data.full_name);
-      setFormNik(data.identity_number);
-      setFormBirthPlace(data.birth_place || '');
-      setFormBirthDate(data.birth_date || '');
-      setFormGender(data.gender || '');
-      setFormAddress(data.address || '');
-      setFormRtRw(data.rt_rw || '');
-      setFormKelurahan(data.village_kelurahan || '');
-      setFormKecamatan(data.district_kecamatan || '');
-      setFormAgama(data.religion || '');
-      setFormStatus(data.marital_status || '');
-      setFormPekerjaan(data.occupation || '');
-      setFormCitizenship(data.citizenship || '');
-      setFormValidUntil(data.valid_until || '');
-
-      // Send to parent component immediately for auto-fill if fields recognized
-      if (recognizedCount > 0 && onScanSuccess) {
-        onScanSuccess(data);
-      }
-
-      // Check warnings & status
-      if (json.duplicate_candidate) {
-        setDuplicateCandidate(json.duplicate_candidate);
-      }
-      if (json.name_mismatch) {
-        setNameMismatch(json.name_mismatch);
-      }
-      if (status === 'MANUAL_REVIEW_REQUIRED' || recognizedCount === 0) {
-        setInfoBanner(json.message || 'Beberapa field tidak dapat dikenali secara otomatis. Harap periksa dan lengkapi form berikut.');
-      }
+      setExtractedData(manualData);
+      setScanSuccessBanner(null);
+      setInfoBanner(
+        'Mode entry manual — data identitas akan diisi secara manual. ' +
+        `Dokumen KTP telah tersimpan (ID: ${documentUploadId.slice(0, 8)}…).`
+      );
     } catch (err: any) {
-      setErrorMsg(err.message || 'Terjadi kesalahan saat memindai KTP.');
-      // Enter manual mode on any OCR failure so the workflow is not blocked
-      setInfoBanner('Pemindaian otomatis gagal atau belum menghasilkan data yang dapat digunakan. Silakan isi data KTP secara manual.');
-      setManualMode(true);
+      setErrorMsg(err.message || 'Terjadi kesalahan saat memproses KTP.');
     } finally {
       setExtracting(false);
     }
   };
 
-  const handleStartExtraction = () => {
-    if (!file) {
-      setErrorMsg('Silakan pilih file KTP terlebih dahulu.');
-      return;
-    }
-    // Landscape orientation gate: verify preview dimensions are landscape (width >= height)
-    const img = new Image();
-    img.onload = () => {
-      if (img.naturalHeight > img.naturalWidth) {
-        setErrorMsg('Posisikan KTP secara landscape terlebih dahulu. Gunakan tombol Putar hingga KTP mendatar dan tidak terbalik.');
-        return;
-      }
-      processFileExtraction(file);
-    };
-    img.onerror = () => {
-      setErrorMsg('Ukuran/orientasi gambar tidak dapat diperiksa. Silakan pilih atau ambil ulang foto KTP sebelum memindai.');
-    };
-    img.src = previewUrl || '';
-  };
-
   const getFinalData = (): ExtractedIdentityData => {
-    const manualCount = [formName.trim(), formNik.trim(), formBirthPlace.trim(), formBirthDate.trim(), formGender, formAddress.trim(), formRtRw.trim(), formKelurahan.trim(), formKecamatan.trim(), formAgama.trim(), formStatus.trim(), formPekerjaan.trim(), formCitizenship.trim()].filter(Boolean).length;
-    const isManual = manualMode && !extractedData;
     return {
       full_name: formName.trim().toUpperCase() || extractedData?.full_name || '',
       identity_number: formNik.trim() || extractedData?.identity_number || '',
@@ -418,12 +629,12 @@ export default function IdentityExtractionModal({
       religion: formAgama.trim() || extractedData?.religion || undefined,
       marital_status: formStatus.trim() || extractedData?.marital_status || undefined,
       occupation: formPekerjaan.trim() || extractedData?.occupation || undefined,
-      citizenship: formCitizenship.trim() || extractedData?.citizenship || 'WNI',
-      valid_until: formValidUntil.trim() || extractedData?.valid_until || 'SEUMUR HIDUP',
-      confidence: isManual ? 0 : (extractedData?.confidence || 1.0),
-      recognized_fields_count: isManual ? manualCount : extractedData?.recognized_fields_count,
+      citizenship: formCitizenship.trim() || extractedData?.citizenship || undefined,
+       valid_until: formValidUntil.trim() || extractedData?.valid_until || undefined,
+      confidence: extractedData?.confidence || 1.0,
+      recognized_fields_count: extractedData?.recognized_fields_count,
       total_fields_count: 13,
-      provider: isManual ? 'MANUAL' : (extractedData?.provider || 'GOOGLE_VISION'),
+      provider: extractedData?.provider || 'GOOGLE_VISION',
       file_path: extractedData?.file_path || '',
       document_upload_id: extractedData?.document_upload_id || null,
       raw_lines: extractedData?.raw_lines || []
@@ -433,12 +644,23 @@ export default function IdentityExtractionModal({
   const handleConfirm = async () => {
     const finalData = getFinalData();
 
-    if (!finalData.identity_number) {
-      setErrorMsg('Nomor NIK / Identitas wajib diisi.');
-      return;
-    }
     if (!finalData.full_name) {
       setErrorMsg('Nama lengkap KTP wajib diisi.');
+      return;
+    }
+    if (!finalData.birth_date) {
+      setErrorMsg('Tanggal lahir KTP wajib diisi.');
+      return;
+    }
+    const normalizedCitizenship = finalData.citizenship ? finalData.citizenship.trim().toUpperCase() : '';
+    const isIndonesian = normalizedCitizenship === 'WNI' || normalizedCitizenship === 'INDONESIA' || normalizedCitizenship === 'INDONESIAN';
+
+    if (!finalData.citizenship || !finalData.citizenship.trim()) {
+      setErrorMsg('Kewarganegaraan wajib diisi.');
+      return;
+    }
+    if (isIndonesian && !formKtpRegencyId) {
+      setErrorMsg('Kota/Kabupaten KTP wajib dipilih untuk WNI.');
       return;
     }
 
@@ -446,7 +668,6 @@ export default function IdentityExtractionModal({
       setSaving(true);
       setErrorMsg(null);
 
-      // Persist directly to canonical CRM guests table
       const confirmPayload = {
          guest_id: guestId || null,
          property_id: propertyId || 1,
@@ -464,13 +685,14 @@ export default function IdentityExtractionModal({
          marital_status: finalData.marital_status || null,
          occupation: finalData.occupation || null,
          citizenship: finalData.citizenship || null,
-         valid_until: finalData.valid_until || null,
-         document_upload_id: finalData.document_upload_id || null,
-         identity_type: 'KTP',
-         confidence: finalData.confidence,
-         ocr_provider: finalData.provider,
-         context: context
-       };
+          valid_until: finalData.valid_until || undefined,
+       document_upload_id: finalData.document_upload_id || null,
+       identity_type: 'KTP',
+       confidence: finalData.confidence,
+       ocr_provider: finalData.provider,
+       context: context,
+       ktp_regency_id: isIndonesian ? formKtpRegencyId : null
+      };
 
       const res = await authenticatedFetch('/api/identity/confirm', {
         method: 'POST',
@@ -495,6 +717,18 @@ export default function IdentityExtractionModal({
       setSaving(false);
     }
   };
+
+  // Build province map once
+  const provinceMap: Record<string, string> = {};
+  provinces.forEach(p => { provinceMap[p.bps_code] = p.name; });
+
+  // Agama options
+  const AGAMA_OPTIONS = ['ISLAM', 'KRISTEN', 'KATOLIK', 'HINDU', 'BUDDHA', 'KONGHUCU'];
+  const [agamaOpen, setAgamaOpen] = useState(false);
+  const [agamaHighlighted, setAgamaHighlighted] = useState(-1);
+  const filteredAgama = AGAMA_OPTIONS.filter(
+    (a) => formAgama && a.toLowerCase().includes(formAgama.toLowerCase())
+  );
 
   if (!isOpen) return null;
 
@@ -630,7 +864,7 @@ export default function IdentityExtractionModal({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                     </svg>
-                    Ambil Foto & Pindai
+                    Ambil Foto
                   </button>
 
                   <button
@@ -644,7 +878,7 @@ export default function IdentityExtractionModal({
               </div>
             )}
 
-            {!extractedData && !isCameraActive && (
+            {!file && !extractedData && !isCameraActive && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {/* Option 1: Live Camera Capture */}
                 <button
@@ -687,130 +921,69 @@ export default function IdentityExtractionModal({
               </div>
             )}
 
-            {/* Scanning Laser / Animation State */}
-            {extracting && (
-              <div className="relative p-6 bg-gradient-to-br from-emerald-950 via-stone-900 to-teal-950 text-white rounded-2xl border border-emerald-500/40 shadow-xl overflow-hidden flex flex-col items-center justify-center text-center space-y-4">
-                {/* Animated laser line */}
-                <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-30">
-                  <div className="w-full h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent animate-bounce" style={{ animationDuration: '1.5s' }} />
-                </div>
-
-                <div className="relative">
-                  <div className="w-16 h-16 rounded-2xl bg-emerald-800/60 border border-emerald-400/50 flex items-center justify-center shadow-lg animate-pulse">
-                    <svg className="w-8 h-8 text-emerald-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-                    </svg>
-                  </div>
-                  <div className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full animate-ping" />
-                </div>
-
-                <div>
-                  <h3 className="text-sm font-bold text-emerald-200 tracking-wide">Memindai ID...</h3>
-                  <p className="text-xs text-stone-300 mt-1">
-                    Google Cloud Vision API sedang mengekstrak NIK, Nama, Tanggal Lahir, dan Alamat...
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2 text-[11px] font-mono text-emerald-400/90 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-700/50">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  Membaca teks dokumen & memvalidasi NIK...
-                </div>
-              </div>
-            )}
-
+            {/* KTP Preview with toolbar */}
             {previewUrl && !extracting && (
-              <div className="p-3.5 bg-white rounded-xl border border-stone-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
-                <div className="flex items-center gap-3 w-full sm:w-auto">
-                  <div className="relative group w-14 h-10 bg-stone-100 rounded-lg overflow-hidden border border-stone-300 shrink-0 flex items-center justify-center">
-                    <img src={previewUrl} alt="Preview KTP" className="w-full h-full object-cover" />
-                  </div>
-                  <div className="truncate">
-                    <span className="text-xs font-semibold text-stone-700 block truncate">{file?.name}</span>
-                    <span className="text-[11px] text-stone-400 font-mono">
-                      {file ? `${(file.size / 1024).toFixed(0)} KB` : ''}
-                    </span>
-                  </div>
+              <div className="flex flex-col items-center gap-2 p-3.5 bg-white rounded-xl border border-stone-200 shadow-xs">
+                {/* Large KTP preview */}
+                <div className="relative w-full max-w-xl">
+                  <img
+                    src={previewUrl}
+                    alt="Preview KTP"
+                    className="w-full h-auto rounded-lg border border-stone-300 object-contain bg-stone-50"
+                    style={{ transform: `rotate(${ktpRotation}deg)` }}
+                  />
                 </div>
-
-                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {/* Toolbar: Putar 90° and Ganti Foto compact, same row */}
+                <div className="flex items-center gap-2 w-full justify-center">
                   <button
                     type="button"
-                    onClick={handleRotateImage}
-                    title="Putar Foto 90 Derajat Searah Jarum Jam"
-                    className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium border border-stone-300 flex items-center gap-1 transition-colors"
+                    onClick={() => setKtpRotation(r => (r + 90) % 360)}
+                    title="Putar 90° searah jarum jam"
+                    className="px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg text-xs font-medium border border-emerald-300 flex items-center gap-1 transition-colors"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
                     Putar 90°
                   </button>
-
-                  {!extractedData && (
-                    <button
-                      type="button"
-                      onClick={handleStartExtraction}
-                      disabled={extracting}
-                      className="px-4 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-2"
-                    >
-                      Memindai ID...
-                    </button>
-                  )}
-
-                  {/* Manual mode toggle: shown after OCR failure with no recognized fields */}
-                  {previewUrl && !extracting && !extractedData && !manualMode && (
-                    <button
-                      type="button"
-                      onClick={() => setManualMode(true)}
-                      className="px-4 py-1.5 bg-stone-600 hover:bg-stone-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors"
-                    >
-                      Isi Manual
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Ganti Foto KTP"
+                    className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium border border-stone-300 flex items-center gap-1 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    Ganti Foto
+                  </button>
+                </div>
+                <div className="text-[10px] text-stone-400 font-mono truncate w-full text-center">
+                  {file?.name} · {(file?.size ? (file.size / 1024).toFixed(0) : '—')} KB
                 </div>
               </div>
             )}
-
-            {previewUrl && !extracting && (
-              <p className="text-[11px] text-stone-500 px-1">
-                Pastikan KTP mendatar (landscape), tegak, tidak terbalik, tidak blur, dan seluruh sisi kartu terlihat sebelum memindai.
-              </p>
-            )}
           </div>
 
-          {/* Extracted Review Form - shown after successful OCR OR in manual mode */}
-          {(extractedData || manualMode) && (
+          {/* Extracted Review Form */}
+          {extractedData && (
             <div className="space-y-4">
-              {extractedData && (
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between">
-                  <span className="font-semibold flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
-                    Hasil Pembacaan Dokumen ({extractedData.provider})
-                    <span className="text-[11px] font-normal text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-full ml-1">
-                      Akurasi: {Math.round((extractedData.confidence || 0) * 100)}% | {extractedData.recognized_fields_count || 0}/{extractedData.total_fields_count || 13} data terisi
-                    </span>
+              <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between">
+                <span className="font-semibold flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                  Form Entry Manual KTP
+                  <span className="text-[11px] font-normal text-amber-700 bg-amber-100/70 px-2 py-0.5 rounded-full ml-1">
+                    OCR sementara dinonaktifkan
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setExtractedData(null);
-                      setManualMode(false);
-                      setDuplicateCandidate(null);
-                      setNameMismatch(null);
-                    }}
-                    className="text-stone-500 hover:text-stone-800 text-xs underline font-medium"
-                  >
-                    Ganti Foto / Ulangi
-                  </button>
-                </div>
-              )}
-              {manualMode && !extractedData && (
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 flex items-center gap-2">
-                  <svg className="w-4 h-4 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span>Mode manual - silakan isi data KTP di bawah ini. Preview gambar tetap tersimpan.</span>
-                </div>
-              )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { fileInputRef.current?.click(); }}
+                  className="text-stone-500 hover:text-stone-800 text-xs underline font-medium"
+                >
+                  Ganti Foto
+                </button>
+              </div>
 
               {/* Duplicate NIK Warning Card */}
               {duplicateCandidate && (
@@ -901,21 +1074,6 @@ export default function IdentityExtractionModal({
 
                 <div>
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    NIK / No. Identitas (16 Digit) <span className="text-rose-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={20}
-                    value={formNik}
-                    onChange={(e) => setFormNik(e.target.value)}
-                    placeholder="Contoh: 3174..."
-                    className="w-full text-xs px-3 py-2 font-mono bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Jenis Kelamin
                   </label>
                   <select
@@ -929,93 +1087,61 @@ export default function IdentityExtractionModal({
                   </select>
                 </div>
 
-                <div>
+                {/* Tempat Lahir with keyboard autocomplete */}
+                <div className="relative">
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Tempat Lahir
                   </label>
-                  <input
-                    type="text"
+                  <TempatLahirAutocomplete
                     value={formBirthPlace}
-                    onChange={(e) => setFormBirthPlace(e.target.value)}
-                    placeholder="Contoh: JAKARTA"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+                    onChange={(v) => setFormBirthPlace(v)}
+                    provinceMap={provinceMap}
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Tanggal Lahir
+                    Tanggal Lahir <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="date"
+                    required
                     value={formBirthDate}
                     onChange={(e) => setFormBirthDate(e.target.value)}
                     className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
                   />
                 </div>
 
+                {/* Kota/Kabupaten KTP - REQUIRED for WNI only */}
                 <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Alamat KTP (Disimpan di CRM)
-                  </label>
-                  <input
-                    type="text"
-                    value={formAddress}
-                    onChange={(e) => setFormAddress(e.target.value)}
-                    placeholder="Contoh: JL SUDIRMAN NO. 45"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+                  <RegionAutocomplete
+                    id="ktp-regency"
+                    label="Kota/Kabupaten KTP"
+                    placeholder="Ketik nama kota/kabupaten..."
+                    selectedId={formKtpRegencyId}
+                    onIdChange={(id) => setFormKtpRegencyId(id)}
+                    provinceMap={provinceMap}
+                    required={(() => {
+                      const c = (formCitizenship.trim() || extractedData?.citizenship || '').trim().toUpperCase();
+                      return c === 'WNI' || c === 'INDONESIA' || c === 'INDONESIAN';
+                    })()}
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    RT / RW
-                  </label>
-                  <input
-                    type="text"
-                    value={formRtRw}
-                    onChange={(e) => setFormRtRw(e.target.value)}
-                    placeholder="Contoh: 005/002"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Kelurahan / Desa
-                  </label>
-                  <input
-                    type="text"
-                    value={formKelurahan}
-                    onChange={(e) => setFormKelurahan(e.target.value)}
-                    placeholder="Contoh: SENAYAN"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Kecamatan
-                  </label>
-                  <input
-                    type="text"
-                    value={formKecamatan}
-                    onChange={(e) => setFormKecamatan(e.target.value)}
-                    placeholder="Contoh: KEBAYORAN BARU"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Agama
-                  </label>
-                  <input
-                    type="text"
-                    value={formAgama}
-                    onChange={(e) => setFormAgama(e.target.value)}
+                {/* Agama with keyboard autocomplete */}
+                <div className="relative">
+                  <Autocomplete
+                    label="Agama"
                     placeholder="Contoh: ISLAM"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+                    value={formAgama}
+                    onChange={(v) => setFormAgama(v)}
+                    required={false}
+                    options={filteredAgama}
+                    open={agamaOpen}
+                    onOpenChange={setAgamaOpen}
+                    highlightedIndex={agamaHighlighted}
+                    onHighlightedIndexChange={setAgamaHighlighted}
+                    onSelect={(v) => { setFormAgama(v); setAgamaOpen(false); setAgamaHighlighted(-1); }}
                   />
                 </div>
 
@@ -1034,19 +1160,6 @@ export default function IdentityExtractionModal({
 
                 <div>
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Pekerjaan
-                  </label>
-                  <input
-                    type="text"
-                    value={formPekerjaan}
-                    onChange={(e) => setFormPekerjaan(e.target.value)}
-                    placeholder="Contoh: KARYAWAN SWASTA"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Kewarganegaraan
                   </label>
                   <input
@@ -1054,19 +1167,6 @@ export default function IdentityExtractionModal({
                     value={formCitizenship}
                     onChange={(e) => setFormCitizenship(e.target.value)}
                     placeholder="Contoh: WNI"
-                    className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Masa Berlaku
-                  </label>
-                  <input
-                    type="text"
-                    value={formValidUntil}
-                    onChange={(e) => setFormValidUntil(e.target.value)}
-                    placeholder="Contoh: SEUMUR HIDUP"
                     className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
                   />
                 </div>
@@ -1084,7 +1184,7 @@ export default function IdentityExtractionModal({
           >
             Batal
           </button>
-          {(extractedData || manualMode) && (
+          {extractedData && (
             <button
               type="button"
               disabled={saving}
@@ -1108,6 +1208,105 @@ export default function IdentityExtractionModal({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Tempat Lahir autocomplete with keyboard navigation and debounce */
+function TempatLahirAutocomplete({
+  value, onChange, provinceMap
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  provinceMap: Record<string, string>;
+}) {
+  const [suggestions, setSuggestions] = useState<Array<{ id: number; name: string; province_bps_code: string; bps_code: string }>>([]);
+  const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchSuggestions = useCallback(async (q: string) => {
+    if (q.length < 2) { setSuggestions([]); return; }
+    try {
+      const res = await authenticatedFetch(`/api/regions/regencies/search?q=${encodeURIComponent(q)}&limit=10`);
+      const data = await res.json();
+      if (data.success) setSuggestions(data.data || []);
+      else setSuggestions([]);
+    } catch { setSuggestions([]); }
+  }, []);
+
+  const handleChange = (val: string) => {
+    onChange(val);
+    setOpen(true);
+    setHighlightedIndex(-1);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => fetchSuggestions(val), 250);
+  };
+
+  const handleSelect = (s: { id: number; name: string; province_bps_code: string }) => {
+    onChange(s.name);
+    setOpen(false);
+    setHighlightedIndex(-1);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open || suggestions.length === 0) return;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightedIndex(i => i < suggestions.length - 1 ? i + 1 : 0);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightedIndex(i => i > 0 ? i - 1 : suggestions.length - 1);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (highlightedIndex >= 0 && highlightedIndex < suggestions.length) {
+          handleSelect(suggestions[highlightedIndex]);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setOpen(false);
+        break;
+    }
+  };
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => handleChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 200)}
+        placeholder="Contoh: JAKARTA atau ketik nama kota"
+        className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+      />
+      {open && suggestions.length > 0 && (
+        <ul className="absolute z-20 left-0 right-0 mt-1 bg-white border border-stone-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {suggestions.map((s, idx) => {
+            const provName = provinceMap[s.province_bps_code] || '';
+            return (
+              <li
+                key={s.id}
+                className={`px-3 py-2 text-xs cursor-pointer transition-colors flex items-center justify-between gap-2 ${
+                  idx === highlightedIndex
+                    ? 'bg-emerald-100 text-emerald-900 font-semibold'
+                    : 'text-stone-700 hover:bg-emerald-50'
+                }`}
+                onMouseDown={() => handleSelect(s)}
+                onMouseEnter={() => setHighlightedIndex(idx)}
+              >
+                <span>{s.name}</span>
+                <span className="text-[10px] text-stone-400 shrink-0">{provName}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
