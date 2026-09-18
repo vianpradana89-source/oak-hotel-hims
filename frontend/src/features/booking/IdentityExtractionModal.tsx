@@ -759,7 +759,7 @@ export default function IdentityExtractionModal({
         </div>
 
         {/* Content */}
-        <div className="p-6 overflow-y-auto space-y-5 flex-1 bg-stone-50/50">
+        <div className="p-6 overflow-x-hidden overflow-y-auto space-y-5 flex-1 bg-stone-50/50">
           {errorMsg && (
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
               <svg className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -921,15 +921,15 @@ export default function IdentityExtractionModal({
               </div>
             )}
 
-            {/* KTP Preview with toolbar */}
+             {/* KTP Preview with toolbar */}
             {previewUrl && !extracting && (
               <div className="flex flex-col items-center gap-2 p-3.5 bg-white rounded-xl border border-stone-200 shadow-xs">
-                {/* Large KTP preview */}
-                <div className="relative w-full max-w-xl">
+                {/* Compact KTP preview — constrained to modal width, rotation-safe overflow */}
+                <div className="relative w-full max-w-md flex justify-center overflow-hidden" style={{ maxHeight: 300 }}>
                   <img
                     src={previewUrl}
                     alt="Preview KTP"
-                    className="w-full h-auto rounded-lg border border-stone-300 object-contain bg-stone-50"
+                    className="max-w-full h-auto object-contain rounded-lg border border-stone-300 bg-stone-50"
                     style={{ transform: `rotate(${ktpRotation}deg)` }}
                   />
                 </div>
@@ -1149,13 +1149,15 @@ export default function IdentityExtractionModal({
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Status Perkawinan
                   </label>
-                  <input
-                    type="text"
+                  <select
                     value={formStatus}
                     onChange={(e) => setFormStatus(e.target.value)}
-                    placeholder="Contoh: KAWIN / BELUM KAWIN"
                     className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
+                  >
+                    <option value="">Pilih status</option>
+                    <option value="BELUM KAWIN">Belum Kawin</option>
+                    <option value="KAWIN">Kawin</option>
+                  </select>
                 </div>
 
                 <div>
