@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 
 export interface ExtractedIdentityData {
   full_name: string;
@@ -22,6 +23,7 @@ export interface ExtractedIdentityData {
   provider: string;
   file_path: string;
   document_upload_id?: string | null;
+  ktp_regency_id?: number | null;
   raw_lines?: string[];
 }
 
@@ -41,6 +43,29 @@ export interface NameMismatchInfo {
   similarity?: number;
 }
 
+export type IdentityModalMode = 'UPLOAD' | 'DETAIL';
+
+export interface InitialIdentityData {
+  full_name: string;
+  identity_number?: string | null;
+  birth_place?: string | null;
+  birth_date?: string | null;
+  gender?: 'MALE' | 'FEMALE' | 'OTHER' | null;
+  address?: string | null;
+  rt_rw?: string | null;
+  village_kelurahan?: string | null;
+  district_kecamatan?: string | null;
+  religion?: string | null;
+  marital_status?: string | null;
+  occupation?: string | null;
+  citizenship?: string | null;
+  valid_until?: string | null;
+  identity_path?: string | null;
+  ktp_regency_id?: number | null;
+  ktp_ocr_confidence?: number | null;
+  ktp_ocr_provider?: string | null;
+}
+
 interface Props {
    isOpen: boolean;
    onClose: () => void;
@@ -53,6 +78,10 @@ interface Props {
    onIdentityConfirmed?: (data: ExtractedIdentityData, savedGuest?: any) => void;
    onScanSuccess?: (parsedData: ExtractedIdentityData) => void;
    onSelectExistingGuest?: (candidate: DuplicateCandidateInfo) => void;
+   /** 'UPLOAD' (default) shows camera/file chooser first. 'DETAIL' shows form + existing photo immediately. */
+   mode?: IdentityModalMode;
+   /** Pre-populate form and existing photo when mode === 'DETAIL'. */
+   initialIdentityData?: InitialIdentityData | null;
  }
 
 /** Generic Autocomplete component with full keyboard navigation */
@@ -171,6 +200,34 @@ function RegionAutocomplete({
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Hydrate suggestions when selectedId is set but not yet present (e.g. DETAIL mode from CRM).
+  // Runs every time selectedId changes; safe — only fetches when the ID is missing from suggestions.
+  useEffect(() => {
+    if (!selectedId) return;
+    const existing = suggestions.find(s => s.id === selectedId);
+    if (existing) {
+      setFilter(prev => (prev === '' ? existing.name : prev));
+      return;
+    }
+    authenticatedFetch(`/api/regions/regencies/${selectedId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success && data.data) {
+          const reg = data.data;
+          setFilter(reg.name);
+          setSuggestions(prev =>
+            prev.some(s => s.id === selectedId) ? prev : [...prev, {
+              id: reg.id,
+              name: reg.name,
+              province_bps_code: reg.province_bps_code,
+              bps_code: reg.bps_code
+            }]
+          );
+        }
+      })
+      .catch(() => {});
+  }, [selectedId]);
+
   // Display: show canonical name if selected, else filter text
   const displayValue = selectedId ? suggestions.find(s => s.id === selectedId)?.name || '' : filter;
 
@@ -282,15 +339,17 @@ function RegionAutocomplete({
 export default function IdentityExtractionModal({
    isOpen,
    onClose,
-    guestName: _guestName = '',
-    guestPhone,
-    guestId,
-    propertyId = 1,
-    context = 'CRM_EDIT',
-    onIdentityConfirmed,
-    onScanSuccess: _onScanSuccess,
-    onSelectExistingGuest
- }: Props) {
+     guestName: _guestName = '',
+     guestPhone,
+     guestId,
+     propertyId = 1,
+     context = 'CRM_EDIT',
+     onIdentityConfirmed,
+     onScanSuccess: _onScanSuccess,
+     onSelectExistingGuest,
+     mode = 'UPLOAD',
+     initialIdentityData = null
+  }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
@@ -328,6 +387,16 @@ export default function IdentityExtractionModal({
   const [formCitizenship, setFormCitizenship] = useState('');
   const [formValidUntil, setFormValidUntil] = useState('');
   const [formKtpRegencyId, setFormKtpRegencyId] = useState<number | null>(null);
+
+  // Secure existing KTP photo in DETAIL mode
+  const existingPhotoPath = (mode === 'DETAIL' && initialIdentityData?.identity_path) || null;
+  const { blobUrl: secureExistingBlobUrl } = useSecureDocumentBlob(
+    existingPhotoPath,
+    mode === 'DETAIL' && Boolean(existingPhotoPath)
+  );
+
+  // Effective preview: new upload takes priority over secure existing blob
+  const effectivePreviewUrl = previewUrl || secureExistingBlobUrl;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -393,10 +462,55 @@ export default function IdentityExtractionModal({
           }
         })
         .catch(() => {});
+
+      // DETAIL mode: pre-populate form from existing identity data
+      if (mode === 'DETAIL' && initialIdentityData) {
+        const d = initialIdentityData;
+        setFormName(d.full_name || '');
+        setFormNik(d.identity_number || '');
+        setFormBirthPlace(d.birth_place || '');
+        setFormBirthDate(d.birth_date || '');
+        setFormGender((d.gender === 'MALE' || d.gender === 'FEMALE') ? d.gender : '');
+        setFormAddress(d.address || '');
+        setFormRtRw(d.rt_rw || '');
+        setFormKelurahan(d.village_kelurahan || '');
+        setFormKecamatan(d.district_kecamatan || '');
+        setFormAgama(d.religion || '');
+        setFormStatus(d.marital_status || '');
+        setFormPekerjaan(d.occupation || '');
+        setFormCitizenship(d.citizenship || '');
+        setFormValidUntil(d.valid_until || '');
+        setFormKtpRegencyId(d.ktp_regency_id || null);
+
+        setExtractedData({
+          full_name: d.full_name || '',
+          identity_number: d.identity_number || '',
+          birth_place: d.birth_place || undefined,
+          birth_date: d.birth_date || undefined,
+          gender: (d.gender === 'MALE' || d.gender === 'FEMALE') ? d.gender : undefined,
+          address: d.address || undefined,
+          rt_rw: d.rt_rw || undefined,
+          village_kelurahan: d.village_kelurahan || undefined,
+          district_kecamatan: d.district_kecamatan || undefined,
+          religion: d.religion || undefined,
+          marital_status: d.marital_status || undefined,
+          occupation: d.occupation || undefined,
+          citizenship: d.citizenship || undefined,
+          valid_until: d.valid_until || undefined,
+          confidence: (d.ktp_ocr_confidence ?? 1.0) as number,
+          recognized_fields_count: 0,
+          total_fields_count: 13,
+          provider: d.ktp_ocr_provider || 'MANUAL',
+          file_path: d.identity_path || '',
+          document_upload_id: null,
+          ktp_regency_id: d.ktp_regency_id || null,
+          raw_lines: []
+        });
+      }
     } else {
       resetModalState();
     }
-  }, [isOpen, resetModalState]);
+  }, [isOpen, resetModalState, mode, initialIdentityData]);
 
   const startCamera = async (mode: 'environment' | 'user' = facingMode) => {
     try {
@@ -637,6 +751,7 @@ export default function IdentityExtractionModal({
       provider: extractedData?.provider || 'GOOGLE_VISION',
       file_path: extractedData?.file_path || '',
       document_upload_id: extractedData?.document_upload_id || null,
+      ktp_regency_id: formKtpRegencyId,
       raw_lines: extractedData?.raw_lines || []
     };
   };
@@ -668,6 +783,48 @@ export default function IdentityExtractionModal({
       setSaving(true);
       setErrorMsg(null);
 
+      // DETAIL mode without new photo: use PATCH /api/guests/:id
+      if (mode === 'DETAIL' && guestId && !finalData.document_upload_id) {
+        const patchPayload = {
+          property_id: propertyId || 1,
+          full_name: finalData.full_name,
+          identity_type: 'KTP',
+          identity_number: finalData.identity_number || null,
+          birth_place: finalData.birth_place || null,
+          birth_date: finalData.birth_date || null,
+          gender: finalData.gender || null,
+          address: finalData.address || null,
+          rt_rw: finalData.rt_rw || null,
+          village_kelurahan: finalData.village_kelurahan || null,
+          district_kecamatan: finalData.district_kecamatan || null,
+          religion: finalData.religion || null,
+          marital_status: finalData.marital_status || null,
+          occupation: finalData.occupation || null,
+          citizenship: finalData.citizenship || null,
+          valid_until: finalData.valid_until || undefined,
+          ktp_regency_id: isIndonesian ? formKtpRegencyId : null
+        };
+
+        const res = await authenticatedFetch(`/api/guests/${guestId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patchPayload)
+        });
+
+        const resJson = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(resJson.message || 'Gagal memperbarui data identitas tamu.');
+        }
+
+        const savedGuest = resJson.data || null;
+        if (onIdentityConfirmed) {
+          onIdentityConfirmed(finalData, savedGuest);
+        }
+        onClose();
+        return;
+      }
+
+      // Default path (UPLOAD mode or DETAIL with new photo): use POST /api/identity/confirm
       const confirmPayload = {
          guest_id: guestId || null,
          property_id: propertyId || 1,
@@ -744,9 +901,9 @@ export default function IdentityExtractionModal({
               </svg>
             </div>
             <div>
-              <h2 className="text-base font-bold tracking-tight text-white">Unggah & Ekstraksi KTP Tamu</h2>
-              <p className="text-xs text-emerald-300/80">Verifikasi identitas resmi tamu menginap (CRM Master)</p>
-            </div>
+               <h2 className="text-base font-bold tracking-tight text-white">{mode === 'DETAIL' ? 'Detail Identitas Tamu' : 'Unggah & Ekstraksi KTP Tamu'}</h2>
+               <p className="text-xs text-emerald-300/80">Verifikasi identitas resmi tamu menginap (CRM Master)</p>
+             </div>
           </div>
           <button
             onClick={onClose}
@@ -878,7 +1035,7 @@ export default function IdentityExtractionModal({
               </div>
             )}
 
-            {!file && !extractedData && !isCameraActive && (
+            {!file && !extractedData && !isCameraActive && mode === 'UPLOAD' && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {/* Option 1: Live Camera Capture */}
                 <button
@@ -922,12 +1079,12 @@ export default function IdentityExtractionModal({
             )}
 
              {/* KTP Preview with toolbar */}
-            {previewUrl && !extracting && (
+            {effectivePreviewUrl && !extracting && (
               <div className="flex flex-col items-center gap-2 p-3.5 bg-white rounded-xl border border-stone-200 shadow-xs">
                 {/* Compact KTP preview — constrained to modal width, rotation-safe overflow */}
                 <div className="relative w-full max-w-md flex justify-center overflow-hidden" style={{ maxHeight: 300 }}>
                   <img
-                    src={previewUrl}
+                    src={effectivePreviewUrl}
                     alt="Preview KTP"
                     className="max-w-full h-auto object-contain rounded-lg border border-stone-300 bg-stone-50"
                     style={{ transform: `rotate(${ktpRotation}deg)` }}
@@ -959,7 +1116,7 @@ export default function IdentityExtractionModal({
                   </button>
                 </div>
                 <div className="text-[10px] text-stone-400 font-mono truncate w-full text-center">
-                  {file?.name} · {(file?.size ? (file.size / 1024).toFixed(0) : '—')} KB
+                  {file ? (file?.name + ' · ' + (file?.size ? (file.size / 1024).toFixed(0) : '—') + ' KB') : (mode === 'DETAIL' ? 'Foto KTP Existing' : '')}
                 </div>
               </div>
             )}

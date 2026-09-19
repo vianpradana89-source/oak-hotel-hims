@@ -48,6 +48,7 @@ export interface Guest {
   ktp_ocr_confidence?: number | null;
   ktp_ocr_provider?: string | null;
   ktp_extracted_at?: string | null;
+  ktp_regency_id?: number | null;
   notes?: string | null;
   is_archived?: boolean;
   is_active?: boolean;

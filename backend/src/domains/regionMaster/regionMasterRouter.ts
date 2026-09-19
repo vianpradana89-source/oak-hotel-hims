@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { requireAuth } from '../auth/authMiddleware';
-import { listProvinces, listRegencies, searchRegencies } from './regionMasterService';
+import { listProvinces, listRegencies, searchRegencies, getRegencyById } from './regionMasterService';
 
 const INTERNAL_ERROR_MSG = 'Terjadi kesalahan pada region master.';
 
@@ -61,6 +61,32 @@ export function createRegionMasterRouter(pool: Pool): Router {
       return res.json({ success: true, data: results });
     } catch (err: any) {
       console.error('[RegionMasterRouter] /regencies/search error:', err.message);
+      return res.status(500).json({ success: false, error: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MSG });
+    }
+  });
+
+  // GET /api/regions/regencies/:id — get a single regency by canonical ID
+  router.get('/regencies/:id', async (req: Request, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'VALIDATION_ERROR',
+          message: 'ID kabupaten/kota tidak valid',
+        });
+      }
+      const regency = await getRegencyById(pool, id);
+      if (!regency) {
+        return res.status(404).json({
+          success: false,
+          error: 'NOT_FOUND',
+          message: 'Kota/Kabupaten tidak ditemukan',
+        });
+      }
+      return res.json({ success: true, data: regency });
+    } catch (err: any) {
+      console.error('[RegionMasterRouter] /regencies/:id error:', err.message);
       return res.status(500).json({ success: false, error: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MSG });
     }
   });

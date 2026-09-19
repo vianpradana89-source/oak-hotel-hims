@@ -4,7 +4,7 @@ import { fetchOtaSources } from '../ota/otaApi';
 import { fetchStayChargeRules } from '../stayCharges/stayChargesApi';
 import { StayChargePickerCombobox } from '../stayCharges/StayChargePickerCombobox';
 import GuestSearchAutocomplete from './GuestSearchAutocomplete';
-import IdentityExtractionModal, { type ExtractedIdentityData } from './IdentityExtractionModal';
+import IdentityExtractionModal, { type ExtractedIdentityData, type IdentityModalMode, type InitialIdentityData } from './IdentityExtractionModal';
 import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
@@ -141,6 +141,7 @@ export default function QuickBookingModal({
 
   // --- Booking-Level Shared State: Identity / KTP ---
   const [isIdentityModalOpen, setIsIdentityModalOpen] = useState(false);
+  const [identityModalMode, setIdentityModalMode] = useState<IdentityModalMode>('UPLOAD');
   const [ktpPath, setKtpPath] = useState<string | null>(null);
   const [identityNumber, setIdentityNumber] = useState('');
   const [hasValidIdentity, setHasValidIdentity] = useState(false);
@@ -445,6 +446,7 @@ export default function QuickBookingModal({
     setShowDuplicateModal(false);
     setDuplicateBypassed(false);
     setIsIdentityModalOpen(false);
+    setIdentityModalMode('UPLOAD');
     setKtpPath(null);
     setIdentityNumber('');
     setHasValidIdentity(false);
@@ -797,7 +799,38 @@ export default function QuickBookingModal({
     setDuplicateBypassed(false);
   };
 
-  const [extractedKtpData, setExtractedKtpData] = useState<ExtractedIdentityData | null>(null);
+   const [extractedKtpData, setExtractedKtpData] = useState<ExtractedIdentityData | null>(null);
+
+  // Build initial identity data for DETAIL mode from selectedCrmGuest (primary) or extractedKtpData (fallback for same-session uploads)
+  const initialIdentityDataForModal = useMemo<InitialIdentityData | null>(() => {
+    if (!selectedCrmGuest) return null;
+    return {
+      full_name: selectedCrmGuest.full_name || '',
+      identity_number: selectedCrmGuest.identity_number,
+      birth_place: selectedCrmGuest.birth_place,
+      birth_date: selectedCrmGuest.birth_date,
+      gender: selectedCrmGuest.gender,
+      address: selectedCrmGuest.address,
+      rt_rw: selectedCrmGuest.rt_rw,
+      village_kelurahan: selectedCrmGuest.village_kelurahan,
+      district_kecamatan: selectedCrmGuest.district_kecamatan,
+      religion: selectedCrmGuest.religion,
+      marital_status: selectedCrmGuest.marital_status,
+      occupation: selectedCrmGuest.occupation,
+      citizenship: selectedCrmGuest.citizenship,
+      valid_until: selectedCrmGuest.valid_until,
+      identity_path: selectedCrmGuest.identity_path,
+      ktp_regency_id: selectedCrmGuest.ktp_regency_id,
+      ktp_ocr_confidence: selectedCrmGuest.ktp_ocr_confidence,
+      ktp_ocr_provider: selectedCrmGuest.ktp_ocr_provider,
+    };
+  }, [selectedCrmGuest?.id, selectedCrmGuest?.full_name, selectedCrmGuest?.identity_number,
+     selectedCrmGuest?.birth_place, selectedCrmGuest?.birth_date, selectedCrmGuest?.gender,
+     selectedCrmGuest?.address, selectedCrmGuest?.rt_rw, selectedCrmGuest?.village_kelurahan,
+     selectedCrmGuest?.district_kecamatan, selectedCrmGuest?.religion, selectedCrmGuest?.marital_status,
+     selectedCrmGuest?.occupation, selectedCrmGuest?.citizenship, selectedCrmGuest?.valid_until,
+     selectedCrmGuest?.identity_path, selectedCrmGuest?.ktp_regency_id,
+     selectedCrmGuest?.ktp_ocr_confidence, selectedCrmGuest?.ktp_ocr_provider]);
 
   // OCR Identity confirmation
   const handleIdentityConfirmed = (data: ExtractedIdentityData, savedGuest?: Guest | null) => {
@@ -1698,7 +1731,7 @@ export default function QuickBookingModal({
                     </div>
                     <button
                       type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
+                      onClick={() => { setIdentityModalMode('DETAIL'); setIsIdentityModalOpen(true); }}
                       className="text-xs text-emerald-800 underline font-semibold hover:text-emerald-950 cursor-pointer"
                     >
                       Detail
@@ -1711,7 +1744,7 @@ export default function QuickBookingModal({
                     </p>
                     <button
                       type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
+                      onClick={() => { setIdentityModalMode('UPLOAD'); setIsIdentityModalOpen(true); }}
                       className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer"
                     >
                       Unggah KTP Sekarang
@@ -2748,13 +2781,15 @@ export default function QuickBookingModal({
       {/* OCR Identity Extraction Review Modal */}
       <IdentityExtractionModal
         isOpen={isIdentityModalOpen}
-        onClose={() => setIsIdentityModalOpen(false)}
+        onClose={() => { setIsIdentityModalOpen(false); setIdentityModalMode('UPLOAD'); }}
         guestName={guestName}
         guestPhone={guestPhone}
         guestId={selectedCrmGuest?.id}
         propertyId={propertyId}
         onScanSuccess={handleIdentityConfirmed}
         onIdentityConfirmed={handleIdentityConfirmed}
+        mode={identityModalMode}
+        initialIdentityData={initialIdentityDataForModal}
       />
 
       {/* OTA Sources Master Manager Modal */}

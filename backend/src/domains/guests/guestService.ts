@@ -1063,6 +1063,20 @@ export async function updateGuest(
     const ktpOcrConfidence = input.ktp_ocr_confidence !== undefined ? input.ktp_ocr_confidence : existing.ktp_ocr_confidence;
     const ktpOcrProvider = input.ktp_ocr_provider !== undefined ? (input.ktp_ocr_provider ? String(input.ktp_ocr_provider).trim() : null) : existing.ktp_ocr_provider;
 
+    // ktp_regency_id: preserve existing when input is undefined/null; validate only when a number is provided.
+    let ktpRegencyId: number | null = existing.ktp_regency_id ?? null;
+    if (input.ktp_regency_id !== undefined && input.ktp_regency_id !== null) {
+      const parsed = Number(input.ktp_regency_id);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw httpError(400, 'INVALID_KTP_REGENCY_ID', 'ID kabupaten/kota KTP tidak valid.');
+      }
+      const regCheck = await client.query('SELECT 1 FROM regencies WHERE id = $1 LIMIT 1', [parsed]);
+      if ((regCheck.rowCount ?? 0) === 0) {
+        throw httpError(400, 'INVALID_KTP_REGENCY_ID', 'Kota/Kabupaten KTP tidak ditemukan.');
+      }
+      ktpRegencyId = parsed;
+    }
+
     const notes = input.notes !== undefined ? (input.notes ? String(input.notes).trim() : null) : existing.notes;
     const isArchived = input.is_archived !== undefined ? Boolean(input.is_archived) : existing.is_archived;
     const isActive = input.is_active !== undefined ? Boolean(input.is_active) : existing.is_active;
@@ -1076,9 +1090,10 @@ export async function updateGuest(
            blacklist_reason = $21, notes = $22, identity_type = $23, identity_number = $24, normalized_identity_number = $25,
            identity_path = $26, has_valid_identity = $27, rt_rw = $28, village_kelurahan = $29, district_kecamatan = $30,
            religion = $31, marital_status = $32, occupation = $33, citizenship = $34, valid_until = $35,
-           ktp_ocr_confidence = $36, ktp_ocr_provider = $37,
-           is_archived = $38, is_active = $39, updated_at = NOW()
-       WHERE id = $40
+            ktp_ocr_confidence = $36, ktp_ocr_provider = $37,
+            ktp_regency_id = $38,
+            is_archived = $39, is_active = $40, updated_at = NOW()
+        WHERE id = $41
        RETURNING *`,
       [
         fullName,
@@ -1118,6 +1133,7 @@ export async function updateGuest(
         validUntil,
         ktpOcrConfidence,
         ktpOcrProvider,
+        ktpRegencyId,
         isArchived,
         isActive,
         guestId
