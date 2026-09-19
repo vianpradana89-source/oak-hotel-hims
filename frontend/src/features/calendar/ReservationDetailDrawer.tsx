@@ -119,6 +119,10 @@ export default function ReservationDetailDrawer({
   const ktpDocPath = hasCanonicalPrimaryGuest
     ? (detailData.primary_guest?.primary_guest_identity_path || null)
     : ((detailData || reservation)?.ktp_path || null);
+  const ktpIdentityNumber = hasCanonicalPrimaryGuest
+    ? (detailData.primary_guest?.primary_guest_identity_number || null)
+    : ((detailData || reservation)?.identity_number || null);
+  const hasKtpIdentity = Boolean(ktpDocPath) || Boolean(ktpIdentityNumber);
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
@@ -1050,14 +1054,14 @@ export default function ReservationDetailDrawer({
                 Dokumen Identitas (KTP)
               </span>
 
-              {data.ktp_path || data.identity_number ? (
+              {hasKtpIdentity ? (
                 <div className="flex items-center justify-between text-xs pt-1 border-t border-stone-100">
                   <div>
                     <span className="font-bold text-emerald-800 flex items-center gap-1">
                       <span>✓</span> KTP / Identitas Terlampir
                     </span>
-                    {data.identity_number && (
-                      <p className="text-xs text-stone-600 font-mono mt-0.5">NIK: <strong className="text-stone-900">{data.identity_number}</strong></p>
+                    {ktpIdentityNumber && (
+                      <p className="text-xs text-stone-600 font-mono mt-0.5">NIK: <strong className="text-stone-900">{ktpIdentityNumber}</strong></p>
                     )}
                   </div>
                   <div className="flex items-center gap-2">
@@ -2003,9 +2007,9 @@ export default function ReservationDetailDrawer({
                   <span className="text-sm font-bold text-stone-100">
                     Foto Identitas (KTP) — {data.guest_name || 'Tamu'}
                   </span>
-                  {data.identity_number && (
+                  {ktpIdentityNumber && (
                     <span className="text-[11px] font-mono bg-stone-800 text-emerald-400 px-2 py-0.5 rounded border border-stone-700">
-                      NIK: {data.identity_number}
+                      NIK: {ktpIdentityNumber}
                     </span>
                   )}
                 </div>
@@ -2048,7 +2052,7 @@ export default function ReservationDetailDrawer({
                     </p>
                   </div>
                 ) : ktpBlobUrl ? (
-                  data.ktp_path.toLowerCase().endsWith('.pdf') ? (
+                  ktpDocPath?.toLowerCase().endsWith('.pdf') ? (
                     <iframe
                       src={ktpBlobUrl}
                       title="Dokumen KTP"
