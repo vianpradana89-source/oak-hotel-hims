@@ -45,6 +45,30 @@ export interface NameMismatchInfo {
 
 export type IdentityModalMode = 'UPLOAD' | 'DETAIL';
 
+/**
+ * Normalizes an arbitrary date string into YYYY-MM-DD for <input type="date">.
+ * Handles: YYYY-MM-DD, DD/MM/YYYY, ISO datetime (YYYY-MM-DDTHH:mm:ss...), empty/null -> ''.
+ */
+function normalizeDateForHtmlInput(value: string | null | undefined): string {
+  if (!value) return '';
+  const s = String(value).trim();
+  if (!s) return '';
+
+  // Already YYYY-MM-DD (or starts with it, e.g. ISO datetime)
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return isoMatch.slice(1).join('-');
+
+  // DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const day = dmyMatch[1].padStart(2, '0');
+    const month = dmyMatch[2].padStart(2, '0');
+    return `${dmyMatch[3]}-${month}-${day}`;
+  }
+
+  return '';
+}
+
 export interface InitialIdentityData {
   full_name: string;
   identity_number?: string | null;
@@ -469,7 +493,7 @@ export default function IdentityExtractionModal({
         setFormName(d.full_name || '');
         setFormNik(d.identity_number || '');
         setFormBirthPlace(d.birth_place || '');
-        setFormBirthDate(d.birth_date || '');
+        setFormBirthDate(normalizeDateForHtmlInput(d.birth_date));
         setFormGender((d.gender === 'MALE' || d.gender === 'FEMALE') ? d.gender : '');
         setFormAddress(d.address || '');
         setFormRtRw(d.rt_rw || '');
