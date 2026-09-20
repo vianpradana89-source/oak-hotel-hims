@@ -73,6 +73,12 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
     label: 'Pengaturan Properti',
     group: 'Manajemen',
     description: 'Identitas hotel, branding, konfigurasi durasi day use, dan kebijakan properti.'
+  },
+  {
+    key: 'Dokumen & Print',
+    label: 'Dokumen & Print',
+    group: 'Manajemen',
+    description: 'Manajemen kuitansi, invoice, kwitansi, dan cetak dokumen reservasi/tamu.'
   }
 ];
 
