@@ -84,8 +84,12 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
 
   { pattern: /^\/api\/access-control/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/settings\/purchases\/categories\/[^/]+\/(activate|deactivate)$/, resources: ['Pengaturan'], action: 'edit' },
+  { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/settings/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/front-office/, resources: ['Pengaturan'] },
+  { pattern: /^\/api\/properties\/[^/]+\/payment-instructions/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/properties\/[^/]+\/payment-instructions/, resources: ['Pengaturan'], action: 'edit', methods: ['POST', 'PUT', 'PATCH', 'DELETE'] },
   { pattern: /^\/api\/properties\/[^/]+\/(branding|features|quick-booking-rules|day-use)/, resources: ['Pengaturan'], methods: ['POST', 'PUT', 'PATCH', 'DELETE'] },
 
   { pattern: /^\/api\/reservations/, resources: ['Kalender'] },
@@ -96,6 +100,8 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/identity/, resources: ['Kalender'] },
   { pattern: /^\/api\/ocr/, resources: ['Kalender'] },
   { pattern: /^\/api\/maintenance/, resources: ['Kalender'] },
+
+  { pattern: /^\/api\/documents(\/|$)/, resources: ['Dokumen & Print'] },
 ];
 
 const SKIP_PATTERNS = [

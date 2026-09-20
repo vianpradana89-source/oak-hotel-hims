@@ -1,0 +1,1051 @@
+/* OAK HIMS — Guest Document Print View (DOCUMENT-1B)
+ * A4 portrait print styling. Hidden from normal app appearance.
+ */
+
+/* Screen preview container */
+.guest-doc-print-wrap {
+  background: #f5f5f5;
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 16px;
+}
+
+.guest-doc-sheet {
+  width: 100%;
+  max-width: 210mm; /* A4 width */
+  min-height: 297mm;
+  background: white;
+  padding: 20mm 18mm;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  border-radius: 2px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Document header */
+.guest-doc-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #1b4332;
+}
+
+.guest-doc-logo {
+  flex-shrink: 0;
+  max-width: 72px;
+  max-height: 72px;
+  object-fit: contain;
+}
+
+.guest-doc-hotel-info {
+  flex: 1;
+}
+
+.guest-doc-hotel-name {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1b4332;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.guest-doc-hotel-tagline {
+  font-size: 11px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.guest-doc-hotel-address {
+  font-size: 11px;
+  color: #555;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.guest-doc-hotel-phone {
+  font-size: 11px;
+  color: #555;
+}
+
+/* Document title */
+.guest-doc-title {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 16px 0 20px;
+  padding: 10px 0;
+  border-top: 1px solid #ddd;
+  border-bottom: 1px solid #ddd;
+}
+
+/* Section headings */
+.guest-doc-section {
+  margin-bottom: 18px;
+}
+
+.guest-doc-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #1b4332;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 4px;
+}
+
+/* Field grid */
+.guest-doc-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 24px;
+  font-size: 12px;
+  color: #222;
+}
+
+.guest-doc-field-label {
+  color: #666;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.guest-doc-field-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: #111;
+  margin-top: 1px;
+}
+
+/* Financial table */
+.guest-doc-fin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.guest-doc-fin-table th {
+  text-align: left;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid #ddd;
+  color: #555;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.guest-doc-fin-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+  color: #222;
+}
+
+.guest-doc-fin-table td.right,
+.guest-doc-fin-table th.right {
+  text-align: right;
+}
+
+.guest-doc-fin-table .row-total td {
+  font-weight: 700;
+  font-size: 13px;
+  border-top: 2px solid #1b4332;
+  border-bottom: none;
+  padding-top: 8px;
+}
+
+.guest-doc-fin-table .row-subtotal td {
+  font-weight: 600;
+}
+
+/* Footer */
+.guest-doc-footer {
+  margin-top: auto;
+  padding-top: 24px;
+  font-size: 10px;
+  color: #888;
+  text-align: center;
+  border-top: 1px solid #eee;
+  line-height: 1.6;
+}
+
+/* Special requests block */
+.guest-doc-requests {
+  font-size: 12px;
+  color: #333;
+  background: #f9f9f9;
+  padding: 10px 12px;
+  border-radius: 4px;
+  border-left: 3px solid #c5a880;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* ── PRINT OVERRIDES ───────────────────────────── */
+@media print {
+  /* Hide all app chrome */
+  body * {
+    visibility: hidden;
+  }
+
+  .guest-doc-print-wrap,
+  .guest-doc-print-wrap * {
+    visibility: visible;
+  }
+
+  .guest-doc-print-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    padding: 0;
+    background: white;
+  }
+
+  .guest-doc-sheet {
+    width: 100%;
+    max-width: none;
+    min-height: auto;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 12mm 14mm;
+  }
+
+  /* Hide modal chrome and buttons */
+  .guest-doc-controls,
+  .modal-card,
+  .modal-header,
+  .modal-footer,
+  .modal-body > :not(.guest-doc-print-wrap) {
+    display: none !important;
+  }
+
+  /* A4 page setup */
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+
+  /* Avoid page break inside financial tables */
+  .guest-doc-fin-table {
+    break-inside: avoid;
+  }
+
+  .guest-doc-section {
+    break-inside: avoid;
+  }
+
+  .guest-doc-header {
+    break-inside: avoid;
+  }
+}
+
+/* ================================================================
+   OAK LETTERHEAD -- Reusable branded A4 document wrapper
+   DOCUMENT-1B letterhead styles
+   ================================================================ */
+
+/* Outer screen preview wrapper: provides subtle background behind the page */
+.oak-letterhead {
+  background: #f5f5f5;
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 24px 16px;
+}
+
+/* The actual A4 page: white, gold frame, fixed width */
+.oak-letterhead-frame {
+  position: relative;
+  width: 100%;
+  max-width: 210mm;   /* A4 width */
+  min-height: 297mm;   /* A4 height */
+  background: white;
+  padding: 16mm 18mm 22mm 18mm;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.14);
+  border: 1.5px solid #c5a880;  /* muted gold frame */
+  border-radius: 2px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Centered watermark -- very low opacity so body text remains readable */
+.oak-letterhead-watermark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+  max-width: 480px;
+  opacity: 0.07;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Header row: logo on the left, hotel info on the right */
+.oak-letterhead-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid #1b4332;
+  margin-bottom: 18px;
+  position: relative;
+  z-index: 1;
+}
+
+.oak-letterhead-logo {
+  flex-shrink: 0;
+  width: 64px;
+  max-width: 64px;
+  max-height: 80px;
+  object-fit: contain;
+  display: block;
+}
+
+.oak-letterhead-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.oak-letterhead-hotel-name {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1b4332;
+  letter-spacing: 0.015em;
+  line-height: 1.25;
+}
+
+.oak-letterhead-tagline {
+  font-size: 11px;
+  color: #555;
+  margin-top: 3px;
+  font-style: italic;
+}
+
+.oak-letterhead-code {
+  font-size: 10px;
+  color: #888;
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Address / phone lines -- used when propertyInfo carries these fields
+   (kept separate from the footer so header can also show them when present) */
+.oak-letterhead-address {
+  font-size: 11px;
+  color: #555;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.oak-letterhead-phone {
+  font-size: 11px;
+  color: #555;
+  margin-top: 2px;
+}
+
+/* Document title block -- centered, uppercase, flanked by hairlines */
+.oak-letterhead-title {
+  text-align: center;
+  font-size: 17px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin: 0 0 22px;
+  padding: 10px 0;
+  border-top: 1px solid #c5a880;
+  border-bottom: 1px solid #c5a880;
+  position: relative;
+  z-index: 1;
+}
+
+/* Document body -- content sits above the watermark (z-index 1) */
+.oak-letterhead-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+}
+
+/* Rose ornament -- absolute bottom-left, decorative, non-interactive */
+.oak-letterhead-rose {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  width: 36px;
+  max-width: 36px;
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Footer area -- pinned to the bottom of the page */
+.oak-letterhead-footer {
+  position: relative;
+  z-index: 1;
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid #c5a880;  /* thin gold separator */
+  text-align: center;
+}
+
+/* Primary footer: canonical property address / phone */
+.oak-letterhead-footer-contact {
+  font-size: 11px;
+  color: #333;
+  font-weight: 500;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+
+/* Secondary footer: system note + print timestamp */
+.oak-letterhead-footer-system {
+  font-size: 9px;
+  color: #999;
+  line-height: 1.5;
+}
+
+.oak-letterhead-footer-system span {
+  display: block;
+}
+
+/* ================================================================
+   PRINT OVERRIDES -- OAK LETTERHEAD
+   Only the A4 page prints. No app chrome, no preview shadow.
+   ================================================================ */
+@media print {
+
+  /* Hide all app chrome (repeated here so it is unambiguous) */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Make the letterhead page and all its children visible */
+  .oak-letterhead,
+  .oak-letterhead-frame,
+  .oak-letterhead-frame * {
+    visibility: visible;
+  }
+
+  /* Position the page at top-left, remove padding/background of wrapper */
+  .oak-letterhead {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    padding: 0;
+    background: white;
+    min-height: 0;
+    display: block;
+  }
+
+  .oak-letterhead-frame {
+    width: 100%;
+    max-width: none;
+    min-height: auto;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 12mm 14mm 16mm 14mm;
+  }
+
+  /* Watermark and rose: ensure they print correctly */
+  .oak-letterhead-watermark {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    opacity: 0.05;  /* slightly lighter in print */
+  }
+
+  .oak-letterhead-rose {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Avoid awkward page breaks inside letterhead sections */
+  .oak-letterhead-header {
+    break-inside: avoid;
+  }
+
+  .oak-letterhead-title {
+    break-inside: avoid;
+  }
+
+  .oak-letterhead-footer {
+    break-inside: avoid;
+  }
+
+  .oak-letterhead-body .oak-doc-section {
+    break-inside: avoid;
+  }
+
+  .oak-letterhead-body .oak-doc-fin-table {
+    break-inside: avoid;
+  }
+
+  /* A4 page setup */
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+}
+
+/* ================================================================
+   OAK DOCUMENT BODY -- Section / Field / Table / Requests styles
+   Used by ReservationConfirmationPrint and QuotationPrint inside
+   the .oak-letterhead-body. Mirrors OakLetterhead visual language:
+   forest green (#1b4332), warm ivory, muted gold (#c5a880).
+   ================================================================ */
+
+/* Document section block */
+.oak-doc-section {
+  margin-bottom: 20px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Compact uppercase section heading with a thin gold/green separator */
+.oak-doc-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #1b4332;
+  letter-spacing: 0.09em;
+  margin-bottom: 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid #c5a880;
+}
+
+/* 2-column field grid; stacks to 1 column in narrow previews */
+.oak-doc-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 28px;
+}
+
+@media (max-width: 560px) {
+  .oak-doc-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.oak-doc-field-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  line-height: 1.3;
+}
+
+.oak-doc-field-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a1a1a;
+  margin-top: 2px;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+
+/* Financial / nightly-rate table: clean hotel document style */
+.oak-doc-fin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.oak-doc-fin-table thead th {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #555;
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid #1b4332;
+}
+
+.oak-doc-fin-table tbody td {
+  padding: 7px 8px;
+  border-bottom: 1px solid #eee;
+  color: #222;
+}
+
+.oak-doc-fin-table th.right,
+.oak-doc-fin-table td.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Discount / negative amounts: subtle red, quiet enough for print */
+.oak-doc-fin-table td[style*="b91c1c"],
+.oak-doc-fin-table td[style*="#b91c1c"] {
+  color: #b91c1c;
+}
+
+/* Bold total row, capped with green top rule */
+.oak-doc-fin-table .row-total td {
+  font-weight: 700;
+  font-size: 13px;
+  color: #111;
+  border-top: 2px solid #1b4332;
+  border-bottom: none;
+  padding-top: 9px;
+}
+
+/* Special-requests panel: light neutral background, gold left accent */
+.oak-doc-requests {
+  font-size: 12px;
+  color: #333;
+  line-height: 1.6;
+  background: #f9f9f7;
+  border-left: 3px solid #c5a880;
+  border-radius: 2px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+/* PRINT -- complementary rules for document body classes */
+@media print {
+  .oak-doc-section {
+    break-inside: avoid;
+  }
+
+  .oak-doc-fin-table {
+    break-inside: avoid;
+  }
+
+  .oak-doc-requests {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+
+/* ================================================================
+   DOCUMENT CENTER WORKSPACE (DOCUMENT-1B Step 3)
+   Left sidebar + live A4 preview. Printing shows only the
+   .oak-letterhead-frame; editor controls stay hidden.
+   ================================================================ */
+
+/* Full workspace container */
+.document-center {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 0;
+  min-height: calc(100vh - 64px);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Left sidebar */
+.document-center-sidebar {
+  background: #f7f6f3;
+  border-right: 1px solid #e8e5dd;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: calc(100vh - 64px);
+}
+
+/* Header */
+.document-center-header {
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid #e8e5dd;
+  background: #fff;
+}
+
+.document-center-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1b4332;
+  margin: 0 0 3px;
+  letter-spacing: 0.01em;
+}
+
+.document-center-subtitle {
+  font-size: 11px;
+  color: #888;
+  margin: 0;
+}
+
+/* Generic block section */
+.document-center-block {
+  padding: 14px 18px;
+  border-bottom: 1px solid #ece9e2;
+}
+
+.document-center-block-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+/* Document kind cards */
+.document-center-kind-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.document-center-kind-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1.5px solid #ddd8cc;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  text-align: left;
+}
+
+.document-center-kind-card:hover {
+  border-color: #c5a880;
+}
+
+.document-center-kind-card.active {
+  border-color: #1b4332;
+  box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.12);
+  background: #f0f5f2;
+}
+
+.document-center-kind-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.3;
+}
+
+.document-center-kind-desc {
+  font-size: 10px;
+  color: #999;
+  line-height: 1.3;
+}
+
+/* Search input */
+.document-center-search {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  border: 1px solid #ddd8cc;
+  border-radius: 6px;
+  outline: none;
+  background: #fff;
+  color: #222;
+  transition: border-color 0.15s;
+}
+
+.document-center-search:focus {
+  border-color: #1b4332;
+  box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
+}
+
+/* Reservation list */
+.document-center-res-list {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.document-center-res-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid #ece9e2;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s;
+}
+
+.document-center-res-item:hover {
+  border-color: #c5a880;
+}
+
+.document-center-res-item.active {
+  border-color: #1b4332;
+  background: #f0f5f2;
+}
+
+.document-center-res-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.document-center-res-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  color: #888;
+  flex-wrap: wrap;
+}
+
+.document-center-no-res {
+  font-size: 11px;
+  color: #999;
+  padding: 6px 0;
+}
+
+/* Selected reservation summary */
+.document-center-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.document-center-summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.document-center-summary-key {
+  color: #888;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.document-center-summary-val {
+  color: #1a1a1a;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* Presentation options */
+.document-center-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.document-center-opt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.document-center-opt-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #666;
+}
+
+.document-center-opt-input {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 11px;
+  border: 1px solid #ddd8cc;
+  border-radius: 6px;
+  background: #fff;
+  color: #333;
+  outline: none;
+  resize: vertical;
+}
+
+.document-center-opt-input:focus {
+  border-color: #1b4332;
+  box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
+}
+
+.document-center-opt-input-inline {
+  resize: none;
+}
+
+/* Preview state - error variant */
+.document-center-empty-error {
+  border-color: #fecaca;
+}
+
+/* Print action */
+.document-center-actions {
+  border-bottom: none;
+  margin-top: auto;
+  padding: 14px 18px 18px;
+  background: #fff;
+}
+
+.document-center-print-btn {
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  background: #1b4332;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.document-center-print-btn:hover:not(:disabled) {
+  background: #143626;
+}
+
+.document-center-print-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.document-center-print-hint {
+  font-size: 10px;
+  color: #888;
+  margin: 6px 0 0;
+  text-align: center;
+}
+
+.document-center-print-hint.muted {
+  color: #aaa;
+}
+
+/* Preview panel */
+.document-center-preview {
+  background: #f5f5f5;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.document-center-preview-label {
+  padding: 8px 18px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #999;
+  background: #fff;
+  border-bottom: 1px solid #e8e5dd;
+}
+
+.document-center-preview-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Empty state */
+.document-center-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 480px;
+  padding: 64px 24px;
+  background: #fff;
+  border: 1.5px solid #ddd8cc;
+  border-radius: 10px;
+  text-align: center;
+}
+
+.document-center-empty-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+}
+
+.document-center-empty-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+  margin: 0 0 6px;
+}
+
+.document-center-empty-sub {
+  font-size: 12px;
+  color: #999;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Responsive: stack vertically on narrow screens */
+@media (max-width: 900px) {
+  .document-center {
+    grid-template-columns: 1fr;
+  }
+
+  .document-center-sidebar {
+    border-right: none;
+    border-bottom: 1px solid #e8e5dd;
+    max-height: none;
+  }
+
+  .document-center-preview-scroll {
+    min-height: 400px;
+  }
+}
+
+/* PRINT -- hide workspace chrome, show only the letterhead page.
+   The OakLetterhead print rules (in the block above) are authoritative;
+   this block only makes Document Center wrappers print-neutral. */
+@media print {
+  /* Workspace container: switch to block layout so children flow naturally */
+  .document-center {
+    display: block;
+    background: #fff;
+    min-height: 0;
+  }
+
+  /* Hide all editor UI: sidebar + preview label + empty/loading/error panels */
+  .document-center-sidebar,
+  .document-center-preview-label,
+  .document-center-empty {
+    display: none;
+  }
+
+  /* Make the preview wrapper print-neutral so the OakLetterhead inside it
+     is not clipped by overflow, min-height, or padding. */
+  .document-center-preview {
+    display: block;
+    overflow: visible;
+    background: #fff;
+    min-height: 0;
+    padding: 0;
+  }
+
+  .document-center-preview-scroll {
+    display: block;
+    overflow: visible;
+    padding: 0;
+    min-height: 0;
+    align-items: unset;
+  }
+
+  /* Existing .oak-letterhead print rules handle the rest; just ensure it is
+     not trapped inside the scroll container with an overflow clip. */
+  .document-center .oak-letterhead {
+    position: static;
+    display: block;
+    min-height: 0;
+    padding: 0;
+    background: #fff;
+  }
+
+  .document-center .oak-letterhead-frame {
+    width: 100%;
+    max-width: none;
+    min-height: auto;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 12mm 14mm 16mm 14mm;
+  }
+}

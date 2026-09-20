@@ -41,6 +41,7 @@ import type {
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
 import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorkspace.tsx';
+import DocumentCenter from './features/documents/DocumentCenter.tsx';
 import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeMobileManagementWorkspace.tsx';
 import { HrdWorkspace } from './features/hrd/HrdWorkspace.tsx';
 import { OccupancySection } from './features/reports/OccupancySection.tsx';
@@ -53,7 +54,7 @@ import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProtectedRoute } from './features/auth/ProtectedRoute';
-import { getDefaultNavKey, isNavAllowed } from './features/auth/accessControl';
+import { getDefaultNavKey, isNavAllowed, getVisibleNavKeys } from './features/auth/accessControl';
 import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
@@ -361,6 +362,23 @@ function AppContent() {
       isMounted = false;
     };
   }, [propertyId]);
+
+  // Redirect away from Dokumen & Print if feature flag is disabled.
+  useEffect(() => {
+    if (selectedMenu !== 'Dokumen & Print') return;
+    if (propertyFeatures['documents.enabled'] !== false) return;
+    if (!effectiveAccess) return;
+
+    const visible = getVisibleNavKeys(effectiveAccess.effective);
+    const nextMenu = visible.find(k => {
+      if (k === 'Dokumen & Print') return false;
+      if (k === 'Housekeeping') return propertyFeatures['housekeeping.enabled'] !== false;
+      return true;
+    });
+    if (nextMenu) {
+      setSelectedMenu(nextMenu);
+    }
+  }, [propertyFeatures, selectedMenu, effectiveAccess]);
 
   const handleSaveBranding = async (updated: PropertyBrandingConfig) => {
     const saved = await savePropertyBranding(updated.propertyId, updated);
@@ -4414,6 +4432,15 @@ function AppContent() {
           <GuestCrmWorkspace propertyId={propertyId} />
         )}
 
+        {selectedMenu === 'Dokumen & Print' && propertyId !== null && (propertyFeatures['documents.enabled'] !== false) && (
+          <DocumentCenter
+            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+            propertyBranding={activeBranding}
+            propertyId={propertyId}
+            authFetch={authFetch}
+          />
+        )}
+
         {selectedMenu === 'Pengaturan' && propertyId !== null && (
           <ManagementSettingsWorkspace
             propertyId={propertyId}
@@ -4425,6 +4452,7 @@ function AppContent() {
             initialCategory={initialSettingsCategory}
             onSelectProperty={(id) => setPropertyId(id)}
             onRefreshProperties={fetchProperties}
+            onFeatureFlagUpdated={(featureKey, enabled) => setPropertyFeatures(prev => ({ ...prev, [featureKey]: enabled }))}
           />
         )}
         </main>

@@ -1,6 +1,7 @@
 export type MainNavKey =
   | 'Kalender'
   | 'Transaksi'
+  | 'Dokumen & Print'
   | 'Housekeeping'
   | 'HRD'
   | 'POS'

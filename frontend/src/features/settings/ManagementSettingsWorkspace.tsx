@@ -52,6 +52,7 @@ export interface ManagementSettingsWorkspaceProps {
   onSelectProperty?: (propertyId: number) => void;
   onRefreshProperties?: () => void;
   onPermissionsUpdated?: (newMatrixMap: Record<string, string[]>) => void;
+  onFeatureFlagUpdated?: (featureKey: string, enabled: boolean) => void;
 }
 
 export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspaceProps> = ({
@@ -65,6 +66,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   apiBaseUrl = '/api',
   onSelectProperty,
   onRefreshProperties,
+  onFeatureFlagUpdated,
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -127,6 +129,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
         throw new Error(err.message || 'Gagal mengubah status fitur');
       }
       setFeatureFlags((prev) => ({ ...prev, [featureKey]: enabled }));
+      onFeatureFlagUpdated?.(featureKey, enabled);
       setFeedback({
         type: 'success',
         message: `Status fitur '${featureKey}' berhasil disimpan (${enabled ? 'Aktif' : 'Nonaktif'}).`
@@ -628,6 +631,44 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
                               }`}
                             >
                               {isEnabled ? 'ON' : 'OFF'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Module Group: Dokumen & Print */}
+                  <div className="space-y-3 pt-4 border-t border-neutral-200">
+                    <div className="text-xs font-bold text-neutral-900 uppercase tracking-wider">
+                      Modul Dokumen & Print
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
+                      {[
+                        { key: 'documents.enabled', label: 'Dokumen & Print', desc: 'Kuisioner, Kwitansi, Invoice, Nota, dan cetak dokumen reservasi' },
+                      ].map((mod) => {
+                        const isEnabled = featureFlags[mod.key] !== false;
+                        return (
+                          <div
+                            key={mod.key}
+                            className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                              isEnabled ? 'bg-emerald-50/30 border-emerald-200' : 'bg-neutral-50 border-neutral-200'
+                            }`}
+                          >
+                            <div>
+                              <div className="text-xs font-bold text-neutral-800">{mod.label}</div>
+                              <div className="text-[11px] text-neutral-500">{mod.desc}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateFeatureFlag(mod.key, !isEnabled)}
+                              className={`px-2.5 py-1 text-xs font-bold rounded-lg shrink-0 cursor-pointer ${
+                                isEnabled
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : 'bg-neutral-200 text-neutral-600'
+                              }`}
+                            >
+                              {isEnabled ? 'AKTIF' : 'NONAKTIF'}
                             </button>
                           </div>
                         );

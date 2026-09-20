@@ -31,6 +31,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
 }) => {
   const { effectiveAccess } = useAuth();
   const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
+  const isDocsEnabled = featureFlags ? featureFlags['documents.enabled'] !== false : true;
 
   // OAK HIMS Grouped Navigation
   const navGroups: NavGroupDef[] = [
@@ -44,6 +45,17 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
           icon: (
             <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          ),
+        },
+        {
+          key: 'Dokumen & Print',
+          label: 'Dokumen & Print',
+          isFunctional: isDocsEnabled,
+          icon: (
+            <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2h8m-4-2h.01M9 9h.01" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 3h6m-6 0v4m6-4v4" />
             </svg>
           ),
         },
@@ -165,11 +177,15 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       ],
     },
   ];
-
   const filteredGroups: NavGroupDef[] = navGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => isNavAllowed(effectiveAccess?.effective, item.key as MainNavKey))
+      items: group.items.filter((item) => {
+        if (!isNavAllowed(effectiveAccess?.effective, item.key as MainNavKey)) return false;
+        if (item.key === 'Dokumen & Print') return isDocsEnabled;
+        if (item.key === 'Housekeeping') return isHkEnabled;
+        return true;
+      })
     }))
     .filter((group) => group.items.length > 0);
 

@@ -102,6 +102,8 @@ import { createPurchaseSettingsRouter } from './domains/transactions/purchaseSet
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
+import { createDocumentRouter } from './domains/documents/documentRouter';
+import { createPropertyPaymentInstructionsRouter } from './domains/propertyPaymentInstructions/propertyPaymentInstructionsRouter';
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
 import {
@@ -7983,6 +7985,8 @@ app.use('/api/properties', createPropertyBrandingRouter(pool));
 app.use('/api/properties', createFeatureRouter(pool));
 app.use('/api/properties', createFrontOfficeSettingsRouter(pool));
 app.use('/api/front-office', createFrontOfficeSettingsRouter(pool));
+app.use('/api/settings/property/payment-instructions', createPropertyPaymentInstructionsRouter(pool));
+app.use('/api/properties', createPropertyPaymentInstructionsRouter(pool));
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
@@ -8006,6 +8010,7 @@ app.use('/api/suppliers', createSuppliersRouter(pool));
 app.use('/api/ota-sources', createOtaRouter(pool));
 app.use('/api/identity', createIdentityExtractionRouter(pool, uploadDir));
 app.use('/api/ocr', createIdentityExtractionRouter(pool, uploadDir));
+app.use('/api/documents', createDocumentRouter(pool));
 app.use('/api/regions', createRegionMasterRouter(pool));
 app.use('/api', createDepositRouter(pool));
 app.use('/api', createIdentityCustodyRouter(pool));
