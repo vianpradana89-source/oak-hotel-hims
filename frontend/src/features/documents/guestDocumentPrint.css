@@ -635,6 +635,12 @@
 
 /* Notes / terms: explicitly allow splitting — do NOT add avoid here. */
 
+/* Financial summary block: heading + table treated as one indivisible unit */
+.oak-doc-fin-block {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
 /* PRINT -- complementary rules for document body classes */
 @media print {
   .oak-doc-section {

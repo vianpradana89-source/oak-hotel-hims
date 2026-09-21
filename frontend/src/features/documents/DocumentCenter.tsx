@@ -775,6 +775,11 @@ export default function DocumentCenter({
         const topMargin = (headerHeightMm ?? 25) + headerGapMm;
         const bottomMargin = (footerHeightMm ?? 20) + footerGapMm;
 
+        // Overlay-safe bottom gap for footer position on the PDF page.
+        // Must be larger than footerGapMm so the overlayed footer sits clear
+        // of the A4 bottom edge — prevents timestamp clipping.
+        const overlayFooterGapMm = 6;
+
         // ── Step 3: Generate paginated PDF via html2pdf ─────────────
         const html2pdfLib = (html2pdf as any)?.default || html2pdf;
         const worker = html2pdfLib().set({
@@ -799,6 +804,7 @@ export default function DocumentCenter({
               '.oak-letterhead-title',
               '.oak-doc-summary-table',
               '.oak-doc-fin-table tbody tr',
+              '.oak-doc-fin-block',
             ],
           },
         }).from(bodyClone);
@@ -813,7 +819,7 @@ export default function DocumentCenter({
         const pages = pdf.getNumberOfPages();
         const contentWidthMm = 174; // A4 210 − 18 − 18
         const headerY = 0;
-        const footerY = 297 - footerGapMm - (footerHeightMm ?? 20);
+        const footerY = 297 - overlayFooterGapMm - (footerHeightMm ?? 20);
 
         for (let i = 1; i <= pages; i++) {
           pdf.setPage(i);
