@@ -1,12 +1,20 @@
+import React from 'react';
 import OakLetterhead from './OakLetterhead';
 import { useDocumentHelpers, reservationScopeLabel } from './GuestDocumentContent';
 import type { GuestDocumentContentProps } from './GuestDocumentContent';
+
+export interface ReservationConfirmationPrintProps extends GuestDocumentContentProps {
+  headerRef?: React.Ref<HTMLDivElement>;
+  footerRef?: React.Ref<HTMLDivElement>;
+}
 
 export default function ReservationConfirmationPrint({
   reservation: res,
   propertyInfo,
   propertyBranding,
-}: GuestDocumentContentProps) {
+  headerRef,
+  footerRef,
+}: ReservationConfirmationPrintProps) {
   const {
     checkIn,
     checkOut,
@@ -46,6 +54,8 @@ export default function ReservationConfirmationPrint({
       propertyInfo={propertyInfo}
       propertyBranding={propertyBranding}
       documentTitle="Konfirmasi Reservasi"
+      headerRef={headerRef}
+      footerRef={footerRef}
     >
       {/* Reference */}
       <div className="oak-doc-section">

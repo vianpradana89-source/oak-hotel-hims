@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import html2pdf from 'html2pdf.js';
-import logoPng from '../../assets/branding/oak-letterhead/logo.png';
+import html2canvas from 'html2canvas';
 import ReservationConfirmationPrint from './ReservationConfirmationPrint';
 import QuotationPrint from './QuotationPrint';
 import QuotationEditor from './QuotationEditor';
@@ -58,6 +58,36 @@ function generateDocumentPdfFilename({
   const cleanRef = (reference || '').trim();
   const refSuffix = cleanRef ? sanitizeFilenameSegment(cleanRef) : today;
   return `${hotelPrefix}-Quotation-${refSuffix}.pdf`;
+}
+
+/* ---------------------------------------------------------------- */
+/*  PDF snapshot helpers                                            */
+/* ---------------------------------------------------------------- */
+
+const SNAPSHOT_TTL_MS = 30_000; // reuse snapshots for 30s before re-capturing
+
+async function captureSnapshot(
+  el: HTMLElement,
+  scale = 2,
+): Promise<{ dataUrl: string; widthPx: number; heightPx: number }> {
+  const canvas = await html2canvas(el, {
+    scale,
+    useCORS: true,
+    allowTaint: true,
+    logging: false,
+    scrollX: 0,
+    scrollY: 0,
+    backgroundColor: '#ffffff',
+  });
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    widthPx: canvas.width,
+    heightPx: canvas.height,
+  };
+}
+
+function computePdfDimensions(pixels: { widthPx: number; heightPx: number }, pdfWidthMm: number) {
+  return pdfWidthMm * (pixels.heightPx / pixels.widthPx);
 }
 
 /* ---------------------------------------------------------------- */
@@ -218,6 +248,17 @@ export default function DocumentCenter({
   const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [savePdfError, setSavePdfError] = useState<string | null>(null);
   const printDocumentRef = useRef<HTMLDivElement>(null);
+  const pdfSnapshotCacheRef = useRef<{
+    header?: string;
+    footer?: string;
+    headerHeight?: number;
+    footerHeight?: number;
+    capturedAt?: number;
+  }>({});
+
+  /* Refs for snapshotting canonical letterhead elements */
+  const headerRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
 
   /* Property payment instructions state (DOCUMENT-1B.2A) */
   const [propertyPaymentInstructions, setPropertyPaymentInstructions] =
@@ -564,261 +605,189 @@ export default function DocumentCenter({
     setSavePdfError(null);
   }, [kind, selectedResId, quotationMode]);
 
-  /* Deterministic logo data URL loader: converts the baked logo.png to a base64
-     data URL once and caches the result in a ref.  Returns cached value on
-     subsequent calls so every PDF page reuses the same image reference. */
-  const logoDataUrl = useRef<string | null>(null);
+  /* ------------------------------------------------------------------ */
 
-  const ensureLogoDataUrl = async () => {
-    if (logoDataUrl.current) return logoDataUrl.current;
-    const resp = await fetch(logoPng);
-    const blob = await resp.blob();
-    logoDataUrl.current = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-    return logoDataUrl.current;
-  };
+   /* Handle real downloadable PDF export via DOM snapshot + jsPDF overlay
+      *
+      * Strategy (zero mutation of live preview DOM):
+      *   1. Snapshot canonical header/footer via html2canvas directly — their
+      *      `data-html2canvas-ignore="true"` is on the element itself, but
+      *      html2canvas 1.4.1 skips that attribute only on children, not root,
+      *      so the snapshots capture the rendered pixels faithfully.
+      *   2. Build a detached clone of .oak-letterhead-frame, strip header &
+      *      footer from it, then feed the clone to html2pdf so the existing
+      *      pagebreak CSS rules paginate the body across multiple pages.
+      *   3. Retrieve the actual jsPDF instance via the official API:
+      *        const pdf = await worker.get('pdf')
+      *   4. Overlay the canonical OAK letterhead snapshots on EVERY page
+      *      (page 1 and pages 2+ use identical geometry).
+      *   5. Exactly ONE final `pdf.save(filename)` call.
+      *
+      * The live preview DOM is never mutated.  No cloneNode or
+      * document.body.appendChild is used.
+      */
+   const handleSavePdf = useCallback(async () => {
+     if (!printEnabled || isSavingPdf) return;
 
-  /* Return true when the active property is OAK Lawang, matching the
-     heuristics used in OakLetterhead.tsx so the baked logo is shown consistently. */
-  const isOakLawangProperty = (
-    propInfo?: PropertyInfoDto,
-    branding?: PropertyBrandingDto,
-  ): boolean => {
-    const code = (propInfo?.property_code || '').trim().toUpperCase();
-    if (code === 'LWG') return true;
-    const name = branding?.displayName || propInfo?.name || '';
-    if (/oak\s*lawang/i.test(name.trim())) return true;
-    return false;
-  };
+     const rootEl = printDocumentRef.current;
+     if (!rootEl) {
+       setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
+       return;
+     }
 
-  /* Handle real downloadable PDF export via html2pdf.js (DOCUMENT-1B.2F)
-   *
-   * Strategy (zero mutation of live preview DOM):
-   *   1. Use the live .oak-letterhead-frame (targetEl) directly as the
-   *      html2pdf source — no manual cloning.
-   *   2. Pass an html2canvas `onclone` callback that modifies only
-   *      html2canvas's own internal cloned document: hide the cloned
-   *      `.oak-letterhead-header` so the captured body does not contain
-   *      the original letterhead chrome.  The live DOM is untouched.
-   *   3. Set a top margin of 38 mm on the PDF.  This reserves space on
-   *      every page for the jsPDF overlay header (logo + name + tagline
-   *      + divider ≈ 37 mm tall), preventing body overlap.
-   *   4. Call `.toPdf()` to generate the PDF without downloading.
-   *   5. Retrieve the actual jsPDF instance via the official API:
-   *        const pdf = await worker.get('pdf')
-   *   6. Overlay the compact OAK Lawang letterhead on EVERY page
-   *      (page 1 and pages 2+ use identical geometry).
-   *   7. Exactly ONE final `pdf.save(filename)` call.
-   *
-   * The live preview DOM is never mutated.  No cloneNode or
-   * document.body.appendChild is used.
-   */
-  const handleSavePdf = useCallback(async () => {
-    if (!printEnabled || isSavingPdf) return;
+     const headerEl = headerRef.current;
+     const footerEl = footerRef.current;
 
-    const rootEl = printDocumentRef.current;
-    if (!rootEl) {
-      setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
-      return;
-    }
+     if (!headerEl || !footerEl) {
+       setSavePdfError('Elemen header/footer tidak ditemukan di DOM.');
+       return;
+     }
 
-    const targetEl = (rootEl.querySelector('.oak-letterhead-frame') as HTMLElement) || rootEl;
+     setIsSavingPdf(true);
+     setSavePdfError(null);
 
-    setIsSavingPdf(true);
-    setSavePdfError(null);
+     try {
+       const filename = generateDocumentPdfFilename({
+         kind,
+         quotationMode,
+         bid: docRes?.bid || pickerRow?.bid,
+         reference: quotationDraft.reference,
+         propertyInfo,
+         propertyBranding,
+       });
 
-    try {
-      const filename = generateDocumentPdfFilename({
-        kind,
-        quotationMode,
-        bid: docRes?.bid || pickerRow?.bid,
-        reference: quotationDraft.reference,
-        propertyInfo,
-        propertyBranding,
-      });
+       // ── Step 1: Snapshot canonical header & footer ──────────────
+       const now = Date.now();
+       const cache = pdfSnapshotCacheRef.current;
+       const ttlExpired = !cache.header ||
+         (now - (cache.capturedAt || 0)) > SNAPSHOT_TTL_MS;
 
-      // Top margin of 38 mm reserves space for the repeated jsPDF header.
-      // Bottom margin of 18 mm reserves space for the repeated jsPDF footer.
-      // Both margins apply to every generated page so body content never
-      // overlaps the repeated chrome.
-      const opt = {
-        margin: [38, 0, 18, 0] as [number, number, number, number],
-        filename,
-        image: { type: 'jpeg' as const, quality: 0.98 },
-        html2canvas: {
-          scale: 2,
-          useCORS: true,
-          logging: false,
-          scrollY: 0,
-          scrollX: 0,
-          // Modify ONLY the internal clone that html2canvas creates.
-          // The live targetEl is never touched.
-          onclone(cloneDoc: Document) {
-            const clonedFrame = cloneDoc.querySelector('.oak-letterhead-frame') as HTMLElement | null;
-            const clonedHeader = clonedFrame?.querySelector('.oak-letterhead-header') as HTMLElement | null;
-            if (clonedHeader) {
-              clonedHeader.style.display = 'none';
-            }
-            // Also suppress the original footer in the clone so the
-            // repeated jsPDF footer appears consistently on every page.
-            const clonedFooter = clonedFrame?.querySelector('.oak-letterhead-footer') as HTMLElement | null;
-            if (clonedFooter) {
-              clonedFooter.style.display = 'none';
-            }
-          },
-        },
-        jsPDF: {
-          unit: 'mm' as const,
-          format: 'a4' as const,
-          orientation: 'portrait' as const,
-        },
-        pagebreak: {
-          mode: ['css', 'legacy'],
-          avoid: [
-            '.oak-letterhead-header',
-            '.oak-letterhead-title',
-            '.oak-doc-summary-table',
-            '.oak-doc-fin-table tbody tr',
-            '.oak-letterhead-footer',
-          ],
-        },
-      };
+       let headerDataUrl = cache.header;
+       let footerDataUrl = cache.footer;
+       let headerHeightMm = cache.headerHeight;
+       let footerHeightMm = cache.footerHeight;
 
-      // Determine showLogo BEFORE loading to avoid unnecessary fetch.
-      const showLogo = Boolean(propertyBranding?.logoUrl) || isOakLawangProperty(propertyInfo, propertyBranding);
-      const logo = showLogo ? await ensureLogoDataUrl() : null;
+       if (ttlExpired) {
+         const [headerSnap, footerSnap] = await Promise.all([
+           captureSnapshot(headerEl),
+           captureSnapshot(footerEl),
+         ]);
+         headerDataUrl = headerSnap.dataUrl;
+         footerDataUrl = footerSnap.dataUrl;
+         headerHeightMm = computePdfDimensions(headerSnap, 174);
+         footerHeightMm = computePdfDimensions(footerSnap, 174);
+         pdfSnapshotCacheRef.current = {
+           header: headerDataUrl,
+           footer: footerDataUrl,
+           headerHeight: headerHeightMm,
+           footerHeight: footerHeightMm,
+           capturedAt: now,
+         };
+       }
 
-      // Build worker FROM the live target element — no cloning.
-      const html2pdfLib = (html2pdf as unknown as { default?: typeof html2pdf }).default || html2pdf;
-      const worker = html2pdfLib().set(opt).from(targetEl);
-
-      // Generate the PDF (no download yet).
-      await worker.toPdf();
-
-      // Retrieve the actual jsPDF instance via the official html2pdf API.
-      const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
-
-      // Overlay canonical OAK letterhead on EVERY page with identical geometry.
-      // The onclone callback ensures the original DOM header and footer are
-      // suppressed in the captured body, so every page looks the same.
-      const pages = pdf.getNumberOfPages();
-
-      // Canonical header dimensions matching .oak-letterhead-header CSS:
-      //   logo: 17×17mm at (14, 12)
-      //   hotel name: 22px (≈7.8mm), color #1b4332, at x=35
-      //   tagline: 11px (≈3.9mm), color #555, italic, at x=35
-      //   property code: 10px (≈3.5mm), color #888, uppercase, at x=35
-      //   divider: 2px solid #1b4332 at y=37mm
-      const hotelName = propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
-      const propertyCode = propertyInfo?.property_code;
-
-      // Canonical footer dimensions matching .oak-letterhead-footer CSS:
-      //   separator: 1px solid #c5a880 at y=281mm
-      //   contact: 11px, color #333, font-weight 500, centered
-      //   system note: 9px, color #999, centered
-      //   timestamp: 9px, color #999, centered
-      //   bottom margin: 16mm (footer sits at ~281-295mm in 297mm A4)
-      const address = propertyInfo?.address;
-      const phone = propertyInfo?.phone;
-      const now = new Date();
-      const printedDate = now.toLocaleDateString('id-ID', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-
-      for (let i = 1; i <= pages; i++) {
-        pdf.setPage(i);
-
-        // ── Top: canonical header ───────────────────────────────────
-        if (showLogo && logo) {
-          pdf.addImage(logo, 'PNG', 14, 12, 17, 17);
+        // ── Step 2: Prepare body source (clone without header/footer) ─
+        const frameEl = rootEl.querySelector('.oak-letterhead-frame') as HTMLElement;
+        if (!frameEl) {
+          throw new Error('Frame elemen tidak ditemukan.');
         }
-        // Hotel name: 22px ≈ 7.76mm, weight 700, color #1b4332
-        pdf.setFontSize(22);
-        pdf.setFont('helvetica', 'normal');
-        pdf.setTextColor(27, 67, 50);
-        pdf.text(hotelName, 35, 20);
-        // Tagline: 11px ≈ 3.88mm, italic, color #555
-        if (propertyBranding?.tagline) {
-          pdf.setFontSize(11);
-          pdf.setFont('helvetica', 'italic');
-          pdf.setTextColor(85, 85, 85);
-          pdf.text(propertyBranding.tagline, 35, 25);
-        }
-        // Property code: 10px ≈ 3.53mm, uppercase, color #888
-        if (propertyCode) {
-          pdf.setFontSize(10);
-          pdf.setFont('helvetica', 'normal');
-          pdf.setTextColor(136, 136, 136);
-          pdf.text(`KODE PROPERTI: ${propertyCode}`, 35, propertyBranding?.tagline ? 30 : 25);
-        }
-        // Divider line: 2px (≈0.71mm) solid #1b4332 at y=37mm
-        pdf.setFontSize(11); // reset
-        pdf.setFont('helvetica', 'normal');
-        pdf.setDrawColor(27, 67, 50);
-        pdf.setLineWidth(0.71);
-        pdf.line(14, 37, 196, 37);
+        const bodyClone = frameEl.cloneNode(true) as HTMLElement;
+        const bh = bodyClone.querySelector('.oak-letterhead-header');
+        const bf = bodyClone.querySelector('.oak-letterhead-footer');
+        if (bh instanceof HTMLElement) bh.remove();
+        if (bf instanceof HTMLElement) bf.remove();
 
-        // ── Bottom: canonical footer ────────────────────────────────
-        // Gold separator at y=281mm (matching footer padding-top: 18px + border)
-        pdf.setDrawColor(197, 168, 128);
-        pdf.setLineWidth(0.36); // 1px ≈ 0.36mm
-        pdf.line(14, 281, 196, 281);
-        // Contact line: centered, 11px, color #333, font-weight 500
-        if (address || phone) {
-          pdf.setFontSize(11);
-          pdf.setFont('helvetica', 'normal');
-          pdf.setTextColor(51, 51, 51);
-          const contactParts: string[] = [];
-          if (address) contactParts.push(address);
-          if (phone) contactParts.push('Telp: ' + phone);
-          const contactText = contactParts.join('  |  ');
-          const contactWidth = pdf.getTextWidth(contactText);
-          const centerX = (210 - contactWidth) / 2;
-          pdf.text(contactText, centerX, 287);
-        }
-        // System note + timestamp: centered, 9px, color #999
-        pdf.setFontSize(9);
-        pdf.setFont('helvetica', 'normal');
-        pdf.setTextColor(153, 153, 153);
-        const sysNote = 'Dokumen ini dicetak secara otomatis dari sistem OAK HIMS';
-        const sysNoteWidth = pdf.getTextWidth(sysNote);
-        const sysNoteX = (210 - sysNoteWidth) / 2;
-        pdf.text(sysNote, sysNoteX, 291);
-        const timestampText = `Waktu cetak: ${printedDate}`;
-        const timestampWidth = pdf.getTextWidth(timestampText);
-        const timestampX = (210 - timestampWidth) / 2;
-        pdf.text(timestampText, timestampX, 295);
-      }
+        // Neutralize outer frame presentation on the clone ONLY to avoid
+        // double-spacing with html2pdf's own margin options.
+        // Live .oak-letterhead-frame in the browser is untouched.
+        bodyClone.style.padding = '0';
+        bodyClone.style.margin = '0';
+        bodyClone.style.border = '0';
+        bodyClone.style.borderRadius = '0';
+        bodyClone.style.boxShadow = 'none';
+        bodyClone.style.minHeight = '0';
+        bodyClone.style.maxWidth = 'none';
 
-      // Exactly ONE download trigger.
-      pdf.save(filename);
+        // Compute safe margins from actual snapshot heights
+        const headerGapMm = 3;
+        const footerGapMm = 3;
+        const topMargin = (headerHeightMm ?? 25) + headerGapMm;
+        const bottomMargin = (footerHeightMm ?? 20) + footerGapMm;
 
-    } catch (err: unknown) {
-      console.error('[DocumentCenter] Failed to generate PDF:', err);
-      const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
-      setSavePdfError(msg);
-    } finally {
-      setIsSavingPdf(false);
-    }
-  }, [
-    printEnabled,
-    isSavingPdf,
-    kind,
-    quotationMode,
-    docRes?.bid,
-    pickerRow?.bid,
-    quotationDraft.reference,
-    propertyInfo,
-    propertyBranding,
-  ]);
+       // ── Step 3: Generate paginated PDF via html2pdf ─────────────
+       const html2pdfLib = (html2pdf as any)?.default || html2pdf;
+       const worker = html2pdfLib().set({
+         margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
+         filename,
+         image: { type: 'jpeg' as const, quality: 0.98 },
+         html2canvas: {
+           scale: 2,
+           useCORS: true,
+           logging: false,
+           scrollY: 0,
+           scrollX: 0,
+         },
+         jsPDF: {
+           unit: 'mm' as const,
+           format: 'a4' as const,
+           orientation: 'portrait' as const,
+         },
+         pagebreak: {
+           mode: ['css', 'legacy'],
+           avoid: [
+             '.oak-letterhead-title',
+             '.oak-doc-summary-table',
+             '.oak-doc-fin-table tbody tr',
+           ],
+         },
+       }).from(bodyClone);
+
+       // Generate the PDF (no download yet).
+       await worker.toPdf();
+
+       // Retrieve the actual jsPDF instance via the official html2pdf API.
+       const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
+
+       // ── Step 4: Overlay canonical header/footer on EVERY page ───
+       const pages = pdf.getNumberOfPages();
+       const contentWidthMm = 174; // A4 210 − 18 − 18
+       const headerY = 0;
+       const footerY = 297 - footerGapMm - (footerHeightMm ?? 20);
+
+       for (let i = 1; i <= pages; i++) {
+         pdf.setPage(i);
+
+         // Header overlay at top
+         if (headerDataUrl && headerHeightMm) {
+           pdf.addImage(headerDataUrl, 'PNG', 18, headerY, contentWidthMm, headerHeightMm);
+         }
+
+         // Footer overlay at bottom
+         if (footerDataUrl && footerHeightMm) {
+           pdf.addImage(footerDataUrl, 'PNG', 18, footerY, contentWidthMm, footerHeightMm);
+         }
+       }
+
+       // Exactly ONE download trigger.
+       pdf.save(filename);
+
+     } catch (err: unknown) {
+       console.error('[DocumentCenter] Failed to generate PDF:', err);
+       const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
+       setSavePdfError(msg);
+     } finally {
+       setIsSavingPdf(false);
+     }
+   }, [
+     printEnabled,
+     isSavingPdf,
+     kind,
+     quotationMode,
+     docRes?.bid,
+     pickerRow?.bid,
+     quotationDraft.reference,
+     propertyInfo,
+     propertyBranding,
+   ]);
 
   /* ------------------------------------------------------------------ */
   /*  LEFT SIDEBAR                                                      */
@@ -1060,6 +1029,8 @@ export default function DocumentCenter({
                 reservation={docRes}
                 propertyInfo={propertyInfo}
                 propertyBranding={propertyBranding}
+                headerRef={headerRef}
+                footerRef={footerRef}
               />
             </div>
           ) : (
@@ -1090,6 +1061,8 @@ export default function DocumentCenter({
                 draft={quotationDraft}
                 propertyInfo={propertyInfo}
                 propertyBranding={propertyBranding}
+                headerRef={headerRef}
+                footerRef={footerRef}
               />
             </div>
           )

@@ -32,6 +32,10 @@ export interface OakLetterheadProps {
   documentTitle: string;
   /** Dynamic document body content */
   children: React.ReactNode;
+  /** Ref to the header element (for PDF snapshot) */
+  headerRef?: React.Ref<HTMLDivElement>;
+  /** Ref to the footer element (for PDF snapshot) */
+  footerRef?: React.Ref<HTMLDivElement>;
 }
 
 /**
@@ -58,6 +62,8 @@ export default function OakLetterhead({
   propertyBranding,
   documentTitle,
   children,
+  headerRef,
+  footerRef,
 }: OakLetterheadProps) {
   const hotelName =
     propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
@@ -106,7 +112,11 @@ export default function OakLetterhead({
         )}
 
         {/* Header: logo + hotel info */}
-        <div className="oak-letterhead-header">
+        <div
+          className="oak-letterhead-header"
+          ref={headerRef}
+          data-html2canvas-ignore="true"
+        >
           {showLogo ? (
             <img
               src={logoSrc}
@@ -153,7 +163,11 @@ export default function OakLetterhead({
         )}
 
         {/* Footer: canonical property data first, system note secondary */}
-        <div className="oak-letterhead-footer">
+        <div
+          className="oak-letterhead-footer"
+          ref={footerRef}
+          data-html2canvas-ignore="true"
+        >
           {(address || phone) && (
             <div className="oak-letterhead-footer-contact">
               {address ? <span>{address}</span> : null}

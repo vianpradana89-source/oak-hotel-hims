@@ -1,3 +1,4 @@
+import React from 'react';
 import { useMemo } from 'react';
 import OakLetterhead from './OakLetterhead';
 import type { PropertyInfoDto, PropertyBrandingDto } from './GuestDocumentContent';
@@ -26,6 +27,8 @@ export interface QuotationPrintProps {
   reservation?: any;
   propertyInfo?: PropertyInfoDto;
   propertyBranding?: PropertyBrandingDto;
+  headerRef?: React.Ref<HTMLDivElement>;
+  footerRef?: React.Ref<HTMLDivElement>;
 }
 
 export default function QuotationPrint({
@@ -33,6 +36,8 @@ export default function QuotationPrint({
   reservation: legacyReservation,
   propertyInfo,
   propertyBranding,
+  headerRef,
+  footerRef,
 }: QuotationPrintProps) {
   const currencyCode = propertyInfo?.currency || 'IDR';
 
@@ -87,6 +92,8 @@ export default function QuotationPrint({
       propertyInfo={propertyInfo}
       propertyBranding={propertyBranding}
       documentTitle="Quotation / Penawaran"
+      headerRef={headerRef}
+      footerRef={footerRef}
     >
       {/* 1. Meta / Reference */}
       <div className="oak-doc-section">
