@@ -702,50 +702,100 @@ export default function DocumentCenter({
       // Retrieve the actual jsPDF instance via the official html2pdf API.
       const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
 
-      // Overlay OAK Lawang letterhead on EVERY page with identical geometry.
+      // Overlay canonical OAK letterhead on EVERY page with identical geometry.
       // The onclone callback ensures the original DOM header and footer are
       // suppressed in the captured body, so every page looks the same.
       const pages = pdf.getNumberOfPages();
+
+      // Canonical header dimensions matching .oak-letterhead-header CSS:
+      //   logo: 17×17mm at (14, 12)
+      //   hotel name: 22px (≈7.8mm), color #1b4332, at x=35
+      //   tagline: 11px (≈3.9mm), color #555, italic, at x=35
+      //   property code: 10px (≈3.5mm), color #888, uppercase, at x=35
+      //   divider: 2px solid #1b4332 at y=37mm
+      const hotelName = propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
+      const propertyCode = propertyInfo?.property_code;
+
+      // Canonical footer dimensions matching .oak-letterhead-footer CSS:
+      //   separator: 1px solid #c5a880 at y=281mm
+      //   contact: 11px, color #333, font-weight 500, centered
+      //   system note: 9px, color #999, centered
+      //   timestamp: 9px, color #999, centered
+      //   bottom margin: 16mm (footer sits at ~281-295mm in 297mm A4)
+      const address = propertyInfo?.address;
+      const phone = propertyInfo?.phone;
+      const now = new Date();
+      const printedDate = now.toLocaleDateString('id-ID', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
       for (let i = 1; i <= pages; i++) {
         pdf.setPage(i);
-        // ── Top: repeated header ──────────────────────────────────
+
+        // ── Top: canonical header ───────────────────────────────────
         if (showLogo && logo) {
           pdf.addImage(logo, 'PNG', 14, 12, 17, 17);
         }
-        const hotelName = propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
-        pdf.setFontSize(11);
-        pdf.setTextColor(27, 67, 50); // #1b4332
-        pdf.text(hotelName, 35, 19);
+        // Hotel name: 22px ≈ 7.76mm, weight 700, color #1b4332
+        pdf.setFontSize(22);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(27, 67, 50);
+        pdf.text(hotelName, 35, 20);
+        // Tagline: 11px ≈ 3.88mm, italic, color #555
         if (propertyBranding?.tagline) {
-          pdf.setFontSize(7.5);
-          pdf.setTextColor(100, 100, 100);
+          pdf.setFontSize(11);
+          pdf.setFont('helvetica', 'italic');
+          pdf.setTextColor(85, 85, 85);
           pdf.text(propertyBranding.tagline, 35, 25);
         }
-        // Horizontal divider line (#1b4332) at y=37mm
+        // Property code: 10px ≈ 3.53mm, uppercase, color #888
+        if (propertyCode) {
+          pdf.setFontSize(10);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setTextColor(136, 136, 136);
+          pdf.text(`KODE PROPERTI: ${propertyCode}`, 35, propertyBranding?.tagline ? 30 : 25);
+        }
+        // Divider line: 2px (≈0.71mm) solid #1b4332 at y=37mm
+        pdf.setFontSize(11); // reset
+        pdf.setFont('helvetica', 'normal');
         pdf.setDrawColor(27, 67, 50);
-        pdf.setLineWidth(0.8);
+        pdf.setLineWidth(0.71);
         pdf.line(14, 37, 196, 37);
 
-        // ── Bottom: repeated official footer ──────────────────────
-        // Gold separator line above footer (matches .oak-letterhead-footer border-top)
-        pdf.setDrawColor(197, 168, 128); // #c5a880
-        pdf.setLineWidth(0.5);
-        pdf.line(14, 280, 196, 280);
-        // Canonical property address / phone from propertyInfo
-        const address = propertyInfo?.address;
-        const phone = propertyInfo?.phone;
+        // ── Bottom: canonical footer ────────────────────────────────
+        // Gold separator at y=281mm (matching footer padding-top: 18px + border)
+        pdf.setDrawColor(197, 168, 128);
+        pdf.setLineWidth(0.36); // 1px ≈ 0.36mm
+        pdf.line(14, 281, 196, 281);
+        // Contact line: centered, 11px, color #333, font-weight 500
         if (address || phone) {
-          pdf.setFontSize(9);
-          pdf.setTextColor(80, 80, 80);
+          pdf.setFontSize(11);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setTextColor(51, 51, 51);
           const contactParts: string[] = [];
           if (address) contactParts.push(address);
           if (phone) contactParts.push('Telp: ' + phone);
-          pdf.text(contactParts.join('  |  '), 14, 286);
+          const contactText = contactParts.join('  |  ');
+          const contactWidth = pdf.getTextWidth(contactText);
+          const centerX = (210 - contactWidth) / 2;
+          pdf.text(contactText, centerX, 287);
         }
-        // System note — repeated on every page for consistency with the letterhead style
-        pdf.setFontSize(8);
-        pdf.setTextColor(150, 150, 150);
-        pdf.text('Dokumen ini dicetak secara otomatis dari sistem OAK HIMS', 14, 292);
+        // System note + timestamp: centered, 9px, color #999
+        pdf.setFontSize(9);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(153, 153, 153);
+        const sysNote = 'Dokumen ini dicetak secara otomatis dari sistem OAK HIMS';
+        const sysNoteWidth = pdf.getTextWidth(sysNote);
+        const sysNoteX = (210 - sysNoteWidth) / 2;
+        pdf.text(sysNote, sysNoteX, 291);
+        const timestampText = `Waktu cetak: ${printedDate}`;
+        const timestampWidth = pdf.getTextWidth(timestampText);
+        const timestampX = (210 - timestampWidth) / 2;
+        pdf.text(timestampText, timestampX, 295);
       }
 
       // Exactly ONE download trigger.
