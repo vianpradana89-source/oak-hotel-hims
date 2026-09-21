@@ -11,6 +11,7 @@ import {
 } from './quotationDraft';
 import { formatHotelDateIndonesian, formatHotelCurrency } from './GuestDocumentContent';
 import type { PropertyInfoDto, PropertyBrandingDto } from './GuestDocumentContent';
+import { Modal } from '../../design-system/Modal';
 import './guestDocumentPrint.css';
 
 function sanitizeFilenameSegment(segment: string): string {
@@ -247,6 +248,8 @@ export default function DocumentCenter({
   /* PDF export state & capture ref (DOCUMENT-1B.2F) */
   const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [savePdfError, setSavePdfError] = useState<string | null>(null);
+  const [showPdfFilenameModal, setShowPdfFilenameModal] = useState(false);
+  const [pdfFilename, setPdfFilename] = useState('');
   const printDocumentRef = useRef<HTMLDivElement>(null);
   const pdfSnapshotCacheRef = useRef<{
     header?: string;
@@ -633,8 +636,33 @@ export default function DocumentCenter({
        * The live preview DOM is never mutated.  Only temporary clones are
        * appended to document.body and removed before the callback returns.
        */
-    const handleSavePdf = useCallback(async () => {
+    const handleOpenSavePdfDialog = useCallback(() => {
       if (!printEnabled || isSavingPdf) return;
+      setSavePdfError(null);
+      const filename = generateDocumentPdfFilename({
+        kind,
+        quotationMode,
+        bid: docRes?.bid || pickerRow?.bid,
+        reference: quotationDraft.reference,
+        propertyInfo,
+        propertyBranding,
+      });
+      setPdfFilename(filename);
+      setShowPdfFilenameModal(true);
+    }, [
+      printEnabled,
+      isSavingPdf,
+      kind,
+      quotationMode,
+      docRes?.bid,
+      pickerRow?.bid,
+      quotationDraft.reference,
+      propertyInfo,
+      propertyBranding,
+    ]);
+
+    const savePdfWithFilename = useCallback(async (finalFilename: string) => {
+      if (isSavingPdf) return;
 
       const rootEl = printDocumentRef.current;
       if (!rootEl) {
@@ -657,15 +685,6 @@ export default function DocumentCenter({
       let bodyHost: HTMLDivElement | null = null;
 
       try {
-        const filename = generateDocumentPdfFilename({
-          kind,
-          quotationMode,
-          bid: docRes?.bid || pickerRow?.bid,
-          reference: quotationDraft.reference,
-          propertyInfo,
-          propertyBranding,
-        });
-
         // ── Step 1: Snapshot canonical header & footer ──────────────
         // Live header/footer carry `data-html2canvas-ignore="true"` which
         // causes html2canvas's DocumentCloner to drop them from the cloned
@@ -788,7 +807,7 @@ export default function DocumentCenter({
         const html2pdfLib = (html2pdf as any)?.default || html2pdf;
         const worker = html2pdfLib().set({
           margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
-          filename,
+          filename: finalFilename,
           image: { type: 'jpeg' as const, quality: 0.98 },
           html2canvas: {
             scale: 2,
@@ -840,7 +859,7 @@ export default function DocumentCenter({
         }
 
         // Exactly ONE download trigger.
-        pdf.save(filename);
+        pdf.save(finalFilename);
 
       } catch (err: unknown) {
         console.error('[DocumentCenter] Failed to generate PDF:', err);
@@ -853,16 +872,34 @@ export default function DocumentCenter({
         setIsSavingPdf(false);
       }
     }, [
-     printEnabled,
-     isSavingPdf,
-     kind,
-     quotationMode,
-     docRes?.bid,
-     pickerRow?.bid,
-     quotationDraft.reference,
-     propertyInfo,
-     propertyBranding,
-   ]);
+      printEnabled,
+      isSavingPdf,
+      kind,
+      docRes?.bid,
+      pickerRow?.bid,
+      quotationDraft.reference,
+      propertyInfo,
+      propertyBranding,
+    ]);
+
+    const normalizePdfFilename = (raw: string): string => {
+      const trimmed = raw.trim();
+      if (!trimmed) return '';
+      const lower = trimmed.toLowerCase();
+      if (lower.endsWith('.pdf')) return trimmed;
+      return trimmed + '.pdf';
+    };
+
+    const handleConfirmPdfSave = useCallback(() => {
+      const finalFilename = normalizePdfFilename(pdfFilename);
+      if (!finalFilename) return;
+      setShowPdfFilenameModal(false);
+      savePdfWithFilename(finalFilename);
+    }, [pdfFilename, savePdfWithFilename]);
+
+    const handleCancelPdfSave = useCallback(() => {
+      setShowPdfFilenameModal(false);
+    }, []);
 
   /* ------------------------------------------------------------------ */
   /*  LEFT SIDEBAR                                                      */
@@ -893,7 +930,7 @@ export default function DocumentCenter({
               <button
                 type="button"
                 className="document-center-print-btn whitespace-nowrap !w-auto px-3.5 py-1.5 text-xs font-semibold rounded-md shadow-sm !bg-[#c5a880] hover:!bg-[#b3956c] !text-[#1b4332] font-bold"
-                onClick={handleSavePdf}
+                onClick={handleOpenSavePdfDialog}
                 disabled={!printEnabled || isSavingPdf}
                 title={!printEnabled ? printHint : undefined}
               >
@@ -1181,6 +1218,55 @@ export default function DocumentCenter({
       `}</style>
       {sidebar}
       {preview}
+      {showPdfFilenameModal && (
+        <Modal
+          isOpen={showPdfFilenameModal}
+          onClose={handleCancelPdfSave}
+          title="Simpan PDF"
+          size="sm"
+          closeOnOverlayClick={false}
+          footer={
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelPdfSave}
+                disabled={isSavingPdf}
+                className="px-3.5 py-1.5 text-xs font-semibold rounded-md shadow-sm border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPdfSave}
+                disabled={isSavingPdf || !pdfFilename.trim()}
+                className="px-3.5 py-1.5 text-xs font-semibold rounded-md shadow-sm bg-emerald-800 hover:bg-emerald-700 text-white transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isSavingPdf ? 'Menyimpan...' : 'Simpan PDF'}
+              </button>
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                Nama File
+              </label>
+              <input
+                type="text"
+                value={pdfFilename}
+                onChange={(e) => setPdfFilename(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && pdfFilename.trim() && !isSavingPdf) {
+                    handleConfirmPdfSave();
+                  }
+                }}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-700/40 focus:border-emerald-700 transition-colors"
+                autoFocus
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
