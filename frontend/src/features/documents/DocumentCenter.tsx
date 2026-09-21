@@ -598,23 +598,19 @@ export default function DocumentCenter({
   /* Handle real downloadable PDF export via html2pdf.js (DOCUMENT-1B.2F)
    *
    * Strategy (zero mutation of live preview DOM):
-   *   1. Find the live .oak-letterhead-frame (targetEl).
-   *   2. Deep-clone it into `clone` without touching targetEl at all.
-   *   3. In the clone only:
-   *      - hide the original header (so it does not render on the first page),
-   *      - reserve top padding on the body for the jsPDF overlay header,
-   *      - place the clone offscreen via fixed positioning.
-   *   4. Build the html2pdf worker directly from the clone:
-   *        html2pdf().set(opt).from(clone)
-   *      No prior `.from(targetEl)` call.
-   *   5. Call `.toPdf()` to generate the PDF — no download yet.
-   *   6. Retrieve the actual jsPDF instance via the official API:
+   *   1. Use the live .oak-letterhead-frame (targetEl) directly as the
+   *      html2pdf source — no manual cloning.
+   *   2. Set a top margin of 40 mm on the PDF so that on every generated
+   *      page the captured body content starts below the area reserved for
+   *      the repeated jsPDF overlay header.
+   *   3. Call `.toPdf()` to generate the PDF without downloading.
+   *   4. Retrieve the actual jsPDF instance via the official API:
    *        const pdf = await worker.get('pdf')
-   *   7. Iterate every page and overlay the OAK Lawang header.
-   *   8. Exactly ONE final `pdf.save(filename)` call.
+   *   5. Overlay the compact OAK Lawang letterhead ONLY on pages 2+
+   *      (page 1 already carries the original header from the captured DOM).
+   *   6. Exactly ONE final `pdf.save(filename)` call.
    *
-   * The live preview DOM is never mutated.  The clone is removed from
-   * document.body in the finally block after success OR failure.
+   * The live preview DOM is never mutated.  No clone is created or appended.
    */
   const handleSavePdf = useCallback(async () => {
     if (!printEnabled || isSavingPdf) return;
@@ -630,8 +626,6 @@ export default function DocumentCenter({
     setIsSavingPdf(true);
     setSavePdfError(null);
 
-    let clone: HTMLElement | null = null;
-
     try {
       const filename = generateDocumentPdfFilename({
         kind,
@@ -642,8 +636,12 @@ export default function DocumentCenter({
         propertyBranding,
       });
 
+      // Top margin of 40 mm reserves space on every PDF page for the
+      // repeated jsPDF overlay header (logo ~17 mm + name ~7 mm + tagline
+      // ~6 mm + divider line ≈ 40 mm total).  Pages 2+ receive the overlay;
+      // page 1 keeps the original captured header intact.
       const opt = {
-        margin: 0,
+        margin: [40, 0, 0, 0] as [number, number, number, number],
         filename,
         image: { type: 'jpeg' as const, quality: 0.98 },
         html2canvas: {
@@ -674,31 +672,9 @@ export default function DocumentCenter({
       const showLogo = Boolean(propertyBranding?.logoUrl) || isOakLawangProperty(propertyInfo, propertyBranding);
       const logo = showLogo ? await ensureLogoDataUrl() : null;
 
-      // Build offscreen clone — targetEl is never mutated.
-      // Use position:absolute at origin so html2canvas can reliably measure
-      // and render the full clone, while z-index keeps it behind the app.
-      clone = targetEl.cloneNode(true) as HTMLElement;
-      clone.style.cssText = 'position:absolute;top:0;left:0;width:210mm;pointer-events:none;z-index:-9999;';
-
-      // Hide the original header inside the clone so it doesn't render in the PDF body.
-      const cloneHeader = clone.querySelector('.oak-letterhead-header') as HTMLElement | null;
-      if (cloneHeader) cloneHeader.style.display = 'none';
-
-      // Reserve top margin for the jsPDF overlay header (logo + name + tagline + divider ≈ 40mm).
-      // Use 44mm to stay safely within the A4 content area.
-      const cloneBody = clone.querySelector('.oak-letterhead-body') as HTMLElement | null;
-      if (cloneBody) {
-        const existingPad = cloneBody.getAttribute('style') || '';
-        cloneBody.setAttribute('style', existingPad + ';padding-top:44mm;');
-      }
-
-      // Attach clone to the document so html2canvas can measure it.
-      // position:absolute keeps it out of normal flow; z-index:-9999 keeps it behind UI.
-      document.body.appendChild(clone);
-
-      // Build worker FROM CLONE — no prior .from(targetEl) call.
+      // Build worker FROM the live target element — no cloning.
       const html2pdfLib = (html2pdf as unknown as { default?: typeof html2pdf }).default || html2pdf;
-      const worker = html2pdfLib().set(opt).from(clone);
+      const worker = html2pdfLib().set(opt).from(targetEl);
 
       // Generate the PDF (no download yet).
       await worker.toPdf();
@@ -706,11 +682,12 @@ export default function DocumentCenter({
       // Retrieve the actual jsPDF instance via the official html2pdf API.
       const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
 
-      // Overlay OAK Lawang letterhead header on every page.
-      // Contents: logo + hotel name + tagline + divider — NO document title
-      // (the original .oak-letterhead-title stays in the captured body).
+      // Overlay OAK Lawang letterhead header on pages 2+ only.
+      // Page 1 already has the original .oak-letterhead-header captured in
+      // the DOM; the 40 mm top margin ensures body content starts below the
+      // overlay area on every page.
       const pages = pdf.getNumberOfPages();
-      for (let i = 1; i <= pages; i++) {
+      for (let i = 2; i <= pages; i++) {
         pdf.setPage(i);
         if (showLogo && logo) {
           pdf.addImage(logo, 'PNG', 14, 12, 17, 17);
@@ -738,9 +715,6 @@ export default function DocumentCenter({
       const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
       setSavePdfError(msg);
     } finally {
-      if (clone) {
-        try { document.body.removeChild(clone); } catch { /* already detached */ }
-      }
       setIsSavingPdf(false);
     }
   }, [
