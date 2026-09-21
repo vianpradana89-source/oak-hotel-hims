@@ -1191,7 +1191,7 @@ export default function DocumentCenter({
       <style>{`
         @media (min-width: 901px) {
           .doc-center-desktop-grid {
-            grid-template-columns: clamp(540px, 44%, 620px) minmax(0, 1fr) !important;
+            grid-template-columns: minmax(560px, 720px) minmax(0, 1fr) !important;
           }
           .doc-center-sidebar-fixed {
             height: calc(100vh - 64px);
