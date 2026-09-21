@@ -612,6 +612,29 @@
   white-space: pre-wrap;
 }
 
+/* ── HTML2PDF PAGINATION RULES (normal stylesheet — visible to html2canvas) ── */
+/* Item rows: avoid splitting a row mid-cell. The table itself may span pages. */
+.oak-doc-fin-table tbody tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Financial summary tables: keep compact block together. */
+.oak-doc-summary-table {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Letterhead chrome blocks: keep header / title / footer intact. */
+.oak-letterhead-header,
+.oak-letterhead-title,
+.oak-letterhead-footer {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Notes / terms: explicitly allow splitting — do NOT add avoid here. */
+
 /* PRINT -- complementary rules for document body classes */
 @media print {
   .oak-doc-section {

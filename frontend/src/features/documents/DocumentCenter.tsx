@@ -605,6 +605,16 @@ export default function DocumentCenter({
           format: 'a4' as const,
           orientation: 'portrait' as const,
         },
+        pagebreak: {
+          mode: ['css', 'legacy'],
+          avoid: [
+            '.oak-letterhead-header',
+            '.oak-letterhead-title',
+            '.oak-doc-summary-table',
+            '.oak-doc-fin-table tbody tr',
+            '.oak-letterhead-footer',
+          ],
+        },
       };
 
       const html2pdfLib = (html2pdf as unknown as { default?: typeof html2pdf }).default || html2pdf;

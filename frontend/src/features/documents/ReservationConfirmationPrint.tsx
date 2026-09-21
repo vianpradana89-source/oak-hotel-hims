@@ -121,7 +121,7 @@ export default function ReservationConfirmationPrint({
       {/* Financial Summary */}
       <div className="oak-doc-section">
         <div className="oak-doc-section-title">Ringkasan Finansial</div>
-        <table className="oak-doc-fin-table">
+        <table className="oak-doc-fin-table oak-doc-summary-table">
           <tbody>
             <tr>
               <td>Total Reservasi</td>

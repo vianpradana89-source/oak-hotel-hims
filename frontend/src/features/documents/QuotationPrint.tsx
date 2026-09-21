@@ -267,7 +267,7 @@ export default function QuotationPrint({
       {/* 5. Financial Summary */}
       <div className="oak-doc-section">
         <div className="oak-doc-section-title">Ringkasan Finansial</div>
-        <table className="oak-doc-fin-table">
+        <table className="oak-doc-fin-table oak-doc-summary-table">
           <tbody>
             <tr>
               <td>Subtotal</td>
