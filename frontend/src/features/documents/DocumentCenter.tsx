@@ -774,9 +774,9 @@ export default function DocumentCenter({
         const topMargin = (headerHeightMm ?? 25) + headerGapMm;
 
         // Overlay-safe bottom gap for footer position on the PDF page.
-        // Footer overlay is placed 10 mm above the A4 bottom edge so the full
+        // Footer overlay is placed 14 mm above the A4 bottom edge so the full
         // timestamp ("Waktu cetak …") remains visible and is not clipped.
-        const overlayFooterGapMm = 10;
+        const overlayFooterGapMm = 14;
 
         // Body-content clearance above the footer overlay zone.  With
         // bodyToFooterGapMm = 3 the rendered body ends 3 mm before the footer
@@ -822,7 +822,7 @@ export default function DocumentCenter({
         // ── Step 4: Overlay canonical header/footer on EVERY page ───
         const pages = pdf.getNumberOfPages();
         const contentWidthMm = 174; // A4 210 − 18 − 18
-        const headerY = 0;
+        const headerY = 3;
         const footerY = 297 - overlayFooterGapMm - (footerHeightMm ?? 20);
 
         for (let i = 1; i <= pages; i++) {
