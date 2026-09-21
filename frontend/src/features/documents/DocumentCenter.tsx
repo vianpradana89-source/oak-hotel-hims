@@ -771,14 +771,18 @@ export default function DocumentCenter({
 
         // Compute safe margins from actual snapshot heights
         const headerGapMm = 3;
-        const footerGapMm = 3;
         const topMargin = (headerHeightMm ?? 25) + headerGapMm;
-        const bottomMargin = (footerHeightMm ?? 20) + footerGapMm;
 
         // Overlay-safe bottom gap for footer position on the PDF page.
-        // Must be larger than footerGapMm so the overlayed footer sits clear
-        // of the A4 bottom edge — prevents timestamp clipping.
-        const overlayFooterGapMm = 6;
+        // Footer overlay is placed 10 mm above the A4 bottom edge so the full
+        // timestamp ("Waktu cetak …") remains visible and is not clipped.
+        const overlayFooterGapMm = 10;
+
+        // Body-content clearance above the footer overlay zone.  With
+        // bodyToFooterGapMm = 3 the rendered body ends 3 mm before the footer
+        // snapshot begins, preventing body content from overlapping the footer.
+        const bodyToFooterGapMm = 3;
+        const bottomMargin = (footerHeightMm ?? 20) + overlayFooterGapMm + bodyToFooterGapMm;
 
         // ── Step 3: Generate paginated PDF via html2pdf ─────────────
         const html2pdfLib = (html2pdf as any)?.default || html2pdf;
