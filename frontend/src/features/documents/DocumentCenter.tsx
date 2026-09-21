@@ -120,20 +120,42 @@ export default function DocumentCenter({
   const [pickerReservations, setPickerReservations] = useState<any[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
+  const [kind, setKind] = useState<DocKind>(initialKind ?? 'confirmation');
+  const [selectedResId, setSelectedResId] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
-  /* Fetch the document reservation list whenever propertyId changes. */
+  /* Debounce ref for search queries to avoid a request on every keystroke. */
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* Stale-response guard: increments on every new request so late responses
+     from a previous request never overwrite the latest one. */
+  const pickerRequestVersion = useRef(0);
+
+  /* Single authoritative effect for all picker requests.
+     - Empty search → immediate default fetch (recent CHECKED_OUT, LIMIT 20)
+     - Non-empty search → debounced 300ms global property-scoped search
+     - propertyId change cancels any in-flight request and resets state */
   useEffect(() => {
-    let cancelled = false;
+    // Cancel any pending debounce timer from the previous run.
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+
     setPickerLoading(true);
     setPickerError(null);
     setPickerReservations([]);
 
-    (async () => {
+    const controller = new AbortController();
+    const version = ++pickerRequestVersion.current;
+
+    const doFetch = async (url: string) => {
       try {
-        const res = await authFetch(
-          `/api/documents/reservations?property_id=${propertyId}`,
-        );
-        if (cancelled) return;
+        const res = await authFetch(url, { signal: controller.signal });
+        // Stale-response protection: enforce immediately after fetch,
+        // before ANY state update (success, error, or !res.ok handling).
+        if (controller.signal.aborted) return;
+        if (version !== pickerRequestVersion.current) return;
         if (!res.ok) {
           if (res.status === 403) {
             setPickerError('Akses ke Dokumen & Print ditolak.');
@@ -144,25 +166,38 @@ export default function DocumentCenter({
           return;
         }
         const json = await res.json();
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        if (version !== pickerRequestVersion.current) return;
         const rows = Array.isArray(json?.data) ? json.data : [];
         setPickerReservations(rows);
         setPickerLoading(false);
-      } catch {
-        if (cancelled) return;
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        if (version !== pickerRequestVersion.current) return;
         setPickerError('Gagal memuat daftar reservasi dokumen.');
         setPickerLoading(false);
       }
-    })();
+    };
+
+    if (!searchQuery.trim()) {
+      // DEFAULT MODE: immediate fetch, no debounce.
+      doFetch(`/api/documents/reservations?property_id=${propertyId}`);
+    } else {
+      // SEARCH MODE: debounced 300ms to avoid excessive requests.
+      searchDebounceRef.current = setTimeout(() => {
+        const encoded = encodeURIComponent(searchQuery.trim());
+        doFetch(`/api/documents/reservations?property_id=${propertyId}&search=${encoded}`);
+      }, 300);
+    }
 
     return () => {
-      cancelled = true;
+      controller.abort();
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
     };
-  }, [propertyId, authFetch]);
-
-  const [kind, setKind] = useState<DocKind>(initialKind ?? 'confirmation');
-  const [selectedResId, setSelectedResId] = useState<number | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  }, [propertyId, authFetch, searchQuery]);
 
   /* Canonical detail state (loaded via API, not from picker row). */
   const [selectedDetail, setSelectedDetail] = useState<any>(null);

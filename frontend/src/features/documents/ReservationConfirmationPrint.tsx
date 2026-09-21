@@ -33,7 +33,7 @@ export default function ReservationConfirmationPrint({
     paymentStatus === 'PAID'
       ? 'LUNAS'
       : paymentStatus === 'PARTIAL'
-        ? 'BAGIAN'
+        ? 'Dibayar Sebagian'
         : 'BELUM LUNAS';
 
   const sourceLabel =

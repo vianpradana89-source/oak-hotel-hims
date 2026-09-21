@@ -206,47 +206,75 @@ export async function getDocumentReservationList(
   propertyId: number,
   search?: string,
 ): Promise<DocumentReservationListResult> {
-  let baseQuery = `
-    SELECT
-      r.id,
-      b.bid,
-      r.guest_name,
-      COALESCE(r.booker_name, b.booker_name) AS booker_name,
-      TO_CHAR(r.check_in, 'YYYY-MM-DD') AS check_in,
-      TO_CHAR(r.check_out, 'YYYY-MM-DD') AS check_out,
-      COALESCE(r.booked_room_type_name_snapshot, rt.name) AS room_type_name,
-      COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type,
-      rm.room_number,
-      r.status,
-      r.total_price
-    FROM reservations r
-    INNER JOIN bookings b ON b.id = r.booking_id
-    LEFT JOIN rooms rm ON rm.id = r.room_id
-      AND rm.property_id = b.property_id
-    LEFT JOIN room_types rt ON rt.id = rm.room_type_id
-      AND rt.property_id = b.property_id
-    WHERE b.property_id = $1
-  `;
-
   const params: any[] = [propertyId];
 
+  let baseQuery: string;
+  let orderClause: string;
+  let limitClause: string = '';
+
   if (search) {
+    // SEARCH MODE: global property-scoped search across all statuses.
+    // No CHECKED_OUT filter; no LIMIT.
     const needle = `%${search}%`;
-    baseQuery += `
-      AND (
-        LOWER(CAST(b.bid AS TEXT)) LIKE LOWER($2)
-        OR LOWER(r.guest_name) LIKE LOWER($2)
-        OR LOWER(COALESCE(r.booker_name, b.booker_name)) LIKE LOWER($2)
-        OR LOWER(CAST(r.id AS TEXT)) LIKE LOWER($2)
-        OR LOWER(CAST(rm.room_number AS TEXT)) LIKE LOWER($2)
-      )
+    baseQuery = `
+      SELECT
+        r.id,
+        b.bid,
+        r.guest_name,
+        COALESCE(r.booker_name, b.booker_name) AS booker_name,
+        TO_CHAR(r.check_in, 'YYYY-MM-DD') AS check_in,
+        TO_CHAR(r.check_out, 'YYYY-MM-DD') AS check_out,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name) AS room_type_name,
+        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type,
+        rm.room_number,
+        r.status,
+        r.total_price
+      FROM reservations r
+      INNER JOIN bookings b ON b.id = r.booking_id
+      LEFT JOIN rooms rm ON rm.id = r.room_id
+        AND rm.property_id = b.property_id
+      LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+        AND rt.property_id = b.property_id
+      WHERE b.property_id = $1
+        AND (
+          LOWER(CAST(b.bid AS TEXT)) LIKE LOWER($2)
+          OR LOWER(r.guest_name) LIKE LOWER($2)
+          OR LOWER(COALESCE(r.booker_name, b.booker_name)) LIKE LOWER($2)
+          OR LOWER(CAST(r.id AS TEXT)) LIKE LOWER($2)
+          OR LOWER(CAST(rm.room_number AS TEXT)) LIKE LOWER($2)
+        )
     `;
     params.push(needle);
+    orderClause = ' ORDER BY r.check_out DESC NULLS LAST, r.id DESC';
+  } else {
+    // DEFAULT MODE: recent checkouts only, newest first, capped at 20.
+    baseQuery = `
+      SELECT
+        r.id,
+        b.bid,
+        r.guest_name,
+        COALESCE(r.booker_name, b.booker_name) AS booker_name,
+        TO_CHAR(r.check_in, 'YYYY-MM-DD') AS check_in,
+        TO_CHAR(r.check_out, 'YYYY-MM-DD') AS check_out,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name) AS room_type_name,
+        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type,
+        rm.room_number,
+        r.status,
+        r.total_price
+      FROM reservations r
+      INNER JOIN bookings b ON b.id = r.booking_id
+      LEFT JOIN rooms rm ON rm.id = r.room_id
+        AND rm.property_id = b.property_id
+      LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+        AND rt.property_id = b.property_id
+      WHERE b.property_id = $1
+        AND UPPER(r.status) = 'CHECKED_OUT'
+    `;
+    orderClause = ' ORDER BY r.check_out DESC, r.id DESC';
+    limitClause = ' LIMIT 20';
   }
 
-  baseQuery += ` ORDER BY r.check_in ASC, r.id ASC`;
-
-  const result = await db.query(baseQuery, params);
+  const result = await db.query(baseQuery + orderClause + limitClause, params);
   const data = (result.rows || []).map(pickListItem);
   return { status: 'OK', data };
 }
