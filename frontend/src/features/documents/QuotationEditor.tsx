@@ -434,7 +434,7 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
         <div className="text-xs font-semibold text-stone-700 uppercase tracking-wider border-b border-stone-100 pb-2">
           Penyesuaian (Diskon, Service &amp; Pajak)
         </div>
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
           {/* Discount */}
           <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
             <div className="text-xs font-medium text-stone-700">Diskon</div>
