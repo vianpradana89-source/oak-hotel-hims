@@ -610,10 +610,15 @@ export default function DocumentCenter({
    /* Handle real downloadable PDF export via DOM snapshot + jsPDF overlay
       *
        * Strategy (zero mutation of live preview DOM):
-       *   1. Snapshot canonical header/footer via html2canvas directly — their
-       *      `data-html2canvas-ignore="true"` is on the element itself, but
-       *      html2canvas 1.4.1 skips that attribute only on children, not root,
-       *      so the snapshots capture the rendered pixels faithfully.
+       *   1. Snapshot canonical header/footer via html2canvas.
+       *      Live headerRef/footerRef carry `data-html2canvas-ignore="true"`
+       *      which causes html2canvas's internal DocumentCloner to skip them
+       *      during the iframe clone pass — producing "Unable to find element
+       *      in cloned iframe" when it later expects the reference element to
+       *      exist in the cloned document.
+       *      Fix: clone each live element, strip the ignore attribute on the
+       *      clone, place the clone inside a temporary off-screen host, then
+       *      snapshot the clone instead of the live element.
        *   2. Build a detached clone of .oak-letterhead-frame, strip header &
        *      footer from it, then attach the clone off-screen to document.body
        *      so html2pdf can find the element in the layout context.
@@ -622,10 +627,11 @@ export default function DocumentCenter({
        *   4. Overlay the canonical OAK letterhead snapshots on EVERY page
        *      (page 1 and pages 2+ use identical geometry).
        *   5. Exactly ONE final `pdf.save(filename)` call.
-       *   6. Clean up the temporary clone from document.body in a finally block.
+       *   6. Clean up both temporary nodes (snapshotHost + bodyClone) from
+       *      document.body in the finally block.
        *
-       * The live preview DOM is never mutated.  A clone is appended temporarily
-       * only for html2pdf's benefit and removed before the callback returns.
+       * The live preview DOM is never mutated.  Only temporary clones are
+       * appended to document.body and removed before the callback returns.
        */
     const handleSavePdf = useCallback(async () => {
       if (!printEnabled || isSavingPdf) return;
@@ -660,6 +666,10 @@ export default function DocumentCenter({
         });
 
         // ── Step 1: Snapshot canonical header & footer ──────────────
+        // Live header/footer carry `data-html2canvas-ignore="true"` which
+        // causes html2canvas's DocumentCloner to drop them from the cloned
+        // iframe, leading to "Unable to find element in cloned iframe".
+        // We snapshot cloned copies with the attribute stripped instead.
         const now = Date.now();
         const cache = pdfSnapshotCacheRef.current;
         const ttlExpired = !cache.header ||
@@ -671,21 +681,43 @@ export default function DocumentCenter({
         let footerHeightMm = cache.footerHeight;
 
         if (ttlExpired) {
-          const [headerSnap, footerSnap] = await Promise.all([
-            captureSnapshot(headerEl),
-            captureSnapshot(footerEl),
-          ]);
-          headerDataUrl = headerSnap.dataUrl;
-          footerDataUrl = footerSnap.dataUrl;
-          headerHeightMm = computePdfDimensions(headerSnap, 174);
-          footerHeightMm = computePdfDimensions(footerSnap, 174);
-          pdfSnapshotCacheRef.current = {
-            header: headerDataUrl,
-            footer: footerDataUrl,
-            headerHeight: headerHeightMm,
-            footerHeight: footerHeightMm,
-            capturedAt: now,
-          };
+          const snapshotHost = document.createElement('div');
+          snapshotHost.style.position = 'fixed';
+          snapshotHost.style.left = '-10000px';
+          snapshotHost.style.top = '0';
+          snapshotHost.style.width = '174mm';
+          snapshotHost.style.background = '#fff';
+          snapshotHost.style.pointerEvents = 'none';
+          snapshotHost.style.zIndex = '-1';
+          document.body.appendChild(snapshotHost);
+
+          try {
+            const headerClone = headerEl.cloneNode(true) as HTMLElement;
+            headerClone.removeAttribute('data-html2canvas-ignore');
+            snapshotHost.appendChild(headerClone);
+
+            const footerClone = footerEl.cloneNode(true) as HTMLElement;
+            footerClone.removeAttribute('data-html2canvas-ignore');
+            snapshotHost.appendChild(footerClone);
+
+            const [headerSnap, footerSnap] = await Promise.all([
+              captureSnapshot(headerClone),
+              captureSnapshot(footerClone),
+            ]);
+            headerDataUrl = headerSnap.dataUrl;
+            footerDataUrl = footerSnap.dataUrl;
+            headerHeightMm = computePdfDimensions(headerSnap, 174);
+            footerHeightMm = computePdfDimensions(footerSnap, 174);
+            pdfSnapshotCacheRef.current = {
+              header: headerDataUrl,
+              footer: footerDataUrl,
+              headerHeight: headerHeightMm,
+              footerHeight: footerHeightMm,
+              capturedAt: now,
+            };
+          } finally {
+            document.body.removeChild(snapshotHost);
+          }
         }
 
         // ── Step 2: Prepare body source (clone without header/footer) ─
