@@ -600,17 +600,22 @@ export default function DocumentCenter({
    * Strategy (zero mutation of live preview DOM):
    *   1. Use the live .oak-letterhead-frame (targetEl) directly as the
    *      html2pdf source — no manual cloning.
-   *   2. Set a top margin of 40 mm on the PDF so that on every generated
-   *      page the captured body content starts below the area reserved for
-   *      the repeated jsPDF overlay header.
-   *   3. Call `.toPdf()` to generate the PDF without downloading.
-   *   4. Retrieve the actual jsPDF instance via the official API:
+   *   2. Pass an html2canvas `onclone` callback that modifies only
+   *      html2canvas's own internal cloned document: hide the cloned
+   *      `.oak-letterhead-header` so the captured body does not contain
+   *      the original letterhead chrome.  The live DOM is untouched.
+   *   3. Set a top margin of 38 mm on the PDF.  This reserves space on
+   *      every page for the jsPDF overlay header (logo + name + tagline
+   *      + divider ≈ 37 mm tall), preventing body overlap.
+   *   4. Call `.toPdf()` to generate the PDF without downloading.
+   *   5. Retrieve the actual jsPDF instance via the official API:
    *        const pdf = await worker.get('pdf')
-   *   5. Overlay the compact OAK Lawang letterhead ONLY on pages 2+
-   *      (page 1 already carries the original header from the captured DOM).
-   *   6. Exactly ONE final `pdf.save(filename)` call.
+   *   6. Overlay the compact OAK Lawang letterhead on EVERY page
+   *      (page 1 and pages 2+ use identical geometry).
+   *   7. Exactly ONE final `pdf.save(filename)` call.
    *
-   * The live preview DOM is never mutated.  No clone is created or appended.
+   * The live preview DOM is never mutated.  No cloneNode or
+   * document.body.appendChild is used.
    */
   const handleSavePdf = useCallback(async () => {
     if (!printEnabled || isSavingPdf) return;
@@ -636,12 +641,12 @@ export default function DocumentCenter({
         propertyBranding,
       });
 
-      // Top margin of 40 mm reserves space on every PDF page for the
-      // repeated jsPDF overlay header (logo ~17 mm + name ~7 mm + tagline
-      // ~6 mm + divider line ≈ 40 mm total).  Pages 2+ receive the overlay;
-      // page 1 keeps the original captured header intact.
+      // Top margin of 38 mm reserves space for the repeated jsPDF header.
+      // Bottom margin of 18 mm reserves space for the repeated jsPDF footer.
+      // Both margins apply to every generated page so body content never
+      // overlaps the repeated chrome.
       const opt = {
-        margin: [40, 0, 0, 0] as [number, number, number, number],
+        margin: [38, 0, 18, 0] as [number, number, number, number],
         filename,
         image: { type: 'jpeg' as const, quality: 0.98 },
         html2canvas: {
@@ -650,6 +655,21 @@ export default function DocumentCenter({
           logging: false,
           scrollY: 0,
           scrollX: 0,
+          // Modify ONLY the internal clone that html2canvas creates.
+          // The live targetEl is never touched.
+          onclone(cloneDoc: Document) {
+            const clonedFrame = cloneDoc.querySelector('.oak-letterhead-frame') as HTMLElement | null;
+            const clonedHeader = clonedFrame?.querySelector('.oak-letterhead-header') as HTMLElement | null;
+            if (clonedHeader) {
+              clonedHeader.style.display = 'none';
+            }
+            // Also suppress the original footer in the clone so the
+            // repeated jsPDF footer appears consistently on every page.
+            const clonedFooter = clonedFrame?.querySelector('.oak-letterhead-footer') as HTMLElement | null;
+            if (clonedFooter) {
+              clonedFooter.style.display = 'none';
+            }
+          },
         },
         jsPDF: {
           unit: 'mm' as const,
@@ -682,13 +702,13 @@ export default function DocumentCenter({
       // Retrieve the actual jsPDF instance via the official html2pdf API.
       const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
 
-      // Overlay OAK Lawang letterhead header on pages 2+ only.
-      // Page 1 already has the original .oak-letterhead-header captured in
-      // the DOM; the 40 mm top margin ensures body content starts below the
-      // overlay area on every page.
+      // Overlay OAK Lawang letterhead on EVERY page with identical geometry.
+      // The onclone callback ensures the original DOM header and footer are
+      // suppressed in the captured body, so every page looks the same.
       const pages = pdf.getNumberOfPages();
-      for (let i = 2; i <= pages; i++) {
+      for (let i = 1; i <= pages; i++) {
         pdf.setPage(i);
+        // ── Top: repeated header ──────────────────────────────────
         if (showLogo && logo) {
           pdf.addImage(logo, 'PNG', 14, 12, 17, 17);
         }
@@ -705,6 +725,27 @@ export default function DocumentCenter({
         pdf.setDrawColor(27, 67, 50);
         pdf.setLineWidth(0.8);
         pdf.line(14, 37, 196, 37);
+
+        // ── Bottom: repeated official footer ──────────────────────
+        // Gold separator line above footer (matches .oak-letterhead-footer border-top)
+        pdf.setDrawColor(197, 168, 128); // #c5a880
+        pdf.setLineWidth(0.5);
+        pdf.line(14, 280, 196, 280);
+        // Canonical property address / phone from propertyInfo
+        const address = propertyInfo?.address;
+        const phone = propertyInfo?.phone;
+        if (address || phone) {
+          pdf.setFontSize(9);
+          pdf.setTextColor(80, 80, 80);
+          const contactParts: string[] = [];
+          if (address) contactParts.push(address);
+          if (phone) contactParts.push('Telp: ' + phone);
+          pdf.text(contactParts.join('  |  '), 14, 286);
+        }
+        // System note — repeated on every page for consistency with the letterhead style
+        pdf.setFontSize(8);
+        pdf.setTextColor(150, 150, 150);
+        pdf.text('Dokumen ini dicetak secara otomatis dari sistem OAK HIMS', 14, 292);
       }
 
       // Exactly ONE download trigger.
