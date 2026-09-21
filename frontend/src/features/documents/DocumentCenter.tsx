@@ -609,88 +609,91 @@ export default function DocumentCenter({
 
    /* Handle real downloadable PDF export via DOM snapshot + jsPDF overlay
       *
-      * Strategy (zero mutation of live preview DOM):
-      *   1. Snapshot canonical header/footer via html2canvas directly — their
-      *      `data-html2canvas-ignore="true"` is on the element itself, but
-      *      html2canvas 1.4.1 skips that attribute only on children, not root,
-      *      so the snapshots capture the rendered pixels faithfully.
-      *   2. Build a detached clone of .oak-letterhead-frame, strip header &
-      *      footer from it, then feed the clone to html2pdf so the existing
-      *      pagebreak CSS rules paginate the body across multiple pages.
-      *   3. Retrieve the actual jsPDF instance via the official API:
-      *        const pdf = await worker.get('pdf')
-      *   4. Overlay the canonical OAK letterhead snapshots on EVERY page
-      *      (page 1 and pages 2+ use identical geometry).
-      *   5. Exactly ONE final `pdf.save(filename)` call.
-      *
-      * The live preview DOM is never mutated.  No cloneNode or
-      * document.body.appendChild is used.
-      */
-   const handleSavePdf = useCallback(async () => {
-     if (!printEnabled || isSavingPdf) return;
+       * Strategy (zero mutation of live preview DOM):
+       *   1. Snapshot canonical header/footer via html2canvas directly — their
+       *      `data-html2canvas-ignore="true"` is on the element itself, but
+       *      html2canvas 1.4.1 skips that attribute only on children, not root,
+       *      so the snapshots capture the rendered pixels faithfully.
+       *   2. Build a detached clone of .oak-letterhead-frame, strip header &
+       *      footer from it, then attach the clone off-screen to document.body
+       *      so html2pdf can find the element in the layout context.
+       *   3. Retrieve the actual jsPDF instance via the official API:
+       *        const pdf = await worker.get('pdf')
+       *   4. Overlay the canonical OAK letterhead snapshots on EVERY page
+       *      (page 1 and pages 2+ use identical geometry).
+       *   5. Exactly ONE final `pdf.save(filename)` call.
+       *   6. Clean up the temporary clone from document.body in a finally block.
+       *
+       * The live preview DOM is never mutated.  A clone is appended temporarily
+       * only for html2pdf's benefit and removed before the callback returns.
+       */
+    const handleSavePdf = useCallback(async () => {
+      if (!printEnabled || isSavingPdf) return;
 
-     const rootEl = printDocumentRef.current;
-     if (!rootEl) {
-       setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
-       return;
-     }
+      const rootEl = printDocumentRef.current;
+      if (!rootEl) {
+        setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
+        return;
+      }
 
-     const headerEl = headerRef.current;
-     const footerEl = footerRef.current;
+      const headerEl = headerRef.current;
+      const footerEl = footerRef.current;
 
-     if (!headerEl || !footerEl) {
-       setSavePdfError('Elemen header/footer tidak ditemukan di DOM.');
-       return;
-     }
+      if (!headerEl || !footerEl) {
+        setSavePdfError('Elemen header/footer tidak ditemukan di DOM.');
+        return;
+      }
 
-     setIsSavingPdf(true);
-     setSavePdfError(null);
+      setIsSavingPdf(true);
+      setSavePdfError(null);
 
-     try {
-       const filename = generateDocumentPdfFilename({
-         kind,
-         quotationMode,
-         bid: docRes?.bid || pickerRow?.bid,
-         reference: quotationDraft.reference,
-         propertyInfo,
-         propertyBranding,
-       });
+      let bodyClone: HTMLElement | null = null;
 
-       // ── Step 1: Snapshot canonical header & footer ──────────────
-       const now = Date.now();
-       const cache = pdfSnapshotCacheRef.current;
-       const ttlExpired = !cache.header ||
-         (now - (cache.capturedAt || 0)) > SNAPSHOT_TTL_MS;
+      try {
+        const filename = generateDocumentPdfFilename({
+          kind,
+          quotationMode,
+          bid: docRes?.bid || pickerRow?.bid,
+          reference: quotationDraft.reference,
+          propertyInfo,
+          propertyBranding,
+        });
 
-       let headerDataUrl = cache.header;
-       let footerDataUrl = cache.footer;
-       let headerHeightMm = cache.headerHeight;
-       let footerHeightMm = cache.footerHeight;
+        // ── Step 1: Snapshot canonical header & footer ──────────────
+        const now = Date.now();
+        const cache = pdfSnapshotCacheRef.current;
+        const ttlExpired = !cache.header ||
+          (now - (cache.capturedAt || 0)) > SNAPSHOT_TTL_MS;
 
-       if (ttlExpired) {
-         const [headerSnap, footerSnap] = await Promise.all([
-           captureSnapshot(headerEl),
-           captureSnapshot(footerEl),
-         ]);
-         headerDataUrl = headerSnap.dataUrl;
-         footerDataUrl = footerSnap.dataUrl;
-         headerHeightMm = computePdfDimensions(headerSnap, 174);
-         footerHeightMm = computePdfDimensions(footerSnap, 174);
-         pdfSnapshotCacheRef.current = {
-           header: headerDataUrl,
-           footer: footerDataUrl,
-           headerHeight: headerHeightMm,
-           footerHeight: footerHeightMm,
-           capturedAt: now,
-         };
-       }
+        let headerDataUrl = cache.header;
+        let footerDataUrl = cache.footer;
+        let headerHeightMm = cache.headerHeight;
+        let footerHeightMm = cache.footerHeight;
+
+        if (ttlExpired) {
+          const [headerSnap, footerSnap] = await Promise.all([
+            captureSnapshot(headerEl),
+            captureSnapshot(footerEl),
+          ]);
+          headerDataUrl = headerSnap.dataUrl;
+          footerDataUrl = footerSnap.dataUrl;
+          headerHeightMm = computePdfDimensions(headerSnap, 174);
+          footerHeightMm = computePdfDimensions(footerSnap, 174);
+          pdfSnapshotCacheRef.current = {
+            header: headerDataUrl,
+            footer: footerDataUrl,
+            headerHeight: headerHeightMm,
+            footerHeight: footerHeightMm,
+            capturedAt: now,
+          };
+        }
 
         // ── Step 2: Prepare body source (clone without header/footer) ─
         const frameEl = rootEl.querySelector('.oak-letterhead-frame') as HTMLElement;
         if (!frameEl) {
           throw new Error('Frame elemen tidak ditemukan.');
         }
-        const bodyClone = frameEl.cloneNode(true) as HTMLElement;
+        bodyClone = frameEl.cloneNode(true) as HTMLElement;
         const bh = bodyClone.querySelector('.oak-letterhead-header');
         const bf = bodyClone.querySelector('.oak-letterhead-footer');
         if (bh instanceof HTMLElement) bh.remove();
@@ -707,77 +710,91 @@ export default function DocumentCenter({
         bodyClone.style.minHeight = '0';
         bodyClone.style.maxWidth = 'none';
 
+        // ── Attach clone to document.body so html2pdf can find it ──
+        bodyClone.style.position = 'fixed';
+        bodyClone.style.left = '-10000px';
+        bodyClone.style.top = '0';
+        bodyClone.style.width = '174mm';
+        bodyClone.style.background = '#fff';
+        bodyClone.style.visibility = 'visible';
+        bodyClone.style.pointerEvents = 'none';
+        bodyClone.style.zIndex = '-1';
+        document.body.appendChild(bodyClone);
+
         // Compute safe margins from actual snapshot heights
         const headerGapMm = 3;
         const footerGapMm = 3;
         const topMargin = (headerHeightMm ?? 25) + headerGapMm;
         const bottomMargin = (footerHeightMm ?? 20) + footerGapMm;
 
-       // ── Step 3: Generate paginated PDF via html2pdf ─────────────
-       const html2pdfLib = (html2pdf as any)?.default || html2pdf;
-       const worker = html2pdfLib().set({
-         margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
-         filename,
-         image: { type: 'jpeg' as const, quality: 0.98 },
-         html2canvas: {
-           scale: 2,
-           useCORS: true,
-           logging: false,
-           scrollY: 0,
-           scrollX: 0,
-         },
-         jsPDF: {
-           unit: 'mm' as const,
-           format: 'a4' as const,
-           orientation: 'portrait' as const,
-         },
-         pagebreak: {
-           mode: ['css', 'legacy'],
-           avoid: [
-             '.oak-letterhead-title',
-             '.oak-doc-summary-table',
-             '.oak-doc-fin-table tbody tr',
-           ],
-         },
-       }).from(bodyClone);
+        // ── Step 3: Generate paginated PDF via html2pdf ─────────────
+        const html2pdfLib = (html2pdf as any)?.default || html2pdf;
+        const worker = html2pdfLib().set({
+          margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
+          filename,
+          image: { type: 'jpeg' as const, quality: 0.98 },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            logging: false,
+            scrollY: 0,
+            scrollX: 0,
+          },
+          jsPDF: {
+            unit: 'mm' as const,
+            format: 'a4' as const,
+            orientation: 'portrait' as const,
+          },
+          pagebreak: {
+            mode: ['css', 'legacy'],
+            avoid: [
+              '.oak-letterhead-title',
+              '.oak-doc-summary-table',
+              '.oak-doc-fin-table tbody tr',
+            ],
+          },
+        }).from(bodyClone);
 
-       // Generate the PDF (no download yet).
-       await worker.toPdf();
+        // Generate the PDF (no download yet).
+        await worker.toPdf();
 
-       // Retrieve the actual jsPDF instance via the official html2pdf API.
-       const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
+        // Retrieve the actual jsPDF instance via the official html2pdf API.
+        const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
 
-       // ── Step 4: Overlay canonical header/footer on EVERY page ───
-       const pages = pdf.getNumberOfPages();
-       const contentWidthMm = 174; // A4 210 − 18 − 18
-       const headerY = 0;
-       const footerY = 297 - footerGapMm - (footerHeightMm ?? 20);
+        // ── Step 4: Overlay canonical header/footer on EVERY page ───
+        const pages = pdf.getNumberOfPages();
+        const contentWidthMm = 174; // A4 210 − 18 − 18
+        const headerY = 0;
+        const footerY = 297 - footerGapMm - (footerHeightMm ?? 20);
 
-       for (let i = 1; i <= pages; i++) {
-         pdf.setPage(i);
+        for (let i = 1; i <= pages; i++) {
+          pdf.setPage(i);
 
-         // Header overlay at top
-         if (headerDataUrl && headerHeightMm) {
-           pdf.addImage(headerDataUrl, 'PNG', 18, headerY, contentWidthMm, headerHeightMm);
-         }
+          // Header overlay at top
+          if (headerDataUrl && headerHeightMm) {
+            pdf.addImage(headerDataUrl, 'PNG', 18, headerY, contentWidthMm, headerHeightMm);
+          }
 
-         // Footer overlay at bottom
-         if (footerDataUrl && footerHeightMm) {
-           pdf.addImage(footerDataUrl, 'PNG', 18, footerY, contentWidthMm, footerHeightMm);
-         }
-       }
+          // Footer overlay at bottom
+          if (footerDataUrl && footerHeightMm) {
+            pdf.addImage(footerDataUrl, 'PNG', 18, footerY, contentWidthMm, footerHeightMm);
+          }
+        }
 
-       // Exactly ONE download trigger.
-       pdf.save(filename);
+        // Exactly ONE download trigger.
+        pdf.save(filename);
 
-     } catch (err: unknown) {
-       console.error('[DocumentCenter] Failed to generate PDF:', err);
-       const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
-       setSavePdfError(msg);
-     } finally {
-       setIsSavingPdf(false);
-     }
-   }, [
+      } catch (err: unknown) {
+        console.error('[DocumentCenter] Failed to generate PDF:', err);
+        const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
+        setSavePdfError(msg);
+      } finally {
+        if (bodyClone?.parentNode) {
+          bodyClone.parentNode.removeChild(bodyClone);
+        }
+        setIsSavingPdf(false);
+      }
+    }, [
      printEnabled,
      isSavingPdf,
      kind,
