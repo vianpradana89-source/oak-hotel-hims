@@ -435,179 +435,173 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
           Penyesuaian (Diskon, Service &amp; Pajak)
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-          {/* Discount */}
-          <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
-            <div className="text-xs font-medium text-stone-700">Diskon</div>
-            <div className="flex items-center gap-2">
-              <select
-                className="w-28 flex-shrink-0 rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
-                value={draft.discountType}
-                onChange={(e) => {
-                  const nextType = e.target.value as QuotationAdjustmentType;
-                  if (nextType === 'percent' && draft.discountValue > 100) {
-                    onChange({
-                      ...draft,
-                      discountType: nextType,
-                      discountValue: Math.min(100, draft.discountValue),
-                    });
-                  } else {
-                    updateDraftField('discountType', nextType);
-                  }
-                }}
-              >
-                <option value="amount">Nominal</option>
-                <option value="percent">Persen (%)</option>
-              </select>
-              <div className="relative flex-1 min-w-0 flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
-                {draft.discountType === 'amount' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
-                    Rp
-                  </span>
-                )}
-                <input
-                  type="number"
-                  min="0"
-                  max={draft.discountType === 'percent' ? 100 : undefined}
-                  step={draft.discountType === 'percent' ? '0.1' : '1000'}
-                  className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                  value={draft.discountValue}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const num = val === '' ? 0 : Number(val);
-                    const clamped =
-                      draft.discountType === 'percent'
-                        ? Math.min(100, Math.max(0, num))
-                        : Math.max(0, num);
-                    updateDraftField('discountValue', clamped);
-                  }}
-                />
-                {draft.discountType === 'percent' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
-                    %
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="text-[11px] font-medium text-rose-600">
-              Nilai diskon: - {formatHotelCurrency(totals.discountAmount)}
-            </div>
-          </div>
+           {/* Discount */}
+           <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
+             <div className="text-xs font-medium text-stone-700">Diskon</div>
+             <select
+               className="w-full rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
+               value={draft.discountType}
+               onChange={(e) => {
+                 const nextType = e.target.value as QuotationAdjustmentType;
+                 if (nextType === 'percent' && draft.discountValue > 100) {
+                   onChange({
+                     ...draft,
+                     discountType: nextType,
+                     discountValue: Math.min(100, draft.discountValue),
+                   });
+                 } else {
+                   updateDraftField('discountType', nextType);
+                 }
+               }}
+             >
+               <option value="amount">Nominal</option>
+               <option value="percent">Persen (%)</option>
+             </select>
+             <div className="relative flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
+               {draft.discountType === 'amount' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
+                   Rp
+                 </span>
+               )}
+               <input
+                 type="number"
+                 min="0"
+                 max={draft.discountType === 'percent' ? 100 : undefined}
+                 step={draft.discountType === 'percent' ? '0.1' : '1000'}
+                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
+                 value={draft.discountValue}
+                 onChange={(e) => {
+                   const val = e.target.value;
+                   const num = val === '' ? 0 : Number(val);
+                   const clamped =
+                     draft.discountType === 'percent'
+                       ? Math.min(100, Math.max(0, num))
+                       : Math.max(0, num);
+                   updateDraftField('discountValue', clamped);
+                 }}
+               />
+               {draft.discountType === 'percent' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
+                   %
+                 </span>
+               )}
+             </div>
+             <div className="text-[11px] font-medium text-rose-600">
+               Nilai diskon: - {formatHotelCurrency(totals.discountAmount)}
+             </div>
+           </div>
 
-          {/* Service */}
-          <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
-            <div className="text-xs font-medium text-stone-700">Service</div>
-            <div className="flex items-center gap-2">
-              <select
-                className="w-28 flex-shrink-0 rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
-                value={draft.serviceType}
-                onChange={(e) => {
-                  const nextType = e.target.value as QuotationAdjustmentType;
-                  if (nextType === 'percent' && draft.serviceValue > 100) {
-                    onChange({
-                      ...draft,
-                      serviceType: nextType,
-                      serviceValue: Math.min(100, draft.serviceValue),
-                    });
-                  } else {
-                    updateDraftField('serviceType', nextType);
-                  }
-                }}
-              >
-                <option value="amount">Nominal</option>
-                <option value="percent">Persen (%)</option>
-              </select>
-              <div className="relative flex-1 min-w-0 flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
-                {draft.serviceType === 'amount' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
-                    Rp
-                  </span>
-                )}
-                <input
-                  type="number"
-                  min="0"
-                  max={draft.serviceType === 'percent' ? 100 : undefined}
-                  step={draft.serviceType === 'percent' ? '0.1' : '1000'}
-                  className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                  value={draft.serviceValue}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const num = val === '' ? 0 : Number(val);
-                    const clamped =
-                      draft.serviceType === 'percent'
-                        ? Math.min(100, Math.max(0, num))
-                        : Math.max(0, num);
-                    updateDraftField('serviceValue', clamped);
-                  }}
-                />
-                {draft.serviceType === 'percent' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
-                    %
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="text-[11px] font-medium text-stone-600">
-              Nilai service: + {formatHotelCurrency(totals.serviceAmount)}
-            </div>
-          </div>
+           {/* Service */}
+           <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
+             <div className="text-xs font-medium text-stone-700">Service</div>
+             <select
+               className="w-full rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
+               value={draft.serviceType}
+               onChange={(e) => {
+                 const nextType = e.target.value as QuotationAdjustmentType;
+                 if (nextType === 'percent' && draft.serviceValue > 100) {
+                   onChange({
+                     ...draft,
+                     serviceType: nextType,
+                     serviceValue: Math.min(100, draft.serviceValue),
+                   });
+                 } else {
+                   updateDraftField('serviceType', nextType);
+                 }
+               }}
+             >
+               <option value="amount">Nominal</option>
+               <option value="percent">Persen (%)</option>
+             </select>
+             <div className="relative flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
+               {draft.serviceType === 'amount' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
+                   Rp
+                 </span>
+               )}
+               <input
+                 type="number"
+                 min="0"
+                 max={draft.serviceType === 'percent' ? 100 : undefined}
+                 step={draft.serviceType === 'percent' ? '0.1' : '1000'}
+                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
+                 value={draft.serviceValue}
+                 onChange={(e) => {
+                   const val = e.target.value;
+                   const num = val === '' ? 0 : Number(val);
+                   const clamped =
+                     draft.serviceType === 'percent'
+                       ? Math.min(100, Math.max(0, num))
+                       : Math.max(0, num);
+                   updateDraftField('serviceValue', clamped);
+                 }}
+               />
+               {draft.serviceType === 'percent' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
+                   %
+                 </span>
+               )}
+             </div>
+             <div className="text-[11px] font-medium text-stone-600">
+               Nilai service: + {formatHotelCurrency(totals.serviceAmount)}
+             </div>
+           </div>
 
-          {/* Tax */}
-          <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
-            <div className="text-xs font-medium text-stone-700">Pajak</div>
-            <div className="flex items-center gap-2">
-              <select
-                className="w-28 flex-shrink-0 rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
-                value={draft.taxType}
-                onChange={(e) => {
-                  const nextType = e.target.value as QuotationAdjustmentType;
-                  if (nextType === 'percent' && draft.taxValue > 100) {
-                    onChange({
-                      ...draft,
-                      taxType: nextType,
-                      taxValue: Math.min(100, draft.taxValue),
-                    });
-                  } else {
-                    updateDraftField('taxType', nextType);
-                  }
-                }}
-              >
-                <option value="amount">Nominal</option>
-                <option value="percent">Persen (%)</option>
-              </select>
-              <div className="relative flex-1 min-w-0 flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
-                {draft.taxType === 'amount' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
-                    Rp
-                  </span>
-                )}
-                <input
-                  type="number"
-                  min="0"
-                  max={draft.taxType === 'percent' ? 100 : undefined}
-                  step={draft.taxType === 'percent' ? '0.1' : '1000'}
-                  className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                  value={draft.taxValue}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const num = val === '' ? 0 : Number(val);
-                    const clamped =
-                      draft.taxType === 'percent'
-                        ? Math.min(100, Math.max(0, num))
-                        : Math.max(0, num);
-                    updateDraftField('taxValue', clamped);
-                  }}
-                />
-                {draft.taxType === 'percent' && (
-                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
-                    %
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="text-[11px] font-medium text-stone-600">
-              Nilai pajak: + {formatHotelCurrency(totals.taxAmount)}
-            </div>
-          </div>
+           {/* Tax */}
+           <div className="p-3 rounded-lg border border-stone-200 bg-stone-50/50 space-y-1.5">
+             <div className="text-xs font-medium text-stone-700">Pajak</div>
+             <select
+               className="w-full rounded border border-stone-300 px-2 py-1.5 text-xs text-stone-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
+               value={draft.taxType}
+               onChange={(e) => {
+                 const nextType = e.target.value as QuotationAdjustmentType;
+                 if (nextType === 'percent' && draft.taxValue > 100) {
+                   onChange({
+                     ...draft,
+                     taxType: nextType,
+                     taxValue: Math.min(100, draft.taxValue),
+                   });
+                 } else {
+                   updateDraftField('taxType', nextType);
+                 }
+               }}
+             >
+               <option value="amount">Nominal</option>
+               <option value="percent">Persen (%)</option>
+             </select>
+             <div className="relative flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 focus-within:border-emerald-600 overflow-hidden">
+               {draft.taxType === 'amount' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-r border-stone-200 select-none">
+                   Rp
+                 </span>
+               )}
+               <input
+                 type="number"
+                 min="0"
+                 max={draft.taxType === 'percent' ? 100 : undefined}
+                 step={draft.taxType === 'percent' ? '0.1' : '1000'}
+                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
+                 value={draft.taxValue}
+                 onChange={(e) => {
+                   const val = e.target.value;
+                   const num = val === '' ? 0 : Number(val);
+                   const clamped =
+                     draft.taxType === 'percent'
+                       ? Math.min(100, Math.max(0, num))
+                       : Math.max(0, num);
+                   updateDraftField('taxValue', clamped);
+                 }}
+               />
+               {draft.taxType === 'percent' && (
+                 <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
+                   %
+                 </span>
+               )}
+             </div>
+             <div className="text-[11px] font-medium text-stone-600">
+               Nilai pajak: + {formatHotelCurrency(totals.taxAmount)}
+             </div>
+           </div>
         </div>
       </div>
 
