@@ -654,6 +654,7 @@ export default function DocumentCenter({
       setSavePdfError(null);
 
       let bodyClone: HTMLElement | null = null;
+      let bodyHost: HTMLDivElement | null = null;
 
       try {
         const filename = generateDocumentPdfFilename({
@@ -743,15 +744,30 @@ export default function DocumentCenter({
         bodyClone.style.maxWidth = 'none';
 
         // ── Attach clone to document.body so html2pdf can find it ──
-        bodyClone.style.position = 'fixed';
-        bodyClone.style.left = '-10000px';
-        bodyClone.style.top = '0';
+        // bodyClone itself must remain at normal coordinates — if it carries
+        // position:fixed / left:-10000px, html2canvas reads those coordinates
+        // and the rendered PDF body becomes blank (content sits outside the
+        // capture viewport).  Instead we wrap bodyClone inside a bodyHost div
+        // that lives off-screen; bodyClone itself is positioned static so
+        // html2canvas can measure it normally.
+        const bodyHostEl = document.createElement('div');
+        bodyHostEl.style.position = 'fixed';
+        bodyHostEl.style.left = '-10000px';
+        bodyHostEl.style.top = '0';
+        bodyHostEl.style.width = '174mm';
+        bodyHostEl.style.background = '#fff';
+        bodyHostEl.style.pointerEvents = 'none';
+        bodyHostEl.style.zIndex = '-1';
+
+        bodyClone.style.position = 'static';
+        bodyClone.style.left = 'auto';
+        bodyClone.style.top = 'auto';
+        bodyClone.style.zIndex = 'auto';
         bodyClone.style.width = '174mm';
-        bodyClone.style.background = '#fff';
-        bodyClone.style.visibility = 'visible';
-        bodyClone.style.pointerEvents = 'none';
-        bodyClone.style.zIndex = '-1';
-        document.body.appendChild(bodyClone);
+
+        bodyHostEl.appendChild(bodyClone);
+        document.body.appendChild(bodyHostEl);
+        bodyHost = bodyHostEl;
 
         // Compute safe margins from actual snapshot heights
         const headerGapMm = 3;
@@ -821,8 +837,8 @@ export default function DocumentCenter({
         const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
         setSavePdfError(msg);
       } finally {
-        if (bodyClone?.parentNode) {
-          bodyClone.parentNode.removeChild(bodyClone);
+        if (bodyHost && bodyHost.parentNode) {
+          bodyHost.parentNode.removeChild(bodyHost);
         }
         setIsSavingPdf(false);
       }
