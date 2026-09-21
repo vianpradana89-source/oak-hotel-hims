@@ -675,10 +675,10 @@ export default function DocumentCenter({
       const logo = showLogo ? await ensureLogoDataUrl() : null;
 
       // Build offscreen clone — targetEl is never mutated.
-      // Position far offscreen (not opacity:0) so html2canvas can fully measure
-      // and render the clone while keeping it invisible to the user.
+      // Use position:absolute at origin so html2canvas can reliably measure
+      // and render the full clone, while z-index keeps it behind the app.
       clone = targetEl.cloneNode(true) as HTMLElement;
-      clone.style.cssText = 'position:fixed;top:0;left:-20000px;width:210mm;pointer-events:none;z-index:-9999;';
+      clone.style.cssText = 'position:absolute;top:0;left:0;width:210mm;pointer-events:none;z-index:-9999;';
 
       // Hide the original header inside the clone so it doesn't render in the PDF body.
       const cloneHeader = clone.querySelector('.oak-letterhead-header') as HTMLElement | null;
@@ -692,8 +692,8 @@ export default function DocumentCenter({
         cloneBody.setAttribute('style', existingPad + ';padding-top:44mm;');
       }
 
-      // Attach clone to the document so html2canvas can measure it,
-      // but it remains completely offscreen (left:-20000px).
+      // Attach clone to the document so html2canvas can measure it.
+      // position:absolute keeps it out of normal flow; z-index:-9999 keeps it behind UI.
       document.body.appendChild(clone);
 
       // Build worker FROM CLONE — no prior .from(targetEl) call.
