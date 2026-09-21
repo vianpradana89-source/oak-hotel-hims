@@ -1,5 +1,6 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import html2pdf from 'html2pdf.js';
+import logoPng from '../../assets/branding/oak-letterhead/logo.png';
 import ReservationConfirmationPrint from './ReservationConfirmationPrint';
 import QuotationPrint from './QuotationPrint';
 import QuotationEditor from './QuotationEditor';
@@ -563,7 +564,58 @@ export default function DocumentCenter({
     setSavePdfError(null);
   }, [kind, selectedResId, quotationMode]);
 
-  /* Handle real downloadable PDF export via html2pdf.js (DOCUMENT-1B.2F) */
+  /* Deterministic logo data URL loader: converts the baked logo.png to a base64
+     data URL once and caches the result in a ref.  Returns cached value on
+     subsequent calls so every PDF page reuses the same image reference. */
+  const logoDataUrl = useRef<string | null>(null);
+
+  const ensureLogoDataUrl = async () => {
+    if (logoDataUrl.current) return logoDataUrl.current;
+    const resp = await fetch(logoPng);
+    const blob = await resp.blob();
+    logoDataUrl.current = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    return logoDataUrl.current;
+  };
+
+  /* Return true when the active property is OAK Lawang, matching the
+     heuristics used in OakLetterhead.tsx so the baked logo is shown consistently. */
+  const isOakLawangProperty = (
+    propInfo?: PropertyInfoDto,
+    branding?: PropertyBrandingDto,
+  ): boolean => {
+    const code = (propInfo?.property_code || '').trim().toUpperCase();
+    if (code === 'LWG') return true;
+    const name = branding?.displayName || propInfo?.name || '';
+    if (/oak\s*lawang/i.test(name.trim())) return true;
+    return false;
+  };
+
+  /* Handle real downloadable PDF export via html2pdf.js (DOCUMENT-1B.2F)
+   *
+   * Strategy (zero mutation of live preview DOM):
+   *   1. Find the live .oak-letterhead-frame (targetEl).
+   *   2. Deep-clone it into `clone` without touching targetEl at all.
+   *   3. In the clone only:
+   *      - hide the original header (so it does not render on the first page),
+   *      - reserve top padding on the body for the jsPDF overlay header,
+   *      - place the clone offscreen via fixed positioning.
+   *   4. Build the html2pdf worker directly from the clone:
+   *        html2pdf().set(opt).from(clone)
+   *      No prior `.from(targetEl)` call.
+   *   5. Call `.toPdf()` to generate the PDF — no download yet.
+   *   6. Retrieve the actual jsPDF instance via the official API:
+   *        const pdf = await worker.get('pdf')
+   *   7. Iterate every page and overlay the OAK Lawang header.
+   *   8. Exactly ONE final `pdf.save(filename)` call.
+   *
+   * The live preview DOM is never mutated.  The clone is removed from
+   * document.body in the finally block after success OR failure.
+   */
   const handleSavePdf = useCallback(async () => {
     if (!printEnabled || isSavingPdf) return;
 
@@ -577,7 +629,8 @@ export default function DocumentCenter({
 
     setIsSavingPdf(true);
     setSavePdfError(null);
-    targetEl.classList.add('oak-pdf-export');
+
+    let clone: HTMLElement | null = null;
 
     try {
       const filename = generateDocumentPdfFilename({
@@ -617,14 +670,77 @@ export default function DocumentCenter({
         },
       };
 
+      // Determine showLogo BEFORE loading to avoid unnecessary fetch.
+      const showLogo = Boolean(propertyBranding?.logoUrl) || isOakLawangProperty(propertyInfo, propertyBranding);
+      const logo = showLogo ? await ensureLogoDataUrl() : null;
+
+      // Build offscreen clone — targetEl is never mutated.
+      // Position far offscreen (not opacity:0) so html2canvas can fully measure
+      // and render the clone while keeping it invisible to the user.
+      clone = targetEl.cloneNode(true) as HTMLElement;
+      clone.style.cssText = 'position:fixed;top:0;left:-20000px;width:210mm;pointer-events:none;z-index:-9999;';
+
+      // Hide the original header inside the clone so it doesn't render in the PDF body.
+      const cloneHeader = clone.querySelector('.oak-letterhead-header') as HTMLElement | null;
+      if (cloneHeader) cloneHeader.style.display = 'none';
+
+      // Reserve top margin for the jsPDF overlay header (logo + name + tagline + divider ≈ 40mm).
+      // Use 44mm to stay safely within the A4 content area.
+      const cloneBody = clone.querySelector('.oak-letterhead-body') as HTMLElement | null;
+      if (cloneBody) {
+        const existingPad = cloneBody.getAttribute('style') || '';
+        cloneBody.setAttribute('style', existingPad + ';padding-top:44mm;');
+      }
+
+      // Attach clone to the document so html2canvas can measure it,
+      // but it remains completely offscreen (left:-20000px).
+      document.body.appendChild(clone);
+
+      // Build worker FROM CLONE — no prior .from(targetEl) call.
       const html2pdfLib = (html2pdf as unknown as { default?: typeof html2pdf }).default || html2pdf;
-      await html2pdfLib().set(opt).from(targetEl).save();
+      const worker = html2pdfLib().set(opt).from(clone);
+
+      // Generate the PDF (no download yet).
+      await worker.toPdf();
+
+      // Retrieve the actual jsPDF instance via the official html2pdf API.
+      const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
+
+      // Overlay OAK Lawang letterhead header on every page.
+      // Contents: logo + hotel name + tagline + divider — NO document title
+      // (the original .oak-letterhead-title stays in the captured body).
+      const pages = pdf.getNumberOfPages();
+      for (let i = 1; i <= pages; i++) {
+        pdf.setPage(i);
+        if (showLogo && logo) {
+          pdf.addImage(logo, 'PNG', 14, 12, 17, 17);
+        }
+        const hotelName = propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
+        pdf.setFontSize(11);
+        pdf.setTextColor(27, 67, 50); // #1b4332
+        pdf.text(hotelName, 35, 19);
+        if (propertyBranding?.tagline) {
+          pdf.setFontSize(7.5);
+          pdf.setTextColor(100, 100, 100);
+          pdf.text(propertyBranding.tagline, 35, 25);
+        }
+        // Horizontal divider line (#1b4332) at y=37mm
+        pdf.setDrawColor(27, 67, 50);
+        pdf.setLineWidth(0.8);
+        pdf.line(14, 37, 196, 37);
+      }
+
+      // Exactly ONE download trigger.
+      pdf.save(filename);
+
     } catch (err: unknown) {
       console.error('[DocumentCenter] Failed to generate PDF:', err);
       const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
       setSavePdfError(msg);
     } finally {
-      targetEl.classList.remove('oak-pdf-export');
+      if (clone) {
+        try { document.body.removeChild(clone); } catch { /* already detached */ }
+      }
       setIsSavingPdf(false);
     }
   }, [
@@ -923,10 +1039,6 @@ export default function DocumentCenter({
   return (
     <div className="document-center doc-center-desktop-grid">
       <style>{`
-        .oak-pdf-export {
-          box-shadow: none !important;
-          border-radius: 0 !important;
-        }
         @media (min-width: 901px) {
           .doc-center-desktop-grid {
             grid-template-columns: clamp(540px, 44%, 620px) minmax(0, 1fr) !important;
