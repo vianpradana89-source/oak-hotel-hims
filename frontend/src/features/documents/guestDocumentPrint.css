@@ -1,5 +1,10 @@
 /* OAK HIMS — Guest Document Print View (DOCUMENT-1B)
  * A4 portrait print styling. Hidden from normal app appearance.
+ *
+ * Dynamic brand colors are supplied via CSS custom properties on the
+ * .oak-letterhead wrapper when property branding is loaded:
+ *   --doc-primary-color  (default #1b4332)
+ *   --doc-accent-color   (default #c5a880)
  */
 
 /* Screen preview container */
@@ -31,7 +36,7 @@
   gap: 16px;
   margin-bottom: 20px;
   padding-bottom: 16px;
-  border-bottom: 2px solid #1b4332;
+  border-bottom: 2px solid var(--doc-primary-color, #1b4332);
 }
 
 .guest-doc-logo {
@@ -48,7 +53,7 @@
 .guest-doc-hotel-name {
   font-size: 22px;
   font-weight: 700;
-  color: #1b4332;
+  color: var(--doc-primary-color, #1b4332);
   letter-spacing: 0.02em;
   line-height: 1.2;
 }
@@ -94,7 +99,7 @@
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  color: #1b4332;
+  color: var(--doc-primary-color, #1b4332);
   letter-spacing: 0.08em;
   margin-bottom: 8px;
   border-bottom: 1px solid #e0e0e0;
@@ -155,7 +160,7 @@
 .guest-doc-fin-table .row-total td {
   font-weight: 700;
   font-size: 13px;
-  border-top: 2px solid #1b4332;
+  border-top: 2px solid var(--doc-primary-color, #1b4332);
   border-bottom: none;
   padding-top: 8px;
 }
@@ -182,7 +187,7 @@
   background: #f9f9f9;
   padding: 10px 12px;
   border-radius: 4px;
-  border-left: 3px solid #c5a880;
+  border-left: 3px solid var(--doc-accent-color, #c5a880);
   line-height: 1.6;
   white-space: pre-wrap;
 }
@@ -270,7 +275,7 @@
   background: white;
   padding: 16mm 18mm 22mm 18mm;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.14);
-  border: 1.5px solid #c5a880;  /* muted gold frame */
+  border: 1.5px solid var(--doc-accent-color, #c5a880);  /* muted gold frame */
   border-radius: 2px;
   overflow: hidden;
   display: flex;
@@ -296,7 +301,7 @@
   align-items: flex-start;
   gap: 16px;
   padding-bottom: 14px;
-  border-bottom: 2px solid #1b4332;
+  border-bottom: 2px solid var(--doc-primary-color, #1b4332);
   margin-bottom: 18px;
   position: relative;
   z-index: 1;
@@ -319,7 +324,7 @@
 .oak-letterhead-hotel-name {
   font-size: 22px;
   font-weight: 700;
-  color: #1b4332;
+  color: var(--doc-primary-color, #1b4332);
   letter-spacing: 0.015em;
   line-height: 1.25;
 }
@@ -364,8 +369,8 @@
   text-transform: uppercase;
   margin: 0 0 22px;
   padding: 10px 0;
-  border-top: 1px solid #c5a880;
-  border-bottom: 1px solid #c5a880;
+  border-top: 1px solid var(--doc-accent-color, #c5a880);
+  border-bottom: 1px solid var(--doc-accent-color, #c5a880);
   position: relative;
   z-index: 1;
 }
@@ -395,7 +400,7 @@
   z-index: 1;
   margin-top: auto;
   padding-top: 18px;
-  border-top: 1px solid #c5a880;  /* thin gold separator */
+  border-top: 1px solid var(--doc-accent-color, #c5a880);  /* thin gold separator */
   text-align: center;
 }
 
@@ -502,7 +507,8 @@
    OAK DOCUMENT BODY -- Section / Field / Table / Requests styles
    Used by ReservationConfirmationPrint and QuotationPrint inside
    the .oak-letterhead-body. Mirrors OakLetterhead visual language:
-   forest green (#1b4332), warm ivory, muted gold (#c5a880).
+    forest green (var(--doc-primary-color, #1b4332)), warm ivory,
+    muted gold (var(--doc-accent-color, #c5a880)).
    ================================================================ */
 
 /* Document section block */
@@ -517,11 +523,11 @@
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  color: #1b4332;
+  color: var(--doc-primary-color, #1b4332);
   letter-spacing: 0.09em;
   margin-bottom: 10px;
   padding-bottom: 5px;
-  border-bottom: 1px solid #c5a880;
+  border-bottom: 1px solid var(--doc-accent-color, #c5a880);
 }
 
 /* 2-column field grid; stacks to 1 column in narrow previews */
@@ -569,7 +575,7 @@
   color: #555;
   text-align: left;
   padding: 7px 8px;
-  border-bottom: 1px solid #1b4332;
+  border-bottom: 1px solid var(--doc-primary-color, #1b4332);
 }
 
 .oak-doc-fin-table tbody td {
@@ -595,7 +601,7 @@
   font-weight: 700;
   font-size: 13px;
   color: #111;
-  border-top: 2px solid #1b4332;
+  border-top: 2px solid var(--doc-primary-color, #1b4332);
   border-bottom: none;
   padding-top: 9px;
 }
@@ -606,7 +612,7 @@
   color: #333;
   line-height: 1.6;
   background: #f9f9f7;
-  border-left: 3px solid #c5a880;
+  border-left: 3px solid var(--doc-accent-color, #c5a880);
   border-radius: 2px;
   padding: 10px 12px;
   white-space: pre-wrap;
@@ -692,7 +698,7 @@
 .document-center-title {
   font-size: 15px;
   font-weight: 700;
-  color: #1b4332;
+  color: var(--doc-primary-color, #1b4332);
   margin: 0 0 3px;
   letter-spacing: 0.01em;
 }
@@ -739,11 +745,11 @@
 }
 
 .document-center-kind-card:hover {
-  border-color: #c5a880;
+  border-color: var(--doc-accent-color, #c5a880);
 }
 
 .document-center-kind-card.active {
-  border-color: #1b4332;
+  border-color: var(--doc-primary-color, #1b4332);
   box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.12);
   background: #f0f5f2;
 }
@@ -775,7 +781,7 @@
 }
 
 .document-center-search:focus {
-  border-color: #1b4332;
+  border-color: var(--doc-primary-color, #1b4332);
   box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
 }
 
@@ -803,11 +809,11 @@
 }
 
 .document-center-res-item:hover {
-  border-color: #c5a880;
+  border-color: var(--doc-accent-color, #c5a880);
 }
 
 .document-center-res-item.active {
-  border-color: #1b4332;
+  border-color: var(--doc-primary-color, #1b4332);
   background: #f0f5f2;
 }
 
@@ -889,7 +895,7 @@
 }
 
 .document-center-opt-input:focus {
-  border-color: #1b4332;
+  border-color: var(--doc-primary-color, #1b4332);
   box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
 }
 
@@ -915,7 +921,7 @@
   padding: 9px 12px;
   font-size: 13px;
   font-weight: 700;
-  background: #1b4332;
+  background: var(--doc-primary-color, #1b4332);
   color: #fff;
   border: none;
   border-radius: 7px;

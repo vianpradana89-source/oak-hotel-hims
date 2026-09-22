@@ -15,6 +15,8 @@ export interface PropertyBrandingDto {
   shortName?: string;
   logoUrl?: string | null;
   tagline?: string;
+  primaryColor?: string;
+  accentColor?: string;
 }
 
 export interface GuestDocumentContentProps {

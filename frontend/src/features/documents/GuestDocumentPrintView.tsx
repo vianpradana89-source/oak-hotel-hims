@@ -1,26 +1,11 @@
 import { useState } from 'react';
 import { Modal } from '../../design-system/Modal';
+import { type PropertyInfoDto, type PropertyBrandingDto } from './GuestDocumentContent';
 import ReservationConfirmationPrint from './ReservationConfirmationPrint';
 import QuotationPrint from './QuotationPrint';
 import './guestDocumentPrint.css';
 
 export type GuestDocumentKind = 'confirmation' | 'quotation';
-
-export interface PropertyInfoDto {
-  id?: number;
-  name?: string;
-  property_code?: string;
-  address?: string;
-  phone?: string;
-  currency?: string;
-}
-
-export interface PropertyBrandingDto {
-  displayName?: string;
-  shortName?: string;
-  logoUrl?: string | null;
-  tagline?: string;
-}
 
 export interface GuestDocumentPrintProps {
   isOpen: boolean;

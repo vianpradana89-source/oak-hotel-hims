@@ -1,5 +1,6 @@
 import React from 'react';
 import { type PropertyInfoDto, type PropertyBrandingDto } from './GuestDocumentContent';
+import PropertyDocumentHeader from './PropertyDocumentHeader';
 import logoPng from '../../assets/branding/oak-letterhead/logo.png';
 import rosePng from '../../assets/branding/oak-letterhead/rose.png';
 import watermarkPng from '../../assets/branding/oak-letterhead/watermark_center.png';
@@ -11,7 +12,7 @@ import watermarkPng from '../../assets/branding/oak-letterhead/watermark_center.
  *
  * Visual elements:
  *   - thin muted-gold frame (1.5px border)
- *   - logo: top-left, from propertyBranding.logoUrl when available;
+ *   - logo: top-left, resolved via getLogoServeUrl;
  *     the baked OAK Lawang logo asset is shown ONLY when the active property
  *     is clearly OAK Lawang (propertyCode "LWG" or name matches /oak lawang/i).
  *     Otherwise, no logo is rendered (text-only header) to avoid
@@ -65,27 +66,23 @@ export default function OakLetterhead({
   headerRef,
   footerRef,
 }: OakLetterheadProps) {
-  const hotelName =
-    propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
-  const tagline = propertyBranding?.tagline;
-  const address = propertyInfo?.address;
-  const phone = propertyInfo?.phone;
-  const propertyCode = propertyInfo?.property_code;
-
-  // Multi-property logo safety:
-  // - Use propertyBranding.logoUrl whenever it is set (any property with its own logo).
-  // - Otherwise, show the baked OAK Lawang logo ONLY when the property is OAK Lawang.
-  // - Otherwise, no logo is shown (text-only header).
+  // Decide whether to show the baked OAK Lawang logo as fallback.
+  // Rules:
+  //   1. If property has an uploaded logoUrl → PropertyDocumentHeader resolves it via getLogoServeUrl.
+  //   2. If no uploaded logo AND property is OAK Lawang → show baked logo asset.
+  //   3. Otherwise → text-only header (no logo).
   const useBakedLogo =
     !propertyBranding?.logoUrl && isOakLawangProperty(propertyInfo, propertyBranding);
-  const showLogo = Boolean(propertyBranding?.logoUrl) || useBakedLogo;
-  const logoSrc = propertyBranding?.logoUrl || logoPng;
 
   // Multi-property ornament safety:
   // The baked watermark and rose are OAK Lawang-specific decorations.
   // They must NOT be shown on another property's document.
   const isOakLawang = isOakLawangProperty(propertyInfo, propertyBranding);
   const showOaksOrnaments = isOakLawang;
+
+  // Dynamic brand colors from property branding
+  const primaryColor = propertyBranding?.primaryColor || '#1b4332';
+  const accentColor = propertyBranding?.accentColor || '#c5a880';
 
   const now = new Date();
   const printedDate = now.toLocaleDateString('id-ID', {
@@ -97,11 +94,17 @@ export default function OakLetterhead({
   });
 
   return (
-    <div className="oak-letterhead">
+    <div
+      className="oak-letterhead"
+      style={{
+        '--doc-primary-color': primaryColor,
+        '--doc-accent-color': accentColor,
+      } as React.CSSProperties}
+    >
       {/* Gold frame */}
       <div className="oak-letterhead-frame">
 
-        {/* Watermark - centered, very low opacity */}
+        {/* Watermark - centered, very low opacity, OAK Lawang only */}
         {showOaksOrnaments && (
           <img
             src={watermarkPng}
@@ -111,39 +114,47 @@ export default function OakLetterhead({
           />
         )}
 
-        {/* Header: logo + hotel info */}
+        {/* Header: canonical A4 header with managed logo URL resolution */}
         <div
-          className="oak-letterhead-header"
           ref={headerRef}
           data-html2canvas-ignore="true"
         >
-          {showLogo ? (
-            <img
-              src={logoSrc}
-              alt=""
-              className="oak-letterhead-logo"
-              onError={(e) => {
-                // If the remote logo fails and we are NOT on OAK Lawang, hide it.
-                const img = e.target as HTMLImageElement;
-                if (isOakLawangProperty(propertyInfo, propertyBranding)) {
-                  img.src = logoPng;
-                } else {
-                  img.style.display = 'none';
-                }
-              }}
-            />
-          ) : null}
-          <div className="oak-letterhead-info">
-            <div className="oak-letterhead-hotel-name">{hotelName}</div>
-            {tagline ? (
-              <div className="oak-letterhead-tagline">{tagline}</div>
-            ) : null}
-            {propertyCode ? (
-              <div className="oak-letterhead-code">
-                Kode Properti: {propertyCode}
+          {useBakedLogo ? (
+            /* OAK Lawang fallback: baked logo asset (local static bundle) */
+            <div className="oak-letterhead-header">
+              <img
+                src={logoPng}
+                alt=""
+                className="oak-letterhead-logo"
+              />
+              <div className="oak-letterhead-info">
+                <div className="oak-letterhead-hotel-name">
+                  {propertyBranding?.displayName || propertyInfo?.name || 'Hotel'}
+                </div>
+                {propertyBranding?.tagline ? (
+                  <div className="oak-letterhead-tagline">{propertyBranding.tagline}</div>
+                ) : null}
+                {propertyInfo?.property_code ? (
+                  <div className="oak-letterhead-code">
+                    Kode Properti: {propertyInfo.property_code}
+                  </div>
+                ) : null}
+                {propertyInfo?.address ? (
+                  <div className="oak-letterhead-address">{propertyInfo.address}</div>
+                ) : null}
+                {propertyInfo?.phone ? (
+                  <div className="oak-letterhead-phone">Telp: {propertyInfo.phone}</div>
+                ) : null}
               </div>
-            ) : null}
-          </div>
+            </div>
+          ) : (
+            /* Property branding logo (managed via getLogoServeUrl) */
+            <PropertyDocumentHeader
+              propertyInfo={propertyInfo}
+              propertyBranding={propertyBranding}
+              propertyId={propertyInfo?.id ?? null}
+            />
+          )}
         </div>
 
         {/* Document title */}
@@ -152,7 +163,7 @@ export default function OakLetterhead({
         {/* Dynamic body */}
         <div className="oak-letterhead-body">{children}</div>
 
-        {/* Rose ornament bottom-left */}
+        {/* Rose ornament bottom-left, OAK Lawang only */}
         {showOaksOrnaments && (
           <img
             src={rosePng}
@@ -168,11 +179,11 @@ export default function OakLetterhead({
           ref={footerRef}
           data-html2canvas-ignore="true"
         >
-          {(address || phone) && (
+          {(propertyInfo?.address || propertyInfo?.phone) && (
             <div className="oak-letterhead-footer-contact">
-              {address ? <span>{address}</span> : null}
-              {address && phone ? <span>&nbsp;|&nbsp;</span> : null}
-              {phone ? <span>Telp: {phone}</span> : null}
+              {propertyInfo?.address ? <span>{propertyInfo.address}</span> : null}
+              {propertyInfo?.address && propertyInfo?.phone ? <span>&nbsp;|&nbsp;</span> : null}
+              {propertyInfo?.phone ? <span>Telp: {propertyInfo.phone}</span> : null}
             </div>
           )}
           <div className="oak-letterhead-footer-system">
