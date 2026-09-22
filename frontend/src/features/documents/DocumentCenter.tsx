@@ -1005,6 +1005,14 @@ export default function DocumentCenter({
         {(kind === 'confirmation' || quotationMode === 'reservation') && (
           <div className="document-center-block">
             <div className="document-center-block-label">Reservasi</div>
+            <input
+              type="text"
+              className="document-center-search"
+              placeholder="Cari BID, nama tamu, atau nomor kamar..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="Cari reservasi"
+            />
             {pickerReservations.length === 0 ? (
               <div className="document-center-no-res">
                 {pickerLoading
@@ -1014,42 +1022,32 @@ export default function DocumentCenter({
                     : 'Belum ada reservasi yang dimuat untuk properti ini.'}
               </div>
             ) : (
-              <>
-                <input
-                  type="text"
-                  className="document-center-search"
-                  placeholder="Cari BID, nama tamu, atau nomor kamar..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  aria-label="Cari reservasi"
-                />
-                <div className="document-center-res-list">
-                  {filtered.length === 0 ? (
-                    <div className="document-center-no-res">Tidak ada reservasi yang cocok.</div>
-                  ) : (
-                    filtered.map((r) => {
-                      const isActive = Number(r?.id) === selectedResId;
-                      const guest = r?.guest_name || r?.booker_name || '—';
-                      const dates = `${formatHotelDateIndonesian(r?.check_in)} – ${formatHotelDateIndonesian(r?.check_out)}`;
-                      return (
-                        <button
-                          key={r?.id}
-                          type="button"
-                          className={`document-center-res-item ${isActive ? 'active' : ''}`}
-                          onClick={() => setSelectedResId(Number(r?.id))}
-                        >
-                          <div className="document-center-res-name">{guest}</div>
-                          <div className="document-center-res-meta">
-                            <span>{r?.bid || '—'}</span>
-                            <span>{dates}</span>
-                            {r?.room_number ? <span>Kamar {r?.room_number}</span> : null}
-                          </div>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </>
+              <div className="document-center-res-list">
+                {filtered.length === 0 ? (
+                  <div className="document-center-no-res">Tidak ada reservasi yang cocok.</div>
+                ) : (
+                  filtered.map((r) => {
+                    const isActive = Number(r?.id) === selectedResId;
+                    const guest = r?.guest_name || r?.booker_name || '—';
+                    const dates = `${formatHotelDateIndonesian(r?.check_in)} – ${formatHotelDateIndonesian(r?.check_out)}`;
+                    return (
+                      <button
+                        key={r?.id}
+                        type="button"
+                        className={`document-center-res-item ${isActive ? 'active' : ''}`}
+                        onClick={() => setSelectedResId(Number(r?.id))}
+                      >
+                        <div className="document-center-res-name">{guest}</div>
+                        <div className="document-center-res-meta">
+                          <span>{r?.bid || '—'}</span>
+                          <span>{dates}</span>
+                          {r?.room_number ? <span>Kamar {r?.room_number}</span> : null}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
             )}
           </div>
         )}
