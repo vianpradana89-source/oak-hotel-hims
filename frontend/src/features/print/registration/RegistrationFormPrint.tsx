@@ -13,14 +13,12 @@ export interface RegistrationFormPrintProps {
   propertyBranding?: PropertyBrandingDto;
   headerRef?: React.Ref<HTMLDivElement>;
   footerRef?: React.Ref<HTMLDivElement>;
-  /** Authoritative folio financials (optional; shown when available) */
-  folioFinancials?: {
-    total_price: number;
-    amount_paid: number;
-    applied_deposit: number;
-    remaining_balance: number;
-    payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
-  } | null;
+  /** List of sibling reservations for multi-room group bookings */
+  siblingReservations?: Array<{
+    id: number;
+    room_number?: string;
+    room_type_name?: string;
+  }> | null;
   /** Deposit list for this reservation (optional) */
   deposits?: Array<{
     id: number;
@@ -51,7 +49,7 @@ export default function RegistrationFormPrint({
   propertyBranding,
   headerRef,
   footerRef,
-  folioFinancials,
+  siblingReservations,
   deposits,
   identityRecord,
   terms,
@@ -66,18 +64,29 @@ export default function RegistrationFormPrint({
   const checkOut = res?.check_out;
   const nights = res?.nights ?? 0;
   const roomTypeName = res?.room_type_name || res?.room_type || '—';
-  const roomNumber = res?.room_number || null;
   const source = res?.booking_source || res?.source || null;
 
   const nightsLabel = nights > 0 ? `${nights} malam` : '—';
 
-  const paymentStatusLabel = (() => {
-    if (!folioFinancials) return null;
-    const s = folioFinancials.payment_status;
-    if (s === 'PAID') return 'LUNAS';
-    if (s === 'PARTIAL') return 'Dibayar Sebagian';
-    return 'BELUM LUNAS';
-  })();
+  // Build room number display: single room or comma-separated list for group booking
+  const getRoomNumbers = (): string | null => {
+    const currentRoom = res?.room_number;
+    const siblings = siblingReservations ?? [];
+
+    if (siblings.length === 0 && !currentRoom) return null;
+    if (siblings.length === 0 && currentRoom) return currentRoom;
+
+    // Collect unique room numbers from siblings + current
+    const roomSet = new Set<string>();
+    if (currentRoom) roomSet.add(currentRoom);
+    for (const sib of siblings) {
+      if (sib.room_number) roomSet.add(sib.room_number);
+    }
+    const rooms = Array.from(roomSet);
+    return rooms.length > 0 ? rooms.sort((a, b) => Number(a) - Number(b)).join(', ') : null;
+  };
+
+  const roomNumbers = getRoomNumbers();
 
   return (
     <OakLetterhead
@@ -155,10 +164,10 @@ export default function RegistrationFormPrint({
             <div className="reg-doc-field-label">Tipe Kamar</div>
             <div className="reg-doc-field-value">{roomTypeName}</div>
           </div>
-          {roomNumber ? (
+          {roomNumbers ? (
             <div>
               <div className="reg-doc-field-label">Nomor Kamar</div>
-              <div className="reg-doc-field-value">{roomNumber}</div>
+              <div className="reg-doc-field-value">{roomNumbers}</div>
             </div>
           ) : null}
         </div>
@@ -221,46 +230,7 @@ export default function RegistrationFormPrint({
         </div>
       ) : null}
 
-      {/* 5. Ringkasan Finansial */}
-      {folioFinancials ? (
-        <div className="reg-doc-fin-block">
-          <div className="reg-doc-section">
-            <div className="oak-doc-section-title">Ringkasan Finansial</div>
-            <table className="oak-doc-fin-table oak-doc-summary-table">
-              <tbody>
-                <tr>
-                  <td>Total Reservasi</td>
-                  <td className="right">{formatHotelCurrency(folioFinancials.total_price)}</td>
-                </tr>
-                <tr>
-                  <td>Jumlah Dibayar</td>
-                  <td className="right">{formatHotelCurrency(folioFinancials.amount_paid)}</td>
-                </tr>
-                {folioFinancials.applied_deposit > 0 ? (
-                  <tr>
-                    <td>Deposit Digunakan</td>
-                    <td className="right">
-                      {formatHotelCurrency(folioFinancials.applied_deposit)}
-                    </td>
-                  </tr>
-                ) : null}
-                <tr>
-                  <td>Sisa Tagihan</td>
-                  <td className="right">
-                    {formatHotelCurrency(folioFinancials.remaining_balance)}
-                  </td>
-                </tr>
-                <tr className="row-total">
-                  <td>Status Pembayaran</td>
-                  <td className="right">{paymentStatusLabel}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 6. Terms & Conditions */}
+      {/* 5. Terms & Conditions */}
       <div className="reg-doc-section reg-doc-terms-section">
         <div className="oak-doc-section-title">Ketentuan & Syarat</div>
         <div className="reg-doc-terms">{terms}</div>

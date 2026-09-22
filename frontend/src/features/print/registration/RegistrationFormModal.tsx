@@ -30,7 +30,6 @@ export default function RegistrationFormModal({
   const [terms, setTerms] = useState(REGISTRATION_FORM_DEFAULT_TERMS);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [folioFinancials, setFolioFinancials] = useState<any>(null);
   const [deposits, setDeposits] = useState<any[]>([]);
   const [identityRecord, setIdentityRecord] = useState<any>(null);
 
@@ -40,10 +39,6 @@ export default function RegistrationFormModal({
     setError(null);
 
     Promise.all([
-      authFetch(`/api/reservations/${reservationId}/folio?property_id=${propertyId}`)
-        .then(r => r.json())
-        .then(json => json?.data?.authoritative_financials || null)
-        .catch(() => null),
       authFetch(`/api/reservations/${reservationId}/deposits?property_id=${propertyId}`)
         .then(r => r.json())
         .then(json => Array.isArray(json?.data) ? json.data : [])
@@ -53,8 +48,7 @@ export default function RegistrationFormModal({
         .then(json => Array.isArray(json?.data) && json.data.length > 0 ? json.data[0] : null)
         .catch(() => null),
     ])
-      .then(([fin, deps, id]) => {
-        setFolioFinancials(fin);
+      .then(([deps, id]) => {
         setDeposits(deps);
         setIdentityRecord(id);
       })
@@ -116,10 +110,10 @@ export default function RegistrationFormModal({
           </div>
         ) : (
           <div className="reg-form-modal-content">
-            {/* Terms editor */}
-            <div className="reg-doc-section">
-              <div className="reg-form-terms-row">
-                <span className="reg-form-terms-label">Ketentuan &amp; Syarat:</span>
+            {/* Left panel: Terms editor */}
+            <div className="reg-form-editor-panel">
+              <div className="reg-form-editor-header">
+                <span className="reg-form-terms-label">Ketentuan &amp; Syarat</span>
                 <button
                   type="button"
                   onClick={handleResetTerms}
@@ -132,21 +126,23 @@ export default function RegistrationFormModal({
                 value={terms}
                 onChange={(e) => setTerms(e.target.value)}
                 className="reg-form-terms-editor"
-                rows={6}
+                placeholder="Ketik ketentuan & syarat di sini..."
               />
             </div>
 
-            {/* A4 Print preview */}
-            <div className="print-only">
-              <RegistrationFormPrint
-                reservation={reservation}
-                propertyInfo={propertyInfo}
-                propertyBranding={propertyBranding}
-                folioFinancials={folioFinancials}
-                deposits={deposits}
-                identityRecord={identityRecord}
-                terms={terms}
-              />
+            {/* Right panel: A4 preview */}
+            <div className="reg-form-preview-panel">
+              <div className="print-only">
+                <RegistrationFormPrint
+                  reservation={reservation}
+                  propertyInfo={propertyInfo}
+                  propertyBranding={propertyBranding}
+                  deposits={deposits}
+                  identityRecord={identityRecord}
+                  terms={terms}
+                  siblingReservations={reservation?.sibling_reservations ?? null}
+                />
+              </div>
             </div>
           </div>
         )}
