@@ -20,6 +20,8 @@ import {
   formatReservationSourceLabel,
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
+import ThermalReceiptModal from '../thermalReceipt/ThermalReceiptModal';
+import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
 
 interface Props {
   reservation: any;
@@ -46,6 +48,8 @@ interface Props {
   // Version bump + matching reservation id triggers a targeted refetch of THIS drawer's detail.
   checkoutInspectionRefreshVersion?: number;
   checkoutInspectionRefreshReservationId?: number | null;
+  propertyBranding?: PropertyBrandingConfig | null;
+  propertyInfo?: { id?: number; name?: string; address?: string | null; phone?: string | null } | null;
 }
 
 export default function ReservationDetailDrawer({
@@ -60,6 +64,8 @@ export default function ReservationDetailDrawer({
   onOpenStayChange,
   checkoutInspectionRefreshVersion,
   checkoutInspectionRefreshReservationId,
+  propertyBranding,
+  propertyInfo,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -111,6 +117,7 @@ export default function ReservationDetailDrawer({
     const [showGuaranteeWarning, setShowGuaranteeWarning] = useState(false);
     const [showGuaranteeVerificationWarning, setShowGuaranteeVerificationWarning] = useState(false);
     const [pendingGuaranteeClose, setPendingGuaranteeClose] = useState(false);
+    const [isThermalModalOpen, setIsThermalModalOpen] = useState(false);
     const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -1254,16 +1261,24 @@ export default function ReservationDetailDrawer({
                 <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
                   Folio &amp; Ringkasan Pembayaran
                 </span>
-                {!isCancelled && !isCheckedOut && (
+                  {!isCancelled && !isCheckedOut && (
+                    <button
+                      type="button"
+                      onClick={() => setIsAddChargeModalOpen(true)}
+                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      + Tambah Biaya
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => setIsAddChargeModalOpen(true)}
-                    className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    onClick={() => setIsThermalModalOpen(true)}
+                    className="px-2.5 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    title="Cetak thermal receipt (58mm / 80mm)"
                   >
-                    + Tambah Biaya
+                    🖨️ Print
                   </button>
-                )}
-              </div>
+                </div>
               <span className={`text-xs font-bold ${remainingBalance > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
                 {remainingBalance > 0 ? `Sisa: Rp ${remainingBalance.toLocaleString('id-ID')}` : 'Lunas (PAID)'}
               </span>
@@ -2265,6 +2280,20 @@ export default function ReservationDetailDrawer({
           Data deposit atau identitas belum dapat diperiksa. Pastikan jaminan sudah diselesaikan sebelum menutup detail reservasi.
         </p>
       </Modal>
+
+      {/* Thermal Receipt Modal */}
+      {isThermalModalOpen && activePropId && (
+        <ThermalReceiptModal
+          isOpen={isThermalModalOpen}
+          onClose={() => setIsThermalModalOpen(false)}
+          reservationId={data.id}
+          propertyId={activePropId}
+          reservation={data}
+          propertyBranding={propertyBranding ?? null}
+          propertyInfo={propertyInfo}
+          authFetch={authFetch}
+        />
+      )}
     </div>
   );
 }

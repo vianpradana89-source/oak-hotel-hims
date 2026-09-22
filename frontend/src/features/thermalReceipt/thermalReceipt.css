@@ -1,0 +1,303 @@
+/**
+ * Thermal Receipt — Print CSS
+ *
+ * Fully isolated from Document & Print (A4/PDF) CSS.
+ * Uses .thermal-* class prefix and #thermal-print-target ID scoping.
+ *
+ * Width variants:
+ *   .thermal-receipt--58  → 58mm paper
+ *   .thermal-receipt--80  → 80mm paper
+ */
+
+/* ──────────────────────────────────────────────────────────
+   SCREEN PREVIEW (shown inside modal before printing)
+   ────────────────────────────────────────────────────────── */
+
+.thermal-receipt {
+  width: 80mm;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #111;
+  background: #fff;
+  padding: 6px 4px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.thermal-receipt--58 {
+  width: 58mm;
+  font-size: 10px;
+}
+
+.thermal-receipt--80 {
+  width: 80mm;
+  font-size: 11px;
+}
+
+/* Header */
+.thermal-header {
+  text-align: center;
+  margin-bottom: 4px;
+}
+
+.thermal-logo {
+  max-width: 48px;
+  max-height: 36px;
+  object-fit: contain;
+  display: block;
+  margin: 0 auto 3px;
+}
+
+.thermal-hotel-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1b4332;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.thermal-receipt--58 .thermal-hotel-name {
+  font-size: 11px;
+}
+
+.thermal-hotel-tagline {
+  font-size: 9px;
+  color: #666;
+  margin-top: 1px;
+}
+
+.thermal-hotel-address {
+  font-size: 9px;
+  color: #555;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+.thermal-hotel-phone {
+  font-size: 9px;
+  color: #555;
+  margin-top: 1px;
+}
+
+/* Divider */
+.thermal-divider {
+  border: none;
+  border-top: 1px dashed #bbb;
+  margin: 5px 0;
+}
+
+/* Title */
+.thermal-title {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 4px 0 6px;
+}
+
+.thermal-receipt--58 .thermal-title {
+  font-size: 10px;
+}
+
+/* Section */
+.thermal-section {
+  margin-bottom: 4px;
+}
+
+/* Row */
+.thermal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 0;
+}
+
+.thermal-row--mono .thermal-value {
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
+}
+
+.thermal-row--bold .thermal-label {
+  font-weight: 700;
+}
+
+.thermal-row--bold .thermal-value {
+  font-weight: 700;
+}
+
+.thermal-row--total {
+  border-top: 2px solid #1b4332;
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+.thermal-label {
+  color: #555;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.thermal-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: #111;
+  text-align: right;
+  word-break: break-all;
+}
+
+.thermal-receipt--58 .thermal-label {
+  font-size: 9px;
+}
+
+.thermal-receipt--58 .thermal-value {
+  font-size: 10px;
+}
+
+.thermal-value--total {
+  font-size: 13px;
+  font-weight: 800;
+  color: #1b4332;
+}
+
+.thermal-receipt--58 .thermal-value--total {
+  font-size: 11px;
+}
+
+/* Status badge */
+.thermal-status {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 0;
+  margin-top: 4px;
+  border: 1.5px solid #1b4332;
+  border-radius: 4px;
+  color: #1b4332;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.thermal-receipt--58 .thermal-status {
+  font-size: 10px;
+}
+
+/* Note */
+.thermal-note {
+  font-size: 9px;
+  color: #888;
+  text-align: center;
+  font-style: italic;
+  margin: 4px 0;
+  line-height: 1.4;
+}
+
+/* Signatures */
+.thermal-signatures {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  gap: 8px;
+}
+
+.thermal-signature-block {
+  flex: 1;
+  text-align: center;
+}
+
+.thermal-signature-line {
+  border-top: 1px solid #333;
+  margin-bottom: 2px;
+}
+
+.thermal-signature-label {
+  font-size: 9px;
+  color: #555;
+  text-transform: uppercase;
+}
+
+/* Footer */
+.thermal-footer {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed #bbb;
+  text-align: center;
+  font-size: 9px;
+  color: #888;
+  line-height: 1.5;
+}
+
+.thermal-footer-text {
+  font-size: 9px;
+  color: #555;
+}
+
+.thermal-footer-text strong {
+  color: #111;
+}
+
+.thermal-footer-note {
+  font-size: 8px;
+  color: #999;
+  margin-top: 2px;
+  font-style: italic;
+}
+
+/* ──────────────────────────────────────────────────────────
+   PRINT ISOLATION
+   Only #thermal-print-target prints. All app chrome hidden.
+   ────────────────────────────────────────────────────────── */
+@media print {
+  /* Hide entire app */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Show only thermal print target and its children */
+  #thermal-print-target,
+  #thermal-print-target * {
+    visibility: visible;
+  }
+
+  #thermal-print-target {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--thermal-width, 80mm);
+    padding: 0;
+    margin: 0;
+    background: #fff;
+  }
+
+  /* Suppress all modal chrome via visibility only (NOT display:none on ancestors)
+     to avoid hiding #thermal-print-target which lives inside the modal body.
+     The visibility:hidden on body* already hides the modal backdrop and frame. */
+  .thermal-selector,
+  .thermal-actions,
+  .thermal-loading,
+  .thermal-error,
+  .thermal-hint,
+  .thermal-step-indicator,
+  .thermal-preview-label {
+    display: none !important;
+  }
+
+  /* Page setup — use auto size; printer driver / browser dialog handles paper */
+  @page {
+    size: auto;
+    margin: 0;
+  }
+
+  /* Force receipt width during print */
+  .thermal-receipt {
+    width: var(--thermal-width, 80mm) !important;
+    margin: 0 !important;
+    padding: 4px !important;
+    font-size: inherit !important;
+  }
+}

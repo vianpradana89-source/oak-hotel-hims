@@ -4703,10 +4703,12 @@ function AppContent() {
           onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
-          checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
-          checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
-        />
-      )}
+            checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
+            checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
+            propertyBranding={activeBranding || null}
+            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+          />
+        )}
 
       <CheckoutGuaranteeConfirmationModal
         isOpen={checkoutConfirmOpen}
