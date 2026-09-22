@@ -2,7 +2,8 @@
  * Thermal Receipt — Print CSS
  *
  * Fully isolated from Document & Print (A4/PDF) CSS.
- * Uses .thermal-* class prefix and #thermal-print-target ID scoping.
+ * Uses .thermal-* class prefix for receipt rendering (print isolation)
+ * and .three-* class prefix for modal UI components (screen only).
  *
  * Width variants:
  *   .thermal-receipt--58  → 58mm paper
@@ -10,7 +11,7 @@
  */
 
 /* ──────────────────────────────────────────────────────────
-   SCREEN PREVIEW (shown inside modal before printing)
+   RECEIPT RENDERING (screen preview + print)
    ────────────────────────────────────────────────────────── */
 
 .thermal-receipt {
@@ -249,8 +250,389 @@
 }
 
 /* ──────────────────────────────────────────────────────────
+   MODAL UI COMPONENTS (screen only, hidden in print)
+   Using .three-* prefix to avoid conflicts with receipt CSS
+   ────────────────────────────────────────────────────────── */
+
+/* Selection cards (Step 1 & 2) */
+.three-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.three-selector-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.three-selector-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px;
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.three-selector-btn:hover {
+  border-color: #1b4332;
+  background: #f8faf9;
+  box-shadow: 0 4px 12px rgba(27, 67, 50, 0.1);
+  transform: translateY(-1px);
+}
+
+.three-selector-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(27, 67, 50, 0.08);
+}
+
+.three-selector-icon {
+  font-size: 28px;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 40px;
+  text-align: center;
+}
+
+.three-selector-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.three-selector-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a1a;
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.three-selector-desc {
+  display: block;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.three-hint {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 8px 0;
+  line-height: 1.5;
+}
+
+/* Record list (Step 3) */
+.three-record-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.three-record-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.three-record-btn:hover {
+  border-color: #1b4332;
+  background: #f8faf9;
+}
+
+.three-record-number {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.three-record-meta {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+
+/* Width selector - segmented control */
+.three-width-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: 16px;
+}
+
+.three-width-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.three-width-segment {
+  display: inline-flex;
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.three-width-btn {
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.three-width-btn:hover {
+  color: #1b4332;
+}
+
+.three-width-btn--active {
+  background: #fff;
+  color: #1b4332;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Preview area */
+.three-preview-container {
+  margin-bottom: 16px;
+}
+
+.three-preview-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.three-preview-label::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #1b4332;
+  border-radius: 50%;
+}
+
+.three-preview-wrap {
+  background: #fafafa;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* Action buttons */
+.three-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 16px;
+  border-top: 1px solid #f1f5f9;
+  margin-top: 8px;
+}
+
+.three-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: #1b4332;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 4px rgba(27, 67, 50, 0.2);
+}
+
+.three-btn-primary:hover:not(:disabled) {
+  background: #153628;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(27, 67, 50, 0.25);
+}
+
+.three-btn-primary:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.three-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: #fff;
+  color: #475569;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.three-btn-secondary:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+}
+
+/* Loading state */
+.three-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.three-loading::before {
+  content: '';
+  width: 20px;
+  height: 20px;
+  border: 2px solid #e2e8f0;
+  border-top-color: #1b4332;
+  border-radius: 50%;
+  animation: thermal-spin 0.8s linear infinite;
+}
+
+@keyframes thermal-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Error state */
+.three-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #991b1b;
+  font-size: 14px;
+}
+
+.three-error .three-btn-secondary {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* Empty state */
+.three-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  text-align: center;
+  background: #fafafa;
+  border: 1px dashed #e2e8f0;
+  border-radius: 8px;
+}
+
+.three-empty-icon {
+  font-size: 32px;
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.three-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 6px;
+}
+
+.three-empty-desc {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+/* Step indicator */
+.three-step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #f1f5f9;
+}
+
+.three-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.three-step-dot--active {
+  background: #1b4332;
+}
+
+.three-step-dot--completed {
+  background: #1b4332;
+  opacity: 0.5;
+}
+
+.three-step-label {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* ──────────────────────────────────────────────────────────
+   PRINT PORTAL ROOT (attached to document.body via createPortal)
+   Hidden on screen, visible only during @media print.
+   Completely isolated from modal layout/positioning.
+   ────────────────────────────────────────────────────────── */
+
+.thermal-print-root {
+  display: none !important;
+}
+
+/* ──────────────────────────────────────────────────────────
    PRINT ISOLATION
-   Only #thermal-print-target prints. All app chrome hidden.
+    * Print portal root is visible only via @media print rules below.
    ────────────────────────────────────────────────────────── */
 @media print {
   /* Hide entire app */
@@ -265,25 +647,27 @@
   }
 
   #thermal-print-target {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: var(--thermal-width, 80mm);
-    padding: 0;
-    margin: 0;
-    background: #fff;
+    display: block !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: var(--thermal-width, 80mm) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
   }
 
-  /* Suppress all modal chrome via visibility only (NOT display:none on ancestors)
-     to avoid hiding #thermal-print-target which lives inside the modal body.
-     The visibility:hidden on body* already hides the modal backdrop and frame. */
-  .thermal-selector,
-  .thermal-actions,
-  .thermal-loading,
-  .thermal-error,
-  .thermal-hint,
-  .thermal-step-indicator,
-  .thermal-preview-label {
+  /* Suppress all modal UI components */
+  .three-selector,
+  .three-actions,
+  .three-loading,
+  .three-error,
+  .three-hint,
+  .three-step-indicator,
+  .three-preview-label,
+  .three-width-selector,
+  .three-empty-state,
+  .three-preview-wrap {
     display: none !important;
   }
 
