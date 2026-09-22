@@ -21,6 +21,7 @@ import {
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
 import ThermalReceiptModal from '../thermalReceipt/ThermalReceiptModal';
+import RegistrationFormModal from '../print/registration/RegistrationFormModal';
 import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
 
 interface Props {
@@ -118,6 +119,7 @@ export default function ReservationDetailDrawer({
     const [showGuaranteeVerificationWarning, setShowGuaranteeVerificationWarning] = useState(false);
     const [pendingGuaranteeClose, setPendingGuaranteeClose] = useState(false);
     const [isThermalModalOpen, setIsThermalModalOpen] = useState(false);
+    const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState(false);
     const { authFetch } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -2291,6 +2293,26 @@ export default function ReservationDetailDrawer({
           reservation={data}
           propertyBranding={propertyBranding ?? null}
           propertyInfo={propertyInfo}
+          authFetch={authFetch}
+          onOpenRegistrationForm={() => setIsRegistrationModalOpen(true)}
+        />
+      )}
+
+      {/* Registration Form Modal */}
+      {isRegistrationModalOpen && activePropId && (
+        <RegistrationFormModal
+          isOpen={isRegistrationModalOpen}
+          onClose={() => setIsRegistrationModalOpen(false)}
+          reservationId={data.id}
+          propertyId={activePropId}
+          reservation={data}
+          propertyBranding={propertyBranding ?? undefined}
+          propertyInfo={propertyInfo ? {
+            id: propertyInfo.id,
+            name: propertyInfo.name,
+            address: propertyInfo.address ?? undefined,
+            phone: propertyInfo.phone ?? undefined,
+          } : undefined}
           authFetch={authFetch}
         />
       )}

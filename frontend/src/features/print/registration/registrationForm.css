@@ -1,0 +1,215 @@
+/* ================================================================
+   FORM REGISTRASI A4 - Scoped styles
+   Hanya class dengan prefix "reg-doc-" yang digunakan di sini.
+   Semua style lainnya diwarisi dari guestDocumentPrint.css (OakLetterhead).
+   ================================================================ */
+
+/* Section wrapper */
+.reg-doc-section {
+  margin-bottom: 18px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Section heading - reuses .oak-doc-section-title from guestDocumentPrint.css */
+
+/* 2-column field grid */
+.reg-doc-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 24px;
+}
+
+@media (max-width: 560px) {
+  .reg-doc-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.reg-doc-field-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  line-height: 1.3;
+}
+
+.reg-doc-field-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a1a1a;
+  margin-top: 2px;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+
+/* Deposit table */
+.reg-doc-deposit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.reg-doc-deposit-table th {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #555;
+  text-align: left;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--doc-primary-color, #1b4332);
+}
+
+.reg-doc-deposit-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid #eee;
+  color: #222;
+}
+
+.reg-doc-deposit-table td.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Terms & Conditions block */
+.reg-doc-terms {
+  font-size: 10px;
+  color: #444;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  background: #fafaf8;
+  border-left: 3px solid var(--doc-accent-color, #c5a880);
+  border-radius: 2px;
+  padding: 8px 10px;
+}
+
+/* Financial summary block - reuse .oak-doc-fin-block from guestDocumentPrint.css */
+
+/* Signature section */
+.reg-doc-signature-section {
+  margin-top: 28px;
+}
+
+.reg-doc-signature-row {
+  display: flex;
+  gap: 48px;
+  margin-top: 12px;
+}
+
+.reg-doc-signature-col {
+  flex: 1;
+  text-align: center;
+}
+
+.reg-doc-signature-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 48px;
+}
+
+.reg-doc-signature-line {
+  border-bottom: 1px solid #333;
+  height: 1px;
+}
+
+/* Modal inner controls */
+.reg-form-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.reg-form-terms-editor {
+  width: 100%;
+  min-height: 120px;
+  max-height: 200px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid #d4d0c8;
+  border-radius: 6px;
+  background: #fafaf8;
+  color: #333;
+  resize: vertical;
+  font-family: inherit;
+  outline: none;
+}
+
+.reg-form-terms-editor:focus {
+  border-color: var(--doc-primary-color, #1b4332);
+  box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
+}
+
+.reg-form-terms-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.reg-form-terms-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+}
+
+.reg-form-reset-btn {
+  font-size: 10px;
+  font-weight: 600;
+  color: #666;
+  background: #f0eeea;
+  border: 1px solid #d4d0c8;
+  border-radius: 5px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.reg-form-reset-btn:hover {
+  background: #e6e2d8;
+}
+
+/* Loading / error states */
+.reg-form-loading {
+  text-align: center;
+  padding: 48px 24px;
+  color: #888;
+  font-size: 13px;
+}
+
+.reg-form-error {
+  text-align: center;
+  padding: 24px;
+  color: #b91c1c;
+  font-size: 13px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+
+/* ================================================================
+   PRINT PAGE BREAK SAFETY
+   Proteksi section agar tidak terpotong di tengah halaman cetak.
+   Terms (reg-doc-terms) boleh split jika konten panjang.
+   ================================================================ */
+
+@media print {
+  .reg-doc-section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .reg-doc-signature-section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .reg-doc-terms-section {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+}

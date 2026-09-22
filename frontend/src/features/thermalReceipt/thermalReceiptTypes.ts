@@ -101,5 +101,5 @@ export type ThermalStep =
 
 export type ThermalWidth = 58 | 80;
 
-export type ThermalReceiptType = 'folio' | 'deposit' | 'identity';
+export type ThermalReceiptType = 'folio' | 'deposit' | 'identity' | 'registration_form';
 export type ThermalDepositSubType = 'cash' | 'identity';

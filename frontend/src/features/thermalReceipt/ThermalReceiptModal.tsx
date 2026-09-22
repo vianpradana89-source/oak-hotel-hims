@@ -52,6 +52,7 @@ interface Props {
   propertyBranding: PropertyBrandingConfig | null;
   propertyInfo: PropertyInfo | undefined | null;
   authFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  onOpenRegistrationForm?: () => void;
 }
 
 // ─── Helper: render receipt JSX (reused for screen preview + print portal) ────
@@ -124,6 +125,7 @@ export default function ThermalReceiptModal({
   propertyBranding,
   propertyInfo,
   authFetch,
+  onOpenRegistrationForm,
 }: Props) {
   const { user } = useAuth();
   const printedBy = user?.full_name || user?.username || 'Resepsionis';
@@ -169,6 +171,13 @@ export default function ThermalReceiptModal({
   // ── Handlers ──
 
   const handleSelectType = useCallback((type: ThermalReceiptType) => {
+    // Form Registrasi - open A4 modal directly, close thermal selector
+    if (type === ('registration_form' as ThermalReceiptType)) {
+      onClose();
+      onOpenRegistrationForm?.();
+      return;
+    }
+
     setReceiptType(type);
     setStep('confirm-print'); // will be overridden by async fetch below
     setLoading(true);
@@ -194,7 +203,7 @@ export default function ThermalReceiptModal({
       // deposit path — proceed to subtype selection
       setStep('select-subtype');
     }
-  }, [reservationId, effectivePropertyId, authFetch]);
+  }, [reservationId, effectivePropertyId, authFetch, onClose, onOpenRegistrationForm]);
 
   const handleSelectSubType = useCallback((subType: ThermalDepositSubType) => {
     setDepositSubType(subType);
@@ -380,9 +389,22 @@ export default function ThermalReceiptModal({
                 </span>
               </div>
             </button>
+            <button
+              type="button"
+              className="three-selector-btn"
+              onClick={() => handleSelectType('registration_form' as ThermalReceiptType)}
+            >
+              <span className="three-selector-icon">A4</span>
+              <div className="three-selector-content">
+                <span className="three-selector-label">Form Registrasi</span>
+                <span className="three-selector-desc">
+                  Formulir A4 untuk tamu saat check-in
+                </span>
+              </div>
+            </button>
           </div>
           <p className="three-hint">
-            Resepsionis akan mencetak bukti melalui printer thermal (58mm / 80mm).
+            Pilih dokumen yang ingin dicetak.
           </p>
         </div>
       </Modal>
