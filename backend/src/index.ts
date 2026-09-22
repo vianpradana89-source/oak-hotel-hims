@@ -7407,22 +7407,26 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
     }
 
     const payments = await pool.query(
-      `SELECT DISTINCT pt.* FROM payment_transactions pt
-       WHERE (
-         pt.reservation_id = $1
-         AND (pt.property_id = $2 OR pt.property_id IS NULL)
-       )
-       OR (
-         pt.scope = 'BOOKING_GROUP'
+      `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
+              reference_payment_id, correction_group_id, reason_code, reason_text,
+              created_by, created_at, booking_id, scope, property_id
+       FROM payment_transactions
+       WHERE reservation_id = $1
+         AND scope = 'ROOM_RESERVATION'
+         AND (property_id = $2 OR property_id IS NULL)
+       UNION ALL
+       SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
+              pt.payment_method, pt.reference_code, pt.status,
+              pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
+              pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
+       FROM payment_transactions pt
+       JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
+       WHERE pt.scope = 'BOOKING_GROUP'
          AND pt.property_id = $2
-         AND EXISTS (
-           SELECT 1 FROM payment_allocations pa
-           WHERE pa.payment_transaction_id = pt.id
-             AND pa.reservation_id = $1
-             AND pa.status = 'ACTIVE'
-         )
-       )
-       ORDER BY pt.id DESC`,
+         AND pa.reservation_id = $1
+         AND pa.property_id = $2
+         AND pa.status = 'ACTIVE'
+       ORDER BY id DESC`,
       [reservationId, propertyId]
     );
     const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
