@@ -269,6 +269,7 @@ export async function getDocumentReservationList(
         AND rt.property_id = b.property_id
       WHERE b.property_id = $1
         AND UPPER(r.status) = 'CHECKED_OUT'
+        AND r.check_out::date <= CURRENT_DATE
     `;
     orderClause = ' ORDER BY r.check_out DESC, r.id DESC';
     limitClause = ' LIMIT 20';
