@@ -18,7 +18,8 @@ export interface PropertyDocumentHeaderProps {
  * Features:
  *   - Resolves managed branding storage keys to backend serve URLs via getLogoServeUrl
  *   - External / manual URLs are passed through unchanged
- *   - Displays logo (if available), hotel name, tagline, address, phone
+ *   - Displays logo (if available), hotel name, tagline, property code
+ *   - Address and phone are intentionally NOT shown here; they live in the footer
  *
  * Note: OAK Lawang baked-logo fallback is handled by OakLetterhead, not this component.
  */
@@ -30,8 +31,6 @@ export default function PropertyDocumentHeader({
   const hotelName =
     propertyBranding?.displayName || propertyInfo?.name || 'Hotel';
   const tagline = propertyBranding?.tagline;
-  const address = propertyInfo?.address;
-  const phone = propertyInfo?.phone;
   const propertyCode = propertyInfo?.property_code;
 
   // Resolve logo URL:
@@ -71,12 +70,6 @@ export default function PropertyDocumentHeader({
           <div className="oak-letterhead-code">
             Kode Properti: {propertyCode}
           </div>
-        ) : null}
-        {address ? (
-          <div className="oak-letterhead-address">{address}</div>
-        ) : null}
-        {phone ? (
-          <div className="oak-letterhead-phone">Telp: {phone}</div>
         ) : null}
       </div>
     </div>
