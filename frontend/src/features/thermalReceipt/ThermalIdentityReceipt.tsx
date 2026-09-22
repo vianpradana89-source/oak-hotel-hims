@@ -5,10 +5,7 @@
  * Document numbers are ALREADY masked by backend — never render raw NIK/passport.
  */
 import type { ThermalIdentityReceiptData } from './thermalReceiptTypes';
-import {
-  formatHotelDateTimeIndonesian,
-  formatIdentityStatus,
-} from './thermalReceiptFormatters';
+import { formatHotelDateTimeIndonesian } from './thermalReceiptFormatters';
 
 interface Props {
   data: ThermalIdentityReceiptData;
@@ -39,7 +36,7 @@ export default function ThermalIdentityReceipt({ data }: Props) {
       <div className="thermal-divider" />
 
       {/* ── Title ── */}
-      <div className="thermal-title">BUKTI JAMINAN IDENTITAS</div>
+      <div className="thermal-title">DEPOSIT IDENTITAS</div>
 
       {/* ── Reservation Info ── */}
       <div className="thermal-section">
@@ -64,22 +61,18 @@ export default function ThermalIdentityReceipt({ data }: Props) {
         <ThermalRow label="No. Dokumen" value={identity.document_number_masked ?? '—'} mono />
         <ThermalRow label="Diterima" value={formatHotelDateTimeIndonesian(identity.created_at)} mono />
         <ThermalRow label="Oleh" value={identity.received_by} />
-        <ThermalRow label="Status" value={formatIdentityStatus(identity.status)} />
         {identity.storage_location && (
           <ThermalRow label="Lokasi Penyimpanan" value={identity.storage_location} />
         )}
         {identity.notes && (
           <ThermalRow label="Catatan" value={identity.notes} />
         )}
-        {identity.status === 'RETURNED' && (
-          <>
-            <ThermalRow label="Dikembalikan" value={formatHotelDateTimeIndonesian(identity.returned_at ?? '')} mono />
-            <ThermalRow label="Oleh" value={identity.returned_by ?? '—'} />
-          </>
-        )}
       </div>
 
       <div className="thermal-divider" />
+
+      {/* ── Status (dominan) ── */}
+      <div className="thermal-status">DITERIMA</div>
 
       {/* ── Signature Area ── */}
       <div className="thermal-signatures">
@@ -102,7 +95,7 @@ export default function ThermalIdentityReceipt({ data }: Props) {
           {formatHotelDateTimeIndonesian(printedAt)}
         </div>
         <div className="thermal-footer-note">
-          Dokumen identitas tamu yang ditahan selama masa menginap.
+          Dokumen identitas tamu yang dititipkan selama masa menginap.
         </div>
       </div>
     </div>

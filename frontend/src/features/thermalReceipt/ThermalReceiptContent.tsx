@@ -107,7 +107,7 @@ export default function ThermalReceiptContent({ data, financials }: Props) {
 
       <div className="thermal-divider" />
 
-      {/* ── Status ── */}
+      {/* ── Status (dominan) ── */}
       <div className="thermal-status">{formatPaymentStatus(financials.payment_status)}</div>
 
       {/* ── Footer ── */}

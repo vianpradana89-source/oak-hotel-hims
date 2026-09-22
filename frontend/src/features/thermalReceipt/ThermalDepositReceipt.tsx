@@ -8,7 +8,6 @@ import {
   formatHotelCurrency,
   formatHotelDateTimeIndonesian,
   formatPaymentMethod,
-  formatDepositStatus,
 } from './thermalReceiptFormatters';
 
 interface Props {
@@ -40,7 +39,7 @@ export default function ThermalDepositReceipt({ data }: Props) {
       <div className="thermal-divider" />
 
       {/* ── Title ── */}
-      <div className="thermal-title">BUKTI DEPOSIT UANG</div>
+      <div className="thermal-title">DEPOSIT UANG</div>
 
       {/* ── Deposit Info ── */}
       <div className="thermal-section">
@@ -80,16 +79,15 @@ export default function ThermalDepositReceipt({ data }: Props) {
           label="Oleh"
           value={deposit.received_by}
         />
-        <ThermalRow
-          label="Status"
-          value={formatDepositStatus(deposit.status)}
-        />
         {deposit.notes && (
           <ThermalRow label="Catatan" value={deposit.notes} />
         )}
       </div>
 
       <div className="thermal-divider" />
+
+      {/* ── Status (dominan) ── */}
+      <div className="thermal-status">DITERIMA</div>
 
       {/* ── Note ── */}
       <div className="thermal-note">
