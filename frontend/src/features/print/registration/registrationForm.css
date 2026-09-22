@@ -74,15 +74,16 @@
 }
 
 /* Terms & Conditions block */
-.reg-doc-terms {
+.reg-doc-terms-list {
   font-size: 12px;
   color: #444;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  background: #fafaf8;
-  border-left: 3px solid var(--doc-accent-color, #c5a880);
-  border-radius: 2px;
-  padding: 6px 8px;
+  line-height: 1.5;
+  margin: 4px 0 0 0;
+  padding-left: 1.2em;
+}
+
+.reg-doc-term-item {
+  margin-bottom: 3px;
 }
 
 /* Signature section */
@@ -105,7 +106,7 @@
   font-size: 11px;
   font-weight: 700;
   color: #333;
-  margin-bottom: 32px;
+  margin-bottom: 46px;
 }
 
 .reg-doc-signature-line {
@@ -154,6 +155,108 @@
   color: #555;
 }
 
+.reg-form-clauses-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.reg-form-clause-item {
+  background: #fff;
+  border: 1px solid #d4d0c8;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.reg-form-clause-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.reg-form-clause-number {
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+}
+
+.reg-form-clause-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.reg-form-clause-btn {
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid #d4d0c8;
+  border-radius: 4px;
+  background: #f5f5f5;
+  cursor: pointer;
+  color: #666;
+  transition: all 0.15s;
+}
+
+.reg-form-clause-btn:hover:not(:disabled) {
+  background: #e8e5dd;
+}
+
+.reg-form-clause-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.reg-form-clause-textarea {
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid #e8e5dd;
+  border-radius: 4px;
+  padding: 6px 8px;
+  resize: vertical;
+  font-family: inherit;
+  color: #333;
+  min-height: 60px;
+}
+
+.reg-form-clause-textarea:focus {
+  outline: none;
+  border-color: var(--doc-primary-color, #1b4332);
+  box-shadow: 0 0 0 2px rgba(27, 67, 50, 0.1);
+}
+
+.reg-form-add-clause-btn {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--doc-primary-color, #1b4332);
+  background: transparent;
+  border: 1px dashed var(--doc-primary-color, #1b4332);
+  border-radius: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+  align-self: flex-start;
+}
+
+.reg-form-add-clause-btn:hover:not(:disabled) {
+  background: rgba(27, 67, 50, 0.05);
+}
+
+.reg-form-add-clause-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-style: dotted;
+}
+
+.reg-form-clause-warning {
+  font-size: 11px;
+  color: #999;
+  text-align: center;
+}
+
 .reg-form-reset-btn {
   font-size: 11px;
   font-weight: 600;
@@ -169,6 +272,44 @@
 
 .reg-form-reset-btn:hover {
   background: #e6e2d8;
+}
+
+.reg-form-save-btn {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: #1b4332;
+  border: 1px solid #1b4332;
+  border-radius: 5px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.reg-form-save-btn:hover:not(:disabled) {
+  background: #2d6a4f;
+  border-color: #2d6a4f;
+}
+
+.reg-form-save-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.reg-form-save-success {
+  background: #2d6a4f !important;
+  border-color: #2d6a4f !important;
+}
+
+.reg-form-save-notice {
+  font-size: 11px;
+  color: #1b4332;
+  background: #d8f5e0;
+  border: 1px solid #b7e4c7;
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-top: 4px;
 }
 
 .reg-form-terms-editor {

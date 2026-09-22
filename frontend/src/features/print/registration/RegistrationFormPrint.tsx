@@ -6,6 +6,7 @@ import {
   formatHotelCurrency,
 } from '../../documents/GuestDocumentContent';
 import { maskIdentityNumber } from './registrationFormDraft';
+import type { RegistrationFormClause } from './registrationFormDraft';
 
 export interface RegistrationFormPrintProps {
   reservation: any;
@@ -39,8 +40,8 @@ export interface RegistrationFormPrintProps {
     received_by: string;
     created_at: string;
   } | null;
-  /** Editable Terms & Conditions content */
-  terms: string;
+  /** Editable Terms & Conditions as structured clauses */
+  terms: RegistrationFormClause[];
 }
 
 export default function RegistrationFormPrint({
@@ -87,6 +88,40 @@ export default function RegistrationFormPrint({
   };
 
   const roomNumbers = getRoomNumbers();
+
+  // Build room type name display: unique types from current + siblings, preserving order
+  const getRoomTypeNames = (): string | null => {
+    const currentType = res?.room_type_name || res?.room_type || null;
+    const siblings = siblingReservations ?? [];
+
+    const seen = new Set<string>();
+    const types: string[] = [];
+
+    // Add current reservation type first
+    if (currentType) {
+      const trimmed = currentType.trim();
+      if (trimmed) {
+        seen.add(trimmed);
+        types.push(trimmed);
+      }
+    }
+
+    // Add sibling types in order
+    for (const sib of siblings) {
+      const sibType = sib?.room_type_name || null;
+      if (sibType) {
+        const trimmed = sibType.trim();
+        if (trimmed && !seen.has(trimmed)) {
+          seen.add(trimmed);
+          types.push(trimmed);
+        }
+      }
+    }
+
+    return types.length > 0 ? types.join(', ') : null;
+  };
+
+  const roomTypeNames = getRoomTypeNames();
 
   return (
     <OakLetterhead
@@ -162,7 +197,7 @@ export default function RegistrationFormPrint({
           </div>
           <div>
             <div className="reg-doc-field-label">Tipe Kamar</div>
-            <div className="reg-doc-field-value">{roomTypeName}</div>
+            <div className="reg-doc-field-value">{roomTypeNames || roomTypeName}</div>
           </div>
           {roomNumbers ? (
             <div>
@@ -231,10 +266,18 @@ export default function RegistrationFormPrint({
       ) : null}
 
       {/* 5. Terms & Conditions */}
-      <div className="reg-doc-section reg-doc-terms-section">
-        <div className="oak-doc-section-title">Ketentuan & Syarat</div>
-        <div className="reg-doc-terms">{terms}</div>
-      </div>
+      {terms && terms.length > 0 && (
+        <div className="reg-doc-section reg-doc-terms-section">
+          <div className="oak-doc-section-title">Ketentuan &amp; Syarat</div>
+          <ol className="reg-doc-terms-list">
+            {terms.map((clause, index) => (
+              <li key={index} className="reg-doc-term-item">
+                {clause.text}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
 
       {/* 7. Tanda Tangan */}
       <div className="reg-doc-section reg-doc-signature-section">

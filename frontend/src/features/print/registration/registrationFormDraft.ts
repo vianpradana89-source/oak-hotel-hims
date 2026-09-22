@@ -2,21 +2,26 @@
  * Form Registrasi - Draft & Constants
  *
  * Default Terms & Conditions (Bahasa Indonesia) untuk Form Registrasi A4.
- * Terms ini bersifat editable per-session; tidak disimpan ke database.
+ * Terms ini bersifat structured clauses (array of objects).
+ * Tersimpan per-property di database via API.
  */
 
-export const REGISTRATION_FORM_DEFAULT_TERMS = [
-  'Tamu wajib menunjukkan identitas resmi yang masih berlaku (KTP / SIM / Paspor) pada saat check-in.',
-  'Waktu check-in mulai pukul 14.00 WIB dan check-out paling lambat pukul 12.00 WIB, kecuali terdapat kesepakatan lain dengan hotel.',
-  'Deposit digunakan sebagai jaminan atas tagihan tambahan, kerusakan, atau kehilangan selama masa menginap.',
-  'Hotel dapat memperhitungkan biaya kerusakan, kehilangan, atau tagihan tambahan terhadap deposit sesuai kondisi aktual.',
-  'Sisa deposit dikembalikan setelah proses check-out dan pemeriksaan kamar selesai, sesuai metode dan prosedur hotel.',
-  'Tamu bertanggung jawab menggunakan kamar dan fasilitas hotel dengan baik selama masa menginap.',
-  'Tamu bertanggung jawab menjaga barang pribadi dan barang berharga selama berada di hotel.',
-  'Tamu wajib mematuhi ketentuan keamanan, ketertiban, kebijakan merokok, serta ketentuan jumlah tamu yang berlaku di hotel.',
-  'Perubahan tanggal, pembatalan, no-show, dan refund mengikuti kebijakan reservasi atau rate plan yang berlaku pada reservasi tersebut.',
-  'Dengan menandatangani formulir ini, tamu menyatakan bahwa data yang diberikan benar dan menyetujui ketentuan yang tercantum.',
-].join('\n');
+export interface RegistrationFormClause {
+  text: string;
+}
+
+export const REGISTRATION_FORM_DEFAULT_TERM_ITEMS: RegistrationFormClause[] = [
+  { text: 'Tamu wajib menunjukkan identitas resmi yang masih berlaku (KTP / SIM / Paspor) pada saat check-in.' },
+  { text: 'Waktu check-in mulai pukul 14.00 WIB dan check-out paling lambat pukul 12.00 WIB, kecuali terdapat kesepakatan lain dengan hotel.' },
+  { text: 'Deposit digunakan sebagai jaminan atas tagihan tambahan, kerusakan, atau kehilangan selama masa menginap.' },
+  { text: 'Hotel dapat memperhitungkan biaya kerusakan, kehilangan, atau tagihan tambahan terhadap deposit sesuai kondisi aktual.' },
+  { text: 'Sisa deposit dikembalikan setelah proses check-out dan pemeriksaan kamar selesai, sesuai metode dan prosedur hotel.' },
+  { text: 'Tamu bertanggung jawab menggunakan kamar dan fasilitas hotel dengan baik selama masa menginap.' },
+  { text: 'Tamu bertanggung jawab menjaga barang pribadi dan barang berharga selama berada di hotel.' },
+  { text: 'Tamu wajib mematuhi ketentuan keamanan, ketertiban, kebijakan merokok, serta ketentuan jumlah tamu yang berlaku di hotel.' },
+  { text: 'Perubahan tanggal, pembatalan, no-show, dan refund mengikuti kebijakan reservasi atau rate plan yang berlaku pada reservasi tersebut.' },
+  { text: 'Dengan menandatangani formulir ini, tamu menyatakan bahwa data yang diberikan benar dan menyetujui ketentuan yang tercantum.' },
+];
 
 /**
  * Mask identity number for safe frontend rendering.

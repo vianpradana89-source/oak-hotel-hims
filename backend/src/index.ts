@@ -104,6 +104,7 @@ import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
 import { createDocumentRouter } from './domains/documents/documentRouter';
 import { createPropertyPaymentInstructionsRouter } from './domains/propertyPaymentInstructions/propertyPaymentInstructionsRouter';
+import { createPropertyRegistrationFormTermsRouter } from './domains/registrationFormTerms/registrationFormTermsRouter';
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
 import {
@@ -7987,6 +7988,8 @@ app.use('/api/properties', createFrontOfficeSettingsRouter(pool));
 app.use('/api/front-office', createFrontOfficeSettingsRouter(pool));
 app.use('/api/settings/property/payment-instructions', createPropertyPaymentInstructionsRouter(pool));
 app.use('/api/properties', createPropertyPaymentInstructionsRouter(pool));
+app.use('/api/settings/property/registration-form/terms', createPropertyRegistrationFormTermsRouter(pool));
+app.use('/api/properties', createPropertyRegistrationFormTermsRouter(pool));
 
 // RM-1C Room Master domain routes (mounted after all legacy /api/rooms registrations)
 app.use('/api/room-categories', createRoomCategoriesRouter(pool));
