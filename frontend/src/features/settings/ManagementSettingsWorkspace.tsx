@@ -10,6 +10,7 @@ import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { uploadPropertyLogo, deletePropertyLogo } from '../propertySettings/propertyBrandingApi';
 
 export type SettingsCategoryKey =
   | 'property'
@@ -53,6 +54,7 @@ export interface ManagementSettingsWorkspaceProps {
   onRefreshProperties?: () => void;
   onPermissionsUpdated?: (newMatrixMap: Record<string, string[]>) => void;
   onFeatureFlagUpdated?: (featureKey: string, enabled: boolean) => void;
+  onLogoUploaded?: () => void;
 }
 
 export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspaceProps> = ({
@@ -67,6 +69,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   onSelectProperty,
   onRefreshProperties,
   onFeatureFlagUpdated,
+  onLogoUploaded,
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -75,6 +78,8 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [hrSubTab, setHrSubTab] = useState<'STAFF' | 'ATTENDANCE' | 'ROLE_POLICY'>('STAFF');
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [isDeletingLogo, setIsDeletingLogo] = useState(false);
 
   // Sync initialCategory if changed externally (e.g. from HK shortcut)
   useEffect(() => {
@@ -171,6 +176,46 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
         message: err.message || 'Gagal menyimpan pengaturan housekeeping'
       });
       throw err;
+    }
+  };
+
+  // Handle Logo Upload
+  const handleLogoUpload = async (file: File) => {
+    setIsUploadingLogo(true);
+    try {
+      await uploadPropertyLogo(propertyId, file);
+      setFeedback({
+        type: 'success',
+        message: 'Logo properti berhasil diunggah.',
+      });
+      onLogoUploaded?.();
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err.message || 'Gagal mengunggah logo.',
+      });
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
+
+  // Handle Logo Delete
+  const handleLogoDelete = async () => {
+    setIsDeletingLogo(true);
+    try {
+      await deletePropertyLogo(propertyId);
+      setFeedback({
+        type: 'success',
+        message: 'Logo properti berhasil dihapus.',
+      });
+      onLogoUploaded?.();
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err.message || 'Gagal menghapus logo.',
+      });
+    } finally {
+      setIsDeletingLogo(false);
     }
   };
 
@@ -715,6 +760,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
               propertyId={propertyId}
               initialBranding={activeBranding || getFallbackPropertyBranding(propertyId, activeProperty?.name, activeProperty?.property_code)}
               onSaveBranding={onSaveBranding}
+              onUploadLogo={handleLogoUpload}
+              onDeleteLogo={handleLogoDelete}
+              isUploading={isUploadingLogo}
+              isDeleting={isDeletingLogo}
             />
           )}
 

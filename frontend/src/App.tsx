@@ -387,6 +387,17 @@ function AppContent() {
       [saved.propertyId]: saved,
     }));
   };
+
+  // Refresh branding after logo upload/delete
+  const handleLogoUploaded = async () => {
+    if (propertyId) {
+      const refreshed = await fetchPropertyBranding(propertyId);
+      setPropertyBrandings((prev) => ({
+        ...prev,
+        [propertyId]: refreshed,
+      }));
+    }
+  };
   const [calendarSearch, setCalendarSearch] = useState('');
   const [calendarRoomSearch, setCalendarRoomSearch] = useState('');
   const [calendarRoomCategoryFilter, setCalendarRoomCategoryFilter] = useState('');
@@ -4447,6 +4458,7 @@ function AppContent() {
             activeProperty={properties.find((p: any) => p.id === propertyId)}
             activeBranding={activeBranding || getFallbackPropertyBranding(propertyId, properties.find((p: any) => p.id === propertyId)?.name, properties.find((p: any) => p.id === propertyId)?.property_code)}
             onSaveBranding={handleSaveBranding}
+            onLogoUploaded={handleLogoUploaded}
             employees={employees}
             payroll={payroll}
             initialCategory={initialSettingsCategory}

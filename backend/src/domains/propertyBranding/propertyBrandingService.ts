@@ -5,6 +5,11 @@ import {
   isValidHexColor,
   DEFAULT_BRANDING,
 } from './propertyBrandingTypes';
+import {
+  isBrandingStorageKey,
+  deleteBrandingFile,
+  assertBrandingKeyForProperty,
+} from './brandingStorageService';
 
 export class PropertyBrandingError extends Error {
   code: string;
@@ -173,18 +178,47 @@ export async function updatePropertyBranding(
     [propertyId, displayName, shortName, tagline, primaryColor, accentColor, logoUrl, compactLogoUrl]
   );
 
-  const row = upsertRes.rows[0];
-  return {
-    id: row.id,
-    property_id: row.property_id,
-    display_name: row.display_name,
-    short_name: row.short_name,
-    tagline: row.tagline,
-    primary_color: row.primary_color,
-    accent_color: row.accent_color,
-    logo_url: row.logo_url,
-    compact_logo_url: row.compact_logo_url,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-  };
+   const row = upsertRes.rows[0];
+   return {
+     id: row.id,
+     property_id: row.property_id,
+     display_name: row.display_name,
+     short_name: row.short_name,
+     tagline: row.tagline,
+     primary_color: row.primary_color,
+     accent_color: row.accent_color,
+     logo_url: row.logo_url,
+     compact_logo_url: row.compact_logo_url,
+     created_at: row.created_at,
+     updated_at: row.updated_at,
+   };
+}
+
+/**
+ * Cleanup old managed branding files when logo is replaced or removed.
+ * Best-effort: logs errors but never throws.
+ */
+export async function cleanupOldBrandingFiles(
+  pool: Pool,
+  propertyId: number,
+  oldLogoUrl: string | null,
+  oldCompactLogoUrl: string | null
+): Promise<void> {
+  const keysToDelete = new Set<string>();
+
+  // Only delete if key belongs to THIS property (prevent cross-property cleanup)
+  if (oldLogoUrl && isBrandingStorageKey(oldLogoUrl) && assertBrandingKeyForProperty(oldLogoUrl, propertyId)) {
+    keysToDelete.add(oldLogoUrl);
+  }
+  if (oldCompactLogoUrl && isBrandingStorageKey(oldCompactLogoUrl) && assertBrandingKeyForProperty(oldCompactLogoUrl, propertyId)) {
+    keysToDelete.add(oldCompactLogoUrl);
+  }
+
+  for (const key of keysToDelete) {
+    try {
+      await deleteBrandingFile(key);
+    } catch (err: any) {
+      console.warn('[BRANDING CLEANUP] Failed to delete old file %s: %s', key, err?.message || err);
+    }
+  }
 }

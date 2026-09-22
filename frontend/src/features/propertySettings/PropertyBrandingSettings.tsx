@@ -1,28 +1,39 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { PropertyBrandingConfig } from './propertyBrandingTypes';
 import { isValidHexColor } from './propertyBrandingTypes';
 import { Card, CardHeader, CardTitle, CardContent } from '../../design-system/Card';
 import { Button } from '../../design-system/Button';
 import { Input } from '../../design-system/Input';
 import { OakLogo } from '../../design-system/OakLogo';
+import { getLogoServeUrl } from './propertyBrandingApi';
 
 export interface PropertyBrandingSettingsProps {
   propertyId: number;
   initialBranding: PropertyBrandingConfig;
   onSaveBranding: (updated: PropertyBrandingConfig) => Promise<void> | void;
+  onUploadLogo: (file: File) => Promise<void>;
+  onDeleteLogo: () => Promise<void>;
   isLoading?: boolean;
+  isUploading?: boolean;
+  isDeleting?: boolean;
 }
 
 export const PropertyBrandingSettings: React.FC<PropertyBrandingSettingsProps> = ({
-  propertyId: _propertyId,
+  propertyId,
   initialBranding,
   onSaveBranding,
+  onUploadLogo,
+  onDeleteLogo,
   isLoading = false,
+  isUploading = false,
+  isDeleting = false,
 }) => {
   const [form, setForm] = useState<PropertyBrandingConfig>(initialBranding);
   const [isSaving, setIsSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isConfirmDelete, setIsConfirmDelete] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setForm(initialBranding);
@@ -53,6 +64,54 @@ export const PropertyBrandingSettings: React.FC<PropertyBrandingSettingsProps> =
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Client-side validation
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      setErrorMessage('Format file tidak didukung. Gunakan PNG, JPEG, atau WebP.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setErrorMessage('Ukuran file melebihi batas maksimal 2 MB.');
+      return;
+    }
+
+    setErrorMessage(null);
+    try {
+      await onUploadLogo(file);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Gagal mengunggah logo.');
+    } finally {
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleDeleteLogo = async () => {
+    if (!isConfirmDelete) {
+      setIsConfirmDelete(true);
+      return;
+    }
+
+    setErrorMessage(null);
+    try {
+      await onDeleteLogo();
+      setIsConfirmDelete(false);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Gagal menghapus logo.');
+      setIsConfirmDelete(false);
+    }
+  };
+
+  const handleCancelDelete = () => {
+    setIsConfirmDelete(false);
   };
 
   if (isLoading) {
@@ -172,18 +231,74 @@ export const PropertyBrandingSettings: React.FC<PropertyBrandingSettingsProps> =
               </div>
             </div>
 
-            {/* Official Logo Destination Notice */}
-            <div className="p-3.5 bg-amber-50/70 border border-amber-200/80 rounded-xl text-xs text-amber-900 space-y-1">
-              <div className="font-semibold flex items-center gap-1.5 text-amber-800">
-                <svg className="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                Aset Logo Resmi Hotel
+            {/* Logo Upload Section */}
+            <div className="pt-4 border-t border-slate-200">
+              <div className="flex items-center gap-4">
+                {/* Logo Preview */}
+                <div className="w-20 h-20 border border-slate-200 rounded-lg flex items-center justify-center overflow-hidden bg-white shrink-0">
+                  {form.logoUrl ? (
+                    <img
+                      src={getLogoServeUrl(form.logoUrl, propertyId) || form.logoUrl}
+                      alt="Logo properti"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <span className="text-[10px] text-slate-400 text-center px-1">Tidak ada logo</span>
+                  )}
+                </div>
+
+                {/* Upload Controls */}
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleLogoUpload}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      isLoading={isUploading}
+                    >
+                      {form.logoUrl ? 'Ganti Logo' : 'Upload Logo'}
+                    </Button>
+                    {form.logoUrl && (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="danger"
+                          size="sm"
+                          onClick={handleDeleteLogo}
+                          disabled={isDeleting}
+                          isLoading={isDeleting}
+                        >
+                          {isConfirmDelete ? 'Konfirmasi Hapus?' : 'Hapus Logo'}
+                        </Button>
+                        {isConfirmDelete && (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleCancelDelete}
+                            disabled={isDeleting}
+                          >
+                            Batal
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    Format: PNG, JPEG, WebP. Maksimal 2 MB.
+                  </p>
+                </div>
               </div>
-              <p className="text-[11px] text-amber-800/90 leading-relaxed">
-                Aset logo resmi hotel dikelola melalui direktori statis <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-[10px]">frontend/src/assets/branding/</code>.
-                Simpan file logo resmi (<code className="font-mono text-[10px]">oak-logo-full.png</code>, <code className="font-mono text-[10px]">oak-logo-mark.png</code>) pada folder tersebut untuk digunakan secara otomatis.
-              </p>
             </div>
 
             {/* Live Preview Panel */}
