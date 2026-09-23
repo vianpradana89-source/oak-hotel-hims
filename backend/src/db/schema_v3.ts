@@ -5446,5 +5446,26 @@ export async function initializeDatabase(pool: Pool) {
     `);
   }
 
+  // Migration: complimentary_access_v1 — Atomic Complimentary Permission Foundation
+  const compAccessCheck = await pool.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_access_v1'`
+  );
+  if ((compAccessCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      INSERT INTO permissions (resource, action, key, description, is_system)
+      VALUES
+        ('reservations.complimentary', 'view', 'reservations.complimentary.view', 'Melihat reservasi yang mendapat perlakuan komplementer', TRUE),
+        ('reservations.complimentary', 'request', 'reservations.complimentary.request', 'Meminta perubahan harga reservasi menjadi komplementer', TRUE),
+        ('reservations.complimentary', 'approve', 'reservations.complimentary.approve', 'Menyetujui permintaan komplementer pada reservasi', TRUE),
+        ('reservations.complimentary', 'revoke', 'reservations.complimentary.revoke', 'Membatalkan persetujuan komplementer pada reservasi', TRUE)
+      ON CONFLICT (key) DO NOTHING;
+    `);
+    await pool.query(`
+      INSERT INTO schema_migrations (version)
+      VALUES ('complimentary_access_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }
