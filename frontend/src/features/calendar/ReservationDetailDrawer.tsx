@@ -77,6 +77,7 @@ export default function ReservationDetailDrawer({
   const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
   const [isAddChargeModalOpen, setIsAddChargeModalOpen] = useState<boolean>(false);
   const [isAddRoomModalOpen, setIsAddRoomModalOpen] = useState<boolean>(false);
+  const [isFooterMoreActionsOpen, setIsFooterMoreActionsOpen] = useState(false);
   const [activeRoomFindings, setActiveRoomFindings] = useState<any[]>([]);
   const [isResolveModalOpen, setIsResolveModalOpen] = useState<boolean>(false);
   const [paymentDraft, setPaymentDraft] = useState<string>('');
@@ -1676,15 +1677,6 @@ export default function ReservationDetailDrawer({
         <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-3 flex-wrap">
           {/* Left: Destructive or Informational State */}
           <div className="flex items-center gap-2">
-            {isBooked && (
-              <button
-                type="button"
-                onClick={() => onCancel(data.id)}
-                className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 font-semibold text-xs rounded-xl border border-rose-200 transition-colors cursor-pointer"
-              >
-                Batalkan Reservasi
-              </button>
-            )}
             {isCheckedOut && (
               <div className="text-xs text-stone-500 font-medium flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-stone-400"></span>
@@ -1711,25 +1703,6 @@ export default function ReservationDetailDrawer({
                 >
                   Edit Reservasi
                 </button>
-                {canShowBookedRateCorrection(data) && (
-                  <button
-                    type="button"
-                    onClick={() => setIsRepriceModalOpen(true)}
-                    className="px-3 py-2 bg-white hover:bg-emerald-50 text-emerald-900 font-semibold text-xs rounded-xl border border-emerald-200 transition-colors cursor-pointer"
-                  >
-                    Koreksi Tarif
-                  </button>
-                )}
-
-                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
-                  <button
-                    type="button"
-                    onClick={() => onOpenStayChange(data)}
-                    className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                  >
-                    {CHECKOUT_DATE_CHANGE_LABEL}
-                  </button>
-                )}
 
                 <button
                   type="button"
@@ -1751,6 +1724,55 @@ export default function ReservationDetailDrawer({
                   <span>{isCheckinReady ? '✓' : '🔒'}</span>
                   <span>Check-in Tamu</span>
                 </button>
+
+                {/* More Actions Dropdown — always present for BOOKED */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setIsFooterMoreActionsOpen((v) => !v)}
+                    className="px-2.5 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                  >
+                    ⋯ Lainnya
+                  </button>
+                  {isFooterMoreActionsOpen && (
+                    <div
+                      className="absolute right-0 bottom-full mb-2 w-[220px] bg-white border border-stone-200 rounded-xl shadow-lg z-50 overflow-hidden"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="py-1">
+                        {canShowBookedRateCorrection(data) && (
+                          <button
+                            type="button"
+                            onClick={() => { setIsFooterMoreActionsOpen(false); setIsRepriceModalOpen(true); }}
+                            className="w-full text-left px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-50 transition-colors cursor-pointer"
+                          >
+                            Koreksi Tarif
+                          </button>
+                        )}
+                        {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
+                          <button
+                            type="button"
+                            onClick={() => { setIsFooterMoreActionsOpen(false); onOpenStayChange(data); }}
+                            className="w-full text-left px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-50 transition-colors cursor-pointer"
+                          >
+                            {CHECKOUT_DATE_CHANGE_LABEL}
+                          </button>
+                        )}
+                        {(canShowBookedRateCorrection(data) ||
+                          (onOpenStayChange && canShowCheckoutDateChange(data.status))) && (
+                          <div className="border-t border-stone-100 my-1" />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => { setIsFooterMoreActionsOpen(false); onCancel(data.id); }}
+                          className="w-full text-left px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer"
+                        >
+                          Batalkan Reservasi
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
 
