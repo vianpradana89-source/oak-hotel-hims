@@ -107,6 +107,7 @@ import { createPropertyPaymentInstructionsRouter } from './domains/propertyPayme
 import { createPropertyRegistrationFormTermsRouter } from './domains/registrationFormTerms/registrationFormTermsRouter';
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
+import { addRoomToBooking } from './domains/reservations/addRoomService';
 import {
   createPendingIdentityDocumentUpload,
   resolveAuthoritativeIdentityPropertyId
@@ -3488,6 +3489,118 @@ app.get('/api/bookings/:bid/reservations', async (req, res) => {
     res.json({ status: 'OK', data: reservationsResult.rows.map(withReservationHotelDates) });
   } catch (err: any) {
     res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// POST add a single reservation child to an existing booking (Add-Room-to-Group Phase 1)
+app.post('/api/bookings/:bid/reservations', async (req, res) => {
+  // Idempotency key is REQUIRED for this endpoint
+  const idempotencyKey = req.headers['idempotency-key'] || req.headers['Idempotency-Key'];
+  if (!idempotencyKey || String(idempotencyKey).trim() === '') {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'IDEMPOTENCY_KEY_REQUIRED',
+      message: 'Idempotency-Key header is required for adding rooms to booking'
+    });
+  }
+
+  const bidParam = String(req.params.bid || '').toUpperCase().trim();
+  if (!bidParam) {
+    return res.status(400).json({ status: 'ERROR', message: 'BID is required' });
+  }
+  try {
+  const payload = req.body || {};
+  const propertyId = parsePropertyId(payload.property_id, 'property_id');
+  await assertPropertyExists(pool, propertyId);
+
+  // Reject unsupported financial fields explicitly
+  const forbiddenFinancialFields = [
+    'amount_paid',
+    'payment_method',
+    'discount_amount',
+    'discount_percent',
+    'discount_reason',
+    'manual_override',
+    'manual_override_reason',
+    'bukti_bayar_path',
+    'quote_grand_total',
+    'balance',
+    'remaining_balance',
+    'payment_status'
+  ];
+  for (const field of forbiddenFinancialFields) {
+    if (payload[field] !== undefined && payload[field] !== null) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'UNSUPPORTED_ADD_ROOM_FINANCIAL_FIELDS',
+        message: `Field '${field}' is not supported for adding room to booking`
+      });
+    }
+  }
+
+  const requiredFields = ['room_id', 'guest_name', 'check_in', 'check_out', 'rate_plan_id'];
+  for (const field of requiredFields) {
+    if (payload[field] === undefined || payload[field] === null || payload[field] === '') {
+      return res.status(400).json({ status: 'ERROR', code: `${field.toUpperCase()}_REQUIRED`, message: `${field} is required` });
+    }
+  }
+
+
+    const result = await addRoomToBooking(pool, bidParam, {
+      property_id: propertyId,
+      room_id: Number(payload.room_id),
+      rate_plan_id: Number(payload.rate_plan_id),
+      guest_name: String(payload.guest_name || '').trim(),
+      guest_phone: payload.guest_phone ? String(payload.guest_phone) : null,
+      guest_segment: payload.guest_segment ? String(payload.guest_segment) : null,
+      check_in: payload.check_in,
+      check_out: payload.check_out,
+      stay_type: payload.stay_type || 'OVERNIGHT',
+      start_at: payload.start_at || null,
+      end_at: payload.end_at || null,
+      created_by: payload.created_by ? String(payload.created_by) : null,
+      correlation_id: payload.correlation_id || null,
+      special_requests: payload.special_requests || null,
+      ktp_path: payload.ktp_path || null,
+    });
+
+    // Broadcast event after successful commit (same pattern as POST /api/reservations)
+    try {
+      broadcastEvent('ReservationCreated', {
+        reservation_id: result.data.reservation.id,
+        reservation_number: result.data.reservation.booking_number,
+        bid: result.data.bid,
+        booking_id: result.data.booking_id,
+        status: 'BOOKED',
+        guest: { name: payload.guest_name, phone: payload.guest_phone },
+        room_id: result.data.reservation.room_id,
+        check_in: result.data.reservation.check_in,
+        check_out: result.data.reservation.check_out,
+        stay_sequence: result.data.stay_sequence,
+        total_price: result.data.reservation.total_price,
+        correlation_id: result.data.correlation_id,
+        timestamp: new Date().toISOString()
+      }, propertyId);
+    } catch (broadcastErr) {
+      console.error('Failed to broadcast ReservationCreated', broadcastErr);
+    }
+
+    await persistIdempotencyResult(req, res, 201, result);
+    return res.status(201).json(result);
+  } catch (err: any) {
+    if (isRoomOverlapViolation(err)) {
+      await persistIdempotencyResult(req, res, 409, ROOM_OVERLAP_RESPONSE);
+      return sendRoomOverlapConflict(res);
+    }
+    const statusCode = err.statusCode || 500;
+    const code = err.code || 'INTERNAL_ERROR';
+    const message = err.message || 'Internal server error';
+    const responseObj: any = { status: 'ERROR', code, message };
+    if (err.conflictDetails) {
+      responseObj.conflict_details = err.conflictDetails;
+    }
+    await persistIdempotencyResult(req, res, statusCode, responseObj);
+    return res.status(statusCode).json(responseObj);
   }
 });
 
