@@ -284,7 +284,7 @@ export default function RegistrationFormPrint({
         <div className="oak-doc-section-title">Tanda Tangan</div>
         <div className="reg-doc-signature-row">
           <div className="reg-doc-signature-col">
-            <div className="reg-doc-signature-label">Petugas Hotel</div>
+            <div className="reg-doc-signature-label">Receptionist</div>
             <div className="reg-doc-signature-line" />
           </div>
           <div className="reg-doc-signature-col">
