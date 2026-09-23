@@ -6,6 +6,7 @@ import { canShowBookedRateCorrection } from './bookedReservationReprice';
 import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
+import { AddRoomToBookingModal } from './AddRoomToBookingModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
@@ -75,6 +76,7 @@ export default function ReservationDetailDrawer({
   const [isRepriceModalOpen, setIsRepriceModalOpen] = useState<boolean>(false);
   const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
   const [isAddChargeModalOpen, setIsAddChargeModalOpen] = useState<boolean>(false);
+  const [isAddRoomModalOpen, setIsAddRoomModalOpen] = useState<boolean>(false);
   const [activeRoomFindings, setActiveRoomFindings] = useState<any[]>([]);
   const [isResolveModalOpen, setIsResolveModalOpen] = useState<boolean>(false);
   const [paymentDraft, setPaymentDraft] = useState<string>('');
@@ -1195,6 +1197,18 @@ export default function ReservationDetailDrawer({
             </div>
           </div>
 
+          {isBooked && activePropId && Boolean(data.bid) && (
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setIsAddRoomModalOpen(true)}
+                className="px-3 py-2 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+              >
+                + Tambah Kamar
+              </button>
+            </div>
+          )}
+
           {isCheckedIn && activePropId && (
             <div className="flex justify-end">
               <button type="button" onClick={() => setIsRoomMoveModalOpen(true)} className="rounded-lg bg-emerald-800 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">
@@ -2210,6 +2224,24 @@ export default function ReservationDetailDrawer({
         )}
       </div>
       {activePropId && <RoomMoveModal isOpen={isRoomMoveModalOpen} reservation={data} propertyId={activePropId} onClose={() => setIsRoomMoveModalOpen(false)} onSuccess={() => { loadFullReservation(); onRefresh(); }} />}
+
+      {isAddRoomModalOpen && activePropId && data.bid && (
+        <AddRoomToBookingModal
+          open={isAddRoomModalOpen}
+          bid={data.bid}
+          propertyId={activePropId}
+          defaultGuestName={data.guest_name || data.booker_name || null}
+          defaultGuestPhone={data.guest_phone || data.booker_phone || null}
+          defaultCheckIn={data.check_in || null}
+          defaultCheckOut={data.check_out || null}
+          onClose={() => setIsAddRoomModalOpen(false)}
+          onSuccess={async () => {
+            await loadFullReservation(data.id);
+            await loadFolio(data.id);
+            onRefresh();
+          }}
+        />
+      )}
 
       {/* GUARANTEE-CLOSE-WARNING: confirmation dialog before closing terminal reservation with unresolved guarantee */}
       <Modal
