@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom';
 import { safeFetchJson } from './calendarApi';
 import { useAuth } from '../auth/AuthContext';
 import { tryBuildDayUseInterval } from '../booking/dayUseInterval';
+import { pricingApi } from '../roomMaster/pricingApi';
+import type { RatePlan } from '../roomMaster/pricingApi';
 import type { BookingCreateAvailability, CreateAvailabilityRoomType } from '../booking/quickBookingAvailability';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -46,16 +48,6 @@ export interface AddRoomSuccessResult {
     projected_group_total: number;
     projected_group_remaining: number;
   };
-}
-
-interface RatePlan {
-  id: number;
-  name: string;
-  code: string;
-  room_type_id: number;
-  rate_type: string;
-  is_active?: unknown;
-  is_archived?: unknown;
 }
 
 interface FormErrors {
@@ -151,35 +143,21 @@ export const AddRoomToBookingModal: React.FC<AddRoomToBookingModalProps> = ({
     if (!open || !propertyId) return;
     let cancelled = false;
 
-    safeFetchJson<{ data?: any[] }>(
-      `/api/pricing/rate-plans?property_id=${propertyId}&is_active=true`,
-      undefined,
-      'Gagal memuat rate plan.',
-      authFetch
-    ).then((result) => {
-      if (cancelled) return;
-      if (result.ok && Array.isArray(result.data?.data)) {
-        const plans: RatePlan[] = result.data.data
-          .filter((rp: any) => rp.is_active !== false && rp.is_archived !== true)
-          .map((rp: any) => ({
-            id: Number(rp.id),
-            name: rp.name || rp.code,
-            code: rp.code,
-            room_type_id: Number(rp.room_type_id),
-            rate_type: rp.rate_type || 'OVERNIGHT',
-            is_active: rp.is_active,
-            is_archived: rp.is_archived,
-          }));
-        setRatePlans(plans);
-      } else {
-        setRatePlans([]);
-      }
-    }).catch(() => {
-      if (!cancelled) setRatePlans([]);
-    });
+    pricingApi
+      .listRatePlans(propertyId, { is_active: true })
+      .then((plans) => {
+        if (cancelled) return;
+        const filtered = plans.filter(
+          (rp) => rp.is_active !== false && rp.is_archived !== true
+        );
+        setRatePlans(filtered);
+      })
+      .catch(() => {
+        if (!cancelled) setRatePlans([]);
+      });
 
     return () => { cancelled = true; };
-  }, [open, propertyId, authFetch]);
+  }, [open, propertyId]);
 
   // ── Load availability when dates are ready ──────────────────────────────
   useEffect(() => {
@@ -274,7 +252,9 @@ export const AddRoomToBookingModal: React.FC<AddRoomToBookingModalProps> = ({
   const compatibleRatePlans = ratePlans.filter(
     (rp) =>
       Number(rp.room_type_id) === Number(selectedRoomTypeId) &&
-      (stayType === 'DAY_USE' ? rp.rate_type === 'DAY_USE' : rp.rate_type !== 'DAY_USE')
+      (stayType === 'DAY_USE'
+        ? rp.rate_type === 'DAY_USE'
+        : rp.rate_type !== 'DAY_USE')
   );
 
   useEffect(() => {
