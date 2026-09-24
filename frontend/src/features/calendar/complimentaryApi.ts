@@ -144,7 +144,7 @@ export async function getComplimentaryRequest(
 ): Promise<ComplimentaryRequest> {
   const result = await safeFetchJson<BackendSuccessResponse<ComplimentaryRequest>>(
     `/api/reservations/${reservationId}/complimentary?property_id=${propertyId}`,
-    undefined,
+    { cache: 'no-store' },
     'Data komplementer belum dapat dimuat.',
     authFetch
   );
