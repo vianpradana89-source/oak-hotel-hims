@@ -584,7 +584,7 @@ export default function ReservationDetailDrawer({
     if (complimentaryRefreshSignalResId !== currentComplimentaryResId) return;
     void loadComplimentary();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [complimentaryRefreshVersionNum]);
+  }, [complimentaryRefreshVersionNum, complimentaryRefreshSignalResId, currentComplimentaryResId, loadComplimentary]);
 
 
   if (!reservation) return null;

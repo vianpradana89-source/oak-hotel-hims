@@ -386,7 +386,7 @@ export default function QuickReservationDetail({
     if (_complimentaryRefreshSignalResId !== _currentComplimentaryResId) return;
     void loadComplimentary();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [_complimentaryRefreshVersionNum]);
+  }, [_complimentaryRefreshVersionNum, _complimentaryRefreshSignalResId, _currentComplimentaryResId, loadComplimentary]);
 
   return (
     <>
