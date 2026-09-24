@@ -5467,5 +5467,65 @@ export async function initializeDatabase(pool: Pool) {
     `);
   }
 
+  // Migration: complimentary_flow_v1 — Reservation Complimentary Workflow Foundation
+  const complimentaryFlowCheck = await pool.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_flow_v1'`
+  );
+  if ((complimentaryFlowCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS reservation_complimentary_requests (
+        id BIGSERIAL PRIMARY KEY,
+        property_id INTEGER NOT NULL REFERENCES properties(id),
+        reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+        status VARCHAR(32) NOT NULL DEFAULT 'PENDING_APPROVAL',
+        category VARCHAR(50) NOT NULL,
+        reason TEXT NOT NULL,
+        original_gross_amount BIGINT NOT NULL DEFAULT 0,
+        pre_complimentary_payable_amount BIGINT NOT NULL DEFAULT 0,
+        applied_adjustment_amount BIGINT NOT NULL DEFAULT 0,
+        requestor_user_id VARCHAR(100),
+        requestor_name_snapshot VARCHAR(150),
+        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        approver_user_id VARCHAR(100),
+        approver_name_snapshot VARCHAR(150),
+        approved_at TIMESTAMPTZ,
+        rejector_user_id VARCHAR(100),
+        rejector_name_snapshot VARCHAR(150),
+        rejected_at TIMESTAMPTZ,
+        rejection_reason TEXT,
+        revoker_user_id VARCHAR(100),
+        revoker_name_snapshot VARCHAR(150),
+        revoked_at TIMESTAMPTZ,
+        revoke_reason TEXT,
+        idempotency_key VARCHAR(100),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT chk_comp_req_status CHECK (status IN ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'REVOKED')),
+        CONSTRAINT chk_comp_req_category CHECK (category IN ('OWNER_GUEST', 'VIP', 'SERVICE_RECOVERY', 'PROMOTION', 'STAFF', 'MANAGEMENT', 'OTHER')),
+        CONSTRAINT chk_comp_req_original_gross_amount CHECK (original_gross_amount >= 0),
+        CONSTRAINT chk_comp_req_pre_complimentary_payable_amount CHECK (pre_complimentary_payable_amount >= 0),
+        CONSTRAINT chk_comp_req_applied_adjustment_amount CHECK (applied_adjustment_amount >= 0)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_comp_req_active
+        ON reservation_complimentary_requests (reservation_id)
+        WHERE status IN ('PENDING_APPROVAL', 'APPROVED');
+
+      CREATE INDEX IF NOT EXISTS idx_comp_req_property_status
+        ON reservation_complimentary_requests (property_id, status);
+
+      CREATE INDEX IF NOT EXISTS idx_comp_req_reservation
+        ON reservation_complimentary_requests (reservation_id);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_comp_req_idempotency_key
+        ON reservation_complimentary_requests (idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+      INSERT INTO schema_migrations (version)
+      VALUES ('complimentary_flow_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }
