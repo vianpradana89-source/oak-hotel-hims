@@ -3,6 +3,8 @@ import { normalizeHotelDate } from './calendarDates';
 import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
+import { ComplimentaryActionModal } from './ComplimentaryActionModal';
+import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 import {
@@ -53,7 +55,7 @@ export default function QuickReservationDetail({
   const [bidCopied, setBidCopied] = useState<boolean>(false);
   const [requestingInspection, setRequestingInspection] = useState<boolean>(false);
   const [inspectionFeedback, setInspectionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const { authFetch } = useAuth();
+  const { authFetch, hasGranularPermission } = useAuth();
 
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number }>({ top: 100, left: 100 });
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -300,6 +302,71 @@ export default function QuickReservationDetail({
 
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
+
+  // COMPLIMENTARY HOOKS
+  const complimentaryLoadSeqRef = useRef(0);
+  const [complimentaryRequest, setComplimentaryRequest] = useState<ComplimentaryRequest | null>(null);
+  const [complimentaryLoading, setComplimentaryLoading] = useState(false);
+  const [complimentaryError, setComplimentaryError] = useState<string | null>(null);
+  const [selectedComplimentaryAction, setSelectedComplimentaryAction] = useState<'REQUEST' | 'APPROVE' | 'REJECT' | 'REVOKE' | null>(null);
+  const [complimentaryModalOpen, setComplimentaryModalOpen] = useState(false);
+
+  const complimentaryReservationId = data?.id ?? null;
+  const hasViewPermission = hasGranularPermission('reservations.complimentary.view');
+  const hasRequestPermission = hasGranularPermission('reservations.complimentary.request');
+  const hasApprovePermission = hasGranularPermission('reservations.complimentary.approve');
+  const hasRevokePermission = hasGranularPermission('reservations.complimentary.revoke');
+
+  const loadComplimentary = useCallback(async () => {
+    const seq = ++complimentaryLoadSeqRef.current;
+    if (!complimentaryReservationId || !activePropId || !hasViewPermission) {
+      setComplimentaryRequest(null);
+      setComplimentaryError(null);
+      setComplimentaryLoading(false);
+      return;
+    }
+    setComplimentaryLoading(true);
+    setComplimentaryError(null);
+    setComplimentaryRequest(null);
+    try {
+      const req = await getComplimentaryRequest(complimentaryReservationId, activePropId, authFetch);
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      setComplimentaryRequest(req);
+    } catch (err) {
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      if (err instanceof ComplimentaryApiError && (err.httpStatus === 404 || err.backendCode === 'NOT_FOUND')) {
+        setComplimentaryRequest(null);
+        return;
+      }
+      if (err instanceof ComplimentaryApiError && (err.httpStatus === 403 || err.backendCode === 'FORBIDDEN')) {
+        setComplimentaryRequest(null);
+        setComplimentaryError(null);
+        return;
+      }
+      setComplimentaryError(err instanceof Error ? err.message : String(err));
+      setComplimentaryRequest(null);
+    } finally {
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      setComplimentaryLoading(false);
+    }
+  }, [complimentaryReservationId, activePropId, authFetch, hasViewPermission]);
+
+  useEffect(() => {
+    void loadComplimentary();
+  }, [loadComplimentary]);
+
+  useEffect(() => {
+    return () => {
+      complimentaryLoadSeqRef.current += 1;
+    };
+  }, []);
+
+  const handleComplimentarySuccess = useCallback(async () => {
+    if (!complimentaryReservationId) return;
+    await loadComplimentary();
+    await Promise.resolve(handleRefresh());
+  }, [complimentaryReservationId, loadComplimentary, handleRefresh]);
+
   return (
     <>
       {/* Context Backdrop: transparent/subtle click-catcher to preserve calendar visibility */}
@@ -421,6 +488,92 @@ export default function QuickReservationDetail({
               </div>
             ) : null}
           </div>
+
+          {/* COMPLIMENTARY SECTION */}
+          {hasViewPermission && (
+            <div className="mt-2 p-2.5 bg-amber-50/50 rounded-xl border border-amber-200">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[11px] font-medium text-amber-700">Komplementer</span>
+                {!complimentaryRequest && !complimentaryLoading && !complimentaryError && hasRequestPermission && (
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedComplimentaryAction('REQUEST'); setComplimentaryModalOpen(true); }}
+                    className="text-[11px] px-2 py-0.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors cursor-pointer"
+                    disabled={complimentaryLoading}
+                  >
+                    Ajukan
+                  </button>
+                )}
+              </div>
+              {complimentaryLoading && !complimentaryRequest && (
+                <div className="text-[11px] text-stone-500">Memuat...</div>
+              )}
+              {complimentaryError && (
+                <div className="mt-1 text-[11px] text-red-600">{complimentaryError}</div>
+              )}
+              {!complimentaryRequest && !complimentaryLoading && !complimentaryError && (
+                <div className="text-[11px] text-stone-500">Belum ada permintaan.</div>
+              )}
+              {complimentaryRequest && (
+                <>
+                  <div className="text-[11px] text-stone-600">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && <span className="text-amber-600">Menunggu persetujuan</span>}
+                    {complimentaryRequest.status === 'APPROVED' && (
+                      <span className="text-emerald-600">
+                        Disetujui
+                        {complimentaryRequest.applied_adjustment_amount != null && (
+                          <> - {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(complimentaryRequest.applied_adjustment_amount)}</>
+                        )}
+                      </span>
+                    )}
+                    {complimentaryRequest.status === 'REJECTED' && <span className="text-red-600">Ditolak</span>}
+                    {complimentaryRequest.status === 'REVOKED' && <span className="text-stone-500">Dicabut</span>}
+                  </div>
+                  {complimentaryRequest.category && (
+                    <div className="text-[11px] text-stone-500">Kategori: <span className="text-stone-700">{complimentaryRequest.category}</span></div>
+                  )}
+                  {complimentaryRequest.reason && (
+                    <div className="text-[11px] text-stone-500">Alasan: <span className="text-stone-700">{complimentaryRequest.reason}</span></div>
+                  )}
+                  {complimentaryRequest.requestor_name_snapshot && complimentaryRequest.requested_at && (
+                    <div className="text-[11px] text-stone-500">Pemohon: {complimentaryRequest.requestor_name_snapshot} - {new Date(complimentaryRequest.requested_at).toLocaleDateString('id-ID')}</div>
+                  )}
+                  {complimentaryRequest.status === 'APPROVED' && complimentaryRequest.approver_name_snapshot && complimentaryRequest.approved_at && (
+                    <div className="text-[11px] text-stone-500">Penyetujui: {complimentaryRequest.approver_name_snapshot} - {new Date(complimentaryRequest.approved_at).toLocaleDateString('id-ID')}</div>
+                  )}
+                  <div className="mt-1 flex gap-1.5">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && hasApprovePermission && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('APPROVE'); setComplimentaryModalOpen(true); }}
+                          className="text-[11px] px-2 py-0.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded transition-colors cursor-pointer"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('REJECT'); setComplimentaryModalOpen(true); }}
+                          className="text-[11px] px-2 py-0.5 bg-red-100 hover:bg-red-200 text-red-800 rounded transition-colors cursor-pointer"
+                        >
+                          Reject
+                        </button>
+                      </>
+                    )}
+                    {complimentaryRequest.status === 'APPROVED' && hasRevokePermission && (
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedComplimentaryAction('REVOKE'); setComplimentaryModalOpen(true); }}
+                        className="text-[11px] px-2 py-0.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded transition-colors cursor-pointer"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Stay Dates & Duration */}
           <div className="grid grid-cols-2 gap-2 p-2.5 bg-white rounded-xl border border-stone-200">
@@ -777,6 +930,24 @@ export default function QuickReservationDetail({
               </div>
             )}
           </div>
+
+
+          {/* COMPLIMENTARY MODAL */}
+          {complimentaryModalOpen && complimentaryReservationId && activePropId && (
+            <ComplimentaryActionModal
+              isOpen={complimentaryModalOpen}
+              onClose={() => {
+                setComplimentaryModalOpen(false);
+                setSelectedComplimentaryAction(null);
+              }}
+              action={selectedComplimentaryAction || 'REQUEST'}
+              reservationId={complimentaryReservationId}
+              propertyId={activePropId}
+              requestId={complimentaryRequest?.id}
+              authFetch={authFetch}
+              onSuccess={handleComplimentarySuccess}
+            />
+          )}
 
           {/* Primary "Buka Detail Lengkap" link */}
           <button
