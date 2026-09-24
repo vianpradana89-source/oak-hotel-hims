@@ -132,6 +132,7 @@ import {
 } from './domains/reservations/reservationBilling';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { createReservationSpecialRequestsRouter } from './domains/reservations/reservationSpecialRequestsRouter';
+import { createComplimentaryRouter } from './domains/reservations/complimentaryRouter';
 import { normalizeSpecialRequests } from './domains/reservations/reservationSpecialRequests';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
@@ -8118,6 +8119,7 @@ app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));
 app.use('/api', createRoomMoveRouter(pool, broadcastEvent));
+app.use('/api', createComplimentaryRouter(pool));
 app.use('/api/housekeeping', createHousekeepingRouter(pool, broadcastEvent));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));
