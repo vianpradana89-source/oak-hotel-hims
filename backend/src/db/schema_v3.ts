@@ -5527,5 +5527,41 @@ export async function initializeDatabase(pool: Pool) {
     `);
   }
 
+  // Migration: complimentary_flow_runtime_privileges_v1 - Grant runtime privileges to oak_app
+  // Uses auditMigrationClient (same client as schema_migrations) for atomicity.
+  // Pre-conditions checked via SELECT before any DDL; marker only written after successful GRANT.
+  const runtimePrivsCheck = await auditMigrationClient.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_flow_runtime_privileges_v1'`
+  );
+  if ((runtimePrivsCheck.rowCount ?? 0) === 0) {
+    // Check preconditions separately to avoid writing the marker when GRANT cannot be applied.
+    const roleCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM pg_roles WHERE rolname = 'oak_app'`
+    );
+    const tableCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reservation_complimentary_requests'`
+    );
+    const seqCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM information_schema.sequences WHERE sequence_schema = 'public' AND sequence_name = 'reservation_complimentary_requests_id_seq'`
+    );
+    if ((roleCheck.rowCount ?? 0) > 0 &&
+        (tableCheck.rowCount ?? 0) > 0 &&
+        (seqCheck.rowCount ?? 0) > 0) {
+      // Preconditions confirmed - run direct GRANT (no extra conditional).
+      await auditMigrationClient.query(
+        `GRANT SELECT, INSERT, UPDATE ON TABLE public.reservation_complimentary_requests TO oak_app`
+      );
+      await auditMigrationClient.query(
+        `GRANT USAGE ON SEQUENCE public.reservation_complimentary_requests_id_seq TO oak_app`
+      );
+      // Marker written only after successful GRANT.
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('complimentary_flow_runtime_privileges_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+  }
+
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }
