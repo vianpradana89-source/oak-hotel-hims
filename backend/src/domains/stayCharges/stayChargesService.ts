@@ -585,10 +585,13 @@ export async function calculateReservationFinancials(
   const remainingBalance = Math.max(0, netTotalCharges - effectiveSettlement);
 
   let newPaymentStatus: 'UNPAID' | 'PARTIAL' | 'PAID' = 'UNPAID';
-  if (effectiveSettlement <= 0) {
-    newPaymentStatus = 'UNPAID';
-  } else if (remainingBalance === 0) {
+  // Zero-balance MUST take priority: when remainingBalance is zero, the reservation
+  // is fully settled regardless of whether effectiveSettlement is also zero.
+  // This fixes the bug where 100% discount + zero payment yielded UNPAID instead of PAID.
+  if (remainingBalance <= 0.01) {
     newPaymentStatus = 'PAID';
+  } else if (effectiveSettlement <= 0) {
+    newPaymentStatus = 'UNPAID';
   } else {
     newPaymentStatus = 'PARTIAL';
   }
