@@ -54,6 +54,11 @@ interface Props {
   checkoutInspectionRefreshReservationId?: number | null;
   propertyBranding?: PropertyBrandingConfig | null;
   propertyInfo?: { id?: number; name?: string; address?: string | null; phone?: string | null } | null;
+  // COMPLIMENTARY REALTIME: parent-owned refresh signal for complimentary changes.
+  // Version bump + matching reservation id triggers a targeted refetch of THIS drawer's
+  // complimentary section without remounting or reloading the full reservation detail.
+  complimentaryRefreshVersion?: number;
+  complimentaryRefreshReservationId?: number | null;
 }
 
 export default function ReservationDetailDrawer({
@@ -70,6 +75,8 @@ export default function ReservationDetailDrawer({
   checkoutInspectionRefreshReservationId,
   propertyBranding,
   propertyInfo,
+  complimentaryRefreshVersion,
+  complimentaryRefreshReservationId,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -562,6 +569,22 @@ export default function ReservationDetailDrawer({
     await loadFolio(complimentaryReservationId);
     await Promise.resolve(onRefresh());
   }, [complimentaryReservationId, loadComplimentary, onRefresh]);
+
+  // COMPLIMENTARY REALTIME: refetch complimentary section when parent signals
+  // a ComplimentaryUpdated SSE event for the SAME reservation this drawer is showing.
+  // - version 0 / absent signal is ignored
+  // - only fires when the signaled reservation id matches this drawer's id
+  const complimentaryRefreshVersionNum = Number(complimentaryRefreshVersion) || 0;
+  const complimentaryRefreshSignalResId = Number(complimentaryRefreshReservationId);
+  const currentComplimentaryResId = Number(complimentaryReservationId);
+  useEffect(() => {
+    if (complimentaryRefreshVersionNum <= 0) return;
+    if (!Number.isInteger(complimentaryRefreshSignalResId) || complimentaryRefreshSignalResId <= 0) return;
+    if (!Number.isInteger(currentComplimentaryResId) || currentComplimentaryResId <= 0) return;
+    if (complimentaryRefreshSignalResId !== currentComplimentaryResId) return;
+    void loadComplimentary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [complimentaryRefreshVersionNum]);
 
 
   if (!reservation) return null;

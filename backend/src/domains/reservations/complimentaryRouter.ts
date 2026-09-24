@@ -56,7 +56,7 @@ function sendError(res: any, error: any): void {
   });
 }
 
-export function createComplimentaryRouter(pool: Pool): Router {
+export function createComplimentaryRouter(pool: Pool, broadcastEvent?: (eventType: string, payload: any, propertyId?: number) => void): Router {
   const router = Router();
   const allowed = [requireAuth];
 
@@ -106,6 +106,13 @@ export function createComplimentaryRouter(pool: Pool): Router {
         idempotencyKey: idemKey,
         requestor: actorFor(req)
       });
+      broadcastEvent?.('ComplimentaryUpdated', {
+        reservation_id: reservationId,
+        request_id: data.id,
+        operation: 'REQUEST',
+        status: data.status,
+        timestamp: new Date().toISOString()
+      }, propertyId);
       res.status(201).json({ status: 'SUCCESS', data });
     } catch (error) {
       sendError(res, error);
@@ -124,6 +131,13 @@ export function createComplimentaryRouter(pool: Pool): Router {
         propertyId,
         actor: actorFor(req)
       });
+      broadcastEvent?.('ComplimentaryUpdated', {
+        reservation_id: reservationId,
+        request_id: requestId,
+        operation: 'APPROVE',
+        status: data.status,
+        timestamp: new Date().toISOString()
+      }, propertyId);
       res.json({ status: 'SUCCESS', data });
     } catch (error) {
       sendError(res, error);
@@ -143,6 +157,13 @@ export function createComplimentaryRouter(pool: Pool): Router {
         reason: req.body?.reason,
         actor: actorFor(req)
       });
+      broadcastEvent?.('ComplimentaryUpdated', {
+        reservation_id: reservationId,
+        request_id: requestId,
+        operation: 'REJECT',
+        status: data.status,
+        timestamp: new Date().toISOString()
+      }, propertyId);
       res.json({ status: 'SUCCESS', data });
     } catch (error) {
       sendError(res, error);
@@ -162,6 +183,13 @@ export function createComplimentaryRouter(pool: Pool): Router {
         reason: req.body?.reason,
         actor: actorFor(req)
       });
+      broadcastEvent?.('ComplimentaryUpdated', {
+        reservation_id: reservationId,
+        request_id: requestId,
+        operation: 'REVOKE',
+        status: data.status,
+        timestamp: new Date().toISOString()
+      }, propertyId);
       res.json({ status: 'SUCCESS', data });
     } catch (error) {
       sendError(res, error);

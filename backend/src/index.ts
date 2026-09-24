@@ -8119,7 +8119,7 @@ app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));
 app.use('/api', createRoomMoveRouter(pool, broadcastEvent));
-app.use('/api', createComplimentaryRouter(pool));
+app.use('/api', createComplimentaryRouter(pool, broadcastEvent));
 app.use('/api/housekeeping', createHousekeepingRouter(pool, broadcastEvent));
 app.use('/api/attendance', createAttendanceRouter(pool));
 app.use('/api/hrd', createHrdRouter(pool));

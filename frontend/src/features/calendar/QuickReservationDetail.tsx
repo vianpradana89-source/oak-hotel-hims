@@ -33,6 +33,9 @@ export interface QuickReservationDetailProps {
   onCancel?: (reservationId: number) => void;
   onOpenStayChange?: (reservation: any) => void;
   onRefresh?: () => void;
+  // COMPLIMENTARY REALTIME: parent-owned refresh signal for complimentary changes.
+  complimentaryRefreshVersion?: number;
+  complimentaryRefreshReservationId?: number | null;
 }
 
 export default function QuickReservationDetail({
@@ -46,7 +49,9 @@ export default function QuickReservationDetail({
   onCheckout,
   onCancel,
   onOpenStayChange,
-  onRefresh
+  onRefresh,
+  complimentaryRefreshVersion,
+  complimentaryRefreshReservationId,
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -366,6 +371,22 @@ export default function QuickReservationDetail({
     await loadComplimentary();
     await Promise.resolve(handleRefresh());
   }, [complimentaryReservationId, loadComplimentary, handleRefresh]);
+
+  // COMPLIMENTARY REALTIME: refetch complimentary section when parent signals
+  // a ComplimentaryUpdated SSE event for the SAME reservation this panel is showing.
+  // - version 0 / absent signal is ignored
+  // - only fires when the signaled reservation id matches this panel's id
+  const _complimentaryRefreshVersionNum = Number(complimentaryRefreshVersion) || 0;
+  const _complimentaryRefreshSignalResId = Number(complimentaryRefreshReservationId);
+  const _currentComplimentaryResId = Number(complimentaryReservationId);
+  useEffect(() => {
+    if (_complimentaryRefreshVersionNum <= 0) return;
+    if (!Number.isInteger(_complimentaryRefreshSignalResId) || _complimentaryRefreshSignalResId <= 0) return;
+    if (!Number.isInteger(_currentComplimentaryResId) || _currentComplimentaryResId <= 0) return;
+    if (_complimentaryRefreshSignalResId !== _currentComplimentaryResId) return;
+    void loadComplimentary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_complimentaryRefreshVersionNum]);
 
   return (
     <>

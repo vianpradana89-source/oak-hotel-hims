@@ -155,6 +155,13 @@ function AppContent() {
     version: number;
     reservationId: number | null;
   }>({ version: 0, reservationId: null });
+  // COMPLIMENTARY REALTIME: parent-owned invalidation signal. Bumped on each
+  // ComplimentaryUpdated SSE event; the open drawer/refetches its own detail
+  // only when the signaled reservation id matches the component it is showing.
+  const [complimentaryRefresh, setComplimentaryRefresh] = useState<{
+    version: number;
+    reservationId: number | null;
+  }>({ version: 0, reservationId: null });
   // REALTIME-3B: canonical transaction-domain invalidation counter. Bumped on each
   // TransactionUpdated SSE event; passed to TransactionWorkspace which refetches
   // its own /api/transactions list without remounting or resetting local filters.
@@ -2396,6 +2403,18 @@ function AppContent() {
 
         const handleEvent = (eventName: string, data: any) => {
           console.log(`SSE ${eventName}`, data);
+          // COMPLIMENTARY-RT: targeted-only event - must run BEFORE the generic
+          // calendarEvents guard so it is not silently dropped.
+          if (eventName === 'ComplimentaryUpdated') {
+            const signaledResId = Number(data?.reservation_id);
+            if (Number.isInteger(signaledResId) && signaledResId > 0) {
+              setComplimentaryRefresh((prev) => ({
+                version: prev.version + 1,
+                reservationId: signaledResId,
+              }));
+            }
+            return;
+          }
           if (!calendarEvents.has(eventName)) {
             return;
           }
@@ -4675,15 +4694,17 @@ function AppContent() {
             setSelectedRes(target);
             fetchReservationFolio(Number(target.id));
           }}
-           onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
-           onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
-           onCancel={(resId) => handleReservationCancel(resId)}
-           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
-           onRefresh={() => {
-             fetchData();
-            fetchOperationsData();
-          }}
-        />
+            onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
+            onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
+            onCancel={(resId) => handleReservationCancel(resId)}
+            onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
+            onRefresh={() => {
+              fetchData();
+              fetchOperationsData();
+            }}
+            complimentaryRefreshVersion={complimentaryRefresh.version}
+            complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
+          />
       )}
 
       {selectedRes && (
@@ -4703,10 +4724,12 @@ function AppContent() {
           onCheckout={(resId, resHint, onSuccess) => openCheckoutConfirmation(resId, resHint ?? selectedRes, onSuccess)}
           onCancel={(resId) => handleReservationCancel(resId)}
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
-            checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
-            checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
-            propertyBranding={activeBranding || null}
-            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+          checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
+          checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
+          complimentaryRefreshVersion={complimentaryRefresh.version}
+          complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
+          propertyBranding={activeBranding || null}
+          propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
           />
         )}
 
