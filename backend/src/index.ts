@@ -6526,6 +6526,46 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       await assertCheckInEligible(client, roomId, reservationId);
     }
 
+    // PRECHECKIN-GATE-1B: Canonical financial eligibility check (backend-authoritative)
+    // This runs INSIDE the transaction after reservation lock to prevent TOCTOU races.
+    const precheckinResult = await evaluatePreCheckinEligibility(client, propertyId, reservationId);
+    if (!precheckinResult.eligible) {
+      await client.query('ROLLBACK');
+      // Determine primary failure reason for response
+      const paymentMissing = precheckinResult.missing.some((m: any) => m.code === 'PAYMENT_MISSING');
+      const evidenceMissing = precheckinResult.missing.some((m: any) => m.code === 'PAYMENT_EVIDENCE_MISSING');
+      const guaranteeMissing = precheckinResult.missing.some((m: any) => m.code === 'GUARANTEE_MISSING');
+
+      if (paymentMissing) {
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'PAYMENT_REQUIRED',
+          message: 'Pembayaran belum lunas. Silakan selesaikan pembayaran sebelum check-in.'
+        });
+      }
+      if (evidenceMissing) {
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'PAYMENT_EVIDENCE_REQUIRED',
+          message: 'Bukti pembayaran belum tersedia. Silakan unggah bukti pembayaran.'
+        });
+      }
+      if (guaranteeMissing) {
+        return res.status(409).json({
+          status: 'ERROR',
+          code: 'GUARANTEE_REQUIRED',
+          message: 'Jaminan belum ditambahkan. Silakan tambahkan jaminan sebelum check-in.'
+        });
+      }
+      // Fallback for other missing requirements
+      const missingMessages = precheckinResult.missing.map((m: any) => m.label).join(', ');
+      return res.status(409).json({
+        status: 'ERROR',
+        code: 'PRECHECKIN_NOT_ELIGIBLE',
+        message: `Check-in gagal: ${missingMessages}`
+      });
+    }
+
     const nextStatus = current.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'CHECKED_IN';
     const updated = await client.query(
       `UPDATE reservations

@@ -16,6 +16,7 @@ import {
   getEffectivePaymentStateForReservation,
   type EffectivePaymentState
 } from '../payments/paymentAllocationService';
+import { lockReservationFinancialState } from '../reservations/reservationLockService';
 
 const VALID_CHARGE_TYPES = new Set<StayChargeType>([
   'EXTRA_BED',
@@ -679,34 +680,18 @@ export async function recalculateReservationFinancials(
 // ============================================================================
 
 export async function postStayChargeToFolio(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   dto: PostStayChargeDto
 ): Promise<{ folio_entry_id: number; reservation: any; folio_entry: any }> {
-  const reservationRes = await client.query(
-    `SELECT r.*, b.property_id as booking_property_id
-     FROM reservations r
-     LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1`,
-    [dto.reservation_id]
+  // PARENT LOCK FIRST: acquire authoritative reservation lock before any mutations
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    dto.reservation_id,
+    propertyId
   );
 
-  if ((reservationRes.rowCount ?? 0) === 0) {
-    const err: any = new Error(`Reservasi #${dto.reservation_id} tidak ditemukan`);
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const reservation = reservationRes.rows[0];
-  const resPropId = reservation.booking_property_id ?? reservation.property_id ?? propertyId;
-  if (Number(resPropId) !== propertyId) {
-    const err: any = new Error('Reservasi tidak berada pada properti yang aktif');
-    err.statusCode = 403;
-    err.code = 'CROSS_PROPERTY_ACCESS';
-    throw err;
-  }
-
-  if (String(reservation.status).toUpperCase() === 'CANCELLED') {
+  if (String(lockedReservation.status).toUpperCase() === 'CANCELLED') {
     const err: any = new Error('Tidak dapat menambahkan biaya pada reservasi yang telah dibatalkan');
     err.statusCode = 400;
     throw err;
@@ -804,7 +789,7 @@ export async function postStayChargeToFolio(
           applicableNightlyRate = sum / ratesRes.rowCount!;
         }
       } else {
-        applicableNightlyRate = Number(reservation.total_price || 0);
+        applicableNightlyRate = Number(lockedReservation.total_price || 0);
       }
 
       if (rule.charge_method === 'FULL_NIGHT') {
@@ -970,7 +955,7 @@ export async function postStayChargeToFolio(
 }
 
 export async function voidFolioEntry(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   reservationId: number,
   folioEntryId: number,
@@ -983,9 +968,9 @@ export async function voidFolioEntry(
     throw err;
   }
 
-  // 1. Lock target entry
+  // 1. PLAIN READ to discover reservation_id from folio entry (no lock yet)
   const entryRes = await client.query(
-    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    'SELECT * FROM folio_entries WHERE id = $1',
     [folioEntryId]
   );
 
@@ -995,24 +980,53 @@ export async function voidFolioEntry(
     throw err;
   }
 
-  const entry = entryRes.rows[0];
-  const targetReservationId = Number(entry.reservation_id);
+  const discoveredEntry = entryRes.rows[0];
+  const targetReservationId = Number(discoveredEntry.reservation_id);
 
-  // 2. Property isolation and reservation validation
-  if (entry.property_id && Number(entry.property_id) !== propertyId) {
+  // 2. PARENT LOCK FIRST: lock reservation before child folio_entry
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    targetReservationId,
+    propertyId
+  );
+
+  // 3. Now lock the child folio_entry (after parent is secured)
+  const lockEntryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    [folioEntryId]
+  );
+
+  if ((lockEntryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // 4. Revalidate after locks
+  const revalidatedEntry = lockEntryRes.rows[0];
+  // A. TOCTOU revalidation: locked child reservation_id === discovered parent
+  if (Number(revalidatedEntry.reservation_id) !== targetReservationId) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  // B. Caller-scope validation: locked child reservation_id === caller's reservationId
+  if (reservationId && Number(revalidatedEntry.reservation_id) !== Number(reservationId)) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (revalidatedEntry.property_id && Number(revalidatedEntry.property_id) !== propertyId) {
     const err: any = new Error('Item folio tidak berada pada properti yang aktif');
     err.statusCode = 403;
     err.code = 'CROSS_PROPERTY_ACCESS';
     throw err;
   }
-  if (reservationId && targetReservationId !== Number(reservationId)) {
-    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
-    err.statusCode = 400;
-    throw err;
-  }
 
-  // 3. Prevent duplicate void / reversal
-  if (entry.is_voided || entry.status === 'VOIDED' || entry.status === 'REVERSED' || entry.status === 'CORRECTED') {
+  // 5. Prevent duplicate void / reversal
+  if (revalidatedEntry.is_voided || revalidatedEntry.status === 'VOIDED' || revalidatedEntry.status === 'REVERSED' || revalidatedEntry.status === 'CORRECTED') {
     const err: any = new Error(`Item folio #${folioEntryId} sudah dibatalkan atau dibalikkan sebelumnya`);
     err.statusCode = 409;
     err.code = 'ALREADY_VOIDED';
@@ -1031,22 +1045,25 @@ export async function voidFolioEntry(
   }
 
   // 4. Validate entry kind (cannot void payment or reversal rows directly through this endpoint)
-  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dibalik melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
     throw err;
   }
-  if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {
+  if (revalidatedEntry.direction === 'CREDIT' && revalidatedEntry.entry_type === 'PAYMENT') {
     const err: any = new Error('Pembayaran harus dibatalkan melalui fitur pembatalan pembayaran');
     err.statusCode = 400;
     throw err;
   }
-  if (entry.entry_type === 'REVERSAL' || entry.reversal_of_entry_id !== null) {
+  if (revalidatedEntry.entry_type === 'REVERSAL' || revalidatedEntry.reversal_of_entry_id !== null) {
     const err: any = new Error('Transaksi pembalik (reversal) tidak dapat dibatalkan kembali');
     err.statusCode = 400;
     throw err;
   }
+
+  // Use locked row as canonical source for all business logic
+  const entry = revalidatedEntry;
 
   const correlationId = `corr_rev_${entry.id}_${Date.now()}`;
   const reversalDirection = entry.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT';
@@ -1139,7 +1156,7 @@ export async function voidFolioEntry(
 }
 
 export async function correctFolioEntry(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   reservationId: number,
   folioEntryId: number,
@@ -1158,9 +1175,9 @@ export async function correctFolioEntry(
     throw err;
   }
 
-  // 1. Lock target entry
+  // 1. PLAIN READ to discover reservation_id from folio entry (no lock yet)
   const entryRes = await client.query(
-    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    'SELECT * FROM folio_entries WHERE id = $1',
     [folioEntryId]
   );
 
@@ -1170,43 +1187,75 @@ export async function correctFolioEntry(
     throw err;
   }
 
-  const entry = entryRes.rows[0];
-  const targetReservationId = Number(entry.reservation_id);
+  const discoveredEntry = entryRes.rows[0];
+  const targetReservationId = Number(discoveredEntry.reservation_id);
 
-  // 2. Validation
-  if (entry.property_id && Number(entry.property_id) !== propertyId) {
+  // 2. PARENT LOCK FIRST: lock reservation before child folio_entry
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    targetReservationId,
+    propertyId
+  );
+
+  // 3. Now lock the child folio_entry (after parent is secured)
+  const lockEntryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    [folioEntryId]
+  );
+
+  if ((lockEntryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // 4. Revalidate after locks
+  const revalidatedEntry = lockEntryRes.rows[0];
+  // A. TOCTOU revalidation: locked child reservation_id === discovered parent
+  if (Number(revalidatedEntry.reservation_id) !== targetReservationId) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  // B. Caller-scope validation: locked child reservation_id === caller's reservationId
+  if (reservationId && Number(revalidatedEntry.reservation_id) !== Number(reservationId)) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (revalidatedEntry.property_id && Number(revalidatedEntry.property_id) !== propertyId) {
     const err: any = new Error('Item folio tidak berada pada properti yang aktif');
     err.statusCode = 403;
     err.code = 'CROSS_PROPERTY_ACCESS';
     throw err;
   }
-  if (reservationId && targetReservationId !== Number(reservationId)) {
-    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
-    err.statusCode = 400;
-    throw err;
-  }
-  if (entry.is_voided || entry.status === 'VOIDED' || entry.status === 'REVERSED' || entry.status === 'CORRECTED') {
+  if (revalidatedEntry.is_voided || revalidatedEntry.status === 'VOIDED' || revalidatedEntry.status === 'REVERSED' || revalidatedEntry.status === 'CORRECTED') {
     const err: any = new Error(`Item folio #${folioEntryId} sudah dibatalkan atau dikoreksi sebelumnya`);
     err.statusCode = 409;
     err.code = 'ALREADY_MODIFIED';
     throw err;
   }
-  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dikoreksi melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
     throw err;
   }
-  if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {
+  if (revalidatedEntry.direction === 'CREDIT' && revalidatedEntry.entry_type === 'PAYMENT') {
     const err: any = new Error('Pembayaran harus dikoreksi melalui fitur koreksi pembayaran');
     err.statusCode = 400;
     throw err;
   }
-  if (entry.entry_type === 'REVERSAL' || entry.reversal_of_entry_id !== null) {
+  if (revalidatedEntry.entry_type === 'REVERSAL' || revalidatedEntry.reversal_of_entry_id !== null) {
     const err: any = new Error('Transaksi pembalik (reversal) tidak dapat dikoreksi');
     err.statusCode = 400;
     throw err;
   }
+
+  // Use locked row as canonical source for all business logic
+  const entry = revalidatedEntry;
 
   const correctionGroupId = `corr_grp_${entry.id}_${Date.now()}`;
 

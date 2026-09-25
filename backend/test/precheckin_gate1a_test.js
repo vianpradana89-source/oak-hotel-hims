@@ -18,6 +18,16 @@ function createMockClient(rows) {
       const key = `${sql}|${JSON.stringify(params)}`;
       callLog.push({ sql, params });
 
+      // ── Booking ID query (for guarantee check) ─────────────────────────
+      if (sql.includes('SELECT b.id AS booking_id') && sql.includes('FROM reservations r')) {
+        const resId = params[0];
+        const res = rows.reservations?.find(r => r.id === resId);
+        if (res) {
+          return { rows: [{ booking_id: String(res.booking_id || 0) }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+
       // ── Reservation check (always first query) ─────────────────────────
       if (sql.includes('FROM reservations') && sql.includes('res.id')) {
         const resId = params[0];
@@ -35,6 +45,78 @@ function createMockClient(rows) {
           };
         }
         return { rows: [], rowCount: 0 };
+      }
+
+      // ── calculateReservationFinancials reservation check ────────────────
+      if (sql.includes('FROM reservations') && sql.includes('r.id') && sql.includes('bookings b')) {
+        const resId = params[0];
+        const res = rows.reservations?.find(r => r.id === resId);
+        if (!res) return { rows: [], rowCount: 0 };
+
+        // If explicit per-reservation financial data is provided, use it
+        if (rows.totalPrice !== undefined || rows.paid !== undefined || rows.appliedDeposit !== undefined) {
+          const totalPrice = rows.totalPrice ?? 500000;
+          const paid = rows.paid ?? 0;
+          const appliedDeposit = rows.appliedDeposit ?? 0;
+          // NOTE: totalPrice is ALREADY net of any folio discounts (including complimentary).
+          // Do NOT subtract compAdjustment again — that would be double-counting.
+          let remaining;
+          if (rows.remainingBalanceNaN) {
+            remaining = NaN;
+          } else {
+            remaining = Math.max(0, totalPrice - paid - appliedDeposit);
+          }
+          return {
+            rows: [{
+              id: res.id,
+              property_id: res.property_id,
+              room_id: res.room_id,
+              booking_property_id: res.property_id,
+              status: res.status || 'BOOKED',
+              total_price: totalPrice,
+              amount_paid: paid,
+              applied_deposit: appliedDeposit,
+              remaining_balance: remaining,
+              subtotal_amount: totalPrice,
+              payment_status: remaining <= 0.01 ? 'PAID' : remaining < totalPrice * 0.9 ? 'PARTIAL' : 'UNPAID'
+            }],
+            rowCount: 1
+          };
+        }
+
+        // Otherwise, compute from payments and allocations
+        const payments = rows.payments || [];
+        const allocations = rows.allocations || [];
+        const groupPayments = rows.groupPayments || [];
+        const totalPaid = payments
+          .filter(p => p.reservation_id === resId && p.status === 'SUCCESS')
+          .reduce((s, p) => s + Number(p.amount || 0), 0);
+        const totalAllocated = allocations
+          .filter(a => a.reservation_id === resId && a.status === 'ACTIVE')
+          .reduce((s, a) => {
+            const parent = groupPayments.find(g => g.id === a.payment_transaction_id);
+            return s + (parent && parent.scope === 'BOOKING_GROUP' && parent.status === 'SUCCESS' ? Number(a.allocated_amount) : 0);
+          }, 0);
+        const appliedDeposit = 0;
+        // totalPrice defaults to total paid + 500000 (standard room rate) if no explicit value
+        const totalPrice = res.totalPrice ?? (totalPaid + totalAllocated > 0 ? totalPaid + totalAllocated : 500000);
+        const remaining = Math.max(0, totalPrice - totalPaid - totalAllocated - appliedDeposit);
+        return {
+          rows: [{
+            id: res.id,
+            property_id: res.property_id,
+            room_id: res.room_id,
+            booking_property_id: res.property_id,
+            status: res.status || 'BOOKED',
+            total_price: totalPrice,
+            amount_paid: totalPaid + totalAllocated,
+            applied_deposit: appliedDeposit,
+            remaining_balance: remaining,
+            subtotal_amount: totalPrice,
+            payment_status: remaining <= 0.01 ? 'PAID' : remaining < totalPrice * 0.9 ? 'PARTIAL' : 'UNPAID'
+          }],
+          rowCount: 1
+        };
       }
 
       // ── PRIMARY_GUEST name & phone ─────────────────────────────────────
@@ -145,17 +227,39 @@ function createMockClient(rows) {
         const propId = params[1];
         const deposits = rows.deposits || [];
         // Must match: (room-reservation scoped by reservation_id) OR (group scoped by booking_id)
+        // Default scope to ROOM_RESERVATION if not specified (backward compat with older test data)
         const filtered = deposits.filter(d =>
           d.property_id === propId &&
           (d.status === 'RECEIVED' || d.status === 'PARTIALLY_USED') &&
-          ((d.scope === 'ROOM_RESERVATION' && d.reservation_id === resId) ||
-           (d.scope === 'BOOKING_GROUP' && rows.targetBookingId && d.booking_id === rows.targetBookingId))
+          ((d.scope === 'BOOKING_GROUP' && rows.targetBookingId && d.booking_id === rows.targetBookingId) ||
+           (d.scope !== 'BOOKING_GROUP' && d.reservation_id === resId))
+        );
+        return { rows: filtered.map(d => ({ id: d.id })), rowCount: filtered.length };
+      }
+
+      // ── Deposit query (SELECT id with status filter) ───────────────────
+      if (sql.includes('FROM deposits') && sql.includes('status IN')) {
+        const resId = params[0];
+        const propId = params[1];
+        const deposits = rows.deposits || [];
+        const filtered = deposits.filter(d =>
+          d.property_id === propId &&
+          d.status === 'RECEIVED' &&
+          d.reservation_id === resId
         );
         return { rows: filtered.map(d => ({ id: d.id })), rowCount: filtered.length };
       }
 
       // ── Deposit events query (new pattern after HOTFIX-2) ───────────────
       if (sql.includes('FROM deposit_events') && sql.includes('WHERE deposit_id')) {
+        const depositId = params[0];
+        const events = rows.events || [];
+        const filtered = events.filter(e => e.deposit_id === depositId);
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── Deposit events query (SELECT *) ────────────────────────────────
+      if (sql.includes('SELECT * FROM deposit_events') && sql.includes('WHERE deposit_id')) {
         const depositId = params[0];
         const events = rows.events || [];
         const filtered = events.filter(e => e.deposit_id === depositId);
@@ -176,6 +280,91 @@ function createMockClient(rows) {
         return { rows: [{ cnt: String(filtered.length) }], rowCount: 1 };
       }
 
+      // ── Payment evidence query (Gate 5 check) - simple form ─────────────
+      if (sql.includes('payment_evidences') && sql.includes('reservation_id') && !sql.includes('JOIN')) {
+        const resId = params[0];
+        const evidences = rows.evidences || [];
+        const payments = rows.payments || [];
+        // Build set of valid payment transaction IDs for this reservation
+        const validPaymentIds = new Set(
+          payments.filter(p =>
+            p.reservation_id === resId &&
+            p.status === 'SUCCESS'
+          ).map(p => p.id || p.payment_transaction_id)
+        );
+        const filtered = evidences.filter(e =>
+          e.reservation_id === resId &&
+          e.is_active === true &&
+          validPaymentIds.has(e.payment_transaction_id)
+        );
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── Payment evidence query (Gate 5 check) - JOIN with payment_allocations ──
+      if (sql.includes('payment_evidences') && sql.includes('JOIN')) {
+        const resId = params[0];
+        const evidences = rows.evidences || [];
+        const allocations = rows.allocations || [];
+        const payments = rows.payments || [];
+        // Valid payment transaction IDs from both direct payments and allocations
+        const validPaymentIds = new Set();
+        payments.filter(p => p.reservation_id === resId && p.status === 'SUCCESS')
+          .forEach(p => validPaymentIds.add(p.id || p.payment_transaction_id));
+        allocations.filter(a => a.reservation_id === resId && a.status === 'ACTIVE')
+          .forEach(a => validPaymentIds.add(a.payment_transaction_id));
+        const filtered = evidences.filter(e =>
+          e.reservation_id === resId &&
+          e.is_active === true &&
+          validPaymentIds.has(e.payment_transaction_id)
+        );
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── calculateReservationFinancials DEPOSIT_APPLY query ─────────────
+      if (sql.includes('DEPOSIT_APPLY') && sql.includes('folio_entries')) {
+        const resId = params[0];
+        const propId = params[1];
+        const folioEntries = rows.folioEntries || [];
+        const filtered = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.property_id === propId &&
+          e.entry_type === 'DEPOSIT_APPLY' &&
+          e.direction === 'CREDIT' &&
+          e.status === 'POSTED' &&
+          !e.is_voided &&
+          !e.reversal_of_entry_id
+        );
+        const appliedDeposit = filtered.reduce((s, e) => s + Number(e.amount || 0), 0);
+        return {
+          rows: [{ applied_deposit: String(appliedDeposit) }],
+          rowCount: 1
+        };
+      }
+
+      // ── calculateReservationFinancials legacy fallback query ───────────
+      if (sql.includes('folio_entries') && sql.includes('PAYMENT') && sql.includes('CORRECTION_REPLACEMENT') && !sql.includes('CASE')) {
+        const resId = params[0];
+        const folioEntries = rows.folioEntries || [];
+        const credits = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'CREDIT' &&
+          (e.entry_type === 'PAYMENT' || e.entry_type === 'CORRECTION_REPLACEMENT') &&
+          !e.reversal_of_entry_id
+        );
+        const debits = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'DEBIT' &&
+          (e.entry_type === 'PAYMENT_VOID' || e.entry_type === 'PAYMENT_REVERSAL')
+        );
+        const credited = credits.reduce((s, e) => s + Number(e.amount || 0), 0);
+        const debited = debits.reduce((s, e) => s + Number(e.amount || 0), 0);
+        const folioPaid = credited - debited;
+        return {
+          rows: [{ folio_paid: String(folioPaid > 0 ? folioPaid : 0) }],
+          rowCount: 1
+        };
+      }
+
       // ── Identity custody query (COUNT) ─────────────────────────────────
       if (sql.includes('identity_custody') && sql.includes('COUNT(*)')) {
         const resId = params[0];
@@ -185,8 +374,8 @@ function createMockClient(rows) {
         const filtered = custodyList.filter(c =>
           c.property_id === propId &&
           c.status === 'HELD' &&
-          ((c.scope === 'ROOM_RESERVATION' && c.reservation_id === resId) ||
-           (c.scope === 'BOOKING_GROUP' && targetBookingId && c.booking_id === targetBookingId))
+          ((c.scope !== 'BOOKING_GROUP' && c.reservation_id === resId) ||
+            (c.scope === 'BOOKING_GROUP' && targetBookingId && c.booking_id === targetBookingId))
         );
         return { rows: [{ cnt: String(filtered.length) }], rowCount: 1 };
       }
@@ -204,12 +393,217 @@ function createMockClient(rows) {
         return { rows: [], rowCount: 0 };
       }
 
-      // ── Check-in date query ────────────────────────────────────────────
-      if (sql.includes('check_in FROM reservations')) {
+      // ── calculateReservationFinancials nightly rates query ─────────────
+      if (sql.includes('reservation_nightly_rates') && sql.includes('reservation_id')) {
+        const resId = params[0];
+        const rates = rows.nightlyRates || [];
+        const filtered = rates.filter(r => r.reservation_id === resId);
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── calculateReservationFinancials folio debit query ────────────────
+      if (sql.includes('COALESCE(SUM(CASE') && sql.includes('folio_entries')) {
+        const resId = params[0];
+        const folioEntries = rows.folioEntries || [];
+        const filteredDebits = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'DEBIT' &&
+          !['PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT'].includes(e.entry_type)
+        );
+        const grossCharges = filteredDebits.reduce((s, e) => s + Number(e.amount || 0), 0);
+        const filteredCredits = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'CREDIT' &&
+          (e.reversal_of_entry_id || e.entry_type?.includes('REVERSAL'))
+        );
+        const chargeReversals = filteredCredits.reduce((s, e) => s + Number(e.amount || 0), 0);
+        const roomChargePosted = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'DEBIT' &&
+          e.entry_type === 'ROOM_CHARGE' &&
+          !e.is_voided
+        ).reduce((s, e) => s + Number(e.amount || 0), 0);
+        const commercialDiscounts = folioEntries.filter(e =>
+          e.reservation_id === resId &&
+          e.direction === 'CREDIT' &&
+          e.entry_type === 'DISCOUNT' &&
+          !e.is_voided &&
+          !e.reversal_of_entry_id
+        ).reduce((s, e) => s + Number(e.amount || 0), 0);
+        return {
+          rows: [{
+            gross_charges: String(grossCharges),
+            charge_reversals: String(chargeReversals),
+            room_charge_posted: String(roomChargePosted),
+            commercial_discounts: String(commercialDiscounts),
+            charge_count: String(filteredDebits.length)
+          }],
+          rowCount: 1
+        };
+      }
+
+       // ── calculateReservationFinancials: initial reservation lookup ──────
+       // Matches: SELECT r.*, b.property_id AS booking_property_id FROM reservations r LEFT JOIN bookings b ...
+       if (sql.includes('r.*') && sql.includes('booking_property_id') && params[0] !== undefined) {
+         const resId = params[0];
+         const res = rows.reservations?.find(r => r.id === resId);
+        if (!res) return { rows: [], rowCount: 0 };
+          const totalPrice = rows.totalPrice !== undefined ? rows.totalPrice : 500000;
+          const paid = rows.paid || 0;
+          const appliedDeposit = rows.appliedDeposit || 0;
+          const remaining = Math.max(0, totalPrice - paid - appliedDeposit);
+         return {
+           rows: [{
+             id: res.id,
+             property_id: res.property_id,
+             room_id: res.room_id,
+             booking_property_id: res.property_id,
+             status: res.status || 'BOOKED',
+             total_price: totalPrice,
+             amount_paid: paid,
+             applied_deposit: appliedDeposit,
+             remaining_balance: remaining,
+             subtotal_amount: totalPrice,
+             payment_status: remaining <= 0.01 ? 'PAID' : remaining < totalPrice * 0.9 ? 'PARTIAL' : 'UNPAID'
+           }],
+           rowCount: 1
+         };
+       }
+
+      // ── calculateReservationFinancials DEPOSIT_APPLY query ─────────────
+      if (sql.includes('payment_transaction_allocations') && sql.includes('WITH direct AS')) {
+        const resId = params[0];
+        const propId = params[1];
+        const allocations = rows.allocations || [];
+        const groupPayments = rows.groupPayments || [];
+        const directAllocations = allocations.filter(a =>
+          a.reservation_id === resId &&
+          a.property_id === propId &&
+          a.status === 'ACTIVE'
+        );
+        const directPaid = directAllocations.reduce((s, a) => s + Number(a.allocated_amount || 0), 0);
+        const directSourceCnt = directAllocations.length;
+        const directPositiveCnt = directAllocations.filter(a => Number(a.allocated_amount) > 0).length;
+        const allocRows = directAllocations.filter(a => {
+          const parent = groupPayments.find(g => g.id === a.payment_transaction_id);
+          return parent &&
+            parent.scope === 'BOOKING_GROUP' &&
+            parent.status === 'SUCCESS' &&
+            (parent.transaction_type === 'PAYMENT' || parent.transaction_type === 'CORRECTION_REPLACEMENT');
+        });
+        const allocatedPaid = allocRows.reduce((s, a) => s + Number(a.allocated_amount || 0), 0);
+        const allocSourceCnt = allocRows.length;
+        const allocPositiveCnt = allocRows.filter(a => Number(a.allocated_amount) > 0).length;
+        return {
+          rows: [{
+            direct_paid: String(directPaid),
+            direct_source_cnt: String(directSourceCnt),
+            direct_positive_cnt: String(directPositiveCnt),
+            allocated_paid: String(allocatedPaid),
+            alloc_source_cnt: String(allocSourceCnt),
+            alloc_positive_cnt: String(allocPositiveCnt)
+          }],
+          rowCount: 1
+        };
+      }
+
+      // ── calculateReservationFinancials payment COUNT query ────────────
+      if (sql.includes('payment_transactions') && sql.includes('COUNT(*)') && sql.includes('SUCCESS')) {
+        const resId = params[0];
+        const payments = rows.payments || [];
+        const filtered = payments.filter(p =>
+          p.reservation_id === resId &&
+          p.status === 'SUCCESS' &&
+          p.transaction_type === 'PAYMENT' &&
+          p.amount > 0
+        );
+        return {
+          rows: [{
+            cnt: String(filtered.length),
+            total: String(filtered.reduce((s, p) => s + Number(p.amount), 0))
+          }],
+          rowCount: 1
+        };
+      }
+
+      // ── calculateReservationFinancials: initial reservation lookup ──────
+      if ((sql.includes('r.*') || sql.includes('reservations r')) && sql.includes('bookings b') && params[0] !== undefined) {
         const resId = params[0];
         const res = rows.reservations?.find(r => r.id === resId);
-        if (res) return { rows: [{ check_in: res.check_in || '2026-09-15' }], rowCount: 1 };
-        return { rows: [], rowCount: 0 };
+        if (!res) return { rows: [], rowCount: 0 };
+        const totalPrice = rows.totalPrice !== undefined ? rows.totalPrice : 500000;
+        const paid = rows.paid || 0;
+        const appliedDeposit = rows.appliedDeposit || 0;
+        const remaining = Math.max(0, totalPrice - paid - appliedDeposit);
+        return {
+          rows: [{
+            id: res.id,
+            property_id: res.property_id,
+            room_id: res.room_id,
+            booking_property_id: res.property_id,
+            status: res.status || 'BOOKED',
+            total_price: totalPrice,
+            amount_paid: paid,
+            applied_deposit: appliedDeposit,
+            remaining_balance: remaining,
+            subtotal_amount: totalPrice,
+            payment_status: remaining <= 0.01 ? 'PAID' : remaining < totalPrice * 0.9 ? 'PARTIAL' : 'UNPAID'
+          }],
+          rowCount: 1
+        };
+      }
+
+      // ── calculateReservationFinancials query (general fallback) ───────
+      if (sql.includes('calculateReservationFinancials') || sql.includes('total_price') || sql.includes('remaining_balance')) {
+        const resId = params[0];
+        const res = rows.reservations?.find(r => r.id === resId);
+        if (!res) return { rows: [], rowCount: 0 };
+        const total = rows.totalPrice || 500000;
+        const paid = rows.paid || 0;
+        const deposit = rows.appliedDeposit || 0;
+        const remaining = Math.max(0, total - paid - deposit);
+        return {
+          rows: [{
+            total_price: String(total),
+            amount_paid: String(paid),
+            applied_deposit: String(deposit),
+            remaining_balance: String(remaining),
+            payment_status: remaining <= 0.01 ? 'PAID' : remaining < total * 0.9 ? 'PARTIAL' : 'UNPAID'
+          }],
+          rowCount: 1
+        };
+      }
+
+      // ── calculateReservationFinancials comp adjustment query (must be before general one) ──
+      if (sql.includes('SUM(applied_adjustment_amount)') && sql.includes('reservation_complimentary_requests')) {
+        const resId = params[0];
+        const requests = rows.complimentaryRequests || [];
+        const total = requests
+          .filter(r => r.reservation_id === resId && r.status === 'APPROVED')
+          .reduce((s, r) => s + Number(r.applied_adjustment_amount || 0), 0);
+        return { rows: [{ total_comp_adjustment: String(total) }], rowCount: 1 };
+      }
+
+      // ── hasApprovedComplimentarySettled query ───────────────────────────
+      if (sql.includes('reservation_complimentary_requests') && sql.includes('APPROVED')) {
+        const resId = params[0];
+        const requests = rows.complimentaryRequests || [];
+        const filtered = requests.filter(r =>
+          r.reservation_id === resId &&
+          r.status === 'APPROVED' &&
+          r.applied_adjustment_amount > 0
+        );
+        return { rows: filtered, rowCount: filtered.length };
+      }
+
+      // ── calculateReservationFinancials comp adjustment query ────────────
+      if (sql.includes('SUM(applied_adjustment_amount)') && sql.includes('reservation_complimentary_requests')) {
+        const resId = params[0];
+        const requests = rows.complimentaryRequests || [];
+        const total = requests
+          .filter(r => r.reservation_id === resId && r.status === 'APPROVED')
+          .reduce((s, r) => s + Number(r.applied_adjustment_amount || 0), 0);
+        return { rows: [{ total_comp_adjustment: String(total) }], rowCount: 1 };
       }
 
       throw new Error(`Unhandled query: ${sql.substring(0, 100)}`);
@@ -582,6 +976,310 @@ async function main() {
     expectEq(result.payment_evidence_ok, false, 'payment_evidence_ok — no evidence for group payment');
     expectNotHasMissing(result, 'PAYMENT_MISSING');
     expectHasMissing(result, 'PAYMENT_EVIDENCE_MISSING');
+  });
+
+  // ── Scenario 17: Approved Complimentary only (no ordinary payment) => Gate 4 PASS, Gate 5 WAIVED ──
+  await test('scenario-17: approved comp only with zero balance => payment PASS, evidence WAIVED', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 17, property_id: 1, room_id: 17, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 17, full_name: 'Maya Estianty', phone: '081234567817' }],
+      primary_guests_identity: [{ reservation_id: 17, identity_storage_key: 'id-docs/17/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 17, status: 'VACANT_CLEAN', is_active: true }],
+      // totalPrice is ALREADY net of the complimentary DISCOUNT folio entry.
+      // Room charge 500000 was fully covered by comp, so net = 0.
+      totalPrice: 0,
+      paid: 0,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 17, status: 'APPROVED', applied_adjustment_amount: 500000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 17);
+    expectEq(result.payment_ok, true, 'payment_ok — approved comp settles zero balance');
+    expectEq(result.payment_evidence_ok, true, 'payment_evidence_ok — evidence WAIVED for comp-only');
+    expectNotHasMissing(result, 'PAYMENT_MISSING');
+    expectNotHasMissing(result, 'PAYMENT_EVIDENCE_MISSING');
+  });
+
+  // ── Scenario 27: Approved comp discounts room charge but extra charge remains ──
+  // This tests the critical invariant: complimentary discount is ALREADY reflected
+  // in netTotalCharges (via folio DISCOUNT entry). It must NOT be double-counted
+  // as an additional settlement on top of effectiveSettlement.
+  await test('scenario-27: comp discount on room + unpaid extra charge => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 27, property_id: 1, room_id: 27, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 27, full_name: 'Budi Santoso', phone: '081234567827' }],
+      primary_guests_identity: [{ reservation_id: 27, identity_storage_key: 'id-docs/27/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 27, status: 'VACANT_CLEAN', is_active: true }],
+      // totalPrice is ALREADY net of the complimentary DISCOUNT folio entry:
+      // gross room 588000 + extra charge 100000 - comp discount 588000 = 100000
+      totalPrice: 100000,
+      paid: 0,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 27, status: 'APPROVED', applied_adjustment_amount: 588000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 27);
+    // Even though comp covers the room, the extra charge of 100000 is UNPAID
+    expectEq(result.payment_ok, false, 'payment_ok — unpaid extra charge blocks check-in');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 18: Pending Complimentary => Gate 4 FAILS ──
+  await test('scenario-18: pending comp => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 18, property_id: 1, room_id: 18, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 18, full_name: 'Nikki Palenewen', phone: '081234567818' }],
+      primary_guests_identity: [{ reservation_id: 18, identity_storage_key: 'id-docs/18/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 18, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 0,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 18, status: 'PENDING_APPROVAL', applied_adjustment_amount: 500000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 18);
+    expectEq(result.payment_ok, false, 'payment_ok — pending comp does not settle');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 19: Rejected Complimentary => Gate 4 FAILS ��─
+  await test('scenario-19: rejected comp => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 19, property_id: 1, room_id: 19, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 19, full_name: 'Rendy Koesnaedi', phone: '081234567819' }],
+      primary_guests_identity: [{ reservation_id: 19, identity_storage_key: 'id-docs/19/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 19, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 0,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 19, status: 'REJECTED', applied_adjustment_amount: 500000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 19);
+    expectEq(result.payment_ok, false, 'payment_ok — rejected comp does not settle');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 20: Revoked Complimentary => Gate 4 FAILS ──
+  await test('scenario-20: revoked comp => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 20, property_id: 1, room_id: 20, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 20, full_name: 'Sissy Priscillia', phone: '081234567820' }],
+      primary_guests_identity: [{ reservation_id: 20, identity_storage_key: 'id-docs/20/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 20, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 0,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 20, status: 'REVOKED', applied_adjustment_amount: 500000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 20);
+    expectEq(result.payment_ok, false, 'payment_ok — revoked comp does not settle');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 21: Extra unpaid charge => Gate 4 FAILS ──
+  await test('scenario-21: extra unpaid charge => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 21, property_id: 1, room_id: 21, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 21, full_name: 'Titi Kamal', phone: '081234567821' }],
+      primary_guests_identity: [{ reservation_id: 21, identity_storage_key: 'id-docs/21/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2000, reservation_id: 21, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 500000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [{ reservation_id: 21, is_active: true, payment_transaction_id: 2000 }],
+      deposits: [],
+      rooms: [{ id: 21, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 600000,
+      paid: 500000,
+      appliedDeposit: 0
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 21);
+    expectEq(result.payment_ok, false, 'payment_ok — outstanding charge blocks check-in');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 22: Partial ordinary payment => Gate 4 FAILS ──
+  await test('scenario-22: partial ordinary payment => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 22, property_id: 1, room_id: 22, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 22, full_name: 'Ungu Festival', phone: '081234567822' }],
+      primary_guests_identity: [{ reservation_id: 22, identity_storage_key: 'id-docs/22/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2100, reservation_id: 22, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 300000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 22, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 300000,
+      appliedDeposit: 0
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 22);
+    expectEq(result.payment_ok, false, 'payment_ok — partial payment blocks check-in');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 23: Full ordinary payment with evidence => PASS ──
+  await test('scenario-23: full ordinary payment with evidence => PASS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 23, property_id: 1, room_id: 23, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 23, full_name: 'Vidi Shallom', phone: '081234567823' }],
+      primary_guests_identity: [{ reservation_id: 23, identity_storage_key: 'id-docs/23/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2200, reservation_id: 23, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 500000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [{ reservation_id: 23, is_active: true, payment_transaction_id: 2200 }],
+      deposits: [],
+      rooms: [{ id: 23, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 500000,
+      appliedDeposit: 0
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 23);
+    expectEq(result.payment_ok, true, 'payment_ok — full payment passes');
+    expectEq(result.payment_evidence_ok, true, 'payment_evidence_ok — evidence present');
+    expectNotHasMissing(result, 'PAYMENT_MISSING');
+    expectNotHasMissing(result, 'PAYMENT_EVIDENCE_MISSING');
+  });
+
+  // ── Scenario 24: Full ordinary payment missing evidence => FAILS ──
+  await test('scenario-24: full ordinary payment missing evidence => FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 24, property_id: 1, room_id: 24, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 24, full_name: 'Wino Bastian', phone: '081234567824' }],
+      primary_guests_identity: [{ reservation_id: 24, identity_storage_key: 'id-docs/24/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2300, reservation_id: 24, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 500000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 24, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 500000,
+      appliedDeposit: 0
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 24);
+    expectEq(result.payment_ok, true, 'payment_ok — full payment passes');
+    expectEq(result.payment_evidence_ok, false, 'payment_evidence_ok — evidence required for ordinary payment');
+    expectNotHasMissing(result, 'PAYMENT_MISSING');
+    expectHasMissing(result, 'PAYMENT_EVIDENCE_MISSING');
+  });
+
+  // ── Scenario 25: Mixed Comp + Ordinary with evidence => PASS ──
+  await test('scenario-25: mixed comp + ordinary with evidence => PASS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 25, property_id: 1, room_id: 25, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 25, full_name: 'Xena Princess', phone: '081234567825' }],
+      primary_guests_identity: [{ reservation_id: 25, identity_storage_key: 'id-docs/25/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2400, reservation_id: 25, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 200000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [{ reservation_id: 25, is_active: true, payment_transaction_id: 2400 }],
+      deposits: [],
+      rooms: [{ id: 25, status: 'VACANT_CLEAN', is_active: true }],
+      // totalPrice is ALREADY net: gross 500000 - comp discount 300000 = 200000
+      totalPrice: 200000,
+      paid: 200000,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 25, status: 'APPROVED', applied_adjustment_amount: 300000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 25);
+    expectEq(result.payment_ok, true, 'payment_ok — mixed comp + ordinary settles');
+    expectEq(result.payment_evidence_ok, true, 'payment_evidence_ok — evidence present for ordinary portion');
+    expectNotHasMissing(result, 'PAYMENT_MISSING');
+    expectNotHasMissing(result, 'PAYMENT_EVIDENCE_MISSING');
+  });
+
+  // ── Scenario 26: Mixed Comp + Ordinary with outstanding => FAILS ──
+  await test('scenario-26: mixed comp + ordinary outstanding => FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 26, property_id: 1, room_id: 26, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 26, full_name: 'Yuki Kato', phone: '081234567826' }],
+      primary_guests_identity: [{ reservation_id: 26, identity_storage_key: 'id-docs/26/doc.jpg', has_valid_identity: true }],
+      payments: [{ id: 2500, reservation_id: 26, scope: 'ROOM_RESERVATION', status: 'SUCCESS', transaction_type: 'PAYMENT', amount: 200000 }],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 26, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 200000,
+      appliedDeposit: 0,
+      complimentaryRequests: [
+        { reservation_id: 26, status: 'APPROVED', applied_adjustment_amount: 200000 }
+      ]
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 26);
+    expectEq(result.payment_ok, false, 'payment_ok — outstanding balance blocks check-in');
+    expectHasMissing(result, 'PAYMENT_MISSING');
+  });
+
+  // ── Scenario 28: Non-finite remaining_balance => payment FAILS (fail-closed) ──
+  await test('scenario-28: invalid remaining_balance => payment FAILS', async () => {
+    const client = createMockClient({
+      reservations: [{ id: 28, property_id: 1, room_id: 28, check_in: '2026-09-15' }],
+      primary_guests: [{ reservation_id: 28, full_name: 'Test Guest', phone: '081234567828' }],
+      primary_guests_identity: [{ reservation_id: 28, identity_storage_key: 'id-docs/28/doc.jpg', has_valid_identity: true }],
+      payments: [],
+      allocations: [],
+      groupPayments: [],
+      evidences: [],
+      deposits: [],
+      rooms: [{ id: 28, status: 'VACANT_CLEAN', is_active: true }],
+      totalPrice: 500000,
+      paid: 0,
+      appliedDeposit: 0,
+      remainingBalanceNaN: true,
+      complimentaryRequests: []
+    });
+
+    const result = await evaluatePreCheckinEligibility(client, 1, 28);
+    expectEq(result.payment_ok, false, 'payment_ok — invalid remaining_balance should fail');
+    expectHasMissing(result, 'PAYMENT_MISSING');
   });
 
   // Print summary

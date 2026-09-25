@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { hasPermission } from '../auth/authMiddleware';
 import type { AuthUserPayload } from '../auth/authService';
 import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
+import { lockReservationFinancialState } from './reservationLockService';
 
 export const COMPLIMENTARY_CATEGORIES = [
   'OWNER_GUEST', 'VIP', 'SERVICE_RECOVERY', 'PROMOTION', 'STAFF', 'MANAGEMENT', 'OTHER'
@@ -340,14 +341,34 @@ export async function approveComplimentaryRequest(
   try {
     await client.query('BEGIN');
 
-  // Permission check
-  const hasApprovePerm = await hasPermission(actor as any, 'reservations.complimentary.approve', client);
-  if (!hasApprovePerm) {
-    throw new ComplimentaryError(403, 'FORBIDDEN', 'Insufficient permission to approve complimentary requests');
-  }
+    // Permission check
+    const hasApprovePerm = await hasPermission(actor as any, 'reservations.complimentary.approve', client);
+    if (!hasApprovePerm) {
+      throw new ComplimentaryError(403, 'FORBIDDEN', 'Insufficient permission to approve complimentary requests');
+    }
 
-    // Lock and validate request
+    // STEP 1: PLAIN READ request (no lock yet)
     const reqCheck = await client.query(
+      `SELECT r.*, b.property_id AS booking_property_id
+       FROM reservation_complimentary_requests r
+       JOIN reservations res ON res.id = r.reservation_id
+       JOIN bookings b ON b.id = res.booking_id
+       WHERE r.id = $1`,
+      [requestId]
+    );
+    if ((reqCheck.rowCount ?? 0) !== 1) {
+      throw new ComplimentaryError(404, 'REQUEST_NOT_FOUND', 'Complimentary request not found');
+    }
+    const reqRow = reqCheck.rows[0];
+
+    // Derive actual parent reservation from the request row, not caller-supplied ID
+    const discoveredReservationId = Number(reqRow.reservation_id);
+
+    // STEP 2: PARENT LOCK FIRST — lock reservation
+    await lockReservationFinancialState(client, discoveredReservationId, propertyId);
+
+    // STEP 3: CHILD LOCK — lock request (after parent is secured)
+    const lockedReq = await client.query(
       `SELECT r.*, b.property_id AS booking_property_id
        FROM reservation_complimentary_requests r
        JOIN reservations res ON res.id = r.reservation_id
@@ -356,26 +377,31 @@ export async function approveComplimentaryRequest(
        FOR UPDATE`,
       [requestId]
     );
-    if ((reqCheck.rowCount ?? 0) !== 1) {
+    if ((lockedReq.rowCount ?? 0) !== 1) {
       throw new ComplimentaryError(404, 'REQUEST_NOT_FOUND', 'Complimentary request not found');
     }
-    const reqRow = reqCheck.rows[0];
+    const lockedReqRow = lockedReq.rows[0];
 
-    // Verify reservation_id matches
-    if (Number(reqRow.reservation_id) !== reservationId) {
+    // STEP 4: REVALIDATE after locks
+    // TOCTOU parent invariant: locked child reservation_id === discovered parent
+    if (Number(lockedReqRow.reservation_id) !== discoveredReservationId) {
+      throw new ComplimentaryError(
+        400,
+        'MISMATCH',
+        'Request reservation changed during locking'
+      );
+    }
+    // Caller-scope validation: locked child reservation_id === caller's reservationId
+    if (Number(lockedReqRow.reservation_id) !== reservationId) {
       throw new ComplimentaryError(400, 'MISMATCH', 'Request does not belong to the specified reservation');
     }
-
-    // Verify property match
-    const bookingPropId = Number(reqRow.booking_property_id);
-    if (bookingPropId !== propertyId) {
+    const lockedBookingPropId = Number(lockedReqRow.booking_property_id);
+    if (lockedBookingPropId !== propertyId) {
       throw new ComplimentaryError(403, 'PROPERTY_MISMATCH', 'Request does not belong to this property');
     }
-
-    // Guard: must be PENDING_APPROVAL
-    if (reqRow.status !== 'PENDING_APPROVAL') {
+    if (lockedReqRow.status !== 'PENDING_APPROVAL') {
       throw new ComplimentaryError(409, 'INVALID_STATUS_TRANSITION',
-        `Cannot approve request in status '${reqRow.status}'. Expected PENDING_APPROVAL.`
+        `Cannot approve request in status '${lockedReqRow.status}'. Expected PENDING_APPROVAL.`
       );
     }
 
@@ -578,31 +604,60 @@ export async function revokeComplimentaryRequest(
       throw new ComplimentaryError(403, 'FORBIDDEN', 'Insufficient permission to revoke complimentary requests');
     }
 
-    // Lock request
+    // STEP 1: PLAIN READ request (no lock yet)
     const reqCheck = await client.query(
-      `SELECT r.*
+      `SELECT r.*, b.property_id AS booking_property_id
        FROM reservation_complimentary_requests r
-       JOIN bookings b ON b.id = (SELECT booking_id FROM reservations WHERE id = r.reservation_id)
-       WHERE r.id = $1 AND b.property_id = $2
-       FOR UPDATE`,
-      [validatedRequestId, validatedPropertyId]
+       JOIN reservations res ON res.id = r.reservation_id
+       JOIN bookings b ON b.id = res.booking_id
+       WHERE r.id = $1`,
+      [validatedRequestId]
     );
     if ((reqCheck.rowCount ?? 0) !== 1) {
       throw new ComplimentaryError(404, 'REQUEST_NOT_FOUND', 'Complimentary request not found');
     }
     const reqRow = reqCheck.rows[0];
 
-    if (Number(reqRow.reservation_id) !== validatedReservationId) {
-      throw new ComplimentaryError(400, 'MISMATCH', 'Request does not belong to the specified reservation');
-    }
+    // Derive actual parent reservation from the request row, not caller-supplied ID
+    const discoveredReservationId = Number(reqRow.reservation_id);
 
-    if (reqRow.status !== 'APPROVED') {
-      throw new ComplimentaryError(409, 'INVALID_STATUS_TRANSITION',
-        `Cannot revoke request in status '${reqRow.status}'. Expected APPROVED.`
+    // STEP 2: PARENT LOCK FIRST — lock reservation
+    await lockReservationFinancialState(client, discoveredReservationId, validatedPropertyId);
+
+    // STEP 3: CHILD LOCK — lock request (after parent is secured)
+    const lockedReq = await client.query(
+      `SELECT r.*, b.property_id AS booking_property_id
+       FROM reservation_complimentary_requests r
+       JOIN reservations res ON res.id = r.reservation_id
+       JOIN bookings b ON b.id = res.booking_id
+       WHERE r.id = $1
+       FOR UPDATE`,
+      [validatedRequestId]
+    );
+    if ((lockedReq.rowCount ?? 0) !== 1) {
+      throw new ComplimentaryError(404, 'REQUEST_NOT_FOUND', 'Complimentary request not found');
+    }
+    const lockedReqRow = lockedReq.rows[0];
+
+    // STEP 4: REVALIDATE after locks
+    // TOCTOU parent invariant: locked child reservation_id === discovered parent
+    if (Number(lockedReqRow.reservation_id) !== discoveredReservationId) {
+      throw new ComplimentaryError(
+        400,
+        'MISMATCH',
+        'Request reservation changed during locking'
       );
     }
-
-    if (!reqRow.applied_adjustment_amount || Number(reqRow.applied_adjustment_amount) <= 0) {
+    // Caller-scope validation: locked child reservation_id === caller's reservationId
+    if (Number(lockedReqRow.reservation_id) !== validatedReservationId) {
+      throw new ComplimentaryError(400, 'MISMATCH', 'Request does not belong to the specified reservation');
+    }
+    if (lockedReqRow.status !== 'APPROVED') {
+      throw new ComplimentaryError(409, 'INVALID_STATUS_TRANSITION',
+        `Cannot revoke request in status '${lockedReqRow.status}'. Expected APPROVED.`
+      );
+    }
+    if (!lockedReqRow.applied_adjustment_amount || Number(lockedReqRow.applied_adjustment_amount) <= 0) {
       throw new ComplimentaryError(400, 'NO_ADJUSTMENT_TO_REVOKE', 'No adjustment amount to revoke');
     }
 
