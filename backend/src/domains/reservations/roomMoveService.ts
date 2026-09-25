@@ -4,6 +4,7 @@ import { calculatePriceQuote } from '../pricing/pricingService';
 import { ensureDirtyRoomCleaningTask } from '../housekeeping/housekeepingService';
 import { evaluateRoomReadiness } from '../turnover/turnoverService';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey } from '../../utils/hotelDate';
+import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
 
 export const ROOM_MOVE_REASONS = [
   'GUEST_REQUEST', 'MAINTENANCE', 'ROOM_ISSUE', 'UPGRADE', 'DOWNGRADE', 'OPERATIONAL', 'OTHER'
@@ -301,6 +302,11 @@ export async function executeRoomMove(pool: Pool, reservationId: number, input: 
       }
     }
     if (Number(reservation.room_id) === targetRoomId) throw roomMoveError('Kamar tujuan sama dengan kamar saat ini.', 'TARGET_ROOM_SAME');
+    // Complimentary APPROVED mutation guard — placed after idempotency replay
+    // check so that a successful prior move is always returned as-is, but any
+    // new mutation attempt is blocked while an APPROVED complimentary sits on
+    // the reservation.
+    await assertNoApprovedComplimentaryForMutation(client, reservationId, propertyId);
     const target = await getTargetRoom(client, targetRoomId, propertyId);
     await assertTargetAvailable(client, reservation, target);
     // Preserve the checked-in hotel date as historical context. The physical

@@ -5,6 +5,7 @@ import { createPaymentInTransaction } from '../payments/paymentDomainService';
 import { syncPrimaryGuestFromReservation } from '../guests/guestService';
 import { validateDayUseInterval } from '../../utils/dayUseInterval';
 import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
+import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
 
 export interface ReservationEditPayload {
   property_id?: number;
@@ -585,6 +586,16 @@ export async function applyReservationEdit(
   }
   const ratePlanChanged = Number(targetRatePlanId) !== Number(current.rate_plan_id);
 
+  // 3.5. Complimentary APPROVED mutation guard — only when protected fields actually change
+  const roomChanged = payload.room_id !== undefined && payload.room_id !== current.room_id;
+  const stayTypeChanged = payload.stay_type !== undefined && payload.stay_type !== current.stay_type;
+  const checkInTimeChanged = payload.check_in_time !== undefined && String(payload.check_in_time) !== String(current.check_in_time);
+  const checkOutTimeChanged = payload.check_out_time !== undefined && String(payload.check_out_time) !== String(current.check_out_time);
+  const hasProtectedMutation = datesChanged || roomTypeChanged || roomChanged || ratePlanChanged || stayTypeChanged || checkInTimeChanged || checkOutTimeChanged;
+  if (hasProtectedMutation) {
+    await assertNoApprovedComplimentaryForMutation(client, reservationId, propertyId);
+  }
+
   // 4. Overlap validation if physical room is assigned
   if (targetRoomId) {
     const roomPropRes = await client.query(
@@ -669,7 +680,7 @@ export async function applyReservationEdit(
   let finalGrandTotal = oldTotalPrice;
   let quoteResult: any = null;
 
-  const needsQuote = !isOta && (datesChanged || roomTypeChanged || ratePlanChanged || payload.stay_type);
+  const needsQuote = !isOta && (datesChanged || roomTypeChanged || ratePlanChanged || stayTypeChanged);
 
   if (needsQuote) {
     quoteResult = await calculatePriceQuote(client, {
@@ -763,7 +774,8 @@ export async function applyReservationEdit(
 
   // 8. Keep snapshot identity aligned with the selected assignment. The money
   // remains unchanged only for an explicit preserved-price or OTA-manual edit.
-  if (keepCurrentPrice || isOta) {
+  // When APPROVED complimentary exists, skip snapshot mutation for metadata-only edits.
+  if (keepCurrentPrice || (isOta && hasProtectedMutation)) {
     await refreshPreservedPriceSnapshotContext(
       client,
       reservationId,

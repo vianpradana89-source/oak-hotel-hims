@@ -13,6 +13,7 @@ import {
   ReservationBillingError,
   roundIdr
 } from './reservationBilling';
+import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
 
 export { CANONICAL_PRICE_QUOTE_FAILED };
 
@@ -531,6 +532,10 @@ export async function executeBookedReservationReprice(
   try {
     await client.query('BEGIN');
     const plan = await computeBookedReservationReprice(client, reservationId, input, true);
+
+    // Complimentary APPROVED mutation guard — placed after plan computation
+    // (which does SELECT FOR UPDATE) but before any DELETE/INSERT/UPDATE.
+    await assertNoApprovedComplimentaryForMutation(client, reservationId, plan.property_id);
 
     const newNet = plan.after.net;
     const remaining = plan.after.remaining;
