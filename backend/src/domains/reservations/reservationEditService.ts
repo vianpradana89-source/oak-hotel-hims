@@ -2,7 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { addDays, calculatePriceQuote, createReservationRateSnapshots, toHotelDateString } from '../pricing/pricingService';
 import { validateEvidenceUpload, saveEvidenceFile, deleteEvidenceFile } from '../payments/evidenceStorageService';
 import { createPaymentInTransaction } from '../payments/paymentDomainService';
-import { syncPrimaryGuestFromReservation } from '../guests/guestService';
+import { syncPrimaryGuestFromReservation, normalizePhone, normalizeDigitsOnly, assertGuestBelongsToProperty, writeGuestAudit } from '../guests/guestService';
 import { validateDayUseInterval } from '../../utils/dayUseInterval';
 import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
 import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
@@ -27,6 +27,8 @@ export interface ReservationEditPayload {
   check_in_time?: string;
   check_out_time?: string;
   ota_source_id?: number | null;
+  guest_id?: number;
+  booker_guest_id?: number;
   actor?: string;
 }
 
@@ -529,8 +531,8 @@ export async function applyReservationEdit(
   }
 
   // 2. Determine targets
-  const targetGuestName = payload.guest_name !== undefined ? payload.guest_name.trim() : current.guest_name;
-  const targetGuestPhone = payload.guest_phone !== undefined ? payload.guest_phone.trim() : current.guest_phone;
+  let targetGuestName = payload.guest_name !== undefined ? payload.guest_name.trim() : current.guest_name;
+  let targetGuestPhone = payload.guest_phone !== undefined ? payload.guest_phone.trim() : current.guest_phone;
   const targetGuestSegment = payload.guest_segment !== undefined ? payload.guest_segment : current.guest_segment;
   const targetBookerName = payload.booker_name !== undefined ? payload.booker_name.trim() : current.booker_name;
   const targetBookerPhone = payload.booker_phone !== undefined ? payload.booker_phone.trim() : current.booker_phone;
@@ -538,6 +540,145 @@ export async function applyReservationEdit(
   const targetAdults = payload.adults !== undefined ? Number(payload.adults) : current.adults;
   const targetChildren = payload.children !== undefined ? Number(payload.children) : current.children;
   const targetOtaSourceId = payload.ota_source_id !== undefined ? payload.ota_source_id : current.ota_source_id;
+
+  // 2.5. Handle canonical guest swap (guest_id / booker_guest_id)
+  let guestSwapped = false;
+  let bookerSwapped = false;
+  if (payload.guest_id !== undefined && payload.guest_id !== null) {
+    const newGuestId = Number(payload.guest_id);
+    if (Number.isInteger(newGuestId) && newGuestId > 0) {
+      // Validate new guest exists and belongs to property scope
+      await assertGuestBelongsToProperty(client, newGuestId, propertyId);
+      const pgCheck = await client.query(
+        `SELECT rg.guest_id FROM reservation_guests rg WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'`,
+        [reservationId]
+      );
+      const currentGuestId = pgCheck.rows.length > 0 ? Number(pgCheck.rows[0].guest_id) : null;
+      if (currentGuestId !== newGuestId) {
+        if (currentGuestId !== null) {
+          await client.query(
+            `UPDATE reservation_guests SET guest_id = $1, updated_at = NOW() WHERE reservation_id = $2 AND role = 'PRIMARY_GUEST'`,
+            [newGuestId, reservationId]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO reservation_guests (reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source, created_at, updated_at)
+             VALUES ($1, $2, 'PRIMARY_GUEST', 'STAYING', TRUE, FALSE, 'RESERVATION_EDIT', NOW(), NOW())`,
+            [reservationId, newGuestId]
+          );
+        }
+        const guestSync = await client.query(
+          `SELECT full_name, phone FROM guests WHERE id = $1`,
+          [newGuestId]
+        );
+        if (guestSync.rows.length > 0) {
+          targetGuestName = guestSync.rows[0].full_name;
+          targetGuestPhone = guestSync.rows[0].phone;
+        }
+        guestSwapped = true;
+      }
+    }
+  }
+
+  // 2.6. Free-text staying guest: detect name change WITHOUT a selected CRM guest_id,
+  //      create a new CRM guest row and replace the PRIMARY_GUEST link so the old guest
+  //      is never renamed. Old guest KTP stays untouched. Identity/KTP is empty for the
+  //      newly created guest (no identity_number / identity_path provided).
+  //      Uses canonical normalization helpers (normalizePhone, normalizeDigitsOnly)
+  //      and matches invariants of createGuest() (guest_code, audit, normalized fields).
+  const originalGuestName = String(current.guest_name || '').trim();
+  const newFreeTextName = (payload.guest_name !== undefined ? String(payload.guest_name).trim() : null);
+  const guestNameChangedFreeText = newFreeTextName !== null
+    && newFreeTextName.length > 0
+    && payload.guest_id === undefined
+    && (newFreeTextName.toLowerCase() !== originalGuestName.toLowerCase());
+  if (guestNameChangedFreeText) {
+    const rawPhone = payload.guest_phone !== undefined && payload.guest_phone !== null
+      ? String(payload.guest_phone).trim() : null;
+    const normPhone = normalizeDigitsOnly(rawPhone);
+    const guestSegment = payload.guest_segment || current.guest_segment || 'Reguler';
+    // Insert guest using canonical invariants aligned with createGuest()
+    const insertRes = await client.query(
+      `INSERT INTO guests (
+         full_name, normalized_name, phone, normalized_phone,
+         guest_segment, nationality, country, vip_status,
+         identity_type, identity_number, normalized_identity_number,
+         identity_path, has_valid_identity,
+         is_archived, is_active, created_property_id, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, 'ID', 'Indonesia', 'STANDARD',
+                'KTP', NULL, NULL, NULL, FALSE,
+                FALSE, TRUE, $6, NOW(), NOW())
+       RETURNING id`,
+      [
+        newFreeTextName,
+        newFreeTextName.toLowerCase(),
+        normalizePhone(rawPhone),
+        normPhone,
+        guestSegment,
+        propertyId
+      ]
+    );
+    const newGuestId = Number(insertRes.rows[0].id);
+    // Write canonical audit log
+    await writeGuestAudit(client, {
+      action: 'GUEST_CREATE',
+      entity: 'GUEST',
+      recordId: newGuestId,
+      newValue: { id: newGuestId, full_name: newFreeTextName },
+      propertyId,
+      correlationId: `${reservationId}-edit-${Date.now()}`
+    });
+    // Assign guest_code following canonical convention
+    await client.query(
+      `UPDATE guests SET guest_code = $1 WHERE id = $2`,
+      [`GST-${String(newGuestId).padStart(5, '0')}`, newGuestId]
+    );
+    // Update reservation_guests PRIMARY_GUEST to point to the new guest
+    const existingPg = await client.query(
+      `SELECT id FROM reservation_guests WHERE reservation_id = $1 AND role = 'PRIMARY_GUEST'`,
+      [reservationId]
+    );
+    if (existingPg.rows.length > 0) {
+      await client.query(
+        `UPDATE reservation_guests SET guest_id = $1, updated_at = NOW() WHERE id = $2`,
+        [newGuestId, existingPg.rows[0].id]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO reservation_guests (reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source, created_at, updated_at)
+         VALUES ($1, $2, 'PRIMARY_GUEST', 'STAYING', TRUE, FALSE, 'RESERVATION_EDIT', NOW(), NOW())`,
+        [reservationId, newGuestId]
+      );
+    }
+    targetGuestName = newFreeTextName;
+    targetGuestPhone = normalizePhone(rawPhone);
+    guestSwapped = true;
+  }
+  if (payload.booker_guest_id !== undefined && payload.booker_guest_id !== null) {
+    const newBookerId = Number(payload.booker_guest_id);
+    if (Number.isInteger(newBookerId) && newBookerId > 0) {
+      const bkCheck = await client.query(
+        `SELECT rg.guest_id FROM reservation_guests rg WHERE rg.reservation_id = $1 AND rg.role = 'BOOKER'`,
+        [reservationId]
+      );
+      const currentBookerId = bkCheck.rows.length > 0 ? Number(bkCheck.rows[0].guest_id) : null;
+      if (currentBookerId !== newBookerId) {
+        if (currentBookerId !== null) {
+          await client.query(
+            `UPDATE reservation_guests SET guest_id = $1, updated_at = NOW() WHERE reservation_id = $2 AND role = 'BOOKER'`,
+            [newBookerId, reservationId]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO reservation_guests (reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source, created_at, updated_at)
+             VALUES ($1, $2, 'BOOKER', 'BOOKER', FALSE, FALSE, 'RESERVATION_EDIT', NOW(), NOW())`,
+            [reservationId, newBookerId]
+          );
+        }
+        bookerSwapped = true;
+      }
+    }
+  }
 
   const targetRoomTypeId = payload.room_type_id || current.current_room_type_id;
   let targetRatePlanId = payload.rate_plan_id !== undefined ? payload.rate_plan_id : current.rate_plan_id;
@@ -763,7 +904,8 @@ export async function applyReservationEdit(
   );
 
   // Synchronize primary staying guest phone to canonical guests table if guest phone or name was edited
-  if (payload.guest_phone !== undefined || payload.guest_name !== undefined) {
+  // Skip if guest_id was swapped (identity now comes from new guest)
+  if ((payload.guest_phone !== undefined || payload.guest_name !== undefined) && !guestSwapped) {
     await syncPrimaryGuestFromReservation(client, reservationId, {
       guestPhone: targetGuestPhone,
       guestName: targetGuestName,

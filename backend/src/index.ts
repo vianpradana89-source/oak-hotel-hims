@@ -4277,6 +4277,8 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUp
       amount_tendered: body.amount_tendered === undefined || String(body.amount_tendered).trim() === '' ? undefined : Number(body.amount_tendered),
       keep_current_price: body.keep_current_price === true || body.keep_current_price === 'true',
       expected_new_total: body.expected_new_total === undefined ? undefined : Number(body.expected_new_total),
+      guest_id: nullableId(body.guest_id),
+      booker_guest_id: nullableId(body.booker_guest_id),
       idempotency_key: idempotencyKey
     };
     const actor = body.actor || req.user?.username || 'USER';

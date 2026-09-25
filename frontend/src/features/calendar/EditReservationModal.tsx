@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { safeFetchJson } from './calendarApi';
 import { useAuth } from '../auth/AuthContext';
+import GuestSearchAutocomplete from '../booking/GuestSearchAutocomplete';
+import type { Guest } from '../guests/guestTypes';
 
 interface EditReservationModalProps {
   isOpen: boolean;
@@ -26,9 +28,11 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   // Form Fields
   const [guestName, setGuestName] = useState<string>('');
   const [guestPhone, setGuestPhone] = useState<string>('');
+  const [selectedGuest, setSelectedGuest] = useState<Guest | null>(null);
   const [guestSegment, setGuestSegment] = useState<string>('Reguler');
   const [bookerName, setBookerName] = useState<string>('');
   const [bookerPhone, setBookerPhone] = useState<string>('');
+  const [selectedBookerGuest, setSelectedBookerGuest] = useState<Guest | null>(null);
   const [referral, setReferral] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [adults, setAdults] = useState<number>(1);
@@ -88,6 +92,49 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     if (!reservation || !isOpen) return;
     setGuestName(reservation.guest_name || '');
     setGuestPhone(reservation.guest_phone || '');
+    if (reservation.primary_guest) {
+      setSelectedGuest({
+        id: reservation.primary_guest.primary_guest_id,
+        full_name: reservation.primary_guest.primary_guest_name || reservation.guest_name,
+        phone: reservation.primary_guest.primary_guest_phone || reservation.guest_phone,
+        guest_code: null,
+        preferred_name: null,
+        gender: null,
+        birth_place: null,
+        birth_date: null,
+        nationality: null,
+        email: null,
+        address: null,
+        city: null,
+        province: null,
+        country: null,
+        guest_segment: reservation.guest_segment || 'Reguler',
+        vip_status: 'STANDARD' as const,
+        preferences: null,
+        identity_type: null,
+        identity_number: reservation.primary_guest.primary_guest_identity_number || null,
+        identity_path: reservation.primary_guest.primary_guest_identity_path || null,
+        has_valid_identity: reservation.primary_guest.primary_guest_identity_verified || false,
+        rt_rw: null,
+        village_kelurahan: null,
+        district_kecamatan: null,
+        religion: null,
+        marital_status: null,
+        occupation: null,
+        citizenship: null,
+        valid_until: null,
+        ktp_ocr_confidence: null,
+        ktp_ocr_provider: null,
+        ktp_extracted_at: null,
+        ktp_regency_id: null,
+        notes: null,
+        is_archived: false,
+        is_active: true,
+        created_property_id: propertyId,
+        created_at: '',
+        updated_at: ''
+      });
+    }
     setGuestSegment(reservation.guest_segment || 'Reguler');
     setBookerName(reservation.booker_name || reservation.guest_name || '');
     setBookerPhone(reservation.booker_phone || reservation.guest_phone || '');
@@ -284,6 +331,8 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     guest_segment: guestSegment,
     booker_name: bookerName.trim() || guestName.trim(),
     booker_phone: bookerPhone.trim() || guestPhone.trim(),
+    guest_id: selectedGuest?.id ?? undefined,
+    booker_guest_id: selectedBookerGuest?.id ?? undefined,
     referral: referral.trim(),
     notes: notes.trim(),
     adults: Number(adults),
@@ -486,12 +535,16 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 <label className="block font-semibold text-stone-700 mb-1">
                   Nama Tamu Menginap <span className="text-rose-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  required
+                <GuestSearchAutocomplete
+                  propertyId={propertyId}
                   value={guestName}
-                  onChange={(e) => setGuestName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  onChange={(name) => { setGuestName(name); if (!selectedGuest) return; setSelectedGuest(null); }}
+                  onSelectGuest={(guest) => { setSelectedGuest(guest); setGuestName(guest.full_name); setGuestPhone(guest.phone || ''); }}
+                  onClearGuest={() => { setSelectedGuest(null); }}
+                  selectedGuest={selectedGuest}
+                  placeholder="请输入至少1个字符搜索CRM tamu..."
+                  required
+                  label=""
                 />
               </div>
 
@@ -512,11 +565,15 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 <label className="block font-semibold text-stone-700 mb-1">
                   Nama Pemesan (Booker)
                 </label>
-                <input
-                  type="text"
+                <GuestSearchAutocomplete
+                  propertyId={propertyId}
                   value={bookerName}
-                  onChange={(e) => setBookerName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  onChange={(name) => { setBookerName(name); if (!selectedBookerGuest) return; setSelectedBookerGuest(null); }}
+                  onSelectGuest={(guest) => { setSelectedBookerGuest(guest); setBookerName(guest.full_name); setBookerPhone(guest.phone || ''); }}
+                  onClearGuest={() => { setSelectedBookerGuest(null); }}
+                  selectedGuest={selectedBookerGuest}
+                  placeholder="请输入至少1个字符搜索CRM pemesan..."
+                  label=""
                 />
               </div>
 
