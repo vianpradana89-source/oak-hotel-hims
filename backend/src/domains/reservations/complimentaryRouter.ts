@@ -62,6 +62,9 @@ export function createComplimentaryRouter(pool: Pool, broadcastEvent?: (eventTyp
 
   // GET /api/reservations/:id/complimentary
   router.get('/reservations/:id/complimentary', ...allowed, async (req: AuthenticatedRequest, res) => {
+    // NO-CACHE: CDN/Firebase cache must not serve stale 404 for uninitiated
+    // reservations. Applied BEFORE try so even error/404 responses bypass cache.
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     try {
       const reservationId = positiveInt(req.params.id, 'reservation_id');
       const propertyId = await propertyIdFor(req, pool);
@@ -74,6 +77,8 @@ export function createComplimentaryRouter(pool: Pool, broadcastEvent?: (eventTyp
 
   // GET /api/reservations/:id/complimentary/list
   router.get('/reservations/:id/complimentary/list', ...allowed, async (req: AuthenticatedRequest, res) => {
+    // NO-CACHE: same rationale as above
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     try {
       const reservationId = positiveInt(req.params.id, 'reservation_id');
       const propertyId = await propertyIdFor(req, pool);
