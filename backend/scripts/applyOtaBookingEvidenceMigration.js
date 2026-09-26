@@ -110,6 +110,22 @@ async function verifyIntegrity(client) {
   }
 }
 
+async function ensureRuntimePrivileges(client) {
+  await client.query(`
+    GRANT SELECT, INSERT, UPDATE
+    ON TABLE booking_evidences
+    TO oak_app
+  `);
+
+  await client.query(`
+    GRANT USAGE, SELECT
+    ON SEQUENCE booking_evidences_id_seq
+    TO oak_app
+  `);
+
+  console.log('[BOOKING EVIDENCES] Runtime privileges ensured for oak_app.');
+}
+
 async function run() {
   const client = await pool.connect();
 
@@ -130,6 +146,7 @@ async function run() {
 
     if ((already.rowCount ?? 0) > 0) {
       console.log(`[OTA BOOKING EVIDENCE MIGRATION] ${MIGRATION_VERSION} already applied - re-verifying integrity...`);
+      await ensureRuntimePrivileges(client);
       await verifyIntegrity(client);
       await client.query('COMMIT');
       console.log('[OTA BOOKING EVIDENCE MIGRATION] Re-verification passed. Nothing to do.');
@@ -187,6 +204,7 @@ async function run() {
 
     console.log('[BOOKING EVIDENCES] Indexes ensured.');
 
+    await ensureRuntimePrivileges(client);
     await verifyIntegrity(client);
     console.log('[INTEGRITY] All checks passed.');
 
