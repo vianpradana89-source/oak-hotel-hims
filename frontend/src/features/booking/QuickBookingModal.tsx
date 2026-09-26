@@ -760,11 +760,9 @@ export default function QuickBookingModal({
       }
       return;
     }
-    // For OTA_COLLECT: canonical hotel payment is always 0, clear evidence
+    // For OTA_COLLECT: canonical hotel payment is always 0; OTA voucher evidence is retained
     if (paymentResponsibility === 'OTA_COLLECT') {
       setAmountPaid(0);
-      setBuktiBayarFile(null);
-      setBuktiBayarPath(null);
       return;
     }
     // For any explicit payment (positive or zero), only clamp overpayment
@@ -1177,10 +1175,15 @@ export default function QuickBookingModal({
     // WALK-IN/DIRECT: user is expected to pay at counter, evidence required for ALL methods including CASH
     // OTA: pay-at-hotel (Hotel Collect) is a valid pattern — amountPaid=0 must NOT require evidence
     const _evidenceRuleMode = getFieldMode('payment_evidence');
-    const _isEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
+    const _isOtaVoucherRequired = paymentResponsibility === 'OTA_COLLECT';
+    const _isPaymentEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
       && amountPaid > 0;
-    if (_isEvidenceRequired && !buktiBayarFile) {
-      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0');
+    if ((_isOtaVoucherRequired || _isPaymentEvidenceRequired) && !buktiBayarFile) {
+      issues.push(
+        _isOtaVoucherRequired
+          ? 'Voucher / bukti booking OTA wajib diunggah untuk OTA Collect'
+          : 'Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0'
+      );
     }
 
     // Multi-room Validation
@@ -1419,8 +1422,8 @@ export default function QuickBookingModal({
 
       const formData = new FormData();
       formData.append('booking_payload', JSON.stringify(payload));
-      // Only attach payment evidence for HOTEL_COLLECT
-      if (paymentResponsibility !== 'OTA_COLLECT' && buktiBayarFile) {
+      // Attach uploaded file for both flows; backend classifies it by payment responsibility
+      if (buktiBayarFile) {
         formData.append('payment_evidence', buktiBayarFile);
       }
       const res = await authenticatedFetch('/api/bookings', {
@@ -2644,6 +2647,29 @@ export default function QuickBookingModal({
                 </div>
                 )}
 
+                {channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Upload Voucher / Bukti Booking OTA{' '}
+                      <span className="text-rose-500">*</span>
+                      <span className="text-stone-500 font-normal ml-1 text-[10px]">
+                        — Screenshot voucher atau bukti booking yang diterbitkan OTA
+                      </span>
+                    </label>
+                    <input
+                      type="file"
+                      required={false}
+                      accept="image/jpeg,image/png,image/webp,application/pdf"
+                      onChange={handleBuktiBayarChange}
+                      className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl outline-none file:mr-3 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-700 cursor-pointer"
+                    />
+                    {buktiBayarFile && (
+                      <span className="text-[11px] text-emerald-800 font-semibold mt-1 block">
+                        ✓ Voucher terpilih: {buktiBayarFile.name}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {/* OTA_COLLECT info panel — shown only for OTA + OTA_COLLECT */}
                 {channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT' && (
                   <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 space-y-1">

@@ -1,0 +1,12 @@
+﻿steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.ota-booking-evidence-migration
+      - -t
+      - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-ota-booking-evidence-migration:ota-booking-evidence-v1
+      - .
+
+images:
+  - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-ota-booking-evidence-migration:ota-booking-evidence-v1

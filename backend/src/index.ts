@@ -49,6 +49,7 @@ import {
 import {
   getEvidenceFileBuffer,
   saveEvidenceFile,
+  saveBookingEvidenceFile,
   deleteEvidenceFile,
   validateEvidenceUpload
 } from './domains/payments/evidenceStorageService';
@@ -1613,6 +1614,10 @@ async function createCanonicalBooking(
     let bookingPaymentMethod = bookingPayload.payment_method
       || bookingPayload.initial_payment?.payment_method
       || null;
+    const otaVoucherFile = paymentResponsibility === 'OTA_COLLECT' ? req.file : null;
+    if (paymentResponsibility === 'OTA_COLLECT' && !otaVoucherFile) {
+      throw createHttpError(400, 'Voucher / bukti booking OTA wajib diunggah untuk OTA Collect');
+    }
 
     // For OTA_COLLECT: canonical hotel amount paid is 0, no payment records created
     if (paymentResponsibility === 'OTA_COLLECT') {
@@ -1639,6 +1644,48 @@ async function createCanonicalBooking(
       createdBy: bookingActor,
       paymentResponsibility: paymentResponsibility
     });
+
+    if (otaVoucherFile) {
+      const savedOtaVoucher = await saveBookingEvidenceFile(bookingPropertyId, {
+        mimetype: otaVoucherFile.mimetype,
+        size: otaVoucherFile.size,
+        originalname: otaVoucherFile.originalname || 'ota_voucher',
+        buffer: otaVoucherFile.buffer
+      });
+      savedEvidenceKeys.push(savedOtaVoucher.storageKey);
+
+      await client.query(
+        `INSERT INTO booking_evidences (
+           property_id,
+           booking_id,
+           evidence_type,
+           storage_key,
+           original_filename,
+           mime_type,
+           file_size_bytes,
+           note,
+           is_active,
+           uploaded_by_user_id,
+           uploaded_by_name_snapshot,
+           uploaded_by_role_snapshot,
+           uploaded_at,
+           created_at,
+           updated_at
+         ) VALUES ($1, $2, 'OTA_VOUCHER', $3, $4, $5, $6, $7, TRUE, $8, $9, $10, NOW(), NOW(), NOW())`,
+        [
+          bookingPropertyId,
+          Number(bookingRecord.id),
+          savedOtaVoucher.storageKey,
+          otaVoucherFile.originalname || 'ota_voucher',
+          otaVoucherFile.mimetype,
+          savedOtaVoucher.fileSizeBytes,
+          'Voucher / bukti booking OTA saat reservasi',
+          req?.user?.id != null ? String(req.user.id) : null,
+          bookingActor,
+          req?.user?.role != null ? String(req.user.role) : null
+        ]
+      );
+    }
 
     const normalizedChildren: any[] = [];
     for (let index = 0; index < rawReservationPayloads.length; index += 1) {
@@ -1692,9 +1739,11 @@ async function createCanonicalBooking(
           discountPercent: useGlobalDiscount ? 0 : (child.discount_percent ?? child.discountPercent),
           discountAmount: useGlobalDiscount ? 0 : (child.discount_amount ?? child.discountAmount),
           discountReason: useGlobalDiscount ? null : (child.discount_reason || child.discountReason || bookingPayload.discount_reason),
-          amountPaid: useBookingLevelPayment
+          amountPaid: paymentResponsibility === 'OTA_COLLECT'
             ? 0
-            : (child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0))
+            : useBookingLevelPayment
+              ? 0
+              : (child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0))
         });
       } catch (err: any) {
         if (err instanceof ReservationBillingError) {
@@ -1736,11 +1785,19 @@ async function createCanonicalBooking(
         discountType: childBilling.discountType,
         discountValue: childBilling.discountValue,
         discountReason: childBilling.reason,
-        amountPaid: useBookingLevelPayment
+        amountPaid: paymentResponsibility === 'OTA_COLLECT'
           ? 0
-          : Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
-        paymentMethod: child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
-        paymentStatus: useBookingLevelPayment ? null : (child.payment_status || null),
+          : useBookingLevelPayment
+            ? 0
+            : Number(child.amount_paid ?? (index === 0 ? (bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0) : 0)),
+        paymentMethod: paymentResponsibility === 'OTA_COLLECT'
+          ? null
+          : child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
+        paymentStatus: paymentResponsibility === 'OTA_COLLECT'
+          ? null
+          : useBookingLevelPayment
+            ? null
+            : (child.payment_status || null),
         attachPaymentEvidence: false,
         bookingPaymentGroupId: null,
         bookingPaymentReferenceCode: null,

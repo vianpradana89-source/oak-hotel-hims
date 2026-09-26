@@ -76,6 +76,18 @@ export function generateStorageKey(propertyId: number, mimeType: string, origina
   const ext = getExtensionFromMime(mimeType, originalFilename);
   return `payment-evidence/${propertyId}/${year}/${month}/${uuid}${ext}`;
 }
+export function generateBookingEvidenceStorageKey(
+  propertyId: number,
+  mimeType: string,
+  originalFilename?: string
+): string {
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const uuid = crypto.randomUUID();
+  const ext = getExtensionFromMime(mimeType, originalFilename);
+  return `booking-evidence/${propertyId}/${year}/${month}/${uuid}${ext}`;
+}
 
 export function resolveAbsolutePath(storageKey: string): string {
   // Prevent path traversal
@@ -327,6 +339,36 @@ export async function saveEvidenceFile(
   }
 
   const storageKey = generateStorageKey(propertyId, file.mimetype, file.originalname);
+  const adapter = getStorageAdapter();
+
+  await adapter.save(storageKey, file.buffer, file.mimetype);
+
+  return {
+    storageKey,
+    absolutePath: adapter.provider === 'local' ? resolveAbsolutePath(storageKey) : '',
+    fileSizeBytes: file.size,
+    provider: adapter.provider
+  };
+}
+export async function saveBookingEvidenceFile(
+  propertyId: number,
+  file: {
+    mimetype: string;
+    size: number;
+    originalname: string;
+    buffer: Buffer;
+  }
+): Promise<SavedEvidenceResult> {
+  const validation = validateEvidenceUpload(file);
+  if (!validation.valid) {
+    throw { statusCode: 400, code: validation.code, message: validation.error };
+  }
+
+  const storageKey = generateBookingEvidenceStorageKey(
+    propertyId,
+    file.mimetype,
+    file.originalname
+  );
   const adapter = getStorageAdapter();
 
   await adapter.save(storageKey, file.buffer, file.mimetype);
