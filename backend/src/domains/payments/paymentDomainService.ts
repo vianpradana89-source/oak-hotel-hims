@@ -10,7 +10,7 @@ import {
   deleteEvidenceFile,
   validateEvidenceUpload
 } from './evidenceStorageService';
-import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
+import { recalculateReservationFinancials, calculateHotelCollectibleBalance } from '../stayCharges/stayChargesService';
 
 export interface CreatePaymentCoreInput {
   propertyId: number;
@@ -82,7 +82,8 @@ export async function createPaymentInTransaction(
 
   const reservationRes = await client.query(`
     SELECT r.id, r.total_price, r.amount_paid, r.applied_deposit,
-           r.payment_status, r.booking_id, b.property_id AS booking_property_id
+           r.payment_status, r.booking_id, b.property_id AS booking_property_id,
+           b.payment_responsibility
     FROM reservations r
     LEFT JOIN bookings b ON b.id = r.booking_id
     WHERE r.id = $1
@@ -100,10 +101,28 @@ export async function createPaymentInTransaction(
     throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' };
   }
 
+  // Compute existing canonical fields first (needed for both paths).
   const currentPaid = Math.round(Number(reservationRes.rows[0].amount_paid || 0));
   const currentAppliedDeposit = Math.round(Number(reservationRes.rows[0].applied_deposit || 0));
   const totalPrice = Math.round(Number(reservationRes.rows[0].total_price || 0));
-  const currentRemaining = Math.max(totalPrice - currentPaid - currentAppliedDeposit, 0);
+
+  // Default overpayment guard: canonical remaining balance (preserves existing
+  // HOTEL_COLLECT behavior even when partial folio charges exist).
+  let currentRemaining = Math.max(totalPrice - currentPaid - currentAppliedDeposit, 0);
+
+  // OTA_COLLECT override: use the hotel-collectible helper to bound the
+  // overpayment guard to hotel_collectible_remaining_balance only.
+  const responsibility = String(reservationRes.rows[0].payment_responsibility || 'HOTEL_COLLECT').trim().toUpperCase();
+  if (responsibility === 'OTA_COLLECT') {
+    const collectible = await calculateHotelCollectibleBalance(
+      client,
+      reservationId,
+      propertyId,
+      responsibility
+    );
+    currentRemaining = collectible.hotel_collectible_remaining_balance;
+  }
+
   if (paymentAmount > currentRemaining) {
     throw {
       statusCode: 400,
