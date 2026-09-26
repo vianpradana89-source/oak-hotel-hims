@@ -7673,6 +7673,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
        WHERE reservation_id = $1
          AND scope = 'ROOM_RESERVATION'
          AND (property_id = $2 OR property_id IS NULL)
+         AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
        UNION ALL
        SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
               pt.payment_method, pt.reference_code, pt.status,
@@ -7685,6 +7686,7 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
          AND pa.reservation_id = $1
          AND pa.property_id = $2
          AND pa.status = 'ACTIVE'
+         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
        ORDER BY id DESC`,
       [reservationId, propertyId]
     );
