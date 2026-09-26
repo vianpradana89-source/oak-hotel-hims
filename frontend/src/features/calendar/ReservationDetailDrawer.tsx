@@ -641,6 +641,35 @@ export default function ReservationDetailDrawer({
   const appliedDeposit = Number(data.applied_deposit || 0);
   const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
 
+  // OTA_COLLECT: derive payment collection balance from authoritative folio financials.
+  // HOTEL_COLLECT continues to use canonical remainingBalance (unchanged).
+  const authoritativeFinancials = folioData?.authoritative_financials;
+  const paymentResponsibility = String(
+    authoritativeFinancials?.payment_responsibility || ''
+  ).trim().toUpperCase();
+  const isOtaCollect = paymentResponsibility === 'OTA_COLLECT';
+  const rawHotelCollectible = authoritativeFinancials?.hotel_collectible_remaining_balance;
+  const hasHotelCollectibleValue =
+    rawHotelCollectible !== null &&
+    rawHotelCollectible !== undefined &&
+    String(rawHotelCollectible).trim() !== '';
+  const parsedHotelCollectible = hasHotelCollectibleValue
+    ? Number(rawHotelCollectible)
+    : Number.NaN;
+  const hotelCollectibleValid = isOtaCollect
+    ? Number.isFinite(parsedHotelCollectible) && parsedHotelCollectible >= 0
+    : true;
+  // Fail-closed: OTA_COLLECT + invalid/missing collectible => null (no fallback to canonical balance).
+  const paymentCollectionBalance: number | null = isOtaCollect
+    ? (hotelCollectibleValid ? Math.max(0, parsedHotelCollectible) : null)
+    : remainingBalance;
+  const otaCollectUnavailable = isOtaCollect && !hotelCollectibleValid;
+  // Form visibility: always hidden when OTA_COLLECT balance is unavailable.
+  const canShowPaymentForm =
+    !isCancelled &&
+    paymentCollectionBalance !== null &&
+    paymentCollectionBalance > 0;
+
   // GROUP-GUARANTEE-CLOSE-WARNING: warn on close only when group is terminal AND guarantee is unresolved.
   // A soft warning — never blocks checkout, never mutates data.
   // Common dismiss that clears ALL warning/pending state so no modal remains logically open.
@@ -730,6 +759,20 @@ export default function ReservationDetailDrawer({
     const amountNum = Number(paymentDraft.replace(/\D/g, ''));
     if (!amountNum || amountNum <= 0) {
       setPaymentError('Masukkan nominal pembayaran yang valid');
+      return;
+    }
+    // Fail-closed: OTA_COLLECT collectible unavailable — never proceed without authoritative data.
+    if (isOtaCollect && paymentCollectionBalance === null) {
+      setPaymentError(
+        'Sisa tagihan hotel belum tersedia. Muat ulang data folio sebelum mencatat pembayaran.'
+      );
+      return;
+    }
+    // Client-side cap for OTA_COLLECT: reject before any network call.
+    if (isOtaCollect && paymentCollectionBalance !== null && amountNum > paymentCollectionBalance) {
+      setPaymentError(
+        `Nominal pembayaran melebihi sisa tagihan hotel Rp ${paymentCollectionBalance.toLocaleString('id-ID')}`
+      );
       return;
     }
     if (!paymentEvidenceFile) {
@@ -1666,8 +1709,17 @@ export default function ReservationDetailDrawer({
             )}
           </div>
 
+           {/* Fail-closed warning for OTA_COLLECT — rendered outside the form so it stays visible */}
+           {otaCollectUnavailable && !isCancelled && (
+             <div className="p-4 bg-amber-50 rounded-xl border border-amber-200">
+               <span className="text-xs font-semibold text-amber-800">
+                 Sisa tagihan hotel belum tersedia. Muat ulang data folio sebelum mencatat pembayaran.
+               </span>
+             </div>
+           )}
+
           {/* Section 7: Tambah Pembayaran Baru (Single Canonical Payment Logging Form) */}
-          {remainingBalance > 0 && !isCancelled && (
+          {canShowPaymentForm && (
             <form onSubmit={handleAddPayment} className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
               <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
                 + Catat Pembayaran Baru
@@ -1700,16 +1752,16 @@ export default function ReservationDetailDrawer({
                     <label className="block text-xs font-semibold text-stone-700">Nominal (Rp)</label>
                     <button
                       type="button"
-                      onClick={() => setPaymentDraft(String(remainingBalance))}
+                      onClick={() => setPaymentDraft(String(paymentCollectionBalance))}
                       className="text-xs font-semibold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded border border-emerald-200 cursor-pointer transition-colors"
                     >
-                      Isi Sisa Tagihan (Rp {remainingBalance.toLocaleString('id-ID')})
+                      {isOtaCollect ? 'Isi Sisa Tagihan Hotel' : 'Isi Sisa Tagihan'} (Rp {paymentCollectionBalance!.toLocaleString('id-ID')})
                     </button>
                   </div>
                   <input
                     type="number"
                     step="1000"
-                    placeholder={`Contoh: ${remainingBalance}`}
+                    placeholder={`Contoh: ${paymentCollectionBalance!.toLocaleString('id-ID')}`}
                     value={paymentDraft}
                     onChange={e => setPaymentDraft(e.target.value)}
                     className="w-full p-2 bg-stone-50 border border-stone-300 rounded-lg outline-none font-mono font-bold text-xs"
