@@ -542,7 +542,6 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   onSelectGuest={(guest) => { setSelectedGuest(guest); setGuestName(guest.full_name); setGuestPhone(guest.phone || ''); }}
                   onClearGuest={() => { setSelectedGuest(null); }}
                   selectedGuest={selectedGuest}
-                  placeholder="请输入至少1个字符搜索CRM tamu..."
                   required
                   label=""
                 />
@@ -572,7 +571,6 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   onSelectGuest={(guest) => { setSelectedBookerGuest(guest); setBookerName(guest.full_name); setBookerPhone(guest.phone || ''); }}
                   onClearGuest={() => { setSelectedBookerGuest(null); }}
                   selectedGuest={selectedBookerGuest}
-                  placeholder="请输入至少1个字符搜索CRM pemesan..."
                   label=""
                 />
               </div>
