@@ -464,6 +464,14 @@ export async function initializeDatabase(pool: Pool) {
       CONSTRAINT bookings_bid_format_check CHECK (bid ~ '^[A-Z0-9-]+$')
     );
 
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_responsibility VARCHAR(20) NOT NULL DEFAULT 'HOTEL_COLLECT';
+    DO $$ BEGIN
+      ALTER TABLE bookings
+        ADD CONSTRAINT bookings_payment_responsibility_chk
+        CHECK (payment_responsibility IN ('HOTEL_COLLECT', 'OTA_COLLECT'));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
     CREATE OR REPLACE FUNCTION bookings_set_updated_at()
     RETURNS TRIGGER AS $$
     BEGIN

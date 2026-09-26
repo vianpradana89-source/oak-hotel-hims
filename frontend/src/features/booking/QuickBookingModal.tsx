@@ -156,6 +156,7 @@ export default function QuickBookingModal({
   const [globalDiscountType, setGlobalDiscountType] = useState<'NOMINAL' | 'PERCENT'>('NOMINAL');
   const [globalDiscountValue, setGlobalDiscountValue] = useState<number>(0);
   const [globalDiscountReason, setGlobalDiscountReason] = useState('');
+  const [paymentResponsibility, setPaymentResponsibility] = useState<'HOTEL_COLLECT' | 'OTA_COLLECT'>('HOTEL_COLLECT');
 
   // --- Payment-intent guard: distinguishes "default 0" from "user intentionally chose 0" ---
   const isPaymentTouchedRef = useRef(false);
@@ -454,6 +455,7 @@ export default function QuickBookingModal({
     setExtractedKtpData(null);
     setPaymentMethod('CASH');
     setAmountPaid(0);
+    setPaymentResponsibility('HOTEL_COLLECT');
     isPaymentTouchedRef.current = false;
     setBuktiBayarFile(null);
     setBuktiBayarPath(null);
@@ -752,10 +754,17 @@ export default function QuickBookingModal({
   useEffect(() => {
     const isOta = channelType === 'OTA';
     // When switching to OTA without touching payment, default to zero (Hotel Collect)
-    if (isOta && !isPaymentTouchedRef.current) {
+    if (isOta && !isPaymentTouchedRef.current && paymentResponsibility === 'HOTEL_COLLECT') {
       if (amountPaid !== 0) {
         setAmountPaid(0);
       }
+      return;
+    }
+    // For OTA_COLLECT: canonical hotel payment is always 0, clear evidence
+    if (paymentResponsibility === 'OTA_COLLECT') {
+      setAmountPaid(0);
+      setBuktiBayarFile(null);
+      setBuktiBayarPath(null);
       return;
     }
     // For any explicit payment (positive or zero), only clamp overpayment
@@ -769,12 +778,16 @@ export default function QuickBookingModal({
     if (amountPaid === 0 || amountPaid > grandTotal) {
       setAmountPaid(grandTotal);
     }
-  }, [grandTotal, channelType]);
+  }, [grandTotal, channelType, paymentResponsibility]);
 
   // Deterministic channel switch: zero payment on OTA switch unless user touched it
   const handleChannelTypeChange = useCallback((next: 'WALKIN' | 'OTA') => {
     if (next === 'OTA' && !isPaymentTouchedRef.current) {
       setAmountPaid(0);
+    }
+    // Default OTA payment responsibility to HOTEL_COLLECT
+    if (next === 'OTA') {
+      setPaymentResponsibility('HOTEL_COLLECT');
     }
     setChannelType(next);
   }, []);
@@ -1338,9 +1351,10 @@ export default function QuickBookingModal({
         valid_until: extractedKtpData?.valid_until || selectedCrmGuest?.valid_until || undefined,
         ktp_ocr_confidence: extractedKtpData?.confidence || selectedCrmGuest?.ktp_ocr_confidence || undefined,
         ktp_ocr_provider: extractedKtpData?.provider || selectedCrmGuest?.ktp_ocr_provider || undefined,
-        payment_method: paymentMethod,
-        amount_paid: amountPaid,
-        bukti_bayar_path: buktiBayarPath || undefined,
+        payment_method: paymentResponsibility === 'OTA_COLLECT' ? undefined : paymentMethod,
+        amount_paid: paymentResponsibility === 'OTA_COLLECT' ? 0 : amountPaid,
+        bukti_bayar_path: paymentResponsibility === 'OTA_COLLECT' ? undefined : (buktiBayarPath || undefined),
+        payment_responsibility: paymentResponsibility,
         require_strict_gates: true,
         special_requests: specialRequests.trim() || undefined,
         global_discount_type: toBackendDiscountType(globalDiscountType),
@@ -1405,7 +1419,8 @@ export default function QuickBookingModal({
 
       const formData = new FormData();
       formData.append('booking_payload', JSON.stringify(payload));
-      if (buktiBayarFile) {
+      // Only attach payment evidence for HOTEL_COLLECT
+      if (paymentResponsibility !== 'OTA_COLLECT' && buktiBayarFile) {
         formData.append('payment_evidence', buktiBayarFile);
       }
       const res = await authenticatedFetch('/api/bookings', {
@@ -2489,6 +2504,49 @@ export default function QuickBookingModal({
                   5. Pembayaran & Bukti Bayar
                 </h3>
 
+                {/* Payment Responsibility Selector (OTA only) */}
+                {channelType === 'OTA' && (
+                  <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 space-y-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
+                      Skema Pembayaran OTA
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPaymentResponsibility('HOTEL_COLLECT')}
+                        className={'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ' + (
+                          paymentResponsibility === 'HOTEL_COLLECT'
+                            ? 'bg-emerald-800 text-white border-emerald-900'
+                            : 'bg-white text-stone-600 border-amber-300 hover:bg-amber-50'
+                        )}
+                      >
+                        🏨 Hotel Collect — Tamu bayar ke hotel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPaymentResponsibility('OTA_COLLECT')}
+                        className={'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ' + (
+                          paymentResponsibility === 'OTA_COLLECT'
+                            ? 'bg-amber-700 text-white border-amber-800'
+                            : 'bg-white text-stone-600 border-amber-300 hover:bg-amber-50'
+                        )}
+                      >
+                        🌐 OTA Collect — Tamu sudah bayar ke OTA
+                      </button>
+                    </div>
+                    {paymentResponsibility === 'OTA_COLLECT' && (
+                      <p className="text-[11px] text-amber-800 font-medium">
+                        ✓ Tamu sudah membayar seluruh tagihan ke {selectedOtaSourceName || 'OTA'}.
+                        {grandTotal > 0 && (
+                          <span> Total tagihan hotel: <strong>Rp {grandTotal.toLocaleString('id-ID')}</strong> dibayar oleh OTA.</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Show payment fields only when NOT OTA_COLLECT */}
+                {(channelType !== 'OTA' || paymentResponsibility !== 'OTA_COLLECT') && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   {getFieldMode('payment_method') !== 'HIDDEN' && (
                     <div>
@@ -2584,6 +2642,24 @@ export default function QuickBookingModal({
                   </div>
                   )}
                 </div>
+                )}
+
+                {/* OTA_COLLECT info panel — shown only for OTA + OTA_COLLECT */}
+                {channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT' && (
+                  <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 space-y-1">
+                    <p className="text-[12px] font-bold text-emerald-900">
+                      ✓ Skema OTA Collect Aktif
+                    </p>
+                    <p className="text-[11px] text-emerald-800">
+                      Tamu telah membayar seluruh tagihan ke {selectedOtaSourceName || 'OTA'}.
+                    </p>
+                    {grandTotal > 0 && (
+                      <p className="text-[11px] text-emerald-800">
+                        Total tagihan hotel: <strong>Rp {grandTotal.toLocaleString('id-ID')}</strong> — dibayar oleh OTA, tidak ada pembayaran hotel.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

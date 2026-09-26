@@ -1218,6 +1218,7 @@ async function createBookingParentRecord(
     globalDiscountReason?: string | null;
     globalDiscountGrossBefore?: number;
     globalDiscountNetAfter?: number;
+    paymentResponsibility?: string | null;
   }
 ) {
   const propertyCode = String(bookingPayload.propertyCode || 'LWG').trim().toUpperCase();
@@ -1253,9 +1254,10 @@ async function createBookingParentRecord(
           global_discount_reason,
           global_discount_gross_before,
           global_discount_net_after,
+          payment_responsibility,
           created_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), NOW())
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NOW(), NOW())
         RETURNING *;`,
         [
           bid,
@@ -1279,7 +1281,8 @@ async function createBookingParentRecord(
           Number(bookingPayload.globalDiscountAmount || 0),
           bookingPayload.globalDiscountReason || null,
           Number(bookingPayload.globalDiscountGrossBefore || 0),
-          Number(bookingPayload.globalDiscountNetAfter || 0)
+          Number(bookingPayload.globalDiscountNetAfter || 0),
+          bookingPayload.paymentResponsibility || null
         ]
       );
 
@@ -1509,31 +1512,57 @@ async function createCanonicalBooking(
       missingFields.push('identity');
     }
   }
+
+  // ── Normalize and validate payment_responsibility BEFORE payment gates ──
+  const rawPaymentResponsibility = bookingPayload.payment_responsibility;
+  let paymentResponsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT' = 'HOTEL_COLLECT';
+  if (rawPaymentResponsibility === 'OTA_COLLECT' || rawPaymentResponsibility === 'HOTEL_COLLECT') {
+    if (rawPaymentResponsibility === 'OTA_COLLECT' && channelType !== 'OTA') {
+      throw createHttpError(400, 'payment_responsibility=OTA_COLLECT is only valid for OTA bookings; non-OTA must be HOTEL_COLLECT');
+    }
+    paymentResponsibility = rawPaymentResponsibility;
+  } else if (rawPaymentResponsibility !== undefined && rawPaymentResponsibility !== null && rawPaymentResponsibility !== '') {
+    throw createHttpError(400, 'payment_responsibility must be either HOTEL_COLLECT or OTA_COLLECT');
+  }
+  // For non-OTA: enforce HOTEL_COLLECT canonical
+  if (channelType !== 'OTA' && paymentResponsibility === 'OTA_COLLECT') {
+    paymentResponsibility = 'HOTEL_COLLECT';
+  }
+
   if (rulesMap['payment_method'] === 'REQUIRED') {
-    const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
-    if (!paymentMethod) {
-      missingFields.push('payment_method');
+    // OTA_COLLECT bypasses payment_method requirement
+    if (paymentResponsibility !== 'OTA_COLLECT') {
+      const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
+      if (!paymentMethod) {
+        missingFields.push('payment_method');
+      }
     }
   }
   if (rulesMap['payment_amount'] === 'REQUIRED') {
-    const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
-      ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
-      : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
-    if (totalAmountPaid <= 0) {
-      missingFields.push('payment_amount');
+    // OTA_COLLECT bypasses payment_amount requirement
+    if (paymentResponsibility !== 'OTA_COLLECT') {
+      const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+        ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+        : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
+      if (totalAmountPaid <= 0) {
+        missingFields.push('payment_amount');
+      }
     }
   }
   if (rulesMap['payment_evidence'] === 'REQUIRED') {
-    const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
-    const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
-      ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
-      : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
-    const paymentEvidence = bookingPayload.bukti_bayar_path
-      || bookingPayload.initial_payment?.payment_evidence_path
-      || rawReservationPayloads[0]?.bukti_bayar_path
-      || (req.file ? true : null);
-    if (totalAmountPaid > 0 && !paymentEvidence) {
-      missingFields.push('payment_evidence');
+    // OTA_COLLECT bypasses payment_evidence requirement
+    if (paymentResponsibility !== 'OTA_COLLECT') {
+      const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
+      const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+        ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+        : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
+      const paymentEvidence = bookingPayload.bukti_bayar_path
+        || bookingPayload.initial_payment?.payment_evidence_path
+        || rawReservationPayloads[0]?.bukti_bayar_path
+        || (req.file ? true : null);
+      if (totalAmountPaid > 0 && !paymentEvidence) {
+        missingFields.push('payment_evidence');
+      }
     }
   }
   if (rulesMap['rate_plan'] === 'REQUIRED') {
@@ -1574,15 +1603,24 @@ async function createCanonicalBooking(
     const bookingActor = String(req?.user?.username || req?.user?.name || 'PMS');
     const useGlobalDiscount = hasBookingGlobalDiscountInput(bookingPayload);
     const useBookingLevelPayment = hasBookingLevelPaymentInput(bookingPayload);
-    const bookingLevelCash = useBookingLevelPayment
+
+    let bookingLevelCash = useBookingLevelPayment
       ? (bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
       : null;
-    const bookingPaymentEvidencePath = bookingPayload.bukti_bayar_path
+    let bookingPaymentEvidencePath = bookingPayload.bukti_bayar_path
       || bookingPayload.initial_payment?.payment_evidence_path
       || null;
-    const bookingPaymentMethod = bookingPayload.payment_method
+    let bookingPaymentMethod = bookingPayload.payment_method
       || bookingPayload.initial_payment?.payment_method
       || null;
+
+    // For OTA_COLLECT: canonical hotel amount paid is 0, no payment records created
+    if (paymentResponsibility === 'OTA_COLLECT') {
+      // Override any payment inputs to ensure zero hotel payment
+      bookingLevelCash = 0;
+      bookingPaymentMethod = null;
+      bookingPaymentEvidencePath = null;
+    }
 
     const bookingRecord = await createBookingParentRecord(client, {
       propertyId: bookingPropertyId,
@@ -1598,7 +1636,8 @@ async function createCanonicalBooking(
       channel,
       currencyCode,
       correlationId,
-      createdBy: bookingActor
+      createdBy: bookingActor,
+      paymentResponsibility: paymentResponsibility
     });
 
     const normalizedChildren: any[] = [];
