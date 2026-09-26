@@ -97,7 +97,7 @@ import {
 } from './domains/pricing/bookingPricingAuthority';
 import type { PriceQuoteResult } from './domains/pricing/pricingTypes';
 import { createStayChargesRouter } from './domains/stayCharges/stayChargesRouter';
-import { recalculateReservationFinancials, calculateReservationFinancials } from './domains/stayCharges/stayChargesService';
+import { recalculateReservationFinancials, calculateReservationFinancials, calculateHotelCollectibleBalance } from './domains/stayCharges/stayChargesService';
 import { createTransactionsRouter } from './domains/transactions/transactionsRouter';
 import { createPurchaseSettingsRouter } from './domains/transactions/purchaseSettingsRouter';
 import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './domains/transactions/transactionService';
@@ -6835,8 +6835,14 @@ app.post('/api/reservations/:id/checkout', async (req, res) => {
       // CHECKOUT-FOLIO-GATE-1B: Authoritative folio balance verification.
       // Must pass before any status mutation. Fail-closed on unverifiable data.
       const folioFinancial = await recalculateReservationFinancials(client, reservationId, propertyId);
-      const validatedBalance = Number(folioFinancial?.remaining_balance);
-      if (!folioFinancial || !Number.isFinite(validatedBalance)) {
+      const hotelCollectible = await calculateHotelCollectibleBalance(
+        client,
+        reservationId,
+        propertyId,
+        booking.payment_responsibility
+      );
+      const validatedBalance = Number(hotelCollectible?.hotel_collectible_remaining_balance);
+      if (!folioFinancial || !hotelCollectible || !Number.isFinite(validatedBalance)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           status: 'ERROR',
@@ -7639,7 +7645,8 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
         r.booking_number as legacy_booking_number,
         b.bid,
         b.id as booking_id_value,
-        b.property_id as booking_property_id
+        b.property_id as booking_property_id,
+        b.payment_responsibility
       FROM reservations r
       LEFT JOIN bookings b ON b.id = r.booking_id
       WHERE r.id = $1
@@ -7708,6 +7715,13 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
       ? Number(folioFinancial.remaining_balance)
       : null;
 
+    const hotelCollectible = await calculateHotelCollectibleBalance(
+      pool,
+      reservationId,
+      propertyId,
+      reservation.rows[0].payment_responsibility
+    );
+
     res.json({
       status: 'OK',
       data: {
@@ -7721,6 +7735,9 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
           amount_paid: folioFinancial?.amount_paid ?? null,
           applied_deposit: folioFinancial?.applied_deposit ?? null,
           remaining_balance: authoritativeRemainingBalance,
+          hotel_collectible_total: hotelCollectible.hotel_collectible_total,
+          hotel_collectible_remaining_balance: hotelCollectible.hotel_collectible_remaining_balance,
+          payment_responsibility: hotelCollectible.payment_responsibility,
           payment_status: folioFinancial?.payment_status ?? null,
         }
       }

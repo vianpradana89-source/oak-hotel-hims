@@ -83,13 +83,24 @@ async function teardown() {
   await testPool.end();
 }
 
-async function createTestBooking(pool, roomId, roomTypeId, checkIn, checkOut, baseRate) {
+async function createTestBooking(
+  pool,
+  roomId,
+  roomTypeId,
+  checkIn,
+  checkOut,
+  baseRate,
+  paymentResponsibility = 'HOTEL_COLLECT'
+) {
   const bid = `TEST-BK-${genId()}`;
 
   const bookRes = await pool.query(
-    `INSERT INTO bookings (property_id, bid, guest_name_snapshot, booking_status, created_at, updated_at)
-     VALUES ($1, $2, $3, 'ACTIVE', NOW(), NOW()) RETURNING id`,
-    [testPropertyId, bid, `Guest${genId().slice(0, 4)}`]
+    `INSERT INTO bookings (
+       property_id, bid, guest_name_snapshot, booking_status,
+       payment_responsibility, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, 'ACTIVE', $4, NOW(), NOW()) RETURNING id`,
+    [testPropertyId, bid, `Guest${genId().slice(0, 4)}`, paymentResponsibility]
   );
   const bookingId = bookRes.rows[0].id;
 
@@ -415,6 +426,238 @@ async function main() {
       assert.strictEqual(afterState.remaining_balance, beforeState.remaining_balance, 'S11: remaining_balance unchanged');
       assert.strictEqual(afterState.payment_status, beforeState.payment_status, 'S11: payment_status unchanged');
       pass(11, 'GET /folio is read-only, does not mutate reservation');
+      await cleanupTestReservation(testPool, reservationId, roomId);
+    }
+
+    // Scenario 12: OTA_COLLECT room-only balance is not hotel collectible
+    {
+      const room = testRooms[0];
+      const { reservationId, roomId } = await createTestBooking(
+        testPool, room.id, room.room_type_id, baseDate, nextDate, baseRate, 'OTA_COLLECT'
+      );
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES ($1, $2, 'ROOM_CHARGE', 'ROOM_CHARGE', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW())`,
+        [reservationId, testPropertyId, baseRate]
+      );
+      const folioRes = await request(testPool, 'GET', `/api/reservations/${reservationId}/folio?property_id=${testPropertyId}`);
+      assert.strictEqual(folioRes.status, 200, `S12: expected folio 200, got ${folioRes.status}`);
+      const fin = folioRes.body.data.authoritative_financials;
+      assert.strictEqual(Number(fin.remaining_balance), baseRate, 'S12: canonical room balance remains visible');
+      assert.strictEqual(Number(fin.hotel_collectible_remaining_balance), 0, 'S12: OTA room is not hotel collectible');
+      assert.strictEqual(fin.payment_responsibility, 'OTA_COLLECT', 'S12: payment responsibility');
+      const res = await request(testPool, 'POST', `/api/reservations/${reservationId}/checkout`, { property_id: testPropertyId });
+      assert.strictEqual(res.status, 200, `S12: expected checkout 200, got ${res.status}`);
+      pass(12, 'OTA_COLLECT room-only does not block checkout');
+      await cleanupTestReservation(testPool, reservationId, roomId);
+    }
+
+    // Scenario 13: OTA_COLLECT unpaid manual extra remains hotel collectible
+    {
+      const extra = 150000;
+      const room = testRooms[1];
+      const { reservationId, roomId } = await createTestBooking(
+        testPool, room.id, room.room_type_id, baseDate, nextDate, baseRate, 'OTA_COLLECT'
+      );
+
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES
+         ($1, $2, 'ROOM_CHARGE', 'ROOM_CHARGE', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW()),
+         ($1, $2, 'STAY_CHARGE', 'EXTRA_BED', 'DEBIT', $4, 'POSTED', FALSE, NULL, NOW())`,
+        [reservationId, testPropertyId, baseRate, extra]
+      );
+
+      const folioRes = await request(
+        testPool,
+        'GET',
+        `/api/reservations/${reservationId}/folio?property_id=${testPropertyId}`
+      );
+      const fin = folioRes.body.data.authoritative_financials;
+
+      assert.strictEqual(
+        Number(fin.hotel_collectible_remaining_balance),
+        extra,
+        'S13: manual extra remains hotel collectible'
+      );
+
+      const res = await request(
+        testPool,
+        'POST',
+        `/api/reservations/${reservationId}/checkout`,
+        { property_id: testPropertyId }
+      );
+
+      assert.strictEqual(res.status, 409, `S13: expected 409, got ${res.status}`);
+      assert.strictEqual(
+        res.body.code,
+        'FOLIO_BALANCE_OUTSTANDING',
+        'S13: unpaid manual extra blocks checkout'
+      );
+
+      pass(13, 'OTA_COLLECT unpaid manual extra blocks checkout');
+      await cleanupTestReservation(testPool, reservationId, roomId);
+    }
+
+    // Scenario 14: OTA_COLLECT manual extra paid to hotel allows checkout
+    {
+      const extra = 150000;
+      const room = testRooms[2];
+      const { reservationId, roomId } = await createTestBooking(
+        testPool, room.id, room.room_type_id, baseDate, nextDate, baseRate, 'OTA_COLLECT'
+      );
+
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES
+         ($1, $2, 'ROOM_CHARGE', 'ROOM_CHARGE', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW()),
+         ($1, $2, 'STAY_CHARGE', 'EXTRA_BED', 'DEBIT', $4, 'POSTED', FALSE, NULL, NOW()),
+         ($1, $2, 'PAYMENT', NULL, 'CREDIT', $4, 'POSTED', FALSE, NULL, NOW())`,
+        [reservationId, testPropertyId, baseRate, extra]
+      );
+
+      const folioRes = await request(
+        testPool,
+        'GET',
+        `/api/reservations/${reservationId}/folio?property_id=${testPropertyId}`
+      );
+      const fin = folioRes.body.data.authoritative_financials;
+
+      assert.strictEqual(
+        Number(fin.hotel_collectible_total),
+        extra,
+        'S14: collectible total is manual extra'
+      );
+      assert.strictEqual(
+        Number(fin.hotel_collectible_remaining_balance),
+        0,
+        'S14: hotel payment clears collectible balance'
+      );
+
+      const res = await request(
+        testPool,
+        'POST',
+        `/api/reservations/${reservationId}/checkout`,
+        { property_id: testPropertyId }
+      );
+
+      assert.strictEqual(res.status, 200, `S14: expected 200, got ${res.status}`);
+
+      pass(14, 'OTA_COLLECT paid manual extra allows checkout');
+      await cleanupTestReservation(testPool, reservationId, roomId);
+    }
+
+    // Scenario 15: OTA_COLLECT reversed manual extra leaves no collectible balance
+    {
+      const extra = 150000;
+      const room = testRooms[3];
+      const { reservationId, roomId } = await createTestBooking(
+        testPool, room.id, room.room_type_id, baseDate, nextDate, baseRate, 'OTA_COLLECT'
+      );
+
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES ($1, $2, 'ROOM_CHARGE', 'ROOM_CHARGE', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW())`,
+        [reservationId, testPropertyId, baseRate]
+      );
+
+      const charge = await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES ($1, $2, 'STAY_CHARGE', 'EXTRA_BED', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW())
+         RETURNING id`,
+        [reservationId, testPropertyId, extra]
+      );
+
+      await testPool.query(
+        `UPDATE folio_entries
+         SET is_voided = TRUE, status = 'VOIDED'
+         WHERE id = $1`,
+        [charge.rows[0].id]
+      );
+
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES ($1, $2, 'REVERSAL', 'EXTRA_BED', 'CREDIT', $3, 'POSTED', FALSE, $4, NOW())`,
+        [reservationId, testPropertyId, extra, charge.rows[0].id]
+      );
+
+      const folioRes = await request(
+        testPool,
+        'GET',
+        `/api/reservations/${reservationId}/folio?property_id=${testPropertyId}`
+      );
+      const fin = folioRes.body.data.authoritative_financials;
+
+      assert.strictEqual(
+        Number(fin.hotel_collectible_remaining_balance),
+        0,
+        'S15: reversed manual extra is not collectible'
+      );
+
+      const res = await request(
+        testPool,
+        'POST',
+        `/api/reservations/${reservationId}/checkout`,
+        { property_id: testPropertyId }
+      );
+
+      assert.strictEqual(res.status, 200, `S15: expected 200, got ${res.status}`);
+
+      pass(15, 'OTA_COLLECT reversed manual extra allows checkout');
+      await cleanupTestReservation(testPool, reservationId, roomId);
+    }
+
+    // Scenario 16: OTA_COLLECT stay extension remains hotel collectible
+    {
+      const extension = 150000;
+      const room = testRooms[4];
+      const { reservationId, roomId } = await createTestBooking(
+        testPool, room.id, room.room_type_id, baseDate, nextDate, baseRate, 'OTA_COLLECT'
+      );
+
+      await testPool.query(
+        `INSERT INTO folio_entries
+         (reservation_id, property_id, entry_type, source_type, direction, amount, status, is_voided, reversal_of_entry_id, created_at)
+         VALUES
+         ($1, $2, 'ROOM_CHARGE', 'ROOM_CHARGE', 'DEBIT', $3, 'POSTED', FALSE, NULL, NOW()),
+         ($1, $2, 'ROOM_CHARGE', 'STAY_EXTENSION', 'DEBIT', $4, 'POSTED', FALSE, NULL, NOW())`,
+        [reservationId, testPropertyId, baseRate, extension]
+      );
+
+      const folioRes = await request(
+        testPool,
+        'GET',
+        `/api/reservations/${reservationId}/folio?property_id=${testPropertyId}`
+      );
+      const fin = folioRes.body.data.authoritative_financials;
+
+      assert.strictEqual(
+        Number(fin.hotel_collectible_remaining_balance),
+        extension,
+        'S16: stay extension remains hotel collectible'
+      );
+
+      const res = await request(
+        testPool,
+        'POST',
+        `/api/reservations/${reservationId}/checkout`,
+        { property_id: testPropertyId }
+      );
+
+      assert.strictEqual(res.status, 409, `S16: expected 409, got ${res.status}`);
+      assert.strictEqual(
+        res.body.code,
+        'FOLIO_BALANCE_OUTSTANDING',
+        'S16: unpaid extension blocks checkout'
+      );
+
+      pass(16, 'OTA_COLLECT stay extension remains hotel collectible');
       await cleanupTestReservation(testPool, reservationId, roomId);
     }
 

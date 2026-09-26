@@ -675,6 +675,96 @@ export async function recalculateReservationFinancials(
   };
 }
 
+
+export async function calculateHotelCollectibleBalance(
+  client: PoolClient | Pool,
+  reservationId: number,
+  propertyId: number,
+  paymentResponsibility: unknown
+): Promise<{
+  payment_responsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT';
+  hotel_collectible_total: number;
+  hotel_collectible_remaining_balance: number;
+  amount_paid: number;
+  applied_deposit: number;
+}> {
+  const responsibility = String(paymentResponsibility || 'HOTEL_COLLECT')
+    .trim()
+    .toUpperCase();
+
+  const canonical = await calculateReservationFinancials(
+    client,
+    reservationId,
+    propertyId
+  );
+
+  if (responsibility !== 'OTA_COLLECT') {
+    return {
+      payment_responsibility: 'HOTEL_COLLECT',
+      hotel_collectible_total: canonical.total_price,
+      hotel_collectible_remaining_balance: canonical.remaining_balance,
+      amount_paid: canonical.amount_paid,
+      applied_deposit: canonical.applied_deposit
+    };
+  }
+
+  // OTA_COLLECT:
+  // The original OTA room charge is settled outside the hotel and therefore
+  // must not block checkout. Only exclude the original ROOM_CHARGE source.
+  //
+  // STAY_EXTENSION and all other manually-posted hotel charges remain
+  // collectible by the hotel.
+  //
+  // Keep the same compensating-reversal model as canonical folio calculation:
+  // original voided debit remains in history and its CREDIT reversal offsets it.
+  const collectibleRes = await client.query(
+    `SELECT
+       COALESCE(SUM(CASE
+         WHEN direction = 'DEBIT'
+          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+          AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
+         THEN amount
+         ELSE 0
+       END), 0) AS gross_collectible,
+       COALESCE(SUM(CASE
+         WHEN direction = 'CREDIT'
+          AND (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL' OR entry_type LIKE '%_REVERSAL')
+          AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
+         THEN amount
+         ELSE 0
+       END), 0) AS collectible_reversals
+     FROM folio_entries
+     WHERE reservation_id = $1`,
+    [reservationId]
+  );
+
+  const grossCollectible = Math.round(
+    Number(collectibleRes.rows[0]?.gross_collectible || 0)
+  );
+  const collectibleReversals = Math.round(
+    Number(collectibleRes.rows[0]?.collectible_reversals || 0)
+  );
+
+  const hotelCollectibleTotal = Math.max(
+    0,
+    grossCollectible - collectibleReversals
+  );
+
+  const effectiveHotelSettlement =
+    canonical.amount_paid + canonical.applied_deposit;
+
+  return {
+    payment_responsibility: 'OTA_COLLECT',
+    hotel_collectible_total: hotelCollectibleTotal,
+    hotel_collectible_remaining_balance: Math.max(
+      0,
+      hotelCollectibleTotal - effectiveHotelSettlement
+    ),
+    amount_paid: canonical.amount_paid,
+    applied_deposit: canonical.applied_deposit
+  };
+}
+
 // ============================================================================
 // FOLIO POSTING, VOID & CORRECTION ENGINE
 // ============================================================================
