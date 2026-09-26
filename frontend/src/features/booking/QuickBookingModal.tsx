@@ -698,10 +698,13 @@ export default function QuickBookingModal({
       if (draft.stayType === 'OVERNIGHT') {
         nightsCount = overnightNights(draft.checkIn, draft.checkOut);
       }
-      // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount
+      // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount.
       const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(0, nightsCount);
+      const isOta = channelType === 'OTA';
       const roomCharge = draft.isManualOverride
-        ? Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights)
+        ? (isOta
+          ? Math.max(0, Number(draft.manualOverridePrice) || 0)
+          : Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights))
         : Math.max(0, Number(draft.roomNightlyRate) || 0);
 
       const stayChargesTotal = draft.stayCharges.reduce((acc, curr) => acc + curr.amount, 0);
@@ -718,7 +721,9 @@ export default function QuickBookingModal({
         roomNumber: matchedRoom?.room_number || availabilityRoom?.room_number || matchedRoom?.name || 'Belum dipilih',
         roomTypeName: matchedType?.name || 'Tipe Kamar',
         nights: nightsCount,
-        nightlyRate: draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge),
+        nightlyRate: isOta && draft.isManualOverride && effectiveNights > 0
+          ? Math.round((Number(draft.manualOverridePrice) || 0) / effectiveNights)
+          : (draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge)),
         roomCharge,
         stayChargesTotal,
         grossSubtotal
@@ -860,8 +865,9 @@ export default function QuickBookingModal({
       : rulesList.find((r: any) => r.id === ruleOrType?.id || r.charge_type === ruleType || r.code === ruleType);
 
     const roomDraft = roomsList[roomIndex];
+    const _isOta = channelType === 'OTA';
     const roomRate = roomDraft
-      ? (roomDraft.isManualOverride ? roomDraft.manualOverridePrice : roomDraft.roomNightlyRate)
+      ? (_isOta && roomDraft.isManualOverride ? (roomDraft.manualOverridePrice / (roomDraft.stayType === 'DAY_USE' ? 1 : Math.max(1, overnightNights(roomDraft.checkIn, roomDraft.checkOut)))) : (roomDraft.isManualOverride ? roomDraft.manualOverridePrice : roomDraft.roomNightlyRate))
       : 0;
 
     const targetCharges = [...roomDraft.stayCharges];
@@ -1186,7 +1192,7 @@ export default function QuickBookingModal({
       }
       if (channelType === 'OTA') {
         if (!r.manualOverridePrice || Number(r.manualOverridePrice) <= 0) {
-          issues.push(label + ': Tarif kamar OTA per malam wajib diisi dengan nominal lebih dari 0');
+          issues.push(label + ': Total harga kamar OTA sesuai voucher wajib diisi dengan nominal lebih dari 0');
         }
       } else {
         if (r.isManualOverride && !r.manualOverrideReason.trim()) {
@@ -2092,25 +2098,25 @@ export default function QuickBookingModal({
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <span className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                                  <span>🌐</span> Tarif Kamar OTA per Malam (Manual Input)
+                                  <span>🌐</span> Total Harga Kamar OTA
                                 </span>
                                 <span className="text-[10px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded font-semibold">
                                   Wajib Sesuai Voucher
                                 </span>
                               </div>
                               <span className="text-[11px] text-amber-800 font-medium">
-                                Net / Voucher Rate per Malam
+                                Total Net / Voucher
                               </span>
                             </div>
 
                             <div className="pt-1 border-t border-amber-200/60">
                               <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                Tarif Kamar OTA per Malam (Rp) <span className="text-rose-500">*</span>
+                                Total Harga Kamar OTA (Rp) <span className="text-rose-500">*</span>
                               </label>
                               <input
                                 type="text"
                                 inputMode="numeric"
-                                placeholder="Contoh: 350.000"
+                                placeholder="Contoh: 1.000.000"
                                 value={roomDraft.manualOverridePrice > 0 ? roomDraft.manualOverridePrice.toLocaleString('id-ID') : ''}
                                 onChange={e => {
                                   const rawVal = e.target.value;
@@ -2123,14 +2129,18 @@ export default function QuickBookingModal({
                                 }}
                                 className="w-full text-xs px-3 py-2 bg-white border border-amber-300 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 rounded-lg font-mono font-bold text-stone-900"
                               />
-                              {roomDraft.manualOverridePrice > 0 && (
-                                <p className="text-[11px] text-amber-800 mt-1 font-medium">
-                                  Tarif per malam: <strong>Rp {roomDraft.manualOverridePrice.toLocaleString('id-ID')}</strong>
-                                  {roomCalculations[roomIdx]?.nights > 1 && (
-                                    <span> • Total {roomCalculations[roomIdx].nights} malam: <strong>Rp {roomCalculations[roomIdx].roomCharge.toLocaleString('id-ID')}</strong></span>
-                                  )}
-                                </p>
-                              )}
+                              {roomDraft.manualOverridePrice > 0 && (() => {
+                                const nights = roomCalculations[roomIdx]?.nights ?? 1;
+                                const avgRate = nights > 1 ? Math.round(roomDraft.manualOverridePrice / nights) : roomDraft.manualOverridePrice;
+                                return (
+                                  <p className="text-[11px] text-amber-800 mt-1 font-medium">
+                                    <strong>Total OTA: Rp {roomDraft.manualOverridePrice.toLocaleString('id-ID')}</strong>
+                                    {nights > 1 && (
+                                      <span> • Average {nights} malam: <strong>Rp {avgRate.toLocaleString('id-ID')}</strong> / malam</span>
+                                    )}
+                                  </p>
+                                );
+                              })()}
                             </div>
                           </div>
                         ) : (
