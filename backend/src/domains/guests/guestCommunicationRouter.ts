@@ -1,8 +1,7 @@
 import { Router, type Response } from 'express';
 import type { Pool } from 'pg';
-import { requireAuth } from '../auth/authMiddleware';
+import { requireAuth, normalizeRoleName } from '../auth/authMiddleware';
 import { isPlatformSuperAdmin } from '../auth/authService';
-import { normalizeRole } from './guestService';
 import type { AuthUserPayload } from '../auth/authService';
 import {
   listTemplates,
@@ -79,7 +78,7 @@ function actorFor(req: any): ActorSnapshot {
   return {
     userId: user.id,
     name: user.full_name,
-    role: normalizeRole(user.role),
+    role: normalizeRoleName(user.role),
   };
 }
 
