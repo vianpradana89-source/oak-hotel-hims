@@ -210,7 +210,12 @@ export async function previewRoomMove(pool: Pool, reservationId: number, input: 
 
 async function reassignMoveInventory(client: PoolClient, reservation: any, fromTypeId: number, toTypeId: number, effectiveFrom: string): Promise<void> {
   if (fromTypeId === toTypeId) return;
-  const dates = enumerateHotelDates(effectiveFrom, hotelDateKey(reservation.check_out));
+  const checkOut = hotelDateKey(reservation.check_out);
+  // Physical move is immediate but inventory/rate context takes effect next night.
+  // If effectiveFrom >= checkOut there are zero occupied nights after the move,
+  // so the inventory reassignment is a no-op (move record stays as historical marker).
+  if (effectiveFrom >= checkOut) return;
+  const dates = enumerateHotelDates(effectiveFrom, checkOut);
   const keys = dates.flatMap(date => [
     { roomTypeId: fromTypeId, date }, { roomTypeId: toTypeId, date }
   ]);
@@ -384,10 +389,17 @@ export async function releaseReservationInventoryForCheckout(client: PoolClient,
   );
   const movesByDate = new Map<string, number>();
   for (const move of moves.rows) movesByDate.set(hotelDateKey(move.effective_from_date), Number(move.to_room_type_id));
+  // Build sorted move list for "latest move whose effectiveFrom <= date" semantics
+  const sortedMoves = Array.from(movesByDate.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]));
   let activeTypeId = baseTypeId;
   const datesByType = new Map<number, string[]>();
   for (const date of enumerateHotelDates(checkIn, checkOut)) {
-    activeTypeId = movesByDate.get(date) || activeTypeId;
+    // Apply the latest move that is effective on or before this date
+    for (const [moveDate, typeId] of sortedMoves) {
+      if (moveDate <= date) activeTypeId = typeId;
+      else break;
+    }
     const dates = datesByType.get(activeTypeId) || [];
     dates.push(date);
     datesByType.set(activeTypeId, dates);
