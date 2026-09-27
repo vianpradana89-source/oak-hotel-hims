@@ -10,6 +10,7 @@ import { GuestDatabaseTable } from './GuestDatabaseTable';
 import { GuestProfileModal } from './GuestProfileModal';
 import { GuestEditModal } from './GuestEditModal';
 import { GuestDuplicateModal } from './GuestDuplicateModal';
+import { GuestCommunicationPanel } from './GuestCommunicationPanel';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestCrmWorkspaceProps {
@@ -140,6 +141,16 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             📋 Database Pelanggan ({guests.length})
           </button>
           <button
+            onClick={() => setActiveTab('communication')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+              activeTab === 'communication'
+                ? 'bg-white text-[#1E392A] shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
+            }`}
+          >
+            Komunikasi Tamu
+          </button>
+          <button
             disabled
             className="px-3 py-1.5 text-xs font-medium text-stone-400 cursor-not-allowed flex items-center space-x-1"
             title="Program Loyalitas akan hadir pada fase mendatang"
@@ -187,6 +198,9 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
         />
       )}
 
+      {activeTab === 'communication' && (
+        <GuestCommunicationPanel propertyId={propertyId} />
+      )}
       {/* Modals */}
       <GuestProfileModal
         guestId={selectedGuestId}

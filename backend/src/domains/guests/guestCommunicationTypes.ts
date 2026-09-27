@@ -149,6 +149,8 @@ export const ALLOWED_TEMPLATE_VARIABLES = new Set<string>([
   'property_name',
   'check_in_date',
   'check_out_date',
+  'check_out_time',
+  'meal_plan',
   'room_type',
   'room_number',
 ]);

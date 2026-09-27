@@ -659,6 +659,20 @@ export async function prepareWhatsAppCommunication(
       if (reservation.check_out) {
         vars['check_out_date'] = String(reservation.check_out);
       }
+      if (reservation.check_out_time) {
+        const checkOutTime = String(reservation.check_out_time).trim();
+        if (checkOutTime !== '') {
+          vars['check_out_time'] = checkOutTime.length >= 5
+            ? checkOutTime.slice(0, 5)
+            : checkOutTime;
+        }
+      }
+      if (
+        reservation.meal_plan_name_snapshot &&
+        String(reservation.meal_plan_name_snapshot).trim() !== ''
+      ) {
+        vars['meal_plan'] = String(reservation.meal_plan_name_snapshot).trim();
+      }
       // room_type: prefer joined room_type_name, fallback to snapshot
       const roomTypeName = roomRow?.room_type_name
         || roomRow?.booked_room_type_name_snapshot

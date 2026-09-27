@@ -148,7 +148,7 @@ export interface DuplicateCandidateCluster {
   guests: Guest[];
 }
 
-export type GuestCrmTab = 'summary' | 'database';
+export type GuestCrmTab = 'summary' | 'database' | 'communication';
 
 export interface GuestFilterState {
   search: string;
