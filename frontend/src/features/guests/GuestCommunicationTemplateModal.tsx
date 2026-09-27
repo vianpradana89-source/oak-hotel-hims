@@ -248,7 +248,15 @@ export const GuestCommunicationTemplateModal: React.FC<
               </label>
               <select
                 value={scope}
-                onChange={(event) => setScope(event.target.value as GuestCommunicationScope)}
+                onChange={(event) => {
+                  const nextScope = event.target.value as GuestCommunicationScope;
+                  setScope(nextScope);
+                  if (!template) {
+                    setAllowedStatuses(
+                      nextScope === 'STAY_OPERATIONAL' ? 'CHECKED_IN' : ''
+                    );
+                  }
+                }}
                 disabled={saving}
                 className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
               >
