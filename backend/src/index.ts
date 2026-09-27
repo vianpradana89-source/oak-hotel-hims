@@ -15,6 +15,7 @@ import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
 import { createReportsRouter } from './domains/reports/reportsRouter';
 import { createRoomOperationalBlocksRouter } from './domains/roomBlocks/roomOperationalBlocksRouter';
 import { createGuestsRouter, createReservationGuestsRouter } from './domains/guests/guestsRouter';
+import { createGuestCommunicationRouter } from './domains/guests/guestCommunicationRouter';
 import { normalizeDigitsOnly, syncPrimaryGuestFromReservation } from './domains/guests/guestService';
 import { createPropertiesRouter } from './domains/properties/propertiesRouter';
 import { createPropertyBrandingRouter } from './domains/propertyBranding/propertyBrandingRouter';
@@ -8272,6 +8273,8 @@ app.use('/api/room-types', createRoomTypesRouter(pool));
 app.use('/api/rooms', createRoomsRouter(pool));
 app.use('/api/reports', createReportsRouter(pool));
 app.use('/api/room-operational-blocks', createRoomOperationalBlocksRouter(pool));
+// Guest Communication routes MUST be mounted before /api/guests to avoid /:id collision
+app.use('/api/guests', createGuestCommunicationRouter(pool));
 app.use('/api/guests', createGuestsRouter(pool));
 app.use('/api/reservations', createReservationGuestsRouter(pool));
 app.use('/api/reservations', createReservationSpecialRequestsRouter(pool));

@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.guest-communication-migration
+      - -t
+      - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-guest-communication-migration:guest-communication-v1
+      - .
+
+images:
+  - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-guest-communication-migration:guest-communication-v1
