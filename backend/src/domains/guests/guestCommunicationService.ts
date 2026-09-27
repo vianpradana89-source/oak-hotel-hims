@@ -172,8 +172,8 @@ function validatePlaceholders(placeholders: string[]): void {
 }
 
 // ─── Audit logging helper ────────────────────────────────────────────────────
-// audit_logs columns: module, action, entity, record_id, property_id,
-//   actor_user_id, actor_name, actor_role, old_value, new_value, correlation_id
+// audit_logs canonical columns: module, action, entity, record_id, new_value, correlation_id, property_id
+// Actor snapshot and old/new values are stored inside new_value JSON.
 
 async function insertAudit(
   client: PoolClient,
@@ -187,28 +187,33 @@ async function insertAudit(
   actor: ActorSnapshot | null,
   correlationId: string | null
 ): Promise<void> {
+  const auditPayload = {
+    actor: actor
+      ? {
+          user_id: actor.userId ?? null,
+          name: actor.name ?? null,
+          role: actor.role ?? null,
+        }
+      : null,
+    old_value: oldValue !== undefined ? oldValue : null,
+    new_value: newValue !== undefined ? newValue : null,
+  };
+
   await client.query(
     `INSERT INTO audit_logs
-       (module, action, entity, record_id, property_id,
-        actor_user_id, actor_name, actor_role,
-        old_value, new_value, correlation_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       (module, action, entity, record_id, new_value, correlation_id, property_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
     [
       module,
       action,
       entityType,
-      recordId,
-      propertyId,
-      actor?.userId ? String(actor.userId) : null,
-      actor?.name ?? null,
-      actor?.role ?? null,
-      oldValue !== undefined && oldValue !== null ? JSON.stringify(oldValue) : null,
-      newValue !== undefined && newValue !== null ? JSON.stringify(newValue) : null,
+      recordId !== null ? String(recordId) : null,
+      JSON.stringify(auditPayload),
       correlationId,
+      propertyId,
     ]
   );
 }
-
 // ─── List templates ──────────────────────────────────────────────────────────
 
 export async function listTemplates(
