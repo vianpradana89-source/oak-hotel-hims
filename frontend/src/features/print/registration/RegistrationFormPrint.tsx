@@ -6,6 +6,7 @@ import {
   formatHotelCurrency,
 } from '../../documents/GuestDocumentContent';
 import { maskIdentityNumber } from './registrationFormDraft';
+import { formatReservationSourceLabel } from '../../calendar/reservationContextMetadata';
 import type { RegistrationFormClause } from './registrationFormDraft';
 
 export interface RegistrationFormPrintProps {
@@ -65,7 +66,8 @@ export default function RegistrationFormPrint({
   const checkOut = res?.check_out;
   const nights = res?.nights ?? 0;
   const roomTypeName = res?.room_type_name || res?.room_type || '—';
-  const source = res?.booking_source || res?.source || null;
+  const source = formatReservationSourceLabel(res);
+  const bookingReference = res?.referral || null;
 
   const nightsLabel = nights > 0 ? `${nights} malam` : '—';
 
@@ -143,6 +145,12 @@ export default function RegistrationFormPrint({
             <div>
               <div className="reg-doc-field-label">Sumber Booking</div>
               <div className="reg-doc-field-value">{source}</div>
+            </div>
+          ) : null}
+          {bookingReference ? (
+            <div>
+              <div className="reg-doc-field-label">Ref/No. Booking</div>
+              <div className="reg-doc-field-value">{bookingReference}</div>
             </div>
           ) : null}
         </div>
