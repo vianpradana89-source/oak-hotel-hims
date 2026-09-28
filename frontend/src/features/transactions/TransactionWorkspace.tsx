@@ -908,6 +908,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     </span>
   );
 
+  const renderPaymentResponsibilityBadge = (responsibility: string | undefined | null) => {
+    if (responsibility !== 'OTA_COLLECT') return null;
+    return (
+      <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.3 rounded border border-amber-300 bg-amber-50 text-amber-800 tracking-wide">
+        DITANGGUNG OTA
+      </span>
+    );
+  };
+
   const renderOperationalBadge = (txLike: Parameters<typeof mapToOperationalStatus>[0]) => {
     const op = mapToOperationalStatus(txLike);
     return (
@@ -958,6 +967,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(paid)}</td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(remaining)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(t.payment_status)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(t.payment_responsibility)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
             <button
@@ -1033,6 +1043,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             {shouldShowListSettlementAmounts(item) ? formatIdr(group.remaining) : '—'}
           </td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(group.payment_status)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(group.payment_responsibility)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">
             {renderOperationalBadge({
               transaction_status: t.transaction_status,
@@ -1052,7 +1063,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         </tr>
         {expanded && (
           <tr className="bg-slate-50/70">
-            <td colSpan={12} className="px-4 py-2.5">
+             <td colSpan={14} className="px-4 py-2.5">
               <div className="rounded-lg border border-slate-200 bg-white/80 overflow-hidden">
                 <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100">
                   Kamar aktivitas periode
@@ -1066,11 +1077,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       <th className="py-1.5 px-3 text-left">Check-out</th>
                       <th className="py-1.5 px-3 text-right">Gross</th>
                       <th className="py-1.5 px-3 text-right">Diskon</th>
-                      <th className="py-1.5 px-3 text-right">Net</th>
-                      <th className="py-1.5 px-3 text-right">Dibayar</th>
-                      <th className="py-1.5 px-3 text-right">Sisa</th>
-                      <th className="py-1.5 px-3 text-center">Status</th>
-                      <th className="py-1.5 px-3 text-center">Aksi</th>
+                       <th className="py-1.5 px-3 text-right">Net</th>
+                       <th className="py-1.5 px-3 text-right">Dibayar</th>
+                       <th className="py-1.5 px-3 text-right">Sisa</th>
+                       <th className="py-1.5 px-3 text-center">Status</th>
+                       <th className="py-1.5 px-3 text-center">Penanggung</th>
+                       <th className="py-1.5 px-3 text-center">Aksi</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1086,6 +1098,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
                         <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
                         <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
+                        <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(child.payment_responsibility)}</td>
                         <td className="py-1.5 px-3 text-center whitespace-nowrap">
                           <button
                             type="button"
@@ -1220,37 +1233,40 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   }
 
   return (
-    <div className="space-y-3.5">
+    <div className="space-y-4">
       {/* 1. PAGE HEADER */}
-      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs px-5 py-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm px-6 py-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse" />
+            <div className="flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-600" />
               <h1 className="text-xl font-bold text-slate-900 tracking-tight">
                 Pusat Transaksi
               </h1>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Kelola transaksi penjualan kamar/POS, pembelian vendor, pengeluaran operasional & verifikasi
+            <p className="text-xs text-slate-500 mt-1">
+              Kelola transaksi penjualan kamar/POS, pembelian vendor, pengeluaran operasional &amp; verifikasi
             </p>
           </div>
 
           {/* Action Buttons */}
-          <div className="flex items-center gap-2">
-            {/* Global Vendor/Supplier Master Shortcut */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Global Vendor/Supplier Master Shortcut — clean SVG, no emoji */}
             <button
               onClick={() => setShowVendorSupplierMaster(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-xs cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
               title="Buka direktori master vendor & supplier"
             >
-              <span>🏢 Vendor & Supplier</span>
+              <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+              </svg>
+              <span>Vendor &amp; Supplier</span>
             </button>
 
             {activeTab === 'PURCHASE' && (
               <button
                 onClick={() => setActiveEditor('PURCHASE')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-sm cursor-pointer"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -1262,7 +1278,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             {activeTab === 'EXPENSE' && (
               <button
                 onClick={() => setActiveEditor('EXPENSE')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-sm cursor-pointer"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -1274,7 +1290,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             {activeTab === 'INCOME' && (
               <button
                 onClick={() => setActiveEditor('INCOME')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-all shadow-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-all shadow-sm cursor-pointer"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -1290,7 +1306,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     onOpenQuickBooking();
                   }
                 }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl transition-all shadow-xs cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl transition-all shadow-sm cursor-pointer"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -1325,100 +1341,129 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* LEVEL 1 — PRIMARY TABS */}
-      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs p-2.5">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 flex-1">
-            {/* Penjualan */}
-            <button
-              onClick={() => handleTabChange('SALE')}
-              className={`flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'SALE'
-                  ? 'bg-emerald-700 text-white shadow-xs'
-                  : 'bg-slate-50 text-slate-700 hover:bg-emerald-50 hover:text-emerald-800 border border-slate-200/80'
-              }`}
-            >
-              <span className="uppercase tracking-wider">Penjualan</span>
-              <span
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  activeTab === 'SALE' ? 'bg-emerald-800 text-emerald-100' : 'bg-slate-200/80 text-slate-600'
-                }`}
-              >
-                {summary.count_sale}
-              </span>
-            </button>
-
-            {/* Pembelian */}
-            <button
-              onClick={() => handleTabChange('PURCHASE')}
-              className={`flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'PURCHASE'
-                  ? 'bg-blue-700 text-white shadow-xs'
-                  : 'bg-slate-50 text-slate-700 hover:bg-blue-50 hover:text-blue-800 border border-slate-200/80'
-              }`}
-            >
-              <span className="uppercase tracking-wider">Pembelian</span>
-              <span
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  activeTab === 'PURCHASE' ? 'bg-blue-800 text-blue-100' : 'bg-slate-200/80 text-slate-600'
-                }`}
-              >
-                {summary.count_purchase}
-              </span>
-            </button>
-
-            {/* Pengeluaran */}
-            <button
-              onClick={() => handleTabChange('EXPENSE')}
-              className={`flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'EXPENSE'
-                  ? 'bg-rose-700 text-white shadow-xs'
-                  : 'bg-slate-50 text-slate-700 hover:bg-rose-50 hover:text-rose-800 border border-slate-200/80'
-              }`}
-            >
-              <span className="uppercase tracking-wider">Pengeluaran</span>
-              <span
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  activeTab === 'EXPENSE' ? 'bg-rose-800 text-rose-100' : 'bg-slate-200/80 text-slate-600'
-                }`}
-              >
-                {summary.count_expense}
-              </span>
-            </button>
-
-            {/* Pemasukan */}
-            <button
-              onClick={() => handleTabChange('INCOME')}
-              className={`flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'INCOME'
-                  ? 'bg-teal-700 text-white shadow-xs'
-                  : 'bg-slate-50 text-slate-700 hover:bg-teal-50 hover:text-teal-800 border border-slate-200/80'
-              }`}
-            >
-              <span className="uppercase tracking-wider">Pemasukan</span>
-              <span
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  activeTab === 'INCOME' ? 'bg-teal-800 text-teal-100' : 'bg-slate-200/80 text-slate-600'
-                }`}
-              >
-                {summary.count_income}
-              </span>
-            </button>
+      {/* 2. FOUR DOMAIN CARDS — replaces tab-button grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* PENJUALAN — emerald */}
+        <button
+          onClick={() => handleTabChange('SALE')}
+          className={`relative overflow-hidden rounded-2xl border-2 p-4 text-left transition-all cursor-pointer ${
+            activeTab === 'SALE'
+              ? 'bg-emerald-700 border-emerald-700 text-white shadow-md'
+              : 'bg-white border-slate-200 text-slate-700 hover:border-emerald-300 hover:shadow-sm'
+          }`}
+        >
+          <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
+            activeTab === 'SALE' ? 'text-emerald-200' : 'text-slate-400'
+          }`}>Penjualan</div>
+          <div className={`text-lg font-bold font-mono leading-tight ${
+            activeTab === 'SALE' ? 'text-white' : 'text-slate-900'
+          }`}>
+            {formatIdr(summary.total_sale)}
           </div>
-
-          <div className="flex items-center justify-end gap-1.5 pt-1 lg:pt-0 lg:pl-2 border-t lg:border-t-0 lg:border-l border-slate-200">
-            <button
-              onClick={() => handleTabChange('ALL')}
-              className={`px-3 py-2 text-xs font-semibold rounded-xl whitespace-nowrap transition-colors cursor-pointer ${
-                activeTab === 'ALL'
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-              }`}
-            >
-              Lihat Semua
-            </button>
+          <div className={`text-[11px] mt-1 font-medium ${
+            activeTab === 'SALE' ? 'text-emerald-100' : 'text-slate-500'
+          }`}>
+            {summary.count_sale} transaksi
           </div>
-        </div>
+          {activeTab === 'SALE' && (
+            <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-emerald-300" />
+          )}
+        </button>
+
+        {/* PEMBELIAN — blue */}
+        <button
+          onClick={() => handleTabChange('PURCHASE')}
+          className={`relative overflow-hidden rounded-2xl border-2 p-4 text-left transition-all cursor-pointer ${
+            activeTab === 'PURCHASE'
+              ? 'bg-blue-700 border-blue-700 text-white shadow-md'
+              : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300 hover:shadow-sm'
+          }`}
+        >
+          <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
+            activeTab === 'PURCHASE' ? 'text-blue-200' : 'text-slate-400'
+          }`}>Pembelian</div>
+          <div className={`text-lg font-bold font-mono leading-tight ${
+            activeTab === 'PURCHASE' ? 'text-white' : 'text-slate-900'
+          }`}>
+            {formatIdr(summary.total_purchase)}
+          </div>
+          <div className={`text-[11px] mt-1 font-medium ${
+            activeTab === 'PURCHASE' ? 'text-blue-100' : 'text-slate-500'
+          }`}>
+            {summary.count_purchase} transaksi
+          </div>
+          {activeTab === 'PURCHASE' && (
+            <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-blue-300" />
+          )}
+        </button>
+
+        {/* PENGELUARAN — rose */}
+        <button
+          onClick={() => handleTabChange('EXPENSE')}
+          className={`relative overflow-hidden rounded-2xl border-2 p-4 text-left transition-all cursor-pointer ${
+            activeTab === 'EXPENSE'
+              ? 'bg-rose-700 border-rose-700 text-white shadow-md'
+              : 'bg-white border-slate-200 text-slate-700 hover:border-rose-300 hover:shadow-sm'
+          }`}
+        >
+          <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
+            activeTab === 'EXPENSE' ? 'text-rose-200' : 'text-slate-400'
+          }`}>Pengeluaran</div>
+          <div className={`text-lg font-bold font-mono leading-tight ${
+            activeTab === 'EXPENSE' ? 'text-white' : 'text-slate-900'
+          }`}>
+            {formatIdr(summary.total_expense)}
+          </div>
+          <div className={`text-[11px] mt-1 font-medium ${
+            activeTab === 'EXPENSE' ? 'text-rose-100' : 'text-slate-500'
+          }`}>
+            {summary.count_expense} transaksi
+          </div>
+          {activeTab === 'EXPENSE' && (
+            <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-rose-300" />
+          )}
+        </button>
+
+        {/* PEMASUKAN — teal */}
+        <button
+          onClick={() => handleTabChange('INCOME')}
+          className={`relative overflow-hidden rounded-2xl border-2 p-4 text-left transition-all cursor-pointer ${
+            activeTab === 'INCOME'
+              ? 'bg-teal-700 border-teal-700 text-white shadow-md'
+              : 'bg-white border-slate-200 text-slate-700 hover:border-teal-300 hover:shadow-sm'
+          }`}
+        >
+          <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
+            activeTab === 'INCOME' ? 'text-teal-200' : 'text-slate-400'
+          }`}>Pemasukan</div>
+          <div className={`text-lg font-bold font-mono leading-tight ${
+            activeTab === 'INCOME' ? 'text-white' : 'text-slate-900'
+          }`}>
+            {formatIdr(summary.total_income)}
+          </div>
+          <div className={`text-[11px] mt-1 font-medium ${
+            activeTab === 'INCOME' ? 'text-teal-100' : 'text-slate-500'
+          }`}>
+            {summary.count_income} transaksi
+          </div>
+          {activeTab === 'INCOME' && (
+            <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-teal-300" />
+          )}
+        </button>
+      </div>
+
+      {/* Lihat Semua — secondary, below cards */}
+      <div className="flex justify-end">
+        <button
+          onClick={() => handleTabChange('ALL')}
+          className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
+            activeTab === 'ALL'
+              ? 'bg-slate-900 text-white shadow-sm'
+              : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          Lihat Semua
+        </button>
       </div>
 
       {showVendorSupplierMaster ? (
@@ -1429,10 +1474,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         />
       ) : (
         /* Main Table Workspace */
-        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
+        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm overflow-hidden">
         {/* Toolbar & Filters */}
-        <div className="p-4 border-b border-slate-200 space-y-3 bg-slate-50/50">
-          {/* LEVEL 2 — DATE PRESETS */}
+        <div className="px-5 py-4 border-b border-slate-200 space-y-3 bg-slate-50/40">
+          {/* LEVEL 2 — DATE PRESETS (refined) */}
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-1.5">
               {[
@@ -1447,8 +1492,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   onClick={() => handleDatePresetChange(p.key as any)}
                   className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                     datePreset === p.key
-                      ? 'bg-emerald-700 text-white shadow-2xs'
-                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                      ? 'bg-emerald-700 text-white shadow-sm'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-800'
                   }`}
                 >
                   {p.label}
@@ -1467,7 +1512,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </button>
               {(activeTab === 'SALE' || activeTab === 'ALL') && (
                 <span
-                  className="ml-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-md"
+                  className="ml-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md"
                   title={periodListHint}
                 >
                   Aktivitas Periode
@@ -1475,18 +1520,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               )}
             </div>
 
-            <div className="text-xs text-slate-500 font-medium">
+            {/* Active period summary — prominent but compact */}
+            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
               {activeStats.total !== null ? (
                 <>
-                  Total {activeStats.label}:{' '}
-                  <span className="font-mono font-bold text-slate-900">{formatIdr(activeStats.total)}</span>{' '}
-                  <span className="text-slate-400">({activeStats.count} transaksi)</span>
+                  <span className="font-mono font-bold text-slate-900">{formatIdr(activeStats.total)}</span>
+                  <span className="text-slate-400">/</span>
+                  <span className="text-slate-400">{activeStats.count} transaksi</span>
                 </>
               ) : (
                 <>
-                  Total Transaksi:{' '}
-                  <span className="font-mono font-bold text-slate-900">{activeStats.count}</span>{' '}
-                  <span className="text-slate-400">transaksi</span>
+                  <span className="font-mono font-bold text-slate-900">{activeStats.count}</span>
+                  <span className="text-slate-400"> transaksi</span>
                 </>
               )}
             </div>
@@ -1520,9 +1565,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             </div>
           )}
 
-          {/* LEVEL 3 — SEARCH & LEVEL 4 — OPERATIONAL STATUS */}
-          <div className="flex flex-col lg:flex-row lg:items-center gap-2.5">
-            {/* Search Bar */}
+          {/* LEVEL 3 — SEARCH + LEVEL 4 — OPERATIONAL STATUS */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+            {/* Search Bar — dominant control */}
             <div className="relative flex-1">
               <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -1546,9 +1591,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               )}
             </div>
 
-            {/* LEVEL 4 — OPERATIONAL STATUS PILLS */}
+            {/* OPERATIONAL STATUS PILLS — compact */}
             <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 shrink-0 overflow-x-auto">
-              <span className="text-[11px] font-medium text-slate-400 px-2">Sheet:</span>
+              <span className="text-[11px] font-medium text-slate-400 px-2 whitespace-nowrap">Sheet:</span>
               {[
                 { key: 'PROSES', label: 'Proses', count: sheetCounts.proses },
                 { key: 'SELESAI', label: 'Selesai', count: sheetCounts.selesai },
@@ -1563,7 +1608,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     setOperationalStatus(st.key as OperationalStatus);
                     setPage(1);
                   }}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
                     operationalStatus === st.key
                       ? st.key === 'PROSES'
                         ? 'bg-amber-100 text-amber-800 font-bold'
@@ -1574,7 +1619,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         : st.key === 'HAPUS'
                         ? 'bg-slate-700 text-white font-bold'
                         : 'bg-slate-900 text-white font-bold'
-                      : 'text-slate-600 hover:bg-slate-100'
+                      : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                   }`}
                 >
                   <span>{st.label}</span>
@@ -1747,11 +1792,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3 text-right" title={periodListHint}>Gross</th>
                         <th className="py-3 px-3 text-right" title={periodListHint}>Diskon</th>
                         <th className="py-3 px-3 text-right" title={periodListHint}>Net</th>
-                        <th className="py-3 px-3 text-right" title={settlementListHint}>Dibayar</th>
-                        <th className="py-3 px-3 text-right" title={settlementListHint}>Sisa</th>
-                        <th className="py-3 px-2 text-center">Pembayaran</th>
-                        <th className="py-3 px-2 text-center">Status</th>
-                        <th className="py-3 px-3 text-center">Aksi</th>
+                         <th className="py-3 px-3 text-right" title={settlementListHint}>Dibayar</th>
+                         <th className="py-3 px-3 text-right" title={settlementListHint}>Sisa</th>
+                         <th className="py-3 px-2 text-center">Pembayaran</th>
+                         <th className="py-3 px-2 text-center">Penanggung</th>
+                         <th className="py-3 px-2 text-center">Status</th>
+                         <th className="py-3 px-3 text-center">Aksi</th>
                       </tr>
                     )}
 
