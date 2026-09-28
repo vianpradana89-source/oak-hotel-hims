@@ -69,13 +69,14 @@ import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
-import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, fetchUnresolvedGuarantees, parseAvailabilityKey } from './features/calendar/calendarApi';
-import type { DailyKpiData, DailyKpiDrilldownData } from './features/calendar/calendarApi';
+import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchDailyKpiHistory as fetchDailyKpiHistoryApi, fetchTapechart, fetchUnresolvedGuarantees, parseAvailabilityKey } from './features/calendar/calendarApi';
+import type { DailyKpiData, DailyKpiDrilldownData, DailyKpiHistoryData, DailyKpiDrilldownType } from './features/calendar/calendarApi';
 import type { UnresolvedGuaranteeItem } from './features/calendar/calendarTypes';
 import GuaranteeQueuePanel from './features/calendar/GuaranteeQueuePanel';
 import { CheckoutGuaranteeConfirmationModal } from './features/deposits/CheckoutGuaranteeConfirmationModal';
 import { buildDailyKpiCards, DRAWER_TYPE_TO_KPI_DRILLDOWN } from './features/calendar/dailyKpiFormat';
 import { DailyKpiDrilldownList } from './features/calendar/DailyKpiDrilldownList';
+import { TrendSparkline } from './features/calendar/TrendSparkline';
 import {
   addHotelDays,
   buildHotelDateWindow,
@@ -522,6 +523,8 @@ function AppContent() {
 
   const [dailyKpis, setDailyKpis] = useState<DailyKpiData | null>(null);
   const dailyKpiRequestVersionRef = useRef(0);
+  const [dailyKpiHistory, setDailyKpiHistory] = useState<DailyKpiHistoryData | null>(null);
+  const dailyKpiHistoryRequestVersionRef = useRef(0);
   const [kpiDrilldown, setKpiDrilldown] = useState<DailyKpiDrilldownData | null>(null);
   const [kpiDrilldownLoading, setKpiDrilldownLoading] = useState(false);
   const [kpiDrilldownError, setKpiDrilldownError] = useState<string | null>(null);
@@ -1092,7 +1095,7 @@ function AppContent() {
     };
   }, [reservations, roomStatuses, rooms, calendarSearchQuery]);
 
-  const dailyKpiCards = useMemo(() => buildDailyKpiCards(dailyKpis), [dailyKpis]);
+  const dailyKpiCards = useMemo(() => buildDailyKpiCards(dailyKpis, dailyKpiHistory), [dailyKpis, dailyKpiHistory]);
 
   const openReservationEditor = (reservation: any) => {
     const checkIn = normalizeHotelDate(reservation.check_in);
@@ -1247,22 +1250,45 @@ function AppContent() {
     const propId = targetPropId !== undefined ? targetPropId : propertyId;
     if (propId === null || propId === undefined) {
       setDailyKpis(null);
+      setDailyKpiHistory(null);
+      ++dailyKpiHistoryRequestVersionRef.current;
       return;
     }
+    // Invalidate any in-flight history request BEFORE starting the new load,
+    // so stale history responses from a prior call cannot overwrite the UI.
+    ++dailyKpiHistoryRequestVersionRef.current;
+    setDailyKpiHistory(null);
+
     const requestVersion = ++dailyKpiRequestVersionRef.current;
+    let kpiData: DailyKpiData | null = null;
     try {
-      const data = await fetchDailyKpisApi(propId, undefined, authFetch);
+      kpiData = await fetchDailyKpisApi(propId, undefined, authFetch);
       if (requestVersion !== dailyKpiRequestVersionRef.current) return;
-      setDailyKpis(data);
+      setDailyKpis(kpiData);
     } catch (err) {
       if (requestVersion !== dailyKpiRequestVersionRef.current) return;
       console.error('Error fetching daily KPIs', err);
+    }
+
+    // Fetch history for trend data (anchored to same date as main KPI)
+    if (!kpiData?.business_date) {
+      // Primary KPI failed or returned no date — history already nulled above.
+      return;
+    }
+    const historyRequestVersion = ++dailyKpiHistoryRequestVersionRef.current;
+    try {
+      const historyData = await fetchDailyKpiHistoryApi(propId, 7, authFetch, kpiData.business_date);
+      if (historyRequestVersion !== dailyKpiHistoryRequestVersionRef.current) return;
+      setDailyKpiHistory(historyData);
+    } catch (err) {
+      if (historyRequestVersion !== dailyKpiHistoryRequestVersionRef.current) return;
+      console.error('Error fetching daily KPI history', err);
     }
   };
   loadDailyKpisRef.current = loadDailyKpis;
 
   useEffect(() => {
-    const apiType = summaryDrawerType ? DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] : undefined;
+    const apiType = summaryDrawerType ? (DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] as DailyKpiDrilldownType | undefined) : undefined;
     if (!apiType || propertyId === null) {
       kpiDrilldownRequestVersionRef.current += 1;
       setKpiDrilldown(null);
@@ -3803,6 +3829,10 @@ function AppContent() {
                       setSummaryDrawerType(card.drawerType);
                     }}
                     badge={card.key === 'checkoutCheck' ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
+                    trendData={card.trendData}
+                    trendDelta={card.trendDelta}
+                    isOccupancy={card.key === 'occupancy'}
+                    occupancyPct={card.occupancyPct}
                   />
                 ))}
               </div>
@@ -5646,11 +5676,11 @@ function AppContent() {
 
 
 
-function StatCard({ title, value, secondary, color, onClick, isActive, badge }: any) {
+function StatCard({ title, value, secondary, color, onClick, isActive, badge, trendData, trendDelta, isOccupancy, occupancyPct }: any) {
   const isClickable = typeof onClick === 'function';
   return (
     <div
-      className={`hotel-stat-card ${color} ${isClickable ? 'hotel-stat-card--clickable' : ''} ${isActive ? 'hotel-stat-card--active' : ''}`}
+      className={`hotel-stat-card ${color} ${isClickable ? 'hotel-stat-card--clickable' : ''} ${isActive ? 'hotel-stat-card--active' : ''} hotel-stat-card--model-c`}
       onClick={onClick}
       onKeyDown={isClickable ? (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
       role={isClickable ? 'button' : undefined}
@@ -5667,8 +5697,51 @@ function StatCard({ title, value, secondary, color, onClick, isActive, badge }: 
           </span>
         )}
       </div>
-      <p className="hotel-stat-value">{value}</p>
-      {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+      {isOccupancy ? (
+        <OccupancyDonut value={value} secondary={secondary} occupancyPct={occupancyPct} />
+      ) : (
+        <>
+          <p className="hotel-stat-value">{value}</p>
+          {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+        </>
+      )}
+      {/* Trend sparkline - only when hasTrend is true and not occupancy */}
+      {!isOccupancy && trendData && trendData.length > 0 && (
+        <TrendSparkline data={trendData} previousValue={trendDelta !== null ? trendData[trendData.length - 2] : null} trendDelta={trendDelta} />
+      )}
+    </div>
+  );
+}
+
+function OccupancyDonut({ value, secondary, occupancyPct }: { value: string; secondary: string | null; occupancyPct: number | null }) {
+  const normalized = typeof occupancyPct === 'number' && Number.isFinite(occupancyPct) ? occupancyPct : null;
+  // Clamp to [0, 100] to avoid garbage rendering when upstream passes an unexpected scale.
+  const clampedPct = normalized !== null ? Math.min(100, Math.max(0, normalized)) : null;
+  const fraction = clampedPct !== null ? clampedPct / 100 : 0;
+  const circumference = 2 * Math.PI * 18;
+  const offset = circumference * (1 - fraction);
+  return (
+    <div className="occupancy-donut">
+      <svg className="occupancy-donut__ring" viewBox="0 0 44 44">
+        <circle cx="22" cy="22" r="18" fill="none" stroke="rgba(255,255,255,0.18)" strokeWidth="4" />
+        <circle
+          cx="22" cy="22" r="18"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="4"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform="rotate(-90 22 22)"
+        />
+        <text x="22" y="26" textAnchor="middle" fill="currentColor" fontSize="9" fontWeight="800" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {clampedPct !== null ? `${clampedPct.toFixed(1).replace('.', ',')}%` : '—'}
+        </text>
+      </svg>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <p className="hotel-stat-value" style={{ fontSize: '0.95rem' }}>{value}</p>
+        {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+      </div>
     </div>
   );
 }

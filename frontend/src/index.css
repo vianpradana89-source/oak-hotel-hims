@@ -1107,12 +1107,69 @@ button, input, select {
   color: white;
 }
 
+/* Model C: Enhanced card with trend sparkline */
+.hotel-stat-card--model-c {
+  position: relative;
+  overflow: hidden;
+}
+
+.hotel-stat-card--model-c::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+}
+
+/* Model C: Card layout with top icon/title, center value, bottom sparkline */
+.hotel-stat-card--model-c .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.hotel-stat-card--model-c .card-value-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.hotel-stat-card--model-c .card-supporting {
+  font-size: 0.68rem;
+  opacity: 0.72;
+  line-height: 1.2;
+  margin-top: 1px;
+}
+
+/* Donut ring for occupancy card */
+.occupancy-donut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.occupancy-donut__ring {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
+
+.occupancy-donut__center {
+  font-size: 0.85rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .hotel-stat-label {
   text-transform: uppercase;
   font-size: 0.64rem;
   letter-spacing: 0.08em;
   opacity: 0.8;
-  margin: 0 0 6px;
+  margin: 0 0 4px;
 }
 
 .hotel-stat-value {
@@ -1128,6 +1185,13 @@ button, input, select {
   line-height: 1.2;
   opacity: 0.78;
   font-weight: 600;
+}
+
+/* Trend sparkline wrapper */
+.trend-sparkline-wrap {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
 }
 
 .room-search-wrap {

@@ -27,6 +27,15 @@ export const DAILY_KPI_DRILLDOWN_TYPES = [
 
 export type DailyKpiDrilldownType = (typeof DAILY_KPI_DRILLDOWN_TYPES)[number];
 
+// Metrics that can be reconstructed from historical point-in-time data
+export const HISTORICAL_RECONSTRUCTABLE_METRICS = [
+  'occupied_rooms',
+  'booked_rooms',
+  'booked_bookings',
+  'check_in_rooms',
+  'check_out_rooms',
+] as const;
+
 export interface DailyKpiOccupancy {
   occupied_rooms: number;
   sellable_rooms: number;
@@ -704,4 +713,178 @@ export async function getDailyKpiDrilldown(
     block_type: asText(row.block_type),
   }));
   return { ...base, type: 'maintenance', count: items.length, items };
+}
+
+export interface DailyKpiHistoricalPoint {
+  business_date: string;
+  occupied_rooms: number;
+  booked_rooms: number;
+  booked_bookings: number;
+  check_in_rooms: number;
+  check_out_rooms: number;
+}
+
+export interface DailyKpiHistoryResult {
+  property_id: number;
+  timezone: string;
+  anchor_date: string;
+  points: DailyKpiHistoricalPoint[];
+  historical_metrics: string[];
+}
+
+export async function getDailyKpiHistory(
+  client: Pool | PoolClient,
+  propertyId: number,
+  days: number,
+  dateValue?: string | null
+): Promise<DailyKpiHistoryResult> {
+  if (!Number.isInteger(days) || days < 1 || days > 90) {
+    throw httpError(400, 'VALIDATION_ERROR', 'days must be an integer between 1 and 90');
+  }
+
+  const { timezone, businessDate: anchorDate } = await resolveKpiScope(client, propertyId, dateValue);
+
+  // Generate list of business dates going back N days from anchorDate.
+  const dates: string[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(anchorDate + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() - i);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    dates.push(`${y}-${m}-${day}`);
+  }
+
+  // Parameter layout:
+  //   $1 = propertyId
+  //   $2..$N+1 = dates (N = days)
+  //   $N+2 = timezone
+  const tzParamIdx = dates.length + 2;
+  const tzParam = `$${tzParamIdx}`;
+
+  // Canonical predicate templates with dynamic param references
+  const createdHotelDate = hotelInstantDateSql('b.created_at', tzParam);
+  const checkedInHotelDate = hotelInstantDateSql('r.checked_in_at', tzParam);
+  const checkedOutHotelDate = hotelInstantDateSql('r.checked_out_at', tzParam);
+
+  // Build VALUES clause with proper multi-row syntax: VALUES ($2), ($3), ($4)
+  const valuesClause = `VALUES ${dates.map((_, i) => `($${i + 2})`).join(', ')}`;
+
+  // ---- Occupancy for each date -------------------------
+  // STRICT property isolation: INNER JOIN bookings with property_id=$1
+  // Ensures unmatched bookings (from other properties) are filtered out.
+  const occupancyCTE = `
+    occupancy AS (
+      SELECT d.date_val, COUNT(*)::int AS occupied
+      FROM dates d
+      JOIN reservations r ON TRUE
+      JOIN bookings b ON b.id = r.booking_id AND b.property_id = $1
+      WHERE
+        COALESCE(b.booking_status, 'ACTIVE') <> 'CANCELLED'
+        AND UPPER(r.status) IN ('BOOKED', 'CHECKED_IN')
+        AND (
+          CASE
+            WHEN UPPER(COALESCE(r.stay_type, 'OVERNIGHT')) = 'DAY_USE'
+              THEN r.check_in::date = d.date_val::date
+            ELSE r.check_in::date <= d.date_val::date
+                 AND r.check_out::date > d.date_val::date
+          END
+        )
+      GROUP BY d.date_val
+    )
+  `;
+
+  // ---- Booked today for each date ----------------------
+  // Uses exact BOOKED_TODAY_BOOKING_PREDICATE and BOOKED_TODAY_CHILD_PREDICATE.
+  // Canonical booking-level predicate plus child-level reservation filter.
+  const bookedTodayCTE = `
+    booked_today AS (
+      SELECT d.date_val,
+        COUNT(DISTINCT b.id) FILTER (WHERE b.id IS NOT NULL)::int AS bookings,
+        COUNT(r.id) FILTER (WHERE ${BOOKED_TODAY_CHILD_PREDICATE})::int AS rooms
+      FROM dates d
+      LEFT JOIN bookings b ON b.property_id = $1
+        AND COALESCE(b.booking_status, 'ACTIVE') <> 'CANCELLED'
+        AND ${createdHotelDate} = d.date_val::date
+      LEFT JOIN reservations r ON r.booking_id = b.id
+      GROUP BY d.date_val
+    )
+  `;
+
+  // ---- Check-in today for each date --------------------
+  // STRICT property isolation: JOIN bookings with property_id=$1.
+  // Uses exact CHECK_IN_TODAY_PREDICATE structure.
+  const checkInCTE = `
+    check_in AS (
+      SELECT d.date_val, COUNT(*)::int AS rooms
+      FROM dates d
+      JOIN reservations r ON TRUE
+      JOIN bookings b ON b.id = r.booking_id AND b.property_id = $1
+      WHERE
+        r.checked_in_at IS NOT NULL
+        AND UPPER(r.status) IN ('CHECKED_IN', 'CHECKED_OUT')
+        AND UPPER(r.status) NOT IN ('CANCELLED', 'NO_SHOW')
+        AND ${checkedInHotelDate} = d.date_val::date
+      GROUP BY d.date_val
+    )
+  `;
+
+  // ---- Check-out today for each date -------------------
+  // STRICT property isolation: JOIN bookings with property_id=$1.
+  // Uses exact CHECK_OUT_TODAY_PREDICATE structure.
+  const checkOutCTE = `
+    check_out AS (
+      SELECT d.date_val, COUNT(*)::int AS rooms
+      FROM dates d
+      JOIN reservations r ON TRUE
+      JOIN bookings b ON b.id = r.booking_id AND b.property_id = $1
+      WHERE
+        r.checked_out_at IS NOT NULL
+        AND UPPER(r.status) = 'CHECKED_OUT'
+        AND ${checkedOutHotelDate} = d.date_val::date
+      GROUP BY d.date_val
+    )
+  `;
+
+  const sql = `
+    WITH dates(date_val) AS (
+      ${valuesClause}
+    ),
+    ${occupancyCTE},
+    ${bookedTodayCTE},
+    ${checkInCTE},
+    ${checkOutCTE}
+    SELECT
+      d.date_val::text AS business_date,
+      COALESCE(o.occupied, 0) AS occupied_rooms,
+      COALESCE(bt.bookings, 0) AS booked_bookings,
+      COALESCE(bt.rooms, 0) AS booked_rooms,
+      COALESCE(ci.rooms, 0) AS check_in_rooms,
+      COALESCE(co.rooms, 0) AS check_out_rooms
+    FROM dates d
+    LEFT JOIN occupancy o ON o.date_val = d.date_val
+    LEFT JOIN booked_today bt ON bt.date_val = d.date_val
+    LEFT JOIN check_in ci ON ci.date_val = d.date_val
+    LEFT JOIN check_out co ON co.date_val = d.date_val
+    ORDER BY d.date_val
+  `;
+
+  const result = await client.query(sql, [propertyId, ...dates, timezone]);
+
+  const points: DailyKpiHistoricalPoint[] = result.rows.map((row) => ({
+    business_date: row.business_date,
+    occupied_rooms: toCount(row.occupied_rooms),
+    booked_bookings: toCount(row.booked_bookings),
+    booked_rooms: toCount(row.booked_rooms),
+    check_in_rooms: toCount(row.check_in_rooms),
+    check_out_rooms: toCount(row.check_out_rooms),
+  }));
+
+  return {
+    property_id: propertyId,
+    timezone,
+    anchor_date: anchorDate,
+    points,
+    historical_metrics: [...HISTORICAL_RECONSTRUCTABLE_METRICS],
+  };
 }

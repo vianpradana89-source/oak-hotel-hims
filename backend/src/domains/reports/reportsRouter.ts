@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate';
-import { getDailyKpiDrilldown, getDailyKpis } from './dailyKpiService';
+import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 
 function parsePositiveInt(value: any): number | null {
@@ -263,6 +263,57 @@ export function createReportsRouter(pool: Pool): Router {
         });
       }
       console.error('Error in /api/reports/daily-kpis:', err);
+      return res.status(500).json({
+        status: 'ERROR',
+        code: 'INTERNAL_ERROR',
+        message: err.message || 'Internal server error'
+      });
+    }
+  });
+
+  /**
+   * GET /api/reports/daily-kpis/history
+   * Query params:
+   *   - property_id (required, positive integer)
+   *   - date (optional, YYYY-MM-DD, defaults to hotel today in property timezone)
+   *   - days (optional, integer 1-90)
+   */
+  router.get('/daily-kpis/history', async (req: Request, res: Response) => {
+    const propertyId = parsePositiveInt(req.query.property_id);
+    if (propertyId === null) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'property_id is required and must be a positive integer'
+      });
+    }
+    const days = parsePositiveInt(req.query.days);
+    // days must be explicitly provided and between 1-90; reject null/missing
+    if (days === null) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'days is required and must be an integer between 1 and 90'
+      });
+    }
+    const daysCount = days;
+
+    try {
+      const data = await getDailyKpiHistory(pool, propertyId, daysCount, req.query.date as string | undefined);
+      return res.json({
+        status: 'SUCCESS',
+        data
+      });
+    } catch (err: any) {
+      if (err.statusCode && err.code) {
+        return res.status(err.statusCode).json({
+          status: 'ERROR',
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {})
+        });
+      }
+      console.error('Error in /api/reports/daily-kpis/history:', err);
       return res.status(500).json({
         status: 'ERROR',
         code: 'INTERNAL_ERROR',
