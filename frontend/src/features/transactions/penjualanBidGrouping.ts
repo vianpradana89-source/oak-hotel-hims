@@ -402,6 +402,16 @@ export function groupPenjualanSaleRows(
       const payload = row.booking_bid_group;
       const paid = roundIdr(payload.paid);
       const remaining = roundIdr(payload.remaining);
+      const normalizedChildren = (payload.children || []).map((child) => ({
+        ...child,
+        payment_status:
+          normalizePaymentStatus(child.payment_status)
+          || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
+        stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence),
+      }));
+      const parentPaymentResponsibility = payload.payment_responsibility
+        ? String(payload.payment_responsibility).toUpperCase()
+        : deriveGroupPaymentResponsibility(normalizedChildren);
       items.push({
         kind: 'bid_group',
         group: {
@@ -421,15 +431,9 @@ export function groupPenjualanSaleRows(
           remaining,
           payment_status:
             normalizePaymentStatus(payload.payment_status) || deriveBookingPaymentStatus(paid, remaining),
-          payment_responsibility: payload.payment_responsibility || 'HOTEL_COLLECT',
+          payment_responsibility: parentPaymentResponsibility,
           operational_sheet: payload.operational_sheet,
-          children: (payload.children || []).map((child) => ({
-            ...child,
-            payment_status:
-              normalizePaymentStatus(child.payment_status)
-              || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
-            stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence),
-          })),
+          children: normalizedChildren,
           primary: row,
           members: [row]
         }
