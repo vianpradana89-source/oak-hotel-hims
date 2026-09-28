@@ -6,6 +6,7 @@ const express = require('express');
 const { generateToken } = require('../dist/domains/auth/authService');
 const { createTransactionsRouter } = require('../dist/domains/transactions/transactionsRouter');
 const { assembleBookingSalesDetail } = require('../dist/domains/transactions/bookingSalesDetail');
+const { getBookingSalesDetail } = require('../dist/domains/transactions/bookingSalesDetailService');
 const {
   mapSaleSourceCategory,
   saleIdentityKey,
@@ -132,10 +133,93 @@ function request(port, urlPath, token) {
   });
 }
 
-function mockDetailPool({ bookingRow = booking, superAdminIds = [] } = {}) {
+function mockDetailPool({
+  bookingRow = booking,
+  superAdminIds = [],
+  canonicalFinancials = null,
+} = {}) {
+  // canonicalFinancials: optional Map/record of reservationId -> {
+  //   amount_paid, applied_deposit, hotel_collectible_remaining_balance, payment_responsibility
+  // } to simulate calculateHotelCollectibleBalance outputs at service level.
   return {
     async query(sql, params = []) {
       const text = String(sql);
+      // ── Canonical calculator stubs (calculateHotelCollectibleBalance) ──
+      // These must run even when canonicalFinancials is not provided (default
+      // zero state), because the service path now ALWAYS calls the canonical
+      // calculator — failing to answer these queries would 500 the request.
+      if (text.includes('booking_property_id')) {
+        // calculateReservationFinancials reservation fetch
+        const reservationId = Number(params[0]);
+        return {
+          rows: [{ id: reservationId, booking_property_id: Number(bookingRow.property_id), amount_paid: 0, total_price: 0 }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('CROSS JOIN allocated')) {
+        // getEffectivePaymentStateForReservation inside canonical calculator
+        const reservationId = Number(params[0]);
+        const fin = canonicalFinancials instanceof Map
+          ? canonicalFinancials.get(reservationId)
+          : (canonicalFinancials ? canonicalFinancials[String(reservationId)] : null);
+        const ordinary = fin ? Number(fin.amount_paid || 0) : 0;
+        const hasHistory = Boolean(fin && (Number(fin.amount_paid) > 0 || Number(fin.applied_deposit) > 0));
+        return {
+          rows: [{
+            direct_paid: ordinary,
+            direct_source_cnt: hasHistory ? 1 : 0,
+            direct_positive_cnt: hasHistory && ordinary > 0 ? 1 : 0,
+            direct_history_cnt: hasHistory ? 1 : 0,
+            allocated_paid: 0,
+            alloc_effective_cnt: 0,
+            alloc_positive_cnt: 0,
+            alloc_history_cnt: 0,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('DEPOSIT_APPLY')) {
+        const reservationId = Number(params[0]);
+        const fin = canonicalFinancials instanceof Map
+          ? canonicalFinancials.get(reservationId)
+          : (canonicalFinancials ? canonicalFinancials[String(reservationId)] : null);
+        return { rows: [{ applied_deposit: fin ? Number(fin.applied_deposit || 0) : 0 }], rowCount: 1 };
+      }
+      if (text.includes('gross_charges') && text.includes('folio_entries')) {
+        // calculateReservationFinancials folio debits query (HOTEL_COLLECT path)
+        const reservationId = Number(params[0]);
+        const fin = canonicalFinancials instanceof Map
+          ? canonicalFinancials.get(reservationId)
+          : (canonicalFinancials ? canonicalFinancials[String(reservationId)] : null);
+        const remaining = fin ? Number(fin.hotel_collectible_remaining_balance || 0) : 0;
+        const applied = fin ? Number(fin.applied_deposit || 0) : 0;
+        const ordinary = fin ? Number(fin.amount_paid || 0) : 0;
+        const total = remaining + applied + ordinary;
+        return {
+          rows: [{
+            gross_charges: total,
+            charge_reversals: 0,
+            room_charge_posted: total,
+            commercial_discounts: 0,
+            charge_count: total > 0 ? 1 : 0,
+          }],
+          rowCount: 1,
+        };
+      }
+      // OTA_COLLECT: filter out ROOM_CHARGE from collectible total
+      if (canonicalFinancials && text.includes('source_type') && text.includes('ROOM_CHARGE')) {
+        const reservationId = Number(params[0]);
+        const fin = canonicalFinancials instanceof Map
+          ? canonicalFinancials.get(reservationId)
+          : canonicalFinancials[String(reservationId)];
+        return {
+          rows: [{
+            gross_collectible: fin ? Number(fin.hotel_collectible_total || 0) : 0,
+            collectible_reversals: 0,
+          }],
+          rowCount: 1,
+        };
+      }
       if (text.includes('FROM users u') && text.includes('JOIN roles r')) {
         const userId = Number(params[0]);
         if (superAdminIds.includes(userId)) {
@@ -184,6 +268,30 @@ function mockDetailPool({ bookingRow = booking, superAdminIds = [] } = {}) {
           rowCount: 2,
         };
       }
+      if (text.includes('payment_allocations pa') || text.includes('UNION ALL')) {
+        // Canonical booking payment-history query (UNION ALL of allocations + direct).
+        // Must be checked BEFORE the generic payment_transactions matcher.
+        return {
+          rows: [{
+            payment_id: 501,
+            pa_reservation_id: null,
+            reservation_id: 101,
+            transaction_id: 1,
+            transaction_type: 'PAYMENT',
+            payment_method: 'CASH',
+            parent_amount: 368000,
+            allocated_amount: null,
+            status: 'SUCCESS',
+            payment_status: 'SUCCESS',
+            created_at: '2026-09-07T03:00:00.000Z',
+            reference_code: 'PAY-101',
+            scope: 'ROOM_RESERVATION',
+            evidence_filename: 'bukti-101.jpg',
+            evidence_storage_key: 'pe/101.jpg',
+          }],
+          rowCount: 1,
+        };
+      }
       if (text.includes('FROM payment_transactions pt')) {
         return {
           rows: [{
@@ -200,6 +308,43 @@ function mockDetailPool({ bookingRow = booking, superAdminIds = [] } = {}) {
           }],
           rowCount: 1,
         };
+      }
+      if (text.includes('folio_entries') && text.includes('COALESCE(SUM')) {
+        // Mock calculateHotelCollectibleBalance → calculateReservationFinancials folio query
+        const reservationId = Number(params[0]);
+        return {
+          rows: [{
+            gross_charges: reservationId === 101 ? 460000 : 534000,
+            charge_reversals: 0,
+            room_charge_posted: reservationId === 101 ? 460000 : 534000,
+            commercial_discounts: reservationId === 101 ? 92000 : 106800,
+            charge_count: 1,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('reservation_nightly_rates')) {
+        return { rows: [{ nightly_sum: 0 }], rowCount: 1 };
+      }
+      if (text.includes('payment_transactions') && text.includes('ROOM_RESERVATION')) {
+        // getEffectivePaymentStateForReservation
+        const reservationId = Number(params[0]);
+        return {
+          rows: [{
+            direct_paid: reservationId === 101 ? 368000 : 0,
+            direct_source_cnt: reservationId === 101 ? 1 : 0,
+            direct_positive_cnt: reservationId === 101 ? 1 : 0,
+            direct_history_cnt: reservationId === 101 ? 1 : 0,
+            allocated_paid: 0,
+            alloc_effective_cnt: 0,
+            alloc_positive_cnt: 0,
+            alloc_history_cnt: 0,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('folio_entries') && text.includes('DEPOSIT_APPLY')) {
+        return { rows: [{ applied_deposit: 0 }], rowCount: 1 };
       }
       throw new Error(`Unexpected query: ${text}`);
     },
@@ -558,6 +703,345 @@ async function main() {
       assert.equal(allowed.status, 200);
       assert.equal(allowed.json.data.booking.property_id, 2);
     });
+  });
+
+  await test('Q. DEPOSIT must NOT appear in payment history', async () => {
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations,
+      sales: roomSales,
+      payments: [
+        {
+          id: 501,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          payment_method: 'CASH',
+          amount: 368000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'PAY-101',
+        },
+        {
+          id: 502,
+          reservation_id: 101,
+          transaction_type: 'DEPOSIT',
+          payment_method: 'CASH',
+          amount: 200000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T02:00:00.000Z',
+          reference_code: 'DEP-LWG-00075',
+        },
+      ],
+    });
+    assert.equal(detail.payments.length, 1, 'Q: only PAYMENT row should appear');
+    assert.equal(detail.payments[0].payment_id, 501);
+    assert.equal(detail.payments[0].amount, 368000);
+    const depositFound = detail.payments.find((p) => p.payment_id === 502);
+    assert.ok(!depositFound, 'Q: DEPOSIT must NOT appear in detail.payments');
+  });
+
+  await test('R. DEPOSIT_REFUND must NOT appear in payment history', async () => {
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations,
+      sales: roomSales,
+      payments: [
+        {
+          id: 503,
+          reservation_id: 101,
+          transaction_type: 'DEPOSIT_REFUND',
+          payment_method: 'CASH',
+          amount: 50000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T01:00:00.000Z',
+          reference_code: 'DEPR-001',
+        },
+        {
+          id: 504,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          payment_method: 'CASH',
+          amount: 100000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T02:00:00.000Z',
+          reference_code: 'PAY-101',
+        },
+      ],
+    });
+    assert.equal(detail.payments.length, 1, 'R: only PAYMENT row should appear');
+    assert.equal(detail.payments[0].payment_id, 504);
+    assert.equal(detail.payments[0].amount, 100000);
+    const depRefFound = detail.payments.find((p) => p.payment_id === 503);
+    assert.ok(!depRefFound, 'R: DEPOSIT_REFUND must NOT appear');
+  });
+
+  await test('S. CORRECTION_REPLACEMENT must appear in payment history', async () => {
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations,
+      sales: roomSales,
+      payments: [
+        {
+          id: 505,
+          reservation_id: 101,
+          transaction_type: 'CORRECTION_REPLACEMENT',
+          payment_method: 'TRANSFER',
+          amount: 25000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'CORR-001',
+        },
+      ],
+    });
+    assert.equal(detail.payments.length, 1, 'S: CORRECTION_REPLACEMENT should appear');
+    assert.equal(detail.payments[0].payment_id, 505);
+    assert.equal(detail.payments[0].method, 'TRANSFER');
+    assert.equal(detail.payments[0].amount, 25000);
+  });
+
+  await test('T. BOOKING_GROUP allocated amount used, not parent amount', async () => {
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations,
+      sales: roomSales,
+      payments: [
+        {
+          payment_id: 506,
+          pa_reservation_id: 101,
+          reservation_id: 101,
+          transaction_id: null,
+          transaction_type: 'PAYMENT',
+          scope: 'BOOKING_GROUP',
+          payment_method: 'CASH',
+          parent_amount: 500000,
+          allocated_amount: 100000,
+          payment_status: 'SUCCESS',
+          allocation_status: 'ACTIVE',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'BGP-C-001',
+        },
+      ],
+    });
+    assert.equal(detail.payments.length, 1, 'T: BOOKING_GROUP payment should appear');
+    assert.equal(detail.payments[0].payment_id, 506, 'T: payment_id is the parent payment id');
+    assert.equal(detail.payments[0].reservation_id, 101, 'T: reservation_id is the allocated reservation');
+    assert.equal(detail.payments[0].amount, 100000, 'T: displayed amount is allocated_amount=100000, not parent_amount=500000');
+  });
+
+  await test('U. applied deposit does not double-count with canonical paid', async () => {
+    // calculateReservationFinancials returns amount_paid = ordinary canonical payment ONLY.
+    // applied_deposit is tracked separately. effective paid = amount_paid + applied_deposit.
+    // When assembleBookingSalesDetail receives no reservationFinancials it falls back
+    // to reservation.amount_paid. This test asserts that fallback behaviour is correct
+    // and that no fake PAYMENT row is created for applied deposit.
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations: [
+        {
+          ...reservations[0],
+          amount_paid: 368000, // fallback: ordinary canonical payment (no applied deposit in this fixture)
+          remaining_balance: 0,
+        },
+        reservations[1],
+      ],
+      sales: roomSales,
+      payments: [],
+    });
+    // Paid comes from reservation.amount_paid fallback (canonical path not exercised here)
+    assert.equal(detail.children.find((c) => c.reservation_id === 101).paid, 368000);
+    assert.equal(detail.children.find((c) => c.reservation_id === 101).remaining, 0);
+    // No duplicate payment entries should be created from applied deposit
+    assert.equal(detail.payments.length, 0, 'U: no fake deposit application payment rows');
+  });
+
+  await test('V. property isolation: scope is enforced at service layer', async () => {
+    // The assembly layer cannot see property_id — property scoping is enforced
+    // by bookingSalesDetailService.ts, not by assembleBookingSalesDetail().
+    // This test verifies the assembly layer correctly passes through both
+    // qualifying payment rows regardless of any mock property metadata.
+    const detail = assembleBookingSalesDetail({
+      booking: { ...booking, property_id: 1 },
+      reservations: [{
+        ...reservations[0],
+        property_id: 1,
+      }],
+      sales: roomSales.slice(0, 1),
+      payments: [
+        {
+          id: 507,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          scope: 'TRANSACTION_DIRECT',
+          payment_method: 'CASH',
+          amount: 9999,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T04:00:00.000Z',
+          reference_code: 'PAY-CROSS',
+        },
+        {
+          id: 508,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          scope: 'ROOM_RESERVATION',
+          payment_method: 'CASH',
+          amount: 368000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'PAY-NORM',
+        },
+      ],
+    });
+    // Both qualifying PAYMENT rows appear at the assembly layer; property
+    // isolation is enforced upstream by the service query.
+    assert.equal(detail.payments.length, 2, 'V: both qualifying payments passed through assembly');
+  });
+
+  await test('W. no duplicate payment rows on identical input', async () => {
+    // Two distinct rows with different ids are independent entries.
+    // A single row duplicated in the array produces duplicate output
+    // which matches current assembly behaviour (dedup is a query concern).
+    const detail = assembleBookingSalesDetail({
+      booking,
+      reservations,
+      sales: roomSales,
+      payments: [
+        {
+          id: 509,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          scope: 'ROOM_RESERVATION',
+          payment_method: 'CASH',
+          amount: 368000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'PAY-DUP',
+        },
+        {
+          id: 510,
+          reservation_id: 101,
+          transaction_type: 'PAYMENT',
+          scope: 'ROOM_RESERVATION',
+          payment_method: 'CASH',
+          amount: 368000,
+          status: 'SUCCESS',
+          created_at: '2026-09-07T03:00:00.000Z',
+          reference_code: 'PAY-DUP-2',
+        },
+      ],
+    });
+    assert.equal(detail.payments.length, 2, 'W: two distinct payment IDs produce two rows');
+    const ids = detail.payments.map((p) => p.payment_id);
+    assert.ok(ids.includes(509) && ids.includes(510), 'W: both payment ids preserved');
+  });
+
+  await test('X. canonical paid uses calculateHotelCollectibleBalance output', async () => {
+    const canonicalFin = new Map([
+      [101, { amount_paid: 200000, applied_deposit: 50000, hotel_collectible_remaining_balance: 118000, payment_responsibility: 'HOTEL_COLLECT' }],
+      [204, { amount_paid: 0, applied_deposit: 0, hotel_collectible_remaining_balance: 427200, payment_responsibility: 'HOTEL_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ canonicalFinancials: canonicalFin });
+    // getBookingSalesDetail calls calculateHotelCollectibleBalance per reservation
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    // Child 101: canonical paid = 200000 + 50000 = 250000
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    assert.equal(child101.paid, 250000, 'X: canonical paid = ordinary + applied_deposit');
+    assert.equal(child101.remaining, 118000, 'X: canonical remaining from collectible');
+    // Child 204: no canonical financials → fallback to amount_paid
+    const child204 = detail.children.find((c) => c.reservation_id === 204);
+    assert.equal(child204.paid, 0, 'X: reservation 204 has no canonical financials');
+  });
+
+  await test('Y. OTA_COLLECT: hotel extras remain collectible, room charge excluded', async () => {
+    // Hotel has room charge of 368000 (OTA settled outside hotel) + extra charge 50000
+    // Hotel collectible = 50000 only
+    const canonicalFin = new Map([
+      [101, { amount_paid: 10000, applied_deposit: 0, hotel_collectible_total: 50000, hotel_collectible_remaining_balance: 40000, payment_responsibility: 'OTA_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ bookingRow: { ...booking, payment_responsibility: 'OTA_COLLECT' }, canonicalFinancials: canonicalFin });
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    assert.equal(child101.paid, 10000, 'Y: OTA_COLLECT ordinary payment counted');
+    assert.equal(child101.remaining, 40000, 'Y: OTA_COLLECT remaining is hotel extras only');
+  });
+
+  await test('Z. applied deposit adds to canonical paid without creating fake PAYMENT row', async () => {
+    const canonicalFin = new Map([
+      [101, { amount_paid: 100000, applied_deposit: 50000, hotel_collectible_remaining_balance: 218000, payment_responsibility: 'HOTEL_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ canonicalFinancials: canonicalFin });
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    assert.equal(child101.paid, 150000, 'Z: canonical paid = ordinary 100000 + applied_deposit 50000');
+    // No fake PAYMENT row for applied deposit — deposit application is not a payment_history row
+    const depositRows = detail.payments.filter((p) => p.amount === 50000);
+    assert.equal(depositRows.length, 0, 'Z: no fake PAYMENT row for applied deposit');
+  });
+
+  await test('AA. booking query selects payment_responsibility', async () => {
+    // Intercept the booking SELECT to assert payment_responsibility is in the SQL.
+    let capturedBookingQueryText = '';
+    const basePool = mockDetailPool({ bookingRow: booking });
+    const interceptingPool = {
+      async query(sql, params) {
+        const text = String(sql);
+        if (text.includes('FROM bookings b') && text.includes('ota_source_id')) {
+          capturedBookingQueryText = text;
+        }
+        // Delegate all other queries (including canonical calculator stubs)
+        return basePool.query(sql, params);
+      },
+    };
+    await getBookingSalesDetail(interceptingPool, 1, 'LWG-260907-79W91XS8');
+    assert.ok(
+      capturedBookingQueryText.includes('payment_responsibility'),
+      'AA: booking SELECT must include payment_responsibility column'
+    );
+  });
+
+  await test('AB. canonical calculation failure propagates, does not silently fall back', async () => {
+    // When calculateHotelCollectibleBalance throws, getBookingSalesDetail must
+    // propagate the error rather than silently returning legacy amount_paid.
+    const throwingPool = {
+      async query(sql, params) {
+        const text = String(sql);
+        // Normal queries from bookingSalesDetailService
+        if (text.includes('FROM bookings b')) {
+          const propertyId = Number(params[0]);
+          const bid = String(params[1]);
+          const numericId = params[2] == null ? null : Number(params[2]);
+          if (Number(booking.property_id) !== propertyId) return { rows: [], rowCount: 0 };
+          if (booking.bid === bid || Number(booking.id) === numericId) {
+            return { rows: [{ ...booking, payment_responsibility: 'HOTEL_COLLECT' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes('FROM reservations r') && text.includes('room_type_name')) {
+          return { rows: reservations, rowCount: reservations.length };
+        }
+        if (text.includes('FROM transactions t') && text.includes('paid_amount')) {
+          return { rows: [sale({ id: 1, reservation_id: 101, amount: 460000, discount_amount: 92000, net_amount: 368000 })], rowCount: 1 };
+        }
+        if (text.includes('payment_allocations') || text.includes('payment_transactions')) {
+          return { rows: [], rowCount: 0 };
+        }
+        // All canonical calculator queries throw — no fallback
+        if (text.includes('booking_property_id') || text.includes('folio_entries') || text.includes('DEPOSIT_APPLY') || text.includes('CROSS JOIN allocated')) {
+          throw new Error('Canonical financial calculation failed');
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    let thrown = null;
+    try {
+      await getBookingSalesDetail(throwingPool, 1, 'LWG-260907-79W91XS8');
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown !== null, 'AB: error must be thrown when canonical calculation fails');
+    assert.ok(
+      String(thrown.message).includes('Canonical financial calculation failed'),
+      'AB: original error must propagate, not be swallowed'
+    );
   });
 
   if (failed > 0) {

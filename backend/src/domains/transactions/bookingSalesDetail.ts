@@ -145,15 +145,26 @@ export interface BookingSalesDetailSaleInput {
 
 export interface BookingSalesDetailPaymentInput {
   id: number | string;
+  transaction_type?: string | null;
   reservation_id?: number | string | null;
   transaction_id?: number | string | null;
   payment_method?: string | null;
   amount?: unknown;
+  effective_amount?: unknown;
   status?: string | null;
   created_at?: string | null;
   reference_code?: string | null;
   evidence_filename?: string | null;
   evidence_storage_key?: string | null;
+  scope?: string | null;
+  booking_id?: number | string | null;
+  // Fields from UNION ALL query (service layer)
+  payment_id?: number | string | null;
+  pa_reservation_id?: number | string | null;
+  allocated_amount?: unknown;
+  parent_amount?: unknown;
+  payment_status?: string | null;
+  allocation_status?: string | null;
 }
 
 function hotelDate(value: unknown): string | null {
@@ -216,6 +227,12 @@ export function assembleBookingSalesDetail(input: {
   reservations: BookingSalesDetailReservationInput[];
   sales: BookingSalesDetailSaleInput[];
   payments: BookingSalesDetailPaymentInput[];
+  reservationFinancials?: Map<number, {
+    amount_paid: number;
+    applied_deposit: number;
+    hotel_collectible_remaining_balance: number;
+    payment_responsibility: string;
+  }> | Record<string, unknown>;
 }): BookingSalesDetail {
   const bookingId = asPositiveInt(input.booking.id);
   if (!bookingId) {
@@ -266,10 +283,34 @@ export function assembleBookingSalesDetail(input: {
       const gross = groups.reduce((sum, group) => sum + group.gross, 0);
       const discount = groups.reduce((sum, group) => sum + group.discount, 0);
       const net = groups.reduce((sum, group) => sum + group.net, 0);
-      const paid = roundIdr(reservation.amount_paid);
-      const remaining = reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
-        ? Math.max(0, roundIdr(reservation.remaining_balance))
-        : Math.max(0, net - paid);
+      const paid = (() => {
+        const rid = asPositiveInt(reservation.id);
+        const fin = rid && input.reservationFinancials
+          ? (input.reservationFinancials instanceof Map
+              ? input.reservationFinancials.get(rid)
+              : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+          : null;
+        if (fin && typeof fin === 'object') {
+          const canonicalPaid = roundIdr((fin as any).amount_paid ?? 0);
+          const canonicalAppliedDeposit = roundIdr((fin as any).applied_deposit ?? 0);
+          return canonicalPaid + canonicalAppliedDeposit;
+        }
+        return roundIdr(reservation.amount_paid);
+      })();
+      const remaining = (() => {
+        const rid = asPositiveInt(reservation.id);
+        const fin = rid && input.reservationFinancials
+          ? (input.reservationFinancials instanceof Map
+              ? input.reservationFinancials.get(rid)
+              : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+          : null;
+        if (fin && typeof fin === 'object') {
+          return Math.max(0, roundIdr((fin as any).hotel_collectible_remaining_balance ?? 0));
+        }
+        return reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
+          ? Math.max(0, roundIdr(reservation.remaining_balance))
+          : Math.max(0, net - paid);
+      })();
       return {
         reservation_id: reservationId,
         room_id: asPositiveInt(reservation.room_id),
@@ -339,16 +380,35 @@ export function assembleBookingSalesDetail(input: {
   const checkIns = children.map((child) => child.check_in).filter((value): value is string => Boolean(value)).sort();
   const checkOuts = children.map((child) => child.check_out).filter((value): value is string => Boolean(value)).sort();
 
-  const payments: BookingSalesPaymentRow[] = [...(input.payments || [])]
+  // Filter to canonical settlement types only (exclude DEPOSIT / DEPOSIT_REFUND).
+  // Backward-compatible: when transaction_type is absent the payment is kept
+  // so pre-existing test fixtures that omit this field continue to work.
+  const qualifyingPayments = [...(input.payments || [])].filter(
+    (payment) => {
+      if (payment.transaction_type != null) {
+        const type = String(payment.transaction_type).toUpperCase();
+        return type === 'PAYMENT' || type === 'CORRECTION_REPLACEMENT';
+      }
+      return true;
+    }
+  );
+
+  const payments: BookingSalesPaymentRow[] = qualifyingPayments
     .map((payment) => ({
-      payment_id: Number(payment.id),
-      reservation_id: asPositiveInt(payment.reservation_id),
+      payment_id: Number(payment.payment_id ?? payment.id),
+      reservation_id: asPositiveInt(payment.pa_reservation_id ?? payment.reservation_id),
       transaction_id: payment.transaction_id == null || payment.transaction_id === ''
         ? null
         : payment.transaction_id,
       method: payment.payment_method || null,
-      amount: roundIdr(payment.amount),
-      status: String(payment.status || '').toUpperCase() || 'SUCCESS',
+      amount: roundIdr(payment.allocated_amount !== undefined && payment.allocated_amount !== null
+        ? payment.allocated_amount
+        : payment.effective_amount !== undefined && payment.effective_amount !== null
+          ? payment.effective_amount
+          : payment.parent_amount !== undefined && payment.parent_amount !== null
+            ? payment.parent_amount
+            : payment.amount),
+      status: String(payment.payment_status ?? (payment.status || '')).toUpperCase() || 'SUCCESS',
       paid_at: payment.created_at ? String(payment.created_at) : null,
       reference: payment.reference_code || null,
       evidence_reference: payment.evidence_filename || payment.evidence_storage_key || null,

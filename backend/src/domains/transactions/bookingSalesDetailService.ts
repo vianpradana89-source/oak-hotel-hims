@@ -3,6 +3,9 @@ import {
   assembleBookingSalesDetail,
   type BookingSalesDetail,
 } from './bookingSalesDetail';
+import {
+  calculateHotelCollectibleBalance,
+} from '../stayCharges/stayChargesService';
 import { isPlatformSuperAdmin } from '../auth/authService';
 
 function httpError(statusCode: number, message: string, code: string): Error {
@@ -58,9 +61,10 @@ export async function getBookingSalesDetail(
        b.booking_source,
        b.channel,
        b.booking_channel,
-       b.booking_status,
-       b.ota_source_id,
-       ota.name AS ota_source_name
+        b.booking_status,
+        b.ota_source_id,
+        b.payment_responsibility,
+        ota.name AS ota_source_name
      FROM bookings b
      LEFT JOIN ota_sources ota
        ON ota.id = b.ota_source_id
@@ -111,78 +115,126 @@ export async function getBookingSalesDetail(
 
   const saleRes = await pool.query(
     `SELECT
-       t.id,
-       t.property_id,
-       t.transaction_type,
-       t.source_type,
-       t.source_id,
-       t.amount,
-       t.discount_amount,
-       t.net_amount,
-       t.payment_status,
-       t.transaction_status,
-       t.reservation_id,
-       t.booking_id,
-       t.reversal_of_transaction_id,
-       t.correction_group_id,
-       t.deleted_at,
-       t.metadata,
-       COALESCE(pmt.total_paid, 0) AS paid_amount
-     FROM transactions t
-     LEFT JOIN LATERAL (
-       SELECT SUM(pt.amount)::bigint AS total_paid
-       FROM payment_transactions pt
-       WHERE pt.transaction_id = t.id
-         AND pt.status = 'SUCCESS'
-         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-     ) pmt ON TRUE
-     WHERE t.property_id = $1
-       AND t.deleted_at IS NULL
-       AND t.transaction_type = 'SALE'
-       AND (
-         t.booking_id = $2
-         OR t.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
-       )
-     ORDER BY t.id ASC`,
+        t.id,
+        t.property_id,
+        t.transaction_type,
+        t.source_type,
+        t.source_id,
+        t.amount,
+        t.discount_amount,
+        t.net_amount,
+        t.payment_status,
+        t.transaction_status,
+        t.reservation_id,
+        t.booking_id,
+        t.reversal_of_transaction_id,
+        t.correction_group_id,
+        t.deleted_at,
+        t.metadata,
+        COALESCE(pmt.total_paid, 0) AS paid_amount
+      FROM transactions t
+      LEFT JOIN LATERAL (
+        SELECT SUM(pt.amount)::bigint AS total_paid
+        FROM payment_transactions pt
+        WHERE pt.transaction_id = t.id
+          AND pt.status = 'SUCCESS'
+          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      ) pmt ON TRUE
+      WHERE t.property_id = $1
+        AND t.deleted_at IS NULL
+        AND t.transaction_type = 'SALE'
+        AND (
+          t.booking_id = $2
+          OR t.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
+        )
+      ORDER BY t.id ASC`,
     [propertyId, bookingId]
   );
 
+  // Build per-reservation canonical financials via calculateHotelCollectibleBalance.
+  // This is the authoritative source for paid/remaining for each reservation child.
+  const reservationFinancials = new Map<number, Awaited<ReturnType<typeof calculateHotelCollectibleBalance>>>();
+  const paymentResponsibility = String(booking.payment_responsibility || 'HOTEL_COLLECT').trim().toUpperCase();
+  for (const resRow of reservationRes.rows) {
+    const rid = Number(resRow.id);
+    const canonical = await calculateHotelCollectibleBalance(
+      pool,
+      rid,
+      propertyId,
+      paymentResponsibility
+    );
+    reservationFinancials.set(rid, canonical);
+  }
+
   const paymentRes = await pool.query(
     `SELECT
-       pt.id,
-       pt.reservation_id,
-       pt.transaction_id,
-       pt.payment_method,
-       pt.amount,
-       pt.status,
-       pt.created_at,
-       pt.reference_code,
-       pe.original_filename AS evidence_filename,
-       pe.storage_key AS evidence_storage_key
-     FROM payment_transactions pt
-     LEFT JOIN LATERAL (
-       SELECT original_filename, storage_key
-       FROM payment_evidences
-       WHERE payment_transaction_id = pt.id
-         AND is_active = TRUE
-         AND property_id = $1
-       ORDER BY uploaded_at DESC NULLS LAST, id DESC
-       LIMIT 1
-     ) pe ON TRUE
-     WHERE (
-       pt.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
-       OR pt.transaction_id IN (
-         SELECT t.id FROM transactions t
-         WHERE t.property_id = $1
-           AND t.transaction_type = 'SALE'
-           AND t.deleted_at IS NULL
-           AND (
-             t.booking_id = $2
-             OR t.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
-           )
-       )
-     )
-     ORDER BY pt.created_at ASC, pt.id ASC`,
+        pa.id AS allocation_id,
+        pa.reservation_id AS pa_reservation_id,
+        pt.id AS payment_id,
+        pt.transaction_id,
+        pt.transaction_type,
+        pt.payment_method,
+        pt.amount AS parent_amount,
+        pa.allocated_amount,
+        pt.status AS payment_status,
+        pa.status AS allocation_status,
+        pt.created_at,
+        pt.reference_code,
+        pt.scope,
+        pe.original_filename AS evidence_filename,
+        pe.storage_key AS evidence_storage_key
+      FROM payment_allocations pa
+      JOIN payment_transactions pt
+        ON pt.id = pa.payment_transaction_id
+        AND pt.scope = 'BOOKING_GROUP'
+      LEFT JOIN LATERAL (
+        SELECT original_filename, storage_key
+        FROM payment_evidences
+        WHERE payment_transaction_id = pt.id
+          AND is_active = TRUE
+          AND property_id = $1
+        ORDER BY uploaded_at DESC NULLS LAST, id DESC
+        LIMIT 1
+      ) pe ON TRUE
+      WHERE pa.property_id = $1
+        AND pa.booking_id = $2
+        AND pa.status = 'ACTIVE'
+        AND pa.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      UNION ALL
+      SELECT
+        NULL::bigint AS allocation_id,
+        NULL::bigint AS pa_reservation_id,
+        pt.id AS payment_id,
+        pt.transaction_id,
+        pt.transaction_type,
+        pt.payment_method,
+        pt.amount AS parent_amount,
+        NULL::bigint AS allocated_amount,
+        pt.status AS payment_status,
+        NULL::text AS allocation_status,
+        pt.created_at,
+        pt.reference_code,
+        pt.scope,
+        pe.original_filename AS evidence_filename,
+        pe.storage_key AS evidence_storage_key
+      FROM payment_transactions pt
+      LEFT JOIN LATERAL (
+        SELECT original_filename, storage_key
+        FROM payment_evidences
+        WHERE payment_transaction_id = pt.id
+          AND is_active = TRUE
+          AND property_id = $1
+        ORDER BY uploaded_at DESC NULLS LAST, id DESC
+        LIMIT 1
+      ) pe ON TRUE
+      WHERE pt.scope = 'ROOM_RESERVATION'
+        AND pt.reservation_id IN (SELECT r.id FROM reservations r WHERE r.booking_id = $2)
+        AND (pt.property_id = $1 OR pt.property_id IS NULL)
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      ORDER BY pt.created_at ASC, payment_id ASC`,
     [propertyId, bookingId]
   );
 
@@ -191,5 +243,6 @@ export async function getBookingSalesDetail(
     reservations: reservationRes.rows,
     sales: saleRes.rows,
     payments: paymentRes.rows,
+    reservationFinancials,
   });
 }
