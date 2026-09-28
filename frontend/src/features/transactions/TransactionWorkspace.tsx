@@ -30,6 +30,7 @@ import {
 } from './transactionClient';
 import type { PurchaseLifecycleAction, ExpenseLifecycleAction } from './transactionDomainTypes';
 import { VoidTransactionModal } from './VoidTransactionModal';
+import { TransactionSourceBadge } from './TransactionSourceBadge';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
 import { BookingSalesDetailDrawer } from './BookingSalesDetailDrawer';
 import { PurchaseTransactionEditor } from './PurchaseTransactionEditor';
@@ -63,6 +64,22 @@ interface TransactionWorkspaceProps {
   // TransactionUpdated SSE event; the workspace refetches its canonical
   // transaction list without remounting or resetting local filters.
   realtimeRefreshVersion?: number;
+}
+
+function formatTransactionBusinessDate(value: string | null | undefined): string {
+  const raw = String(value || '').slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return raw || '-';
+
+  const [, year, month, day] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  if (Number.isNaN(date.getTime())) return raw;
+
+  return date.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
 }
 
 export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
@@ -100,8 +117,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [receivingFilter, setReceivingFilter] = useState<string>('');
   const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false);
 
-  // LEVEL 4 — OPERATIONAL STATUS (Semua, Proses, Selesai, Batal. Default: ALL)
-  const [operationalStatus, setOperationalStatus] = useState<OperationalStatus>('ALL');
+  // LEVEL 4 — OPERATIONAL STATUS (Proses, Selesai, Batal. Default: PROSES)
+  const [operationalStatus, setOperationalStatus] = useState<OperationalStatus>('PROSES');
 
   // Pagination
   const [page, setPage] = useState<number>(1);
@@ -915,7 +932,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           className="hover:bg-slate-50/80 transition-colors cursor-pointer"
         >
           <td className="py-2.5 px-3 whitespace-nowrap">
-            <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+            <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
             <div className="text-[10px] text-slate-400">
               {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
             </div>
@@ -932,6 +949,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
           </td>
           <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <TransactionSourceBadge channel={t.booking_channel} otaSourceName={t.ota_source_name} />
+          </td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(t.amount)}</td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(t.discount_amount)}</td>
           <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(displayTransactionNet(t))}</td>
@@ -976,7 +996,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 </svg>
               </button>
               <div>
-                <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                 <div className="text-[10px] text-slate-400">
                   {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                 </div>
@@ -998,6 +1018,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             </span>
           </td>
           <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(group.stay_type_label)}</td>
+          <td className="py-2.5 px-3 whitespace-nowrap">
+            <TransactionSourceBadge channel={group.primary.booking_channel} otaSourceName={group.primary.ota_source_name} />
+          </td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(group.gross)}</td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(group.discount)}</td>
           <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap" title={periodListHint}>
@@ -1527,7 +1550,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 shrink-0 overflow-x-auto">
               <span className="text-[11px] font-medium text-slate-400 px-2">Sheet:</span>
               {[
-                { key: 'ALL', label: 'Semua', count: null },
                 { key: 'PROSES', label: 'Proses', count: sheetCounts.proses },
                 { key: 'SELESAI', label: 'Selesai', count: sheetCounts.selesai },
                 { key: 'BATAL', label: 'Batal', count: sheetCounts.batal },
@@ -1721,6 +1743,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3">BID / No. Transaksi</th>
                         <th className="py-3 px-3">Tamu</th>
                         <th className="py-3 px-3">Tipe Stay</th>
+<th className="py-3 px-3">Sumber</th>
                         <th className="py-3 px-3 text-right" title={periodListHint}>Gross</th>
                         <th className="py-3 px-3 text-right" title={periodListHint}>Diskon</th>
                         <th className="py-3 px-3 text-right" title={periodListHint}>Net</th>
@@ -1837,7 +1860,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         className="hover:bg-slate-50/80 transition-colors cursor-pointer opacity-80"
                       >
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-600 line-through">{t.transaction_date}</div>
+                          <div className="font-semibold text-slate-600 line-through">{formatTransactionBusinessDate(t.transaction_date)}</div>
                           <div className="text-[10px] text-slate-400">
                             {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                           </div>
@@ -1905,7 +1928,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 </svg>
                               </button>
                               <div>
-                                <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                                <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                                 <div className="text-[10px] text-slate-400">
                                   {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                                 </div>
@@ -2186,7 +2209,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                   </svg>
                                 </button>
                                 <div>
-                                  <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                                  <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                                   <div className="text-[10px] text-slate-400">
                                     {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                                   </div>
@@ -2496,7 +2519,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                       >
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                          <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                           <div className="text-[10px] text-slate-400">
                             {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                           </div>
@@ -2568,7 +2591,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                       >
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                          <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                           <div className="text-[10px] text-slate-400" title={periodListHint}>Aktivitas Periode</div>
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
@@ -2626,7 +2649,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                     >
                       <td className="py-3 px-3 whitespace-nowrap">
-                        <div className="font-semibold text-slate-800">{t.transaction_date}</div>
+                        <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                         <div className="text-[10px] text-slate-400">
                           {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
                         </div>
@@ -3059,3 +3082,4 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     </div>
   );
 };
+
