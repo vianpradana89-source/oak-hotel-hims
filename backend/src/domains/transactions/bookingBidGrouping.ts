@@ -480,28 +480,77 @@ export function presentListWithSaleBidGrouping(presented: any[], options?: BidGr
 export async function loadBookingReservationLifecycle(
   client: any,
   propertyId: number,
-  reservationIds: number[],
-  bookingIds: Array<number | string>
+  reservationIds: number[]
 ): Promise<BookingReservationLifecycleRow[]> {
   if (reservationIds.length === 0) return [];
 
   const res = await client.query(
     `
-WITH direct AS (
+WITH net_charges AS (
   SELECT
-    r.id as reservation_id,
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+      THEN fe.amount ELSE 0 END), 0) AS gross_charges,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND (fe.reversal_of_entry_id IS NOT NULL
+          OR fe.entry_type = 'REVERSAL'
+          OR fe.entry_type LIKE '%_REVERSAL')
+      THEN fe.amount ELSE 0 END), 0) AS charge_reversals,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type = 'ROOM_CHARGE'
+        AND COALESCE(fe.is_voided, FALSE) = FALSE
+      THEN fe.amount ELSE 0 END), 0) AS room_charge_posted,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND fe.entry_type = 'DISCOUNT'
+        AND COALESCE(fe.is_voided, FALSE) = FALSE
+        AND fe.reversal_of_entry_id IS NULL
+      THEN fe.amount ELSE 0 END), 0) AS commercial_discounts,
+    COUNT(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+      THEN 1 END) AS charge_count
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
+),
+deposit_apply AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(fe.amount), 0) AS applied_deposit
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+    AND fe.entry_type = 'DEPOSIT_APPLY'
+    AND fe.direction = 'CREDIT'
+    AND fe.status = 'POSTED'
+    AND fe.is_voided = FALSE
+    AND fe.reversal_of_entry_id IS NULL
+  GROUP BY fe.reservation_id
+),
+direct AS (
+  SELECT
+    pt.reservation_id,
     COALESCE(SUM(CASE
       WHEN pt.status = 'SUCCESS'
         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-      THEN pt.amount ELSE 0 END), 0) AS direct_paid
-  FROM reservations r
-  JOIN bookings b ON b.id = r.booking_id
-  JOIN payment_transactions pt
-    ON pt.reservation_id = r.id
-  WHERE b.property_id = $1
-    AND r.id = ANY($2)
+      THEN pt.amount ELSE 0 END), 0) AS direct_paid,
+    COUNT(CASE
+      WHEN pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS direct_source_cnt,
+    COUNT(CASE
+      WHEN pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS direct_history_cnt
+  FROM payment_transactions pt
+  WHERE pt.reservation_id = ANY($2)
     AND pt.scope = 'ROOM_RESERVATION'
-  GROUP BY r.id
+  GROUP BY pt.reservation_id
 ),
 allocated AS (
   SELECT
@@ -510,7 +559,15 @@ allocated AS (
       WHEN pa.status = 'ACTIVE'
         AND pt.status = 'SUCCESS'
         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-      THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_paid
+      THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_paid,
+    COUNT(CASE
+      WHEN pa.status = 'ACTIVE'
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS alloc_effective_cnt,
+    COUNT(CASE
+      WHEN pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS alloc_history_cnt
   FROM payment_allocations pa
   JOIN payment_transactions pt
     ON pt.id = pa.payment_transaction_id
@@ -519,59 +576,161 @@ allocated AS (
     AND pt.scope = 'BOOKING_GROUP'
   GROUP BY pa.reservation_id
 ),
-deposits AS (
+hotel_collectible AS (
   SELECT
-    b.id as booking_id,
-    COALESCE(SUM(
-      CASE WHEN bd.status = 'APPLIED' THEN bd.amount ELSE 0 END
-    ), 0) as applied_deposit
-  FROM bookings b
-  JOIN booking_deposits bd ON bd.booking_id = b.id
-  WHERE b.property_id = $1
-    AND b.id = ANY($3)
-  GROUP BY b.id
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+        AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
+      THEN fe.amount ELSE 0 END), 0) AS gross_collectible,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND (fe.reversal_of_entry_id IS NOT NULL
+          OR fe.entry_type = 'REVERSAL'
+          OR fe.entry_type LIKE '%_REVERSAL')
+        AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
+      THEN fe.amount ELSE 0 END), 0) AS collectible_reversals
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
+),
+nightly_fallback AS (
+  SELECT
+    rn.reservation_id,
+    COALESCE(SUM(rn.total_amount), 0) AS nightly_sum
+  FROM reservation_nightly_rates rn
+  WHERE rn.property_id = $1
+    AND rn.reservation_id = ANY($2)
+  GROUP BY rn.reservation_id
+),
+folio_payment_fallback AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND fe.entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        AND fe.reversal_of_entry_id IS NULL
+      THEN fe.amount ELSE 0 END), 0)
+    - COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL')
+      THEN fe.amount ELSE 0 END), 0) AS folio_paid
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
 )
 SELECT
   b.property_id,
   r.booking_id,
-  b.bid as booking_bid,
+  b.bid AS booking_bid,
   b.payment_responsibility,
-  r.id as reservation_id,
-  r.status as reservation_status,
+  r.id AS reservation_id,
+  r.status AS reservation_status,
   r.stay_status,
-  fn.net_amount as reservation_net,
-  COALESCE(d.direct_paid, 0)
-    + COALESCE(a.allocated_paid, 0)
-  AS total_paid,
-  COALESCE(dep.applied_deposit, 0) as booking_applied_deposit
+  r.total_price AS fallback_total_price,
+  r.subtotal_amount,
+  r.amount_paid AS persisted_amount_paid,
+  COALESCE(nc.gross_charges, 0) AS gross_charges,
+  COALESCE(nc.charge_reversals, 0) AS charge_reversals,
+  COALESCE(nc.room_charge_posted, 0) AS room_charge_posted,
+  COALESCE(nc.commercial_discounts, 0) AS commercial_discounts,
+  COALESCE(nc.charge_count, 0) AS charge_count,
+  COALESCE(da.applied_deposit, 0) AS applied_deposit,
+  COALESCE(d.direct_paid, 0) AS direct_paid,
+  COALESCE(d.direct_source_cnt, 0) AS direct_source_cnt,
+  COALESCE(d.direct_history_cnt, 0) AS direct_history_cnt,
+  COALESCE(a.allocated_paid, 0) AS allocated_paid,
+  COALESCE(a.alloc_effective_cnt, 0) AS alloc_effective_cnt,
+  COALESCE(a.alloc_history_cnt, 0) AS alloc_history_cnt,
+  COALESCE(hc.gross_collectible, 0) AS gross_collectible,
+  COALESCE(hc.collectible_reversals, 0) AS collectible_reversals,
+  COALESCE(nf.nightly_sum, 0) AS nightly_sum,
+  COALESCE(fpf.folio_paid, 0) AS folio_paid
 FROM reservations r
 JOIN bookings b ON b.id = r.booking_id
-LEFT JOIN reservation_financials fn ON fn.reservation_id = r.id
+LEFT JOIN net_charges nc ON nc.reservation_id = r.id
+LEFT JOIN deposit_apply da ON da.reservation_id = r.id
 LEFT JOIN direct d ON d.reservation_id = r.id
 LEFT JOIN allocated a ON a.reservation_id = r.id
-LEFT JOIN deposits dep ON dep.booking_id = b.id
+LEFT JOIN hotel_collectible hc ON hc.reservation_id = r.id
+LEFT JOIN nightly_fallback nf ON nf.reservation_id = r.id
+LEFT JOIN folio_payment_fallback fpf ON fpf.reservation_id = r.id
 WHERE b.property_id = $1
   AND r.id = ANY($2)
 ORDER BY r.booking_id, r.stay_sequence, r.id
 `,
-    [propertyId, reservationIds, bookingIds]
+    [propertyId, reservationIds]
   );
 
   return res.rows.map((row) => {
-    const net = Math.max(0, roundIdr(row.reservation_net));
-    const paid = Math.max(0, roundIdr(row.total_paid));
-    const deposit = Math.max(0, roundIdr(row.booking_applied_deposit));
-    const totalEffectivePaid = paid + deposit;
+    const grossCharges = Math.round(Number(row.gross_charges || 0));
+    const chargeReversals = Math.round(Number(row.charge_reversals || 0));
+    const roomChargePosted = Math.round(Number(row.room_charge_posted || 0));
+    const commercialDiscounts = Math.round(Number(row.commercial_discounts || 0));
+    const chargeCount = Number(row.charge_count || 0);
+    const subtotalAmount = Math.round(Number(row.subtotal_amount || 0));
+    const nightlySum = Math.round(Number(row.nightly_sum || 0));
+    const fallbackTotalPrice = Math.round(Number(row.fallback_total_price || 0));
+    const persistedAmountPaid = Math.round(Number(row.persisted_amount_paid || 0));
+    const folioPaidFallback = Math.max(0, Math.round(Number(row.folio_paid || 0)));
+    const directPaid = Math.max(0, Math.round(Number(row.direct_paid || 0)));
+    const allocatedPaid = Math.max(0, Math.round(Number(row.allocated_paid || 0)));
+    const directSourceCnt = Number(row.direct_source_cnt || 0);
+    const allocEffectiveCnt = Number(row.alloc_effective_cnt || 0);
+    const directHistoryCnt = Number(row.direct_history_cnt || 0);
+    const allocHistoryCnt = Number(row.alloc_history_cnt || 0);
 
-    let remaining = Math.max(0, net - totalEffectivePaid);
+    // Legacy fallback for ordinary payment — parity with calculateReservationFinancials
+    let ordinaryAmountPaid = directPaid + allocatedPaid;
+    const canonicalPaymentHistoryExists = directHistoryCnt > 0 || allocHistoryCnt > 0;
+    if (!canonicalPaymentHistoryExists) {
+      if (folioPaidFallback > 0) {
+        ordinaryAmountPaid = folioPaidFallback;
+      } else {
+        ordinaryAmountPaid = persistedAmountPaid;
+      }
+    }
 
-    if (row.payment_responsibility === 'OTA_COLLECT') {
-      remaining = 0;
+    const appliedDeposit = Math.max(0, Math.round(Number(row.applied_deposit || 0)));
+    const canonicalEffectivePaid = ordinaryAmountPaid + appliedDeposit;
+
+    // Net charges calculation (parity with calculateReservationFinancials)
+    let netTotalCharges: number;
+    if (chargeCount > 0) {
+      netTotalCharges = Math.max(0, grossCharges - chargeReversals);
+      if (
+        commercialDiscounts > 0
+        && subtotalAmount > 0
+        && roomChargePosted > 0
+        && Math.abs(roomChargePosted - subtotalAmount) <= 1
+      ) {
+        netTotalCharges = Math.max(0, netTotalCharges - commercialDiscounts);
+      }
+    } else {
+      netTotalCharges = nightlySum > 0 ? nightlySum : fallbackTotalPrice;
+    }
+    netTotalCharges = Math.max(0, netTotalCharges);
+
+    // Remaining balance calculation
+    const paymentResponsibility = String(row.payment_responsibility || 'HOTEL_COLLECT').trim().toUpperCase();
+    let remaining: number;
+    if (paymentResponsibility === 'OTA_COLLECT') {
+      // OTA_COLLECT: only non-ROOM_CHARGE charges are hotel collectible
+      const grossCollectible = Math.round(Number(row.gross_collectible || 0));
+      const collectibleReversals = Math.round(Number(row.collectible_reversals || 0));
+      const hotelCollectibleTotal = Math.max(0, grossCollectible - collectibleReversals);
+      remaining = Math.max(0, hotelCollectibleTotal - canonicalEffectivePaid);
+    } else {
+      // HOTEL_COLLECT: entire net charge is collectible
+      remaining = Math.max(0, netTotalCharges - canonicalEffectivePaid);
     }
 
     return {
       ...row,
-      canonical_effective_paid: totalEffectivePaid,
+      canonical_effective_paid: canonicalEffectivePaid,
       canonical_remaining_balance: remaining,
     };
   });

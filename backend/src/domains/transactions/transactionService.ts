@@ -2844,7 +2844,7 @@ export async function getTransactions(
     const listType = String(params.transaction_type || '').toUpperCase();
     const saleBidGrouped = listType === 'SALE' || listType === ''
       ? presentListWithSaleBidGrouping(presentedAll, {
-          lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean), presentedAll.map(p => p.booking_id).filter(Boolean)),
+           lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean)),
         })
       : null;
     const listSource = saleBidGrouped || presentedAll;
@@ -2933,7 +2933,7 @@ export async function getTransactions(
   const listType = String(params.transaction_type || '').toUpperCase();
   const saleBidGrouped = listType === 'SALE' || listType === ''
     ? presentListWithSaleBidGrouping(presentedAll, {
-        lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean), presentedAll.map(p => p.booking_id).filter(Boolean)),
+        lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean)),
       })
     : null;
   const sheetSource = saleBidGrouped || groups.map((group) => ({ operational_sheet: group.sheet }));
