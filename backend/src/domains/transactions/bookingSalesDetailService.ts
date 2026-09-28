@@ -234,7 +234,7 @@ export async function getBookingSalesDetail(
         AND (pt.property_id = $1 OR pt.property_id IS NULL)
         AND pt.status = 'SUCCESS'
         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-      ORDER BY pt.created_at ASC, payment_id ASC`,
+      ORDER BY created_at ASC, payment_id ASC`,
     [propertyId, bookingId]
   );
 
