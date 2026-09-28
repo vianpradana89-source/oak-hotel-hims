@@ -142,6 +142,10 @@ export interface TransactionRecord {
   reservation_status?: string | null;
   reservation_stay_status?: string | null;
   booking_status?: string | null;
+  booking_source?: string | null;
+  booking_channel?: string | null;
+  ota_source_id?: number | null;
+  ota_source_name?: string | null;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
