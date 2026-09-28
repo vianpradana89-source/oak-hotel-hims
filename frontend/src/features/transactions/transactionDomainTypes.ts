@@ -643,6 +643,8 @@ export interface BookingSalesDetail {
     booker_name: string | null;
     booking_source: string | null;
     booking_channel: string | null;
+    ota_source_id: number | null;
+    ota_source_name: string | null;
     booking_status: string | null;
     check_in: string | null;
     check_out: string | null;

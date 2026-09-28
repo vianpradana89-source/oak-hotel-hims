@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { BookingSalesDetail, BookingSaleSourceCategory } from './transactionDomainTypes';
 import { formatReservationStayType } from './transactionDomainTypes';
 import { fetchBookingSalesDetailApi } from './transactionClient';
+import { formatReservationSourceLabel } from '../calendar/reservationContextMetadata';
 import { formatStayShortDate, paymentStatusBadgeClass } from './penjualanBidGrouping';
 
 interface BookingSalesDetailDrawerProps {
@@ -143,7 +144,7 @@ export const BookingSalesDetailDrawer: React.FC<BookingSalesDetailDrawerProps> =
                   <div>
                     <div className="text-slate-400">Sumber / Channel</div>
                     <div className="font-semibold text-slate-800">
-                      {[booking.booking_source, booking.booking_channel].filter(Boolean).join(' · ') || '-'}
+                      {formatReservationSourceLabel(booking)}
                     </div>
                   </div>
                   <div>

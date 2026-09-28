@@ -58,8 +58,13 @@ export async function getBookingSalesDetail(
        b.booking_source,
        b.channel,
        b.booking_channel,
-       b.booking_status
+       b.booking_status,
+       b.ota_source_id,
+       ota.name AS ota_source_name
      FROM bookings b
+     LEFT JOIN ota_sources ota
+       ON ota.id = b.ota_source_id
+      AND ota.property_id = b.property_id
      WHERE b.property_id = $1
        AND (
          b.bid = $2

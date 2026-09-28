@@ -24,6 +24,8 @@ export interface BookingSalesHeader {
   booker_name: string | null;
   booking_source: string | null;
   booking_channel: string | null;
+  ota_source_id: number | null;
+  ota_source_name: string | null;
   booking_status: string | null;
   check_in: string | null;
   check_out: string | null;
@@ -99,6 +101,8 @@ export interface BookingSalesDetailBookingInput {
   booking_source?: string | null;
   channel?: string | null;
   booking_channel?: string | null;
+  ota_source_id?: number | string | null;
+  ota_source_name?: string | null;
   booking_status?: string | null;
 }
 
@@ -362,6 +366,12 @@ export function assembleBookingSalesDetail(input: {
       booker_name: input.booking.booker_name ? String(input.booking.booker_name).trim() : null,
       booking_source: input.booking.booking_source || null,
       booking_channel: input.booking.booking_channel || input.booking.channel || null,
+      ota_source_id: input.booking.ota_source_id != null
+        ? Number(input.booking.ota_source_id)
+        : null,
+      ota_source_name: input.booking.ota_source_name
+        ? String(input.booking.ota_source_name).trim()
+        : null,
       booking_status: input.booking.booking_status || null,
       check_in: checkIns[0] || null,
       check_out: checkOuts[checkOuts.length - 1] || null,
