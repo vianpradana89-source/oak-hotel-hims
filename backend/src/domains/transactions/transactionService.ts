@@ -2598,31 +2598,7 @@ export async function voidTransaction(
  * represented in the current list page candidates. Used for grouped BID
  * operational status (full booking lifecycle), not period financial totals.
  */
-async function loadBookingReservationLifecycle(
-  pool: Pool,
-  propertyId: number,
-  presented: any[]
-): Promise<BookingReservationLifecycleRow[]> {
-  const { bookingIds, bids } = collectSaleBookingRefs(presented);
-  if (bookingIds.length === 0 && bids.length === 0) return [];
-  const res = await pool.query(
-    `SELECT b.property_id,
-            b.id AS booking_id,
-            b.bid AS booking_bid,
-            r.id AS reservation_id,
-            r.status AS reservation_status,
-            r.stay_status AS reservation_stay_status
-     FROM bookings b
-     INNER JOIN reservations r ON r.booking_id = b.id
-     WHERE b.property_id = $1
-       AND (
-         ($2::bigint[] <> '{}' AND b.id = ANY($2::bigint[]))
-         OR ($3::text[] <> '{}' AND b.bid = ANY($3::text[]))
-       )`,
-    [propertyId, bookingIds, bids]
-  );
-  return res.rows;
-}
+
 
 /**
  * Queries transactions with dynamic payment settlement derivation from payment_transactions.
@@ -2867,7 +2843,7 @@ export async function getTransactions(
     const listType = String(params.transaction_type || '').toUpperCase();
     const saleBidGrouped = listType === 'SALE' || listType === ''
       ? presentListWithSaleBidGrouping(presentedAll, {
-          lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll),
+          lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean), presentedAll.map(p => p.booking_id).filter(Boolean)),
         })
       : null;
     const listSource = saleBidGrouped || presentedAll;
@@ -2956,7 +2932,7 @@ export async function getTransactions(
   const listType = String(params.transaction_type || '').toUpperCase();
   const saleBidGrouped = listType === 'SALE' || listType === ''
     ? presentListWithSaleBidGrouping(presentedAll, {
-        lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll),
+        lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean), presentedAll.map(p => p.booking_id).filter(Boolean)),
       })
     : null;
   const sheetSource = saleBidGrouped || groups.map((group) => ({ operational_sheet: group.sheet }));
@@ -4155,3 +4131,4 @@ export async function executeExpenseLifecycle(
     client.release();
   }
 }
+

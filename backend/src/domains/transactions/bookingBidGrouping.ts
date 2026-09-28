@@ -229,14 +229,20 @@ function canonicalBookingId(rows: any[]): number | string | null {
 }
 
 function reservationPaid(row: any): number {
-  if (row.reservation_amount_paid !== undefined && row.reservation_amount_paid !== null && String(row.reservation_amount_paid) !== '') {
+  if (row.canonical_effective_paid != null) {
+    return roundIdr(row.canonical_effective_paid);
+  }
+  if (row.reservation_amount_paid != null && String(row.reservation_amount_paid) !== '') {
     return roundIdr(row.reservation_amount_paid);
   }
   return roundIdr(row.paid_amount);
 }
 
 function reservationRemaining(row: any, net: number, paid: number): number {
-  if (row.reservation_remaining_balance !== undefined && row.reservation_remaining_balance !== null && String(row.reservation_remaining_balance) !== '') {
+  if (row.canonical_remaining_balance != null) {
+    return Math.max(0, roundIdr(row.canonical_remaining_balance));
+  }
+  if (row.reservation_remaining_balance != null && String(row.reservation_remaining_balance) !== '') {
     return Math.max(0, roundIdr(row.reservation_remaining_balance));
   }
   return Math.max(0, net - paid);
@@ -467,4 +473,105 @@ export function presentListWithSaleBidGrouping(presented: any[], options?: BidGr
     result.push(grouped);
   }
   return result;
+}
+
+
+
+export async function loadBookingReservationLifecycle(
+  client: any,
+  propertyId: number,
+  reservationIds: number[],
+  bookingIds: Array<number | string>
+): Promise<BookingReservationLifecycleRow[]> {
+  if (reservationIds.length === 0) return [];
+
+  const res = await client.query(
+    `
+WITH direct AS (
+  SELECT
+    r.id as reservation_id,
+    COALESCE(SUM(CASE
+      WHEN pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN pt.amount ELSE 0 END), 0) AS direct_paid
+  FROM reservations r
+  JOIN payment_transactions pt
+    ON pt.reservation_id = r.id
+  WHERE r.property_id = $1
+    AND r.id = ANY($2)
+    AND pt.scope = 'ROOM_RESERVATION'
+  GROUP BY r.id
+),
+allocated AS (
+  SELECT
+    pa.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN pa.status = 'ACTIVE'
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_paid
+  FROM payment_allocations pa
+  JOIN payment_transactions pt
+    ON pt.id = pa.payment_transaction_id
+  WHERE pa.property_id = $1
+    AND pa.reservation_id = ANY($2)
+    AND pt.scope = 'BOOKING_GROUP'
+  GROUP BY pa.reservation_id
+),
+deposits AS (
+  SELECT
+    b.id as booking_id,
+    COALESCE(SUM(
+      CASE WHEN bd.status = 'APPLIED' THEN bd.amount ELSE 0 END
+    ), 0) as applied_deposit
+  FROM bookings b
+  JOIN booking_deposits bd ON bd.booking_id = b.id
+  WHERE b.property_id = $1
+    AND b.id = ANY($3)
+  GROUP BY b.id
+)
+SELECT
+  r.property_id,
+  r.booking_id,
+  b.bid as booking_bid,
+  b.payment_responsibility,
+  r.id as reservation_id,
+  r.status as reservation_status,
+  r.stay_status,
+  fn.net_amount as reservation_net,
+  COALESCE(d.direct_paid, 0)
+    + COALESCE(a.allocated_paid, 0)
+  AS total_paid,
+  COALESCE(dep.applied_deposit, 0) as booking_applied_deposit
+FROM reservations r
+JOIN bookings b ON b.id = r.booking_id
+LEFT JOIN reservation_financials fn ON fn.reservation_id = r.id
+LEFT JOIN direct d ON d.reservation_id = r.id
+LEFT JOIN allocated a ON a.reservation_id = r.id
+LEFT JOIN deposits dep ON dep.booking_id = r.booking_id
+WHERE r.property_id = $1
+  AND r.id = ANY($2)
+ORDER BY r.booking_id, r.stay_sequence, r.id
+`,
+    [propertyId, reservationIds, bookingIds]
+  );
+
+  return res.rows.map((row) => {
+    const net = Math.max(0, roundIdr(row.reservation_net));
+    const paid = Math.max(0, roundIdr(row.total_paid));
+    const deposit = Math.max(0, roundIdr(row.booking_applied_deposit));
+    const totalEffectivePaid = paid + deposit;
+
+    let remaining = Math.max(0, net - totalEffectivePaid);
+
+    if (row.payment_responsibility === 'OTA_COLLECT') {
+      remaining = 0;
+    }
+
+    return {
+      ...row,
+      canonical_effective_paid: totalEffectivePaid,
+      canonical_remaining_balance: remaining,
+    };
+  });
 }
