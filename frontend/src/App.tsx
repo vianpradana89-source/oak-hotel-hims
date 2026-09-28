@@ -3814,7 +3814,7 @@ function AppContent() {
                   {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-8">
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
                 {dailyKpiCards.map((card) => (
                   <StatCard
                     key={card.key}
