@@ -328,6 +328,7 @@ export interface DailyKpiBookedGroup {
   guest_name: string | null;
   booking_status: string | null;
   booking_source: string | null;
+  created_by: string | null;
   created_at: string | null;
   room_count: number;
   children: DailyKpiBookedChild[];

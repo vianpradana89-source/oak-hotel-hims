@@ -1,4 +1,4 @@
-// backend/src/index.ts
+﻿// backend/src/index.ts
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
@@ -1602,7 +1602,7 @@ async function createCanonicalBooking(
     const propertyCode = String(propertyResult.rows[0].property_code || 'LWG');
     const propertyTimezone = resolvePropertyTimezone(propertyResult.rows[0].timezone);
 
-    const bookingActor = String(req?.user?.username || req?.user?.name || 'PMS');
+    const bookingActor = String(req?.user?.full_name || req?.user?.username || req?.user?.name || 'PMS');
     const useGlobalDiscount = hasBookingGlobalDiscountInput(bookingPayload);
     const useBookingLevelPayment = hasBookingLevelPaymentInput(bookingPayload);
 

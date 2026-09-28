@@ -71,7 +71,7 @@ export function DailyKpiDrilldownList({
               </div>
               <div className="text-[11px] text-slate-700 mt-1">{group.guest_name || '-'}</div>
               <div className="text-[11px] text-slate-500 mt-0.5">
-                Dibuat {formatKpiClock(group.created_at, timeZone)}
+                Dibuat {formatKpiClock(group.created_at, timeZone)}{group.created_by ? ` • oleh ${group.created_by}` : ''}
               </div>
             </summary>
             {group.children.length > 0 && (

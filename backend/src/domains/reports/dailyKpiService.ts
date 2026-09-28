@@ -526,6 +526,7 @@ export async function getDailyKpiDrilldown(
         b.guest_name_snapshot AS guest_name,
         b.booking_status,
         b.booking_source,
+        b.created_by,
         b.created_at,
         COUNT(r.id) FILTER (WHERE ${BOOKED_TODAY_CHILD_PREDICATE})::int AS room_count,
         COALESCE(
@@ -545,7 +546,7 @@ export async function getDailyKpiDrilldown(
       LEFT JOIN rooms rm ON rm.id = r.room_id
       LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot)
       WHERE ${BOOKED_TODAY_BOOKING_PREDICATE(createdHotelDate)}
-      GROUP BY b.id, b.bid, b.guest_name_snapshot, b.booking_status, b.booking_source, b.created_at
+      GROUP BY b.id, b.bid, b.guest_name_snapshot, b.booking_status, b.booking_source, b.created_by, b.created_at
       ORDER BY b.created_at, b.id
       `,
       tzParams
@@ -556,6 +557,7 @@ export async function getDailyKpiDrilldown(
       guest_name: asText(row.guest_name),
       booking_status: asText(row.booking_status),
       booking_source: asText(row.booking_source),
+      created_by: asText(row.created_by),
       created_at: asIso(row.created_at),
       room_count: toCount(row.room_count),
       children: parseBookedChildren(row.children),
