@@ -63,6 +63,8 @@ export interface BookingSalesChildRow {
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — which party bears the room-charge settlement */
+  payment_responsibility: string;
   gross: number;
   discount: number;
   net: number;
@@ -311,6 +313,13 @@ export function assembleBookingSalesDetail(input: {
           ? Math.max(0, roundIdr(reservation.remaining_balance))
           : Math.max(0, net - paid);
       })();
+      // Resolve payment_responsibility once (same fin lookup as remaining)
+      const rid = asPositiveInt(reservation.id);
+      const fin = rid && input.reservationFinancials
+        ? (input.reservationFinancials instanceof Map
+            ? input.reservationFinancials.get(rid)
+            : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+        : null;
       return {
         reservation_id: reservationId,
         room_id: asPositiveInt(reservation.room_id),
@@ -325,6 +334,9 @@ export function assembleBookingSalesDetail(input: {
         reservation_status: reservation.status || reservation.stay_status || null,
         operational_sheet: childOperationalSheet(reservation),
         payment_status: derivePaymentStatus(paid, remaining, net),
+        payment_responsibility: (fin && typeof fin === 'object')
+          ? String((fin as any).payment_responsibility || 'HOTEL_COLLECT').toUpperCase()
+          : 'HOTEL_COLLECT',
         gross,
         discount,
         net,

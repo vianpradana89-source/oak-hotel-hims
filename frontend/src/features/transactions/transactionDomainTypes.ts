@@ -146,6 +146,8 @@ export interface TransactionRecord {
   booking_channel?: string | null;
   ota_source_id?: number | null;
   ota_source_name?: string | null;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — which party settles the room charge */
+  payment_responsibility?: string | null;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
@@ -193,6 +195,8 @@ export interface TransactionRecord {
     paid: number;
     remaining: number;
     payment_status: string;
+    /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+    payment_responsibility?: string;
     operational_sheet: OperationalSheet;
     children: Array<{
       reservation_id: number | null;
@@ -209,6 +213,8 @@ export interface TransactionRecord {
       paid: number;
       remaining: number;
       payment_status: string;
+      /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+      payment_responsibility?: string;
       reservation_status: string | null;
       operational_sheet: OperationalSheet;
     }>;

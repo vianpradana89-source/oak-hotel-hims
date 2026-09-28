@@ -1044,6 +1044,52 @@ async function main() {
     );
   });
 
+  await test('AC. OTA_COLLECT with zero hotel collectible shows PAID + responsibility field', async () => {
+    // The core bug scenario: OTA booking, room charge settled outside hotel,
+    // no hotel extras → hotel collectible = 0 → remaining = 0 → PAID.
+    // This must NOT show UNPAID/329k contradiction.
+    const canonicalFin = new Map([
+      [101, { amount_paid: 0, applied_deposit: 0, hotel_collectible_total: 0, hotel_collectible_remaining_balance: 0, payment_responsibility: 'OTA_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ bookingRow: { ...booking, payment_responsibility: 'OTA_COLLECT' }, canonicalFinancials: canonicalFin });
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    assert.equal(child101.payment_status, 'PAID', 'AC: OTA_COLLECT with zero collectible → PAID');
+    assert.equal(child101.remaining, 0, 'AC: OTA_COLLECT remaining is zero');
+    assert.equal(child101.payment_responsibility, 'OTA_COLLECT', 'AC: payment_responsibility field present on child');
+  });
+
+  await test('AD. OTA_COLLECT with unpaid hotel extras shows PARTIAL, not UNPAID', async () => {
+    // OTA room settled; hotel extras of 50000 remain; guest paid 20000 toward extras.
+    const canonicalFin = new Map([
+      [101, { amount_paid: 20000, applied_deposit: 0, hotel_collectible_total: 50000, hotel_collectible_remaining_balance: 30000, payment_responsibility: 'OTA_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ bookingRow: { ...booking, payment_responsibility: 'OTA_COLLECT' }, canonicalFinancials: canonicalFin });
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    assert.equal(child101.payment_status, 'PARTIAL', 'AD: OTA_COLLECT with partial extra payment → PARTIAL');
+    assert.equal(child101.paid, 20000, 'AD: OTA_COLLECT paid reflects hotel extras only');
+    assert.equal(child101.remaining, 30000, 'AD: OTA_COLLECT remaining is unpaid hotel extras');
+  });
+
+  await test('AE. booking-level payment_responsibility applies to all children', async () => {
+    // payment_responsibility is a booking-level attribute; all reservations under
+    // the same booking inherit it. This test verifies the field propagates to
+    // every child row regardless of their individual canonical financials.
+    const canonicalFin = new Map([
+      [101, { amount_paid: 0, applied_deposit: 0, hotel_collectible_total: 0, hotel_collectible_remaining_balance: 0, payment_responsibility: 'OTA_COLLECT' }],
+      [204, { amount_paid: 50000, applied_deposit: 0, hotel_collectible_total: 0, hotel_collectible_remaining_balance: 0, payment_responsibility: 'OTA_COLLECT' }],
+    ]);
+    const pool = mockDetailPool({ bookingRow: { ...booking, payment_responsibility: 'OTA_COLLECT' }, canonicalFinancials: canonicalFin });
+    const detail = await getBookingSalesDetail(pool, 1, 'LWG-260907-79W91XS8');
+    const child101 = detail.children.find((c) => c.reservation_id === 101);
+    const child204 = detail.children.find((c) => c.reservation_id === 204);
+    assert.equal(child101.payment_responsibility, 'OTA_COLLECT', 'AE: OTA booking → all children are OTA_COLLECT');
+    assert.equal(child204.payment_responsibility, 'OTA_COLLECT', 'AE: OTA booking → all children are OTA_COLLECT');
+    assert.equal(child101.payment_status, 'PAID', 'AE: OTA child with zero collectible → PAID');
+    assert.equal(child204.payment_status, 'PAID', 'AE: OTA child with paid extras exceeding zero collectible → PAID');
+  });
+
   if (failed > 0) {
     console.error(`\nFAILED ${failed} | passed ${passed}`);
     process.exit(1);

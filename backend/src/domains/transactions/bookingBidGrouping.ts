@@ -18,6 +18,8 @@ export interface PenjualanBidChild {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+  payment_responsibility?: string;
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
 }
@@ -38,6 +40,8 @@ export interface PenjualanBidGroupPayload {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — group-level (derived from children) */
+  payment_responsibility?: string;
   operational_sheet: OperationalSheet;
   children: PenjualanBidChild[];
 }
@@ -284,9 +288,10 @@ function buildChild(reservationId: number | null, members: any[]): PenjualanBidC
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    reservation_status: primary.reservation_status || null,
-    operational_sheet: operationalSheetOf(primary),
-  };
+      payment_responsibility: String(primary.payment_responsibility || 'HOTEL_COLLECT').toUpperCase(),
+      reservation_status: primary.reservation_status || null,
+      operational_sheet: operationalSheetOf(primary),
+    };
 }
 
 function unattachedFinancial(rows: any[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {

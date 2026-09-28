@@ -19,6 +19,8 @@ export interface PenjualanBidChild {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+  payment_responsibility?: string;
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
 }
@@ -37,6 +39,8 @@ export interface PenjualanBidGroup {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — derived from children */
+  payment_responsibility?: string;
   operational_sheet: OperationalSheet;
   children: PenjualanBidChild[];
   primary: TransactionRecord;
@@ -90,6 +94,16 @@ export function deriveBookingPaymentStatus(paid: number, remaining: number): Pen
   if (remaining <= 0) return 'PAID';
   if (paid > 0) return 'PARTIAL';
   return 'UNPAID';
+}
+
+/**
+ * Derive group-level payment responsibility from children.
+ * If ANY child is OTA_COLLECT, the group is OTA_COLLECT.
+ * Otherwise defaults to HOTEL_COLLECT.
+ */
+export function deriveGroupPaymentResponsibility(children: PenjualanBidChild[]): string {
+  const hasOta = children.some((c) => String(c.payment_responsibility || '').toUpperCase() === 'OTA_COLLECT');
+  return hasOta ? 'OTA_COLLECT' : 'HOTEL_COLLECT';
 }
 
 export function isPeriodActivityGroup(group: Pick<PenjualanBidGroup, 'totals_scope'>): boolean {
@@ -271,9 +285,10 @@ function buildChild(reservationId: number | null, members: TransactionRecord[]):
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    reservation_status: primary.reservation_status || null,
-    operational_sheet: operationalSheetOf(primary)
-  };
+      payment_responsibility: String(primary.payment_responsibility || 'HOTEL_COLLECT').toUpperCase(),
+      reservation_status: primary.reservation_status || null,
+      operational_sheet: operationalSheetOf(primary)
+    };
 }
 
 function unattachedFinancial(rows: TransactionRecord[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {
@@ -357,11 +372,12 @@ function buildGroup(
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    operational_sheet: deriveGroupOperationalSheet(statusSheets),
-    children,
-    primary: members[0],
-    members
-  };
+      payment_responsibility: deriveGroupPaymentResponsibility(children),
+      operational_sheet: deriveGroupOperationalSheet(statusSheets),
+      children,
+      primary: members[0],
+      members
+    };
 }
 
 export function groupPenjualanSaleRows(
@@ -405,13 +421,14 @@ export function groupPenjualanSaleRows(
           remaining,
           payment_status:
             normalizePaymentStatus(payload.payment_status) || deriveBookingPaymentStatus(paid, remaining),
+          payment_responsibility: payload.payment_responsibility || 'HOTEL_COLLECT',
           operational_sheet: payload.operational_sheet,
           children: (payload.children || []).map((child) => ({
             ...child,
             payment_status:
               normalizePaymentStatus(child.payment_status)
               || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
-            stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence)
+            stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence),
           })),
           primary: row,
           members: [row]
@@ -509,6 +526,7 @@ export function flattenAllTabRows(items: AllTabListItem[]): TransactionRecord[] 
         paid: group.paid,
         remaining: group.remaining,
         payment_status: group.payment_status,
+        payment_responsibility: group.payment_responsibility,
         operational_sheet: group.operational_sheet,
         children: group.children
       }
