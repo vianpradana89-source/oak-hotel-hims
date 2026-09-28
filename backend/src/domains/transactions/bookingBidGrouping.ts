@@ -495,6 +495,7 @@ WITH direct AS (
         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
       THEN pt.amount ELSE 0 END), 0) AS direct_paid
   FROM reservations r
+  JOIN bookings b ON b.id = r.booking_id
   JOIN payment_transactions pt
     ON pt.reservation_id = r.id
   WHERE b.property_id = $1
@@ -548,7 +549,7 @@ JOIN bookings b ON b.id = r.booking_id
 LEFT JOIN reservation_financials fn ON fn.reservation_id = r.id
 LEFT JOIN direct d ON d.reservation_id = r.id
 LEFT JOIN allocated a ON a.reservation_id = r.id
-LEFT JOIN deposits dep ON dep.booking_id = r.booking_id
+LEFT JOIN deposits dep ON dep.booking_id = b.id
 WHERE b.property_id = $1
   AND r.id = ANY($2)
 ORDER BY r.booking_id, r.stay_sequence, r.id
