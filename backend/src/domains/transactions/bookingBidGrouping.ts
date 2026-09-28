@@ -101,6 +101,8 @@ export interface BookingReservationLifecycleRow {
   reservation_status?: string | null;
   reservation_stay_status?: string | null;
   stay_status?: string | null;
+  canonical_effective_paid?: number;
+  canonical_remaining_balance?: number;
 }
 
 export interface BidGroupingOptions {
@@ -381,11 +383,31 @@ function buildGroup(
 }
 
 export function presentBidGroupedSales(presented: any[], options?: BidGroupingOptions): any[] {
-  const lifecycleSheets = indexBookingLifecycleSheets(options?.lifecycleReservations);
+  const lifecycleReservations = options?.lifecycleReservations || [];
+  const lifecycleSheets = indexBookingLifecycleSheets(lifecycleReservations);
+  const canonicalSettlementByReservationId = new Map<number, BookingReservationLifecycleRow>();
+  for (const lifecycle of lifecycleReservations) {
+    const reservationId = Number(lifecycle.reservation_id);
+    if (Number.isInteger(reservationId) && reservationId > 0) {
+      canonicalSettlementByReservationId.set(reservationId, lifecycle);
+    }
+  }
   const items: Array<{ kind: 'standalone'; tx: any } | { kind: 'bid_group'; group: ReturnType<typeof buildGroup> }> = [];
   const bidIndex = new Map<string, number>();
 
-  for (const row of presented) {
+  for (const sourceRow of presented) {
+    const reservationId = Number(sourceRow.reservation_id);
+    const canonicalSettlement = Number.isInteger(reservationId) && reservationId > 0
+      ? canonicalSettlementByReservationId.get(reservationId)
+      : undefined;
+    const row = canonicalSettlement
+      ? {
+          ...sourceRow,
+          canonical_effective_paid: canonicalSettlement.canonical_effective_paid,
+          canonical_remaining_balance: canonicalSettlement.canonical_remaining_balance,
+        }
+      : sourceRow;
+
     if (isStandalonePenjualanSale(row)) {
       items.push({ kind: 'standalone', tx: row });
       continue;

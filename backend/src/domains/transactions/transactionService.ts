@@ -2733,15 +2733,19 @@ export async function getTransactions(
            r.remaining_balance AS reservation_remaining_balance,
            r.booked_room_type_name_snapshot,
            COALESCE(rt_current.name, rt_booked.name, r.booked_room_type_name_snapshot) AS room_type_name,
-           b.bid AS booking_bid,
-           b.booking_status,
-           b.booking_source,
-           COALESCE(pmt.total_paid, 0) AS paid_amount,
-           GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
-    FROM transactions t
-    LEFT JOIN suppliers s ON s.id = t.supplier_id
-    LEFT JOIN reservations r ON r.id = t.reservation_id
-    LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+            b.bid AS booking_bid,
+            b.booking_status,
+            b.booking_source,
+            b.channel AS booking_channel,
+            b.ota_source_id,
+            ota.name AS ota_source_name,
+            COALESCE(pmt.total_paid, 0) AS paid_amount,
+            GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
+     FROM transactions t
+     LEFT JOIN suppliers s ON s.id = t.supplier_id
+     LEFT JOIN reservations r ON r.id = t.reservation_id
+     LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+     LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
     LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = t.property_id
     LEFT JOIN room_types rt_current ON rt_current.id = rm.room_type_id AND rt_current.property_id = t.property_id
     LEFT JOIN room_types rt_booked ON rt_booked.id = r.booked_room_type_id_snapshot AND rt_booked.property_id = t.property_id
@@ -3052,18 +3056,21 @@ export async function getTransactionById(
             r.stay_type,
             r.status as reservation_status,
             r.stay_status as reservation_stay_status,
-            b.bid as booking_bid,
-            b.booking_source,
-            b.channel as booking_channel,
-            rev_orig.transaction_no as original_transaction_no,
+             b.bid as booking_bid,
+             b.booking_source,
+             b.channel as booking_channel,
+             b.ota_source_id,
+             ota.name AS ota_source_name,
+             rev_orig.transaction_no as original_transaction_no,
             rev_repl.transaction_no as reversal_transaction_no,
             COALESCE(pmt.total_paid, 0) AS paid_amount,
             GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
      FROM transactions t
-     LEFT JOIN suppliers s ON s.id = t.supplier_id
-     LEFT JOIN reservations r ON r.id = t.reservation_id
-     LEFT JOIN bookings b ON b.id = t.booking_id
-     LEFT JOIN transactions rev_orig ON rev_orig.id = t.reversal_of_transaction_id
+      LEFT JOIN suppliers s ON s.id = t.supplier_id
+      LEFT JOIN reservations r ON r.id = t.reservation_id
+      LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+      LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
+      LEFT JOIN transactions rev_orig ON rev_orig.id = t.reversal_of_transaction_id
      LEFT JOIN transactions rev_repl ON rev_repl.reversal_of_transaction_id = t.id
      LEFT JOIN LATERAL (
        SELECT SUM(pt.amount)::bigint AS total_paid
@@ -3105,13 +3112,46 @@ export async function getTransactionById(
   );
 
   // Fetch authoritative payment settlements
-  const pmtRes = await pool.query(
-    `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
-     FROM payment_transactions
-     WHERE (transaction_id = $1 OR (reservation_id IS NOT NULL AND reservation_id = $2))
-     ORDER BY created_at DESC`,
-    [id, tx.reservation_id || -1]
-  );
+  // Canonical reservation payment history: exclude DEPOSIT / DEPOSIT_REFUND / DEPOSIT_APPLY
+  // per semantics established in index.ts:7669-7691.
+  // Non-reservation transaction-linked PAYMENT paths are preserved when reservation_id is absent.
+  let pmtRes;
+  if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+    const resId = Number(tx.reservation_id);
+    pmtRes = await pool.query(
+      `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
+              reference_payment_id, correction_group_id, reason_code, reason_text,
+              created_by, created_at, booking_id, scope, property_id
+       FROM payment_transactions
+       WHERE reservation_id = $1
+         AND scope = 'ROOM_RESERVATION'
+         AND (property_id = $2 OR property_id IS NULL)
+         AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+       UNION ALL
+       SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
+              pt.payment_method, pt.reference_code, pt.status,
+              pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
+              pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
+       FROM payment_transactions pt
+       JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
+       WHERE pt.scope = 'BOOKING_GROUP'
+         AND pt.property_id = $2
+         AND pa.reservation_id = $1
+         AND pa.property_id = $2
+         AND pa.status = 'ACTIVE'
+         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+       ORDER BY id DESC`,
+      [resId, propertyId]
+    );
+  } else {
+    pmtRes = await pool.query(
+      `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
+       FROM payment_transactions
+       WHERE transaction_id = $1 AND property_id = $2
+       ORDER BY created_at DESC`,
+      [id, propertyId]
+    );
+  }
 
   // Fetch audit logs
   const auditRes = await pool.query(

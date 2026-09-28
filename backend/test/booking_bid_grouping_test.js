@@ -451,4 +451,28 @@ expect(reservationLifecycleSheet({
   reservation_stay_status: 'BOOKED',
 }) === 'PROSES', '3B1-J. reservation BOOKED maps PROSES');
 
+const canonicalSettlementTest = presentBidGroupedSales([
+  sale({
+    ...periodCheckedOutOnly,
+    reservation_amount_paid: 100000,
+    reservation_remaining_balance: 290000,
+  }),
+], {
+  lifecycleReservations: [{
+    property_id: 1,
+    booking_id: 10,
+    booking_bid: 'LWG-260907-79W91XS8',
+    reservation_id: 101,
+    reservation_status: 'BOOKED',
+    reservation_stay_status: 'BOOKED',
+    canonical_effective_paid: 368000,
+    canonical_remaining_balance: 0,
+  }],
+})[0].booking_bid_group;
+
+expect(canonicalSettlementTest.paid === 368000, '3B1-K. canonical effective paid overrides row settlement');
+expect(canonicalSettlementTest.remaining === 0, '3B1-K. canonical remaining balance overrides row settlement');
+expect(canonicalSettlementTest.payment_status === 'PAID', '3B1-K. canonical settlement produces PAID');
+
+
 console.log(`PASS | booking BID grouping | ${assertions} assertions`);

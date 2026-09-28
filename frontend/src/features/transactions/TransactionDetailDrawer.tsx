@@ -7,6 +7,7 @@ import {
   isTransactionEditable,
   isTransactionVerificationEditable
 } from './transactionDomainTypes';
+import { formatStayShortDate } from './penjualanBidGrouping';
 import type {
   TransactionRecord,
   TransactionAttachment,
@@ -405,7 +406,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {tx ? `${tx.transaction_date} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
+                {tx ? `${formatStayShortDate(tx.transaction_date)} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
               </p>
             </div>
           </div>
@@ -659,6 +660,14 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                       {tx.booking_bid}
                     </span>
+                    {tx.ota_source_name && (
+                      <span className="text-xs font-semibold bg-sky-100 text-sky-800 px-2 py-0.5 rounded-md border border-sky-200">
+                        OTA — {tx.ota_source_name}
+                      </span>
+                    )}
+                    {tx.booking_channel && tx.booking_channel !== 'WALK_IN' && (
+                      <span className="text-xs text-slate-500">Channel: {tx.booking_channel}</span>
+                    )}
                     {formatReservationStayType(tx.stay_type) !== '-' && (
                       <span className="inline-flex items-center gap-1 text-slate-500">
                         <span>Tipe Stay:</span>

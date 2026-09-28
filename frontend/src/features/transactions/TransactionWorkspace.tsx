@@ -1003,8 +1003,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </div>
             </div>
           </td>
-          <td className="py-2.5 px-3 whitespace-nowrap">
-            <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+          <td className="py-2.5 px-3 max-w-[180px]">
+            <span className="font-mono font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 truncate block" title={group.bid}>
               {group.bid}
             </span>
           </td>
@@ -2594,11 +2594,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
                           <div className="text-[10px] text-slate-400" title={periodListHint}>Aktivitas Periode</div>
                         </td>
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                            {group.bid}
-                          </span>
-                        </td>
+                         <td className="py-3 px-3 max-w-[180px]">
+                           <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 truncate block" title={group.bid}>
+                             {group.bid}
+                           </span>
+                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
                           <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded border bg-emerald-50 text-emerald-700 border-emerald-200">
                             Penjualan
