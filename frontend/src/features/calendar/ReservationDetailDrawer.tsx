@@ -94,6 +94,7 @@ export default function ReservationDetailDrawer({
   const [paymentDraft, setPaymentDraft] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'TRANSFER' | 'QRIS' | 'DEBIT_CARD' | 'CREDIT_CARD'>('CASH');
   const [paymentEvidenceFile, setPaymentEvidenceFile] = useState<File | null>(null);
+  const paymentEvidenceInputRef = useRef<HTMLInputElement | null>(null);
   const [paymentSubmitting, setPaymentSubmitting] = useState<boolean>(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [bidCopied, setBidCopied] = useState(false);
@@ -809,6 +810,7 @@ export default function ReservationDetailDrawer({
 
       setPaymentDraft('');
       setPaymentEvidenceFile(null);
+      if (paymentEvidenceInputRef.current) paymentEvidenceInputRef.current.value = '';
       loadFullReservation();
       loadFolio();
       onRefresh();
@@ -1797,6 +1799,7 @@ export default function ReservationDetailDrawer({
                   </label>
                   <input
                     type="file"
+                    ref={paymentEvidenceInputRef}
                     accept="image/jpeg,image/png,application/pdf"
                     onChange={e => setPaymentEvidenceFile(e.target.files ? e.target.files[0] : null)}
                     className="w-full text-xs p-1.5 bg-stone-50 border border-stone-300 rounded-lg"
