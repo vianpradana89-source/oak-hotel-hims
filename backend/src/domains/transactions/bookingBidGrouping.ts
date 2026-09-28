@@ -531,7 +531,7 @@ deposits AS (
   GROUP BY b.id
 )
 SELECT
-  r.property_id,
+  b.property_id,
   r.booking_id,
   b.bid as booking_bid,
   b.payment_responsibility,
