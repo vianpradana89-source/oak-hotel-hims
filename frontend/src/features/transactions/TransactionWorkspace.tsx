@@ -954,7 +954,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <div className="mt-0.5">{getSourceBadge(t.source_type)}</div>
           </td>
           <td className="py-2.5 px-3 max-w-[180px]">
-            <div className="font-semibold text-slate-800 truncate">{party}</div>
+            {t.verification_status === 'REJECTED' ? (
+              <div>
+                <div className="font-semibold text-rose-700 truncate">{party}</div>
+                <div className="text-[10px] text-rose-600 font-medium">Perlu koreksi</div>
+              </div>
+            ) : (
+              <div className="font-semibold text-slate-800 truncate">{party}</div>
+            )}
             <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
           </td>
           <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
@@ -1019,7 +1026,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             </span>
           </td>
           <td className="py-2.5 px-3 max-w-[200px]">
-            <div className="font-semibold text-slate-800 truncate">{group.guest_name}</div>
+            {group.audit_verification_status === 'REJECTED' ? (
+              <div>
+                <div className="font-semibold text-rose-700 truncate">{group.guest_name}</div>
+                <span className="inline-flex items-center mt-0.5 text-[10px] font-bold text-rose-600">
+                  Perlu koreksi
+                </span>
+              </div>
+            ) : (
+              <div className="font-semibold text-slate-800 truncate">{group.guest_name}</div>
+            )}
             <span
               className="inline-flex items-center mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-800"
               title={periodListHint}
@@ -1714,9 +1730,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700 focus:outline-hidden"
               >
                 <option value="">Semua Verifikasi</option>
-                <option value="UNVERIFIED">Belum Diverifikasi</option>
+                <option value="UNVERIFIED">Belum Diperiksa</option>
                 <option value="VERIFIED">Terverifikasi</option>
-                <option value="REJECTED">Ditolak</option>
+                <option value="REJECTED">Perlu Koreksi</option>
               </select>
 
               {/* Receiving Filter (for Purchase) */}
@@ -1874,7 +1890,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           <svg className="w-3 h-3 text-emerald-600" fill="currentColor" viewBox="0 0 20 20">
                             <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                           </svg>
-                          Sah
+                          Terverifikasi
                         </span>
                       );
                     }
@@ -1884,7 +1900,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           <svg className="w-3 h-3 text-rose-600" fill="currentColor" viewBox="0 0 20 20">
                             <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
                           </svg>
-                          Ditolak
+                          Perlu Koreksi
                         </span>
                       );
                     }
@@ -1893,7 +1909,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <svg className="w-3 h-3 text-amber-600" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                         </svg>
-                        Belum
+                        Belum Diperiksa
                       </span>
                     );
                   };
@@ -2053,9 +2069,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
                                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
                               >
-                                <option value="UNVERIFIED">Belum Terverifikasi</option>
+                                <option value="UNVERIFIED">Belum Diperiksa</option>
                                 <option value="VERIFIED">Terverifikasi</option>
-                                <option value="REJECTED">Ditolak</option>
+                                <option value="REJECTED">Perlu Koreksi</option>
                               </select>
                             );
                           })()}
@@ -2321,9 +2337,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                     disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
                                     className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
                                   >
-                                    <option value="UNVERIFIED">Belum Terverifikasi</option>
+                                    <option value="UNVERIFIED">Belum Diperiksa</option>
                                     <option value="VERIFIED">Terverifikasi</option>
-                                    <option value="REJECTED">Ditolak</option>
+                                    <option value="REJECTED">Perlu Koreksi</option>
                                   </select>
                                 );
                               })()}

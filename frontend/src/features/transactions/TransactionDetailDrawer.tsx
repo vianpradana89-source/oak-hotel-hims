@@ -508,14 +508,15 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 </div>
 
                 <div>
-                  <span className="text-[10px] text-slate-400 font-bold uppercase block">Verifikasi Audit</span>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase block">Pemeriksaan</span>
                   <div className="flex items-center gap-1.5 mt-1">
-                    <span className={`text-xs font-bold ${
-                      tx.verification_status === 'VERIFIED' ? 'text-emerald-700' :
-                      tx.verification_status === 'REJECTED' ? 'text-rose-700' : 'text-amber-700'
-                    }`}>
-                      {tx.verification_status || 'UNVERIFIED'}
-                    </span>
+                  <span className={`text-xs font-bold ${
+                    tx.verification_status === 'VERIFIED' ? 'text-emerald-700' :
+                    tx.verification_status === 'REJECTED' ? 'text-rose-700' : 'text-amber-700'
+                  }`}>
+                    {tx.verification_status === 'VERIFIED' ? 'Terverifikasi' :
+                     tx.verification_status === 'REJECTED' ? 'Perlu Koreksi' : 'Belum Diperiksa'}
+                  </span>
                     <button
                       type="button"
                       onClick={() => setShowVerifyModal(true)}
@@ -1163,7 +1164,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
       {showVerifyModal && (
         <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
-            <h4 className="text-sm font-bold text-slate-900">Ubah Status Verifikasi Audit</h4>
+            <h4 className="text-sm font-bold text-slate-900">Ubah Status Pemeriksaan</h4>
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-700">Status</label>
               <div className="grid grid-cols-3 gap-2">
@@ -1176,7 +1177,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ✓ Sah
+                  Terverifikasi
                 </button>
                 <button
                   type="button"
@@ -1187,7 +1188,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ✕ Tolak
+                  Perlu Koreksi
                 </button>
                 <button
                   type="button"
@@ -1198,7 +1199,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ○ Belum
+                  Belum Diperiksa
                 </button>
               </div>
             </div>

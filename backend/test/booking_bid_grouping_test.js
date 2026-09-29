@@ -474,5 +474,150 @@ expect(canonicalSettlementTest.paid === 368000, '3B1-K. canonical effective paid
 expect(canonicalSettlementTest.remaining === 0, '3B1-K. canonical remaining balance overrides row settlement');
 expect(canonicalSettlementTest.payment_status === 'PAID', '3B1-K. canonical settlement produces PAID');
 
+// ===== UI-1 AUDIT OVERLAY TESTS =====
+// C: CHECKED_OUT + REJECTED => PROSES
+const rejectedChild = sale({
+  id: 5001,
+  reservation_id: 5001,
+  stay_sequence: 1,
+  room_number_snapshot: '601',
+  room_type_name: 'DELUXE KING',
+  check_in: '2026-09-29',
+  check_out: '2026-09-30',
+  amount: 400000,
+  net_amount: 400000,
+  effective_net_amount: 400000,
+  reservation_amount_paid: 400000,
+  reservation_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+  verification_status: 'REJECTED',
+  booking_bid: 'BID-AUDIT-C',
+  booking_id: 60,
+});
+const cGroup = presentBidGroupedSales([rejectedChild]);
+expect(cGroup.length === 1 && cGroup[0].booking_bid_group, 'UI1-C. REJECTED child produces bid_group');
+if (cGroup[0].booking_bid_group) {
+  expect(cGroup[0].booking_bid_group.operational_sheet === 'PROSES', 'UI1-C. REJECTED forced to PROSES');
+  expect(cGroup[0].booking_bid_group.children[0].operational_sheet === 'PROSES', 'UI1-C. child also PROSES');
+  expect(cGroup[0].booking_bid_group.audit_verification_status === 'REJECTED', 'UI1-C. audit status is REJECTED');
+}
+
+// F: BID with one REJECTED member => parent PROSES, non-rejected stays SELESAI
+const normalChild = sale({
+  id: 5002,
+  reservation_id: 5002,
+  stay_sequence: 2,
+  room_number_snapshot: '602',
+  room_type_name: 'STANDARD KING',
+  check_in: '2026-09-29',
+  check_out: '2026-09-30',
+  amount: 300000,
+  net_amount: 300000,
+  effective_net_amount: 300000,
+  reservation_amount_paid: 300000,
+  reservation_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+  verification_status: 'UNVERIFIED',
+  booking_bid: 'BID-AUDIT-C',
+  booking_id: 60,
+});
+const fGroup = presentBidGroupedSales([rejectedChild, normalChild]);
+expect(fGroup.length === 1 && fGroup[0].booking_bid_group, 'UI1-F. two children produce one bid_group');
+if (fGroup[0].booking_bid_group) {
+  expect(fGroup[0].booking_bid_group.operational_sheet === 'PROSES', 'UI1-F. parent forced to PROSES by REJECTED child');
+  expect(fGroup[0].booking_bid_group.audit_verification_status === 'REJECTED', 'UI1-F. parent audit status REJECTED');
+  const rejectedChildData = fGroup[0].booking_bid_group.children.find(c => c.room_number === '601');
+  expect(rejectedChildData && rejectedChildData.operational_sheet === 'PROSES', 'UI1-F. rejected child stays PROSES');
+  const normalChildData = fGroup[0].booking_bid_group.children.find(c => c.room_number === '602');
+  expect(normalChildData && normalChildData.operational_sheet === 'SELESAI', 'UI1-F. normal child stays SELESAI');
+}
+
+// BUG1: primary UNVERIFIED + secondary REJECTED (same reservation) => child PROSES via aggregated verification
+const bug1Primary = sale({
+  id: 6001,
+  reservation_id: 6001,
+  stay_sequence: 1,
+  room_number_snapshot: '701',
+  room_type_name: 'DELUXE KING',
+  check_in: '2026-09-29',
+  check_out: '2026-09-30',
+  amount: 400000,
+  net_amount: 400000,
+  effective_net_amount: 400000,
+  reservation_amount_paid: 400000,
+  reservation_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+  verification_status: 'UNVERIFIED',
+  booking_bid: 'BID-BUG1',
+  booking_id: 70,
+  transaction_time: '10:00:00',
+});
+const bug1Secondary = sale({
+  id: 6002,
+  reservation_id: 6001,
+  stay_sequence: 1,
+  room_number_snapshot: '701',
+  room_type_name: 'DELUXE KING',
+  source_type: 'EXTRA_BED',
+  amount: 50000,
+  net_amount: 50000,
+  effective_net_amount: 50000,
+  reservation_amount_paid: 400000,
+  reservation_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+  verification_status: 'REJECTED',
+  booking_bid: 'BID-BUG1',
+  booking_id: 70,
+  transaction_time: '10:30:00',
+});
+const bug1Group = presentBidGroupedSales([bug1Primary, bug1Secondary]);
+expect(bug1Group.length === 1 && bug1Group[0].booking_bid_group, 'BUG1. primary UNVERIFIED + secondary REJECTED produces one bid_group');
+if (bug1Group[0].booking_bid_group) {
+  const bug1Child = bug1Group[0].booking_bid_group.children.find((c) => c.room_number === '701');
+  expect(bug1Child && bug1Child.audit_verification_status === 'REJECTED', 'BUG1. child audit_verification_status is REJECTED (aggregated from both members)');
+  expect(bug1Child && bug1Child.operational_sheet === 'PROSES', 'BUG1. child operational_sheet is PROSES via aggregated REJECTED (not SELESAI despite primary being UNVERIFIED)');
+  expect(bug1Child && bug1Child.canonical_operational_sheet === 'SELESAI', 'BUG1. canonical sheet preserved as SELESAI');
+  expect(bug1Group[0].booking_bid_group.operational_sheet === 'PROSES', 'BUG1. parent also forced to PROSES');
+}
+
+// E: CANCELLED + REJECTED => BATAL (terminal wins)
+const cancelledChild = sale({
+  ...rejectedChild,
+  id: 5003,
+  reservation_id: 5003,
+  reservation_status: 'CANCELLED',
+  reservation_stay_status: 'CANCELLED',
+  operational_sheet: 'BATAL',
+  booking_bid: 'BID-AUDIT-E',
+});
+const eGroup = presentBidGroupedSales([cancelledChild]);
+expect(eGroup.length === 1 && eGroup[0].booking_bid_group, 'UI1-E. cancelled child produces bid_group');
+if (eGroup[0].booking_bid_group) {
+  expect(eGroup[0].booking_bid_group.operational_sheet === 'BATAL', 'UI1-E. cancelled stays BATAL despite REJECTED');
+}
+
+// Non-reservation POS + REJECTED => no overlay (stays as-is)
+const posSale = sale({
+  id: 5004,
+  reservation_id: null,
+  source_type: 'POS',
+  booking_id: null,
+  booking_bid: null,
+  verification_status: 'REJECTED',
+  operational_sheet: 'SELESAI',
+  amount: 50000,
+  net_amount: 50000,
+  effective_net_amount: 50000,
+});
+const posGroup = presentBidGroupedSales([posSale]);
+expect(posGroup.length === 1 && !posGroup[0].booking_bid_group, 'UI1-POS. non-reservation POS stays standalone');
 
 console.log(`PASS | booking BID grouping | ${assertions} assertions`);

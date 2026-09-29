@@ -22,6 +22,10 @@ export interface PenjualanBidChild {
   payment_responsibility?: string;
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
+  /** UI-1: canonical sheet before audit overlay (preserved for frontend) */
+  canonical_operational_sheet?: OperationalSheet;
+  /** UI-1: worst member verification for audit display */
+  audit_verification_status?: 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
 }
 
 export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
@@ -43,6 +47,10 @@ export interface PenjualanBidGroupPayload {
   /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — group-level (derived from children) */
   payment_responsibility?: string;
   operational_sheet: OperationalSheet;
+  /** UI-1: canonical sheet before audit overlay (preserved for frontend) */
+  canonical_operational_sheet?: OperationalSheet;
+  /** UI-1: worst member verification for audit display */
+  audit_verification_status?: 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
   children: PenjualanBidChild[];
 }
 
@@ -266,6 +274,64 @@ function operationalSheetOf(row: any): OperationalSheet {
   return 'PROSES';
 }
 
+/**
+ * UI-1 Audit Overlay — presentation-only.
+ *
+ * Canonical lifecycle is NEVER overridden by audit:
+ *   BATAL / HAPUS terminal states ALWAYS win (rule #4).
+ *
+ * For SALE reservation-linked items that are NOT terminal:
+ *   UNVERIFIED + CHECKED_OUT => stays SELESAI   (rule #1)
+ *   VERIFIED + CHECKED_OUT => stays SELESAI     (rule #2)
+ *   VERIFIED + active stay => stays PROSES      (rule #2)
+ *   REJECTED + non-terminal => forced PROSES     (rule #3)
+ */
+function applyAuditOverlay(
+  row: {
+    transaction_type?: string;
+    source_type?: string | null;
+    reservation_id?: unknown;
+    reservation_status?: string | null;
+    reservation_stay_status?: string | null;
+    verification_status?: string | null;
+    operational_sheet?: OperationalSheet | null;
+  },
+  existingSheet?: OperationalSheet | null
+): OperationalSheet {
+  const derived = deriveReservationLinkedSaleSheet({
+    transaction_type: row.transaction_type,
+    source_type: row.source_type,
+    reservation_id: row.reservation_id,
+    reservation_status: row.reservation_status,
+    reservation_stay_status: row.reservation_stay_status,
+  });
+  const canonical: OperationalSheet = (existingSheet as OperationalSheet | null) ?? derived ?? 'PROSES';
+  // Terminal states from backend/lifecycle always win (rule #4).
+  if (canonical === 'BATAL' || canonical === 'HAPUS') return canonical;
+  // Only SALE reservation-linked items are subject to the REJECTED overlay.
+  const isSaleReservationLinked =
+    String(row.transaction_type || '').toUpperCase() === 'SALE'
+    && (Number(row.reservation_id) > 0 || !!row.reservation_status || !!row.reservation_stay_status);
+  if (!isSaleReservationLinked) return canonical;
+  if (row.verification_status === 'REJECTED') return 'PROSES';
+  return canonical;
+}
+
+/**
+ * UI-1: worst verification status among a set of members.
+ * Correct semantic priority: REJECTED > UNVERIFIED > VERIFIED.
+ * REJECTED = needs correction; UNVERIFIED = not yet inspected (wins over VERIFIED to avoid false-positive); VERIFIED = confirmed.
+ */
+function worstVerificationStatus(statuses: Array<string | null | undefined>): 'UNVERIFIED' | 'VERIFIED' | 'REJECTED' | undefined {
+  const normalized = statuses
+    .map((s) => String(s || '').toUpperCase())
+    .filter(Boolean);
+  if (normalized.some((s) => s === 'REJECTED')) return 'REJECTED';
+  if (normalized.some((s) => s === 'UNVERIFIED')) return 'UNVERIFIED';
+  if (normalized.some((s) => s === 'VERIFIED')) return 'VERIFIED';
+  return undefined;
+}
+
 function buildChild(reservationId: number | null, members: any[]): PenjualanBidChild {
   const primary = members[0];
   const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
@@ -273,6 +339,14 @@ function buildChild(reservationId: number | null, members: any[]): PenjualanBidC
   const net = members.reduce((sum, row) => sum + saleNet(row), 0);
   const paid = reservationPaid(primary);
   const remaining = reservationRemaining(primary, net, paid);
+  const canonicalSheet = operationalSheetOf(primary);
+  // DEFECT 2 FIX: use worst verification status across all members, not just primary
+  const aggregatedVerification = worstVerificationStatus(members.map((m) => m.verification_status));
+  // BUG 1 FIX: overlay must read aggregatedVerification, not primary.verification_status
+  const appliedSheet = applyAuditOverlay(
+    { ...primary, verification_status: aggregatedVerification },
+    canonicalSheet
+  );
   return {
     reservation_id: reservationId,
     primary_transaction_id: primary.id,
@@ -290,7 +364,9 @@ function buildChild(reservationId: number | null, members: any[]): PenjualanBidC
     payment_status: deriveBookingPaymentStatus(paid, remaining),
       payment_responsibility: String(primary.payment_responsibility || 'HOTEL_COLLECT').toUpperCase(),
       reservation_status: primary.reservation_status || null,
-      operational_sheet: operationalSheetOf(primary),
+      operational_sheet: appliedSheet,
+      canonical_operational_sheet: canonicalSheet,
+      audit_verification_status: aggregatedVerification,
     };
 }
 
@@ -366,6 +442,23 @@ function buildGroup(
         ? lifetimeSheets
         : (periodSheets.length > 0 ? periodSheets : members.map((row) => operationalSheetOf(row))));
 
+  // UI-1: Apply audit overlay to parent BID.
+  // Must re-evaluate after lifetimeSheets to prevent them from masking REJECTED overlay.
+  const parentCanonicalSheet = deriveGroupOperationalSheet(statusSheets);
+  const parentVerification = worstVerificationStatus(
+    members.map((row) => row.verification_status)
+  );
+  // BUG 2 FIX: use actual member/child reservation data so isSaleReservationLinked is true.
+  const parentOverlayRow = reservationMembers.length > 0
+    ? reservationMembers[0]
+    : (children.length > 0 && members.find((m) => Number(m.reservation_id) > 0));
+  const parentAppliedSheet = applyAuditOverlay(
+    parentOverlayRow
+      ? { ...parentOverlayRow, verification_status: parentVerification }
+      : { transaction_type: 'SALE', verification_status: parentVerification },
+    parentCanonicalSheet
+  );
+
   return {
     bid,
     booking_id: bookingId,
@@ -380,7 +473,9 @@ function buildGroup(
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    operational_sheet: deriveGroupOperationalSheet(statusSheets),
+    operational_sheet: parentAppliedSheet,
+    canonical_operational_sheet: parentCanonicalSheet,
+    audit_verification_status: parentVerification,
     children,
     primary: members[0],
     members,

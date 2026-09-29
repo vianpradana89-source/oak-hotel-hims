@@ -402,6 +402,45 @@ function reservationLinkedSaleSheet(tx: {
   return hasReservation ? 'PROSES' : null;
 }
 
+/**
+ * UI-1 Audit Overlay — presentation-only.
+ *
+ * Canonical lifecycle is NEVER overridden by audit:
+ *   BATAL / HAPUS terminal states ALWAYS win (rule #4).
+ *
+ * For SALE reservation-linked items that are NOT terminal:
+ *   UNVERIFIED + CHECKED_OUT => tetap SELESAI   (rule #1)
+ *   VERIFIED + CHECKED_OUT => tetap SELESAI     (rule #2)
+ *   VERIFIED + active stay => tetap PROSES      (rule #2)
+ *   REJECTED + non-terminal => paksa PROSES     (rule #3)
+ */
+export function applyAuditOverlay(
+  tx: {
+    transaction_type?: string;
+    source_type?: string | null;
+    reservation_id?: unknown;
+    reservation_status?: string | null;
+    reservation_stay_status?: string | null;
+    verification_status?: VerificationStatus | null;
+    operational_sheet?: OperationalSheet | null;
+    transaction_status?: string | null;
+  },
+  existingSheet?: OperationalSheet | null
+): OperationalSheet {
+  // Start from provided sheet or derive from reservation-linked logic.
+  const derived = reservationLinkedSaleSheet(tx);
+  const canonical: OperationalSheet = (existingSheet as OperationalSheet | null) ?? derived ?? 'PROSES';
+  // Terminal states from backend/lifecycle always win (rule #4).
+  if (canonical === 'BATAL' || canonical === 'HAPUS') return canonical;
+  // Only SALE reservation-linked items are subject to the REJECTED overlay.
+  const isSaleReservationLinked =
+    String(tx.transaction_type || '').toUpperCase() === 'SALE'
+    && (Number(tx.reservation_id) > 0 || !!tx.reservation_status || !!tx.reservation_stay_status);
+  if (!isSaleReservationLinked) return canonical;
+  if (tx.verification_status === 'REJECTED') return 'PROSES';
+  return canonical;
+}
+
 export function mapToOperationalStatus(tx: {
   transaction_type?: string;
   transaction_status: string;
