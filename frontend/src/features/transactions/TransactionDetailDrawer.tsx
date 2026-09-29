@@ -376,15 +376,23 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
 
   const isVerified = tx?.verification_status === 'VERIFIED';
   const outstanding = Number(tx?.outstanding_amount) || 0;
-  const isPaid = tx?.payment_status === 'PAID';
   // UI-3: Canonical OTA collectible balance
   const hotelCollectibleTotal = Number(tx?.hotel_collectible_total || 0);
   const hotelCollectibleRemaining = Number(tx?.hotel_collectible_remaining_balance || 0);
   const canonicalAmountPaid = Number(tx?.canonical_amount_paid || 0);
   const canonicalAppliedDeposit = Number(tx?.canonical_applied_deposit || 0);
   const isReservationLinked = tx?.reservation_id != null && Number(tx.reservation_id) > 0;
+  // UI-3: Derive display status from canonical fields for reservation-linked transactions.
+  // Non-reservation falls back to legacy tx.payment_status.
+  const displayPaymentStatus = isReservationLinked
+    ? hotelCollectibleRemaining > 0
+      ? (canonicalAmountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID')
+      : 'PAID'
+    : (tx?.payment_status || 'UNPAID');
   // Can settle when reservation-linked with remaining collectible, or non-reservation with outstanding.
-  const canSettle = !isPaid && !isSettling
+  // Use canonical displayPaymentStatus (not legacy tx.payment_status) so OTA_COLLECT rooms
+  // with hotelCollectibleRemaining=0 don't get blocked from UI by an old UNPAID status.
+  const canSettle = displayPaymentStatus !== 'PAID' && !isSettling
     ? (isReservationLinked ? hotelCollectibleRemaining > 0 : outstanding > 0)
     : false;
   // For OTA_COLLECT and HOTEL_COLLECT reservations, settlement ceiling is canonical remaining.
@@ -493,9 +501,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 <div>
                   <span className="text-[10px] text-slate-400 font-bold uppercase block">Status Pelunasan</span>
                   <span className={`inline-flex items-center text-xs font-bold mt-1 ${
-                    tx.payment_status === 'PAID' ? 'text-emerald-700' : 'text-amber-700'
+                    displayPaymentStatus === 'PAID' ? 'text-emerald-700' : 'text-amber-700'
                   }`}>
-                    {tx.payment_status}
+                    {displayPaymentStatus}
                   </span>
                 </div>
 
@@ -864,7 +872,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                     Riwayat Pembayaran & Pelunasan ({payments.length})
                   </span>
-                  {!isPaid && !showSettleForm && canSettle && (
+                  {!showSettleForm && canSettle && (
                     <button
                       type="button"
                       onClick={() => {
