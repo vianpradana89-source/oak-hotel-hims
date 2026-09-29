@@ -212,6 +212,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const bankToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentRequestIdRef = useRef<number>(0);
+  // ATOMIC-LOADING: tracks whether a fresh query is in-flight.
+  // Used to show placeholders on summary cards and sheet counts
+  // while the new data is being fetched, preventing stale numbers.
+  const [isQueryLoading, setIsQueryLoading] = useState<boolean>(false);
 
   useEffect(() => {
     fetchCategoriesApi(propertyId)
@@ -235,6 +239,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const loadTransactions = useCallback(async () => {
     const reqId = ++currentRequestIdRef.current;
+    setIsQueryLoading(true);
     setIsLoading(true);
     setError(null);
     try {
@@ -278,6 +283,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     } finally {
       if (reqId === currentRequestIdRef.current) {
         setIsLoading(false);
+        setIsQueryLoading(false);
       }
     }
   }, [
@@ -1173,27 +1179,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     }
   };
 
-  const getActiveTabTotal = () => {
-    switch (activeTab) {
-      case 'SALE':
-        return { total: summary.total_sale, count: summary.count_sale, label: 'Penjualan' };
-      case 'PURCHASE':
-        return { total: summary.total_purchase, count: summary.count_purchase, label: 'Pembelian' };
-      case 'EXPENSE':
-        return { total: summary.total_expense, count: summary.count_expense, label: 'Pengeluaran' };
-      case 'INCOME':
-        return { total: summary.total_income, count: summary.count_income, label: 'Pemasukan' };
-      default:
-        return {
-          total: null,
-          count: summary.count_sale + summary.count_purchase + summary.count_expense + summary.count_income,
-          label: 'Semua Transaksi'
-        };
-    }
-  };
-
-  const activeStats = getActiveTabTotal();
-
   // If Dedicated Editor Mode is Active, render Editor
   if (activeEditor === 'PURCHASE') {
     return (
@@ -1279,42 +1264,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <span>Vendor &amp; Supplier</span>
             </button>
 
-            {activeTab === 'PURCHASE' && (
-              <button
-                onClick={() => setActiveEditor('PURCHASE')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-sm cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                <span>+ Catat Pembelian</span>
-              </button>
-            )}
-
-            {activeTab === 'EXPENSE' && (
-              <button
-                onClick={() => setActiveEditor('EXPENSE')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-sm cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                <span>+ Catat Pengeluaran</span>
-              </button>
-            )}
-
-            {activeTab === 'INCOME' && (
-              <button
-                onClick={() => setActiveEditor('INCOME')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-all shadow-sm cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                <span>+ Catat Pemasukan</span>
-              </button>
-            )}
-
             {activeTab === 'SALE' && (
               <button
                 onClick={() => {
@@ -1329,29 +1278,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 </svg>
                 <span>+ Reservasi Cepat</span>
               </button>
-            )}
-
-            {activeTab === 'ALL' && (
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => setActiveEditor('EXPENSE')}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-all cursor-pointer"
-                >
-                  <span>+ Pengeluaran</span>
-                </button>
-                <button
-                  onClick={() => setActiveEditor('PURCHASE')}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-xl transition-all cursor-pointer"
-                >
-                  <span>+ Pembelian</span>
-                </button>
-                <button
-                  onClick={() => setActiveEditor('INCOME')}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-xl transition-all cursor-pointer"
-                >
-                  <span>+ Pemasukan</span>
-                </button>
-              </div>
             )}
           </div>
         </div>
@@ -1371,17 +1297,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'SALE' ? 'text-emerald-200' : 'text-slate-400'
           }`}>Penjualan</div>
-          <div className={`text-lg font-bold font-mono leading-tight ${
-            activeTab === 'SALE' ? 'text-white' : 'text-slate-900'
-          }`}>
-            {formatIdr(summary.total_sale)}
-          </div>
-          <div className={`text-[11px] mt-1 font-medium ${
-            activeTab === 'SALE' ? 'text-emerald-100' : 'text-slate-500'
-          }`}>
-            {summary.count_sale} transaksi
-          </div>
-          {activeTab === 'SALE' && (
+          {isQueryLoading ? (
+            <div className="space-y-1.5">
+              <div className="h-6 w-20 bg-emerald-200/40 animate-pulse rounded" />
+              <div className="h-4 w-16 bg-emerald-200/30 animate-pulse rounded" />
+            </div>
+          ) : (
+            <>
+              <div className={`text-lg font-bold font-mono leading-tight ${
+                activeTab === 'SALE' ? 'text-white' : 'text-slate-900'
+              }`}>
+                {formatIdr(summary.total_sale)}
+              </div>
+              <div className={`text-[11px] mt-1 font-medium ${
+                activeTab === 'SALE' ? 'text-emerald-100' : 'text-slate-500'
+              }`}>
+                {summary.count_sale} transaksi
+              </div>
+            </>
+          )}
+          {activeTab === 'SALE' && !isQueryLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-emerald-300" />
           )}
         </button>
@@ -1398,17 +1333,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'PURCHASE' ? 'text-blue-200' : 'text-slate-400'
           }`}>Pembelian</div>
-          <div className={`text-lg font-bold font-mono leading-tight ${
-            activeTab === 'PURCHASE' ? 'text-white' : 'text-slate-900'
-          }`}>
-            {formatIdr(summary.total_purchase)}
-          </div>
-          <div className={`text-[11px] mt-1 font-medium ${
-            activeTab === 'PURCHASE' ? 'text-blue-100' : 'text-slate-500'
-          }`}>
-            {summary.count_purchase} transaksi
-          </div>
-          {activeTab === 'PURCHASE' && (
+          {isQueryLoading ? (
+            <div className="space-y-1.5">
+              <div className="h-6 w-20 bg-blue-200/40 animate-pulse rounded" />
+              <div className="h-4 w-16 bg-blue-200/30 animate-pulse rounded" />
+            </div>
+          ) : (
+            <>
+              <div className={`text-lg font-bold font-mono leading-tight ${
+                activeTab === 'PURCHASE' ? 'text-white' : 'text-slate-900'
+              }`}>
+                {formatIdr(summary.total_purchase)}
+              </div>
+              <div className={`text-[11px] mt-1 font-medium ${
+                activeTab === 'PURCHASE' ? 'text-blue-100' : 'text-slate-500'
+              }`}>
+                {summary.count_purchase} transaksi
+              </div>
+            </>
+          )}
+          {activeTab === 'PURCHASE' && !isQueryLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-blue-300" />
           )}
         </button>
@@ -1425,17 +1369,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'EXPENSE' ? 'text-rose-200' : 'text-slate-400'
           }`}>Pengeluaran</div>
-          <div className={`text-lg font-bold font-mono leading-tight ${
-            activeTab === 'EXPENSE' ? 'text-white' : 'text-slate-900'
-          }`}>
-            {formatIdr(summary.total_expense)}
-          </div>
-          <div className={`text-[11px] mt-1 font-medium ${
-            activeTab === 'EXPENSE' ? 'text-rose-100' : 'text-slate-500'
-          }`}>
-            {summary.count_expense} transaksi
-          </div>
-          {activeTab === 'EXPENSE' && (
+          {isQueryLoading ? (
+            <div className="space-y-1.5">
+              <div className="h-6 w-20 bg-rose-200/40 animate-pulse rounded" />
+              <div className="h-4 w-16 bg-rose-200/30 animate-pulse rounded" />
+            </div>
+          ) : (
+            <>
+              <div className={`text-lg font-bold font-mono leading-tight ${
+                activeTab === 'EXPENSE' ? 'text-white' : 'text-slate-900'
+              }`}>
+                {formatIdr(summary.total_expense)}
+              </div>
+              <div className={`text-[11px] mt-1 font-medium ${
+                activeTab === 'EXPENSE' ? 'text-rose-100' : 'text-slate-500'
+              }`}>
+                {summary.count_expense} transaksi
+              </div>
+            </>
+          )}
+          {activeTab === 'EXPENSE' && !isQueryLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-rose-300" />
           )}
         </button>
@@ -1452,17 +1405,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'INCOME' ? 'text-teal-200' : 'text-slate-400'
           }`}>Pemasukan</div>
-          <div className={`text-lg font-bold font-mono leading-tight ${
-            activeTab === 'INCOME' ? 'text-white' : 'text-slate-900'
-          }`}>
-            {formatIdr(summary.total_income)}
-          </div>
-          <div className={`text-[11px] mt-1 font-medium ${
-            activeTab === 'INCOME' ? 'text-teal-100' : 'text-slate-500'
-          }`}>
-            {summary.count_income} transaksi
-          </div>
-          {activeTab === 'INCOME' && (
+          {isQueryLoading ? (
+            <div className="space-y-1.5">
+              <div className="h-6 w-20 bg-teal-200/40 animate-pulse rounded" />
+              <div className="h-4 w-16 bg-teal-200/30 animate-pulse rounded" />
+            </div>
+          ) : (
+            <>
+              <div className={`text-lg font-bold font-mono leading-tight ${
+                activeTab === 'INCOME' ? 'text-white' : 'text-slate-900'
+              }`}>
+                {formatIdr(summary.total_income)}
+              </div>
+              <div className={`text-[11px] mt-1 font-medium ${
+                activeTab === 'INCOME' ? 'text-teal-100' : 'text-slate-500'
+              }`}>
+                {summary.count_income} transaksi
+              </div>
+            </>
+          )}
+          {activeTab === 'INCOME' && !isQueryLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-teal-300" />
           )}
         </button>
@@ -1536,19 +1498,40 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               )}
             </div>
 
-            {/* Active period summary — prominent but compact */}
-            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
-              {activeStats.total !== null ? (
-                <>
-                  <span className="font-mono font-bold text-slate-900">{formatIdr(activeStats.total)}</span>
-                  <span className="text-slate-400">/</span>
-                  <span className="text-slate-400">{activeStats.count} transaksi</span>
-                </>
-              ) : (
-                <>
-                  <span className="font-mono font-bold text-slate-900">{activeStats.count}</span>
-                  <span className="text-slate-400"> transaksi</span>
-                </>
+            {/* Contextual create action — right side */}
+            <div className="flex items-center gap-2 shrink-0">
+              {activeTab === 'PURCHASE' && (
+                <button
+                  onClick={() => setActiveEditor('PURCHASE')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span>+ Catat Pembelian</span>
+                </button>
+              )}
+              {activeTab === 'EXPENSE' && (
+                <button
+                  onClick={() => setActiveEditor('EXPENSE')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span>+ Catat Pengeluaran</span>
+                </button>
+              )}
+              {activeTab === 'INCOME' && (
+                <button
+                  onClick={() => setActiveEditor('INCOME')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span>+ Catat Pemasukan</span>
+                </button>
               )}
             </div>
           </div>
@@ -1611,11 +1594,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 shrink-0 overflow-x-auto">
               <span className="text-[11px] font-medium text-slate-400 px-2 whitespace-nowrap">Sheet:</span>
               {[
-                { key: 'PROSES', label: 'Proses', count: sheetCounts.proses },
-                { key: 'SELESAI', label: 'Selesai', count: sheetCounts.selesai },
-                { key: 'BATAL', label: 'Batal', count: sheetCounts.batal },
+                { key: 'PROSES', label: 'Proses', count: isQueryLoading ? null : sheetCounts.proses },
+                { key: 'SELESAI', label: 'Selesai', count: isQueryLoading ? null : sheetCounts.selesai },
+                { key: 'BATAL', label: 'Batal', count: isQueryLoading ? null : sheetCounts.batal },
                 ...(['PURCHASE', 'EXPENSE'].includes(activeTab)
-                  ? [{ key: 'HAPUS', label: 'Hapus', count: sheetCounts.hapus ?? 0 }]
+                  ? [{ key: 'HAPUS', label: 'Hapus', count: isQueryLoading ? null : (sheetCounts.hapus ?? 0) }]
                   : [])
               ].map((st) => (
                 <button
@@ -1639,7 +1622,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   }`}
                 >
                   <span>{st.label}</span>
-                  {st.count !== null && (
+                  {isQueryLoading ? (
+                    <span className="w-4 h-3 bg-slate-200 animate-pulse rounded-full" />
+                  ) : st.count !== null && (
                     <span
                       className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
                         operationalStatus === st.key
