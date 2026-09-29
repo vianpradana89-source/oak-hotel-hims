@@ -191,7 +191,9 @@ export async function queryPresentedPage(
           b.payment_responsibility AS payment_responsibility,
           r.status AS reservation_status,
          r.stay_status AS reservation_stay_status,
-         r.cancelled_at AS reservation_cancelled_at,
+          r.cancelled_at AS reservation_cancelled_at,
+          t.reservation_id AS reservation_id,
+          t.verification_status AS verification_status,
         ${LIFECYCLE_KEY_SQL} AS lifecycle_key,
         ${STANDALONE_SHEET_SQL} AS standalone_sheet
       FROM transactions t
@@ -227,12 +229,28 @@ export async function queryPresentedPage(
       FROM live l
       GROUP BY l.lifecycle_key
     ),
+    lifecycle_audit AS (
+      SELECT
+        l.lifecycle_key,
+        BOOL_OR(
+          UPPER(l.transaction_type) = 'SALE'
+          AND UPPER(COALESCE(l.source_type, '')) NOT IN ('POS', 'POS_ORDER')
+          AND (l.reservation_id > 0
+               OR l.reservation_status <> ''
+               OR l.reservation_stay_status <> '')
+          AND l.verification_status = 'REJECTED'
+        ) AS lifecycle_reservation_rejected
+      FROM live l
+      GROUP BY l.lifecycle_key
+    ),
     primaries AS (
       SELECT DISTINCT ON (l.lifecycle_key)
         l.*,
-        n.effective_net
+        n.effective_net,
+        la.lifecycle_reservation_rejected
       FROM live l
       JOIN lifecycle_nets n ON n.lifecycle_key = l.lifecycle_key
+      LEFT JOIN lifecycle_audit la ON la.lifecycle_key = l.lifecycle_key
       WHERE l.lifecycle_key IN (SELECT lifecycle_key FROM search_keys)
       ORDER BY l.lifecycle_key, ${PRIMARY_STATUS_RANK_SQL.replace(/t\./g, 'l.')}, l.id DESC
     ),
@@ -294,14 +312,28 @@ export async function queryPresentedPage(
         SUM(CASE WHEN UPPER(d.transaction_type) = 'EXPENSE' THEN d.effective_net ELSE 0 END) AS expense_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'INCOME' THEN d.effective_net ELSE 0 END) AS income_net,
         MAX(d.booking_bid) AS booking_bid,
-        CASE
-          WHEN BOOL_OR(
-            UPPER(COALESCE(d.transaction_status, ''))
-              IN ('VOIDED', 'CANCELLED', 'REVERSED')
-          )
-          THEN 'BATAL'
-          ELSE MAX(COALESCE(bs.booking_sheet, d.standalone_sheet))
-        END AS operational_sheet,
+          CASE
+            -- Rule A: transaction-level terminal status always wins.
+            WHEN BOOL_OR(
+              UPPER(COALESCE(d.transaction_status, ''))
+                IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            ) THEN 'BATAL'
+            -- Rule B: booking_sheet BATAL (cancelled reservation/lifecycle) wins
+            -- over the audit overlay — prevents REJECTED from overriding a
+            -- cancelled stay.
+            WHEN BOOL_OR(bs.booking_sheet = 'BATAL') THEN 'BATAL'
+            -- Rule C: audit overlay — reservation-linked non-POS SALE with
+            -- effective REJECTED becomes PROSES. The REJECTED fact is the
+            -- lifecycle-level aggregation (lifecycle_audit) so a REJECTED on
+            -- a secondary lifecycle member (correction/reversal family)
+            -- survives DISTINCT ON. POS/non-reservation sales are excluded
+            -- and keep their canonical sheet.
+            WHEN BOOL_OR(UPPER(d.transaction_type) = 'SALE')
+              AND BOOL_OR(d.lifecycle_reservation_rejected)
+            THEN 'PROSES'
+            -- Rule D: default to canonical sheet (booking_sheet or standalone).
+            ELSE MAX(COALESCE(bs.booking_sheet, d.standalone_sheet))
+          END AS operational_sheet,
         ARRAY_AGG(d.id) AS member_ids
       FROM dated d
       LEFT JOIN booking_sheets bs

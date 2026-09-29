@@ -48,6 +48,7 @@ import {
   presentListWithSaleBidGrouping,
   loadBookingReservationLifecycle,
   type BookingReservationLifecycleRow,
+  applyAuditOverlay
 } from './bookingBidGrouping';
 import { presentedListKey, queryPresentedPage } from './transactionListQuery';
 import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
@@ -3287,7 +3288,7 @@ export async function getTransactionById(
 
   return {
     ...tx,
-    operational_sheet: deriveOperationalSheet(tx),
+    operational_sheet: applyAuditOverlay(tx, deriveOperationalSheet(tx)),
     effective_net_amount: lifecycleGroup ? lifecycleGroup.effectiveNet : Number(tx.net_amount || 0),
     is_lifecycle_primary: lifecycleGroup
       ? Number(lifecycleGroup.primary.id) === Number(tx.id)

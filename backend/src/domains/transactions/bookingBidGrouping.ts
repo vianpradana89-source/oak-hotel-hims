@@ -286,7 +286,7 @@ function operationalSheetOf(row: any): OperationalSheet {
  *   VERIFIED + active stay => stays PROSES      (rule #2)
  *   REJECTED + non-terminal => forced PROSES     (rule #3)
  */
-function applyAuditOverlay(
+export function applyAuditOverlay(
   row: {
     transaction_type?: string;
     source_type?: string | null;
