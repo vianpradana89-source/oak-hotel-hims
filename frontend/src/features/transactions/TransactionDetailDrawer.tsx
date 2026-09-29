@@ -823,31 +823,33 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   </div>
                 )}
                 <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-sm font-bold text-slate-900">
-                  <span>Total Tagihan / Nilai Net:</span>
+                  <span>{isReservationLinked ? 'Nilai Penjualan / Net:' : 'Total Tagihan / Nilai Net:'}</span>
                   <span className="text-base text-emerald-800 font-mono">{formatIdr(tx.net_amount)}</span>
                 </div>
 
                 <div className="pt-2 border-t border-slate-200/80 grid grid-cols-2 gap-2 text-xs">
-                  <div className="p-2 bg-white rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
-                    <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
-                  </div>
+                  {!isReservationLinked && (
+                    <div className="p-2 bg-white rounded-xl border border-slate-200">
+                      <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
+                      <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
+                    </div>
+                  )}
                   {isReservationLinked ? (
                     <>
                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Tagihan Hotel</span>
+                        <span className="text-[10px] text-amber-600 font-bold block">Ditagih Hotel</span>
                         <span className="font-mono font-bold text-amber-700">{formatIdr(hotelCollectibleTotal)}</span>
                       </div>
                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Pembayaran Hotel</span>
+                        <span className="text-[10px] text-amber-600 font-bold block">Dibayar ke Hotel</span>
                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAmountPaid)}</span>
                       </div>
                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Deposit Terpakai</span>
+                        <span className="text-[10px] text-amber-600 font-bold block">Deposit Digunakan</span>
                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAppliedDeposit)}</span>
                       </div>
                       <div className={`p-2 rounded-xl border ${hotelCollectibleRemaining > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
-                        <span className="text-[10px] font-bold block">Sisa Ditagih Hotel</span>
+                        <span className="text-[10px] font-bold block">Sisa Tagihan Hotel</span>
                         <span className={`font-mono font-bold ${hotelCollectibleRemaining > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
                           {formatIdr(hotelCollectibleRemaining)}
                         </span>
