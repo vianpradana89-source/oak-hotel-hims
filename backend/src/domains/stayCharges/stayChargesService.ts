@@ -16,6 +16,10 @@ import {
   getEffectivePaymentStateForReservation,
   type EffectivePaymentState
 } from '../payments/paymentAllocationService';
+import {
+  calculateReservationFinancials,
+  calculateHotelCollectibleBalance
+} from '../reservations/reservationFinancialCalculator';
 import { lockReservationFinancialState } from '../reservations/reservationLockService';
 
 const VALID_CHARGE_TYPES = new Set<StayChargeType>([
@@ -412,207 +416,18 @@ export async function deleteStayChargeRule(
 // ============================================================================
 // CENTRALIZED FINANCIAL RECALCULATION ENGINE
 // ============================================================================
-
-/**
- * Read-only canonical financial calculator.
- *
- * Computes total_price, amount_paid, applied_deposit, remaining_balance,
- * and payment_status from folio_entries + payment_transactions without
- * mutating any rows. Used by GET /api/reservations/:id/folio.
- *
- * Same canonical rules as recalculateReservationFinancials but NO FOR UPDATE,
- * NO UPDATE/INSERT/DELETE.
- */
-export async function calculateReservationFinancials(
-  client: PoolClient | Pool,
-  reservationId: number,
-  propertyId: number,
-  ordinaryFallbackOverride?: number
-): Promise<{
-  total_price: number;
-  amount_paid: number;
-  applied_deposit: number;
-  remaining_balance: number;
-  payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
-  reservation: any;
-}> {
-  // 1. Fetch current reservation details (read-only, no lock)
-  const resCheck = await client.query(
-    `SELECT r.*, b.property_id AS booking_property_id
-     FROM reservations r
-     LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1`,
-    [reservationId]
-  );
-  if ((resCheck.rowCount ?? 0) === 0) {
-    const err: any = new Error(`Reservasi #${reservationId} tidak ditemukan`);
-    err.statusCode = 404;
-    throw err;
-  }
-  const resRow = resCheck.rows[0];
-  const bookingPropId = Number(resRow.booking_property_id || resRow.property_id || propertyId);
-  if (propertyId && bookingPropId && bookingPropId !== propertyId) {
-    const err: any = new Error('Reservasi milik properti yang berbeda');
-    err.statusCode = 403;
-    err.code = 'CROSS_PROPERTY_ACCESS';
-    throw err;
-  }
-
-  // 2. Calculate Total Charges (Debits) from folio_entries:
-  // Charges = Sum of DEBIT entries that are NOT payment voids/reversals
-  // Reversals = Sum of CREDIT entries that are reversals of charges (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL')
-  // Net Charges = Charges - Reversals
-  const folioDebitsRes = await client.query(
-    `SELECT
-       COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN amount
-         ELSE 0
-       END), 0) AS gross_charges,
-       COALESCE(SUM(CASE
-         WHEN direction = 'CREDIT' AND (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL' OR entry_type LIKE '%_REVERSAL') THEN amount
-         ELSE 0
-       END), 0) AS charge_reversals,
-       COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type = 'ROOM_CHARGE' AND COALESCE(is_voided, FALSE) = FALSE THEN amount
-         ELSE 0
-       END), 0) AS room_charge_posted,
-       COALESCE(SUM(CASE
-         WHEN direction = 'CREDIT'
-          AND entry_type = 'DISCOUNT'
-          AND COALESCE(is_voided, FALSE) = FALSE
-          AND reversal_of_entry_id IS NULL
-         THEN amount
-         ELSE 0
-       END), 0) AS commercial_discounts,
-       COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN 1 END)::int as charge_count
-     FROM folio_entries
-     WHERE reservation_id = $1`,
-    [reservationId]
-  );
-
-  const grossCharges = Math.round(Number(folioDebitsRes.rows[0]?.gross_charges || 0));
-  const chargeReversals = Math.round(Number(folioDebitsRes.rows[0]?.charge_reversals || 0));
-  const roomChargePosted = Math.round(Number(folioDebitsRes.rows[0]?.room_charge_posted || 0));
-  const commercialDiscounts = Math.round(Number(folioDebitsRes.rows[0]?.commercial_discounts || 0));
-  const chargeCount = Number(folioDebitsRes.rows[0]?.charge_count || 0);
-
-  let netTotalCharges: number;
-  if (chargeCount > 0) {
-    netTotalCharges = Math.max(0, grossCharges - chargeReversals);
-    if (
-      commercialDiscounts > 0
-      && shouldApplyPostedCommercialDiscount({
-        roomChargePosted,
-        persistedSubtotal: resRow.subtotal_amount
-      })
-    ) {
-      netTotalCharges = Math.max(0, netTotalCharges - commercialDiscounts);
-    }
-  } else {
-    // Fallback for legacy reservations where folio charges haven't been backfilled
-    const nightlySumRes = await client.query(
-      `SELECT COALESCE(SUM(total_amount), 0) as nightly_sum FROM reservation_nightly_rates WHERE reservation_id = $1`,
-      [reservationId]
-    );
-    const nightlySum = Math.round(Number(nightlySumRes.rows[0]?.nightly_sum || 0));
-    netTotalCharges = nightlySum > 0 ? nightlySum : Math.round(Number(resRow.total_price || 0));
-  }
-
-  // 3. Calculate Total Payments from canonical dual-source engine:
-  //    A. Direct ROOM_RESERVATION payment_transactions
-  //    B. Allocated BOOKING_GROUP payments via payment_allocations
-  //
-  // NOTE: legacy fallback (folio/persisted) runs ONLY when no canonical source
-  // row exists at all (canonicalSourceExists === false). We do NOT use
-  // totalEffectivePaid === 0 as the fallback trigger — a zero-amount SUCCESS
-  // direct payment is still a canonical source that must not be overridden.
-  const payState = await getEffectivePaymentStateForReservation(
-    client, reservationId, propertyId
-  );
-  let ordinaryAmountPaid = payState.totalEffectivePaid;
-
-  const depositApplyRes = await client.query(
-    `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
-     FROM folio_entries
-     WHERE reservation_id = $1
-       AND property_id = $2
-       AND entry_type = 'DEPOSIT_APPLY'
-       AND direction = 'CREDIT'
-       AND status = 'POSTED'
-       AND is_voided = FALSE
-       AND reversal_of_entry_id IS NULL`,
-    [reservationId, propertyId]
-  );
-  const appliedDeposit = Math.round(Number(depositApplyRes.rows[0]?.applied_deposit || 0));
-
-  // Deposit cash movements are liabilities, not reservation settlement. Only
-  // ordinary settlement transaction types participate in this legacy fallback.
-  //
-  // CRITICAL: We use canonicalPaymentHistoryExists (broad: any status), NOT
-  // canonicalSourceExists (narrow: SUCCESS only). This preserves the pre-1B2
-  // invariant: a reservation whose canonical payment was later VOIDED/CORRECTED/
-  // REVERSED still has canonical history and must NOT fall back to stale folio
-  // or persisted amount_paid. Using the narrow check would re-activate the
-  // legacy fallback and resurrect obsolete payment amounts.
-  if (!payState.canonicalPaymentHistoryExists) {
-    const folioPmtRes = await client.query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN direction = 'CREDIT'
-           AND entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-           AND reversal_of_entry_id IS NULL THEN amount ELSE 0 END), 0) -
-         COALESCE(SUM(CASE WHEN direction = 'DEBIT'
-           AND entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL') THEN amount ELSE 0 END), 0)
-           AS folio_paid
-       FROM folio_entries
-       WHERE reservation_id = $1`,
-      [reservationId]
-    );
-    const folioPaid = Math.round(Number(folioPmtRes.rows[0]?.folio_paid || 0));
-    if (folioPaid > 0) {
-      ordinaryAmountPaid = folioPaid;
-    } else {
-      ordinaryAmountPaid = ordinaryFallbackOverride === undefined
-        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)))
-        : Math.max(0, Math.round(ordinaryFallbackOverride));
-    }
-  }
-
-  // A deposit affects reservation settlement only when explicitly applied.
-  // Do not generically sum folio credits: ordinary payments already have folio
-  // projections and would otherwise be counted twice.
-  const effectiveSettlement = ordinaryAmountPaid + appliedDeposit;
-
-  // 4. Calculate Remaining Balance & Payment Status
-  const remainingBalance = Math.max(0, netTotalCharges - effectiveSettlement);
-
-  let newPaymentStatus: 'UNPAID' | 'PARTIAL' | 'PAID' = 'UNPAID';
-  // Zero-balance MUST take priority: when remainingBalance is zero, the reservation
-  // is fully settled regardless of whether effectiveSettlement is also zero.
-  // This fixes the bug where 100% discount + zero payment yielded UNPAID instead of PAID.
-  if (remainingBalance <= 0.01) {
-    newPaymentStatus = 'PAID';
-  } else if (effectiveSettlement <= 0) {
-    newPaymentStatus = 'UNPAID';
-  } else {
-    newPaymentStatus = 'PARTIAL';
-  }
-
-  return {
-    total_price: netTotalCharges,
-    amount_paid: ordinaryAmountPaid,
-    applied_deposit: appliedDeposit,
-    remaining_balance: remainingBalance,
-    payment_status: newPaymentStatus,
-    reservation: resRow
-  };
-}
+//
+// The read-only calculators have been extracted to the neutral module
+// reservationFinancialCalculator.ts to avoid circular imports with transactionService.
+// stayChargesService re-exports them for backward compatibility.
+//
 
 /**
  * Write variant: acquires FOR UPDATE lock, persists canonical financials
  * into the reservations row, then returns the result.
  *
  * Delegates the read-only calculation to calculateReservationFinancials
- * and only adds the persistence step.
+ * (imported from reservationFinancialCalculator) and only adds the persistence step.
  */
 export async function recalculateReservationFinancials(
   client: PoolClient | Pool,
@@ -675,95 +490,11 @@ export async function recalculateReservationFinancials(
   };
 }
 
-
-export async function calculateHotelCollectibleBalance(
-  client: PoolClient | Pool,
-  reservationId: number,
-  propertyId: number,
-  paymentResponsibility: unknown
-): Promise<{
-  payment_responsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT';
-  hotel_collectible_total: number;
-  hotel_collectible_remaining_balance: number;
-  amount_paid: number;
-  applied_deposit: number;
-}> {
-  const responsibility = String(paymentResponsibility || 'HOTEL_COLLECT')
-    .trim()
-    .toUpperCase();
-
-  const canonical = await calculateReservationFinancials(
-    client,
-    reservationId,
-    propertyId
-  );
-
-  if (responsibility !== 'OTA_COLLECT') {
-    return {
-      payment_responsibility: 'HOTEL_COLLECT',
-      hotel_collectible_total: canonical.total_price,
-      hotel_collectible_remaining_balance: canonical.remaining_balance,
-      amount_paid: canonical.amount_paid,
-      applied_deposit: canonical.applied_deposit
-    };
-  }
-
-  // OTA_COLLECT:
-  // The original OTA room charge is settled outside the hotel and therefore
-  // must not block checkout. Only exclude the original ROOM_CHARGE source.
-  //
-  // STAY_EXTENSION and all other manually-posted hotel charges remain
-  // collectible by the hotel.
-  //
-  // Keep the same compensating-reversal model as canonical folio calculation:
-  // original voided debit remains in history and its CREDIT reversal offsets it.
-  const collectibleRes = await client.query(
-    `SELECT
-       COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT'
-          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
-          AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
-         THEN amount
-         ELSE 0
-       END), 0) AS gross_collectible,
-       COALESCE(SUM(CASE
-         WHEN direction = 'CREDIT'
-          AND (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL' OR entry_type LIKE '%_REVERSAL')
-          AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
-         THEN amount
-         ELSE 0
-       END), 0) AS collectible_reversals
-     FROM folio_entries
-     WHERE reservation_id = $1`,
-    [reservationId]
-  );
-
-  const grossCollectible = Math.round(
-    Number(collectibleRes.rows[0]?.gross_collectible || 0)
-  );
-  const collectibleReversals = Math.round(
-    Number(collectibleRes.rows[0]?.collectible_reversals || 0)
-  );
-
-  const hotelCollectibleTotal = Math.max(
-    0,
-    grossCollectible - collectibleReversals
-  );
-
-  const effectiveHotelSettlement =
-    canonical.amount_paid + canonical.applied_deposit;
-
-  return {
-    payment_responsibility: 'OTA_COLLECT',
-    hotel_collectible_total: hotelCollectibleTotal,
-    hotel_collectible_remaining_balance: Math.max(
-      0,
-      hotelCollectibleTotal - effectiveHotelSettlement
-    ),
-    amount_paid: canonical.amount_paid,
-    applied_deposit: canonical.applied_deposit
-  };
-}
+// Re-export from neutral module for backward compat with external callers.
+export {
+  calculateReservationFinancials,
+  calculateHotelCollectibleBalance
+} from '../reservations/reservationFinancialCalculator';
 
 // ============================================================================
 // FOLIO POSTING, VOID & CORRECTION ENGINE

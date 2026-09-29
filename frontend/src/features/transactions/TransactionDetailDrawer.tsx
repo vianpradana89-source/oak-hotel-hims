@@ -377,6 +377,20 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const isVerified = tx?.verification_status === 'VERIFIED';
   const outstanding = Number(tx?.outstanding_amount) || 0;
   const isPaid = tx?.payment_status === 'PAID';
+  // UI-3: Canonical OTA collectible balance
+  const hotelCollectibleTotal = Number(tx?.hotel_collectible_total || 0);
+  const hotelCollectibleRemaining = Number(tx?.hotel_collectible_remaining_balance || 0);
+  const canonicalAmountPaid = Number(tx?.canonical_amount_paid || 0);
+  const canonicalAppliedDeposit = Number(tx?.canonical_applied_deposit || 0);
+  const isReservationLinked = tx?.reservation_id != null && Number(tx.reservation_id) > 0;
+  // Can settle when reservation-linked with remaining collectible, or non-reservation with outstanding.
+  const canSettle = !isPaid && !isSettling
+    ? (isReservationLinked ? hotelCollectibleRemaining > 0 : outstanding > 0)
+    : false;
+  // For OTA_COLLECT and HOTEL_COLLECT reservations, settlement ceiling is canonical remaining.
+  const settleCeiling = isReservationLinked
+    ? hotelCollectibleRemaining > 0 ? hotelCollectibleRemaining : 0
+    : outstanding;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/50 backdrop-blur-xs transition-opacity animate-in fade-in">
@@ -810,12 +824,37 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
                     <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
                   </div>
-                  <div className="p-2 bg-white rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
-                    <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
-                      {formatIdr(outstanding)}
-                    </span>
-                  </div>
+                  {isReservationLinked ? (
+                    <>
+                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                        <span className="text-[10px] text-amber-600 font-bold block">Tagihan Hotel</span>
+                        <span className="font-mono font-bold text-amber-700">{formatIdr(hotelCollectibleTotal)}</span>
+                      </div>
+                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                        <span className="text-[10px] text-amber-600 font-bold block">Pembayaran Hotel</span>
+                        <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAmountPaid)}</span>
+                      </div>
+                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                        <span className="text-[10px] text-amber-600 font-bold block">Deposit Terpakai</span>
+                        <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAppliedDeposit)}</span>
+                      </div>
+                      <div className={`p-2 rounded-xl border ${hotelCollectibleRemaining > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                        <span className="text-[10px] font-bold block">Sisa Ditagih Hotel</span>
+                        <span className={`font-mono font-bold ${hotelCollectibleRemaining > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                          {formatIdr(hotelCollectibleRemaining)}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="p-2 bg-white rounded-xl border border-slate-200">
+                        <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
+                        <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
+                          {formatIdr(outstanding)}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -825,14 +864,15 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                     Riwayat Pembayaran & Pelunasan ({payments.length})
                   </span>
-                  {!isPaid && !showSettleForm && (
+                  {!isPaid && !showSettleForm && canSettle && (
                     <button
                       type="button"
                       onClick={() => {
-                        setSettleAmount(outstanding);
+                        setSettleAmount(canSettle ? String(settleCeiling) : '0');
                         setShowSettleForm(true);
                       }}
-                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs transition-colors"
+                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={!canSettle}
                     >
                       + Catat Pelunasan
                     </button>
@@ -859,7 +899,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                         <input
                           type="number"
                           min="1"
-                          max={outstanding}
+                          max={settleCeiling}
                           step="1"
                           required
                           value={settleAmount}

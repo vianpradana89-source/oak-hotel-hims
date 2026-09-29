@@ -58,6 +58,7 @@ import {
   resolvePurchaseDepartmentBinding,
 } from './purchaseSettingsService';
 import { preparePurchaseCreateDto } from './purchaseFieldRulesService';
+import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 
 export const TRANSACTION_CATEGORIES: Record<
   string,
@@ -2274,8 +2275,11 @@ export async function settleTransactionPayment(
 
     const txRes = await client.query(
       `SELECT t.id, t.transaction_no, t.transaction_type, t.net_amount, t.payment_status,
-              COALESCE(pmt.total_paid, 0)::bigint AS paid_amount
+              t.reservation_id, t.booking_id,
+              COALESCE(pmt.total_paid, 0)::bigint AS paid_amount,
+              COALESCE(b.payment_responsibility, 'HOTEL_COLLECT') AS payment_responsibility
        FROM transactions t
+       LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, (SELECT booking_id FROM reservations WHERE id = t.reservation_id LIMIT 1))
        LEFT JOIN LATERAL (
          SELECT SUM(pt.amount)::bigint AS total_paid
          FROM payment_transactions pt
@@ -2297,30 +2301,102 @@ export async function settleTransactionPayment(
     const currentPaid = Number(tx.paid_amount) || 0;
     const outstanding = Math.max(0, netAmount - currentPaid);
 
-    if (amount > outstanding && outstanding > 0) {
-      throw new Error(`Nominal pelunasan (Rp ${amount.toLocaleString('id-ID')}) melebihi sisa tagihan (Rp ${outstanding.toLocaleString('id-ID')})`);
+    // UI-3: For reservation-linked transactions, gate settlement on canonical
+    // hotel collectible balance. This avoids accepting payment for OTA room
+    // charges that are settled outside the hotel.
+    // Fail-closed: if calculator throws, reject the settlement (no legacy fallback).
+    let canonicalCollectible: Awaited<ReturnType<typeof calculateHotelCollectibleBalance>> | null = null;
+    if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+      canonicalCollectible = await calculateHotelCollectibleBalance(
+        client,
+        Number(tx.reservation_id),
+        propertyId,
+        String(tx.payment_responsibility || 'HOTEL_COLLECT')
+      );
     }
 
-    // Insert payment_transactions
-    await client.query(
-      `INSERT INTO payment_transactions (
-        property_id, transaction_id, transaction_type, amount, payment_method,
-        reference_code, status, created_by, created_at
-      ) VALUES (
-        $1, $2, 'PAYMENT', $3, $4, $5, 'SUCCESS', $6, NOW()
-      )`,
-      [
-        propertyId,
-        id,
-        amount,
-        dto.payment_method || 'TRANSFER',
-        dto.notes || `PELUNASAN-${tx.transaction_no}`,
-        dto.actor_name || 'Staff'
-      ]
-    );
+    if (canonicalCollectible) {
+      const { hotel_collectible_remaining_balance } = canonicalCollectible;
+      if (hotel_collectible_remaining_balance <= 0) {
+        throw new Error('Tidak dapat menyetor ke reservasi ini — tidak ada sisa tagihan hotel (hotel_collectible_remaining_balance = 0). Tagihan kamar OTA sudah diselesaikan di luar hotel.');
+      }
+      if (amount > hotel_collectible_remaining_balance) {
+        throw new Error(`Nominal pelunasan (Rp ${amount.toLocaleString('id-ID')}) melebihi sisa tagihan hotel (Rp ${hotel_collectible_remaining_balance.toLocaleString('id-ID')}). Sisa tagihan hotel yang dapat disetor: Rp ${hotel_collectible_remaining_balance.toLocaleString('id-ID')}.`);
+      }
+    } else {
+      // Non-reservation: use legacy outstanding check
+      if (amount > outstanding && outstanding > 0) {
+        throw new Error(`Nominal pelunasan (Rp ${amount.toLocaleString('id-ID')}) melebihi sisa tagihan (Rp ${outstanding.toLocaleString('id-ID')})`);
+      }
+    }
 
-    const newPaid = currentPaid + amount;
-    const newPaymentStatus = newPaid >= netAmount ? 'PAID' : (newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID');
+    // Insert payment_transactions.
+    // Non-reservation: legacy transaction-level INSERT (no scope/booking linkage).
+    // Reservation-linked: canonical direct ROOM_RESERVATION payment row with
+    // transaction_id + reservation_id + booking_id so it is visible to both
+    // transaction-scoped readers AND getEffectivePaymentStateForReservation
+    // as a single row (OR-condition matches once per row).
+    if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+      await client.query(
+        `INSERT INTO payment_transactions (
+          property_id, transaction_id, reservation_id, booking_id, scope,
+          transaction_type, amount, payment_method,
+          reference_code, status, created_by, created_at
+        ) VALUES (
+          $1, $2, $3, $4, 'ROOM_RESERVATION', 'PAYMENT', $5, $6, $7, 'SUCCESS', $8, NOW()
+        )`,
+        [
+          propertyId,
+          id,
+          tx.reservation_id,
+          tx.booking_id || null,
+          amount,
+          dto.payment_method || 'TRANSFER',
+          dto.notes || `PELUNASAN-${tx.transaction_no}`,
+          dto.actor_name || 'Staff'
+        ]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO payment_transactions (
+          property_id, transaction_id, transaction_type, amount, payment_method,
+          reference_code, status, created_by, created_at
+        ) VALUES (
+          $1, $2, 'PAYMENT', $3, $4, $5, 'SUCCESS', $6, NOW()
+        )`,
+        [
+          propertyId,
+          id,
+          amount,
+          dto.payment_method || 'TRANSFER',
+          dto.notes || `PELUNASAN-${tx.transaction_no}`,
+          dto.actor_name || 'Staff'
+        ]
+      );
+    }
+
+    // Derive payment_status from canonical state for reservation-linked,
+    // legacy derived from raw paid_amount for non-reservation.
+    // CRITICAL: use remaining_balance - amount (state AFTER this payment),
+    // not canonical_amount_paid + canonical_applied_deposit (state BEFORE).
+    let newPaymentStatus: string;
+    let newPaid: number;
+    if (canonicalCollectible) {
+      const { hotel_collectible_remaining_balance, canonical_amount_paid, canonical_applied_deposit } = canonicalCollectible;
+      // remaining_balance at settlement time = what is left AFTER this payment applies
+      const postInsertRemaining = Math.max(0, hotel_collectible_remaining_balance - amount);
+      newPaid = canonical_amount_paid + canonical_applied_deposit + amount;
+      if (postInsertRemaining <= 0) {
+        newPaymentStatus = 'PAID';
+      } else if (newPaid > 0) {
+        newPaymentStatus = 'PARTIALLY_PAID';
+      } else {
+        newPaymentStatus = 'UNPAID';
+      }
+    } else {
+      newPaid = currentPaid + amount;
+      newPaymentStatus = newPaid >= netAmount ? 'PAID' : (newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID');
+    }
 
     await client.query(
       `UPDATE transactions
@@ -3065,104 +3141,116 @@ export async function getTransactionById(
              ota.name AS ota_source_name,
              rev_orig.transaction_no as original_transaction_no,
             rev_repl.transaction_no as reversal_transaction_no,
-            COALESCE(pmt.total_paid, 0) AS paid_amount,
-            GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
-     FROM transactions t
-      LEFT JOIN suppliers s ON s.id = t.supplier_id
-      LEFT JOIN reservations r ON r.id = t.reservation_id
-      LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
-      LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
-      LEFT JOIN transactions rev_orig ON rev_orig.id = t.reversal_of_transaction_id
-     LEFT JOIN transactions rev_repl ON rev_repl.reversal_of_transaction_id = t.id
-     LEFT JOIN LATERAL (
-       SELECT SUM(pt.amount)::bigint AS total_paid
-       FROM payment_transactions pt
-       WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
-         AND pt.status = 'SUCCESS'
-         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-     ) pmt ON TRUE
-     WHERE t.id = $1 AND t.property_id = $2`,
-    [id, propertyId]
-  );
+    COALESCE(pmt.total_paid, 0) AS paid_amount,
+             GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
+      FROM transactions t
+       LEFT JOIN suppliers s ON s.id = t.supplier_id
+       LEFT JOIN reservations r ON r.id = t.reservation_id
+       LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+       LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
+       LEFT JOIN transactions rev_orig ON rev_orig.id = t.reversal_of_transaction_id
+      LEFT JOIN transactions rev_repl ON rev_repl.reversal_of_transaction_id = t.id
+      LEFT JOIN LATERAL (
+        SELECT SUM(pt.amount)::bigint AS total_paid
+        FROM payment_transactions pt
+        WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
+          AND pt.status = 'SUCCESS'
+          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      ) pmt ON TRUE
+      WHERE t.id = $1 AND t.property_id = $2`,
+     [id, propertyId]
+   );
 
-  if ((txRes.rowCount ?? 0) === 0) {
-    const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
-    err.statusCode = 404;
-    throw err;
-  }
+   if ((txRes.rowCount ?? 0) === 0) {
+     const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+     err.statusCode = 404;
+     throw err;
+   }
 
-  const tx = txRes.rows[0];
+   const tx = txRes.rows[0];
 
-  // Fetch transaction lines
-  const linesRes = await pool.query(
-    `SELECT id::text, property_id, transaction_id::text, product_id::text, description_snapshot,
-            quantity, unit, unit_price, discount_amount, line_total, sort_order, created_at
-     FROM transaction_lines
-     WHERE transaction_id = $1 AND property_id = $2
-     ORDER BY sort_order ASC, id ASC`,
-    [id, propertyId]
-  );
+   // Fetch transaction lines
+   const linesRes = await pool.query(
+     `SELECT id::text, property_id, transaction_id::text, product_id::text, description_snapshot,
+             quantity, unit, unit_price, discount_amount, line_total, sort_order, created_at
+      FROM transaction_lines
+      WHERE transaction_id = $1 AND property_id = $2
+      ORDER BY sort_order ASC, id ASC`,
+     [id, propertyId]
+   );
 
-  // Fetch purpose-aware attachments
-  const attRes = await pool.query(
-    `SELECT id::text, property_id, transaction_id::text, file_name, original_name,
-            mime_type, file_size, storage_path, uploaded_by, uploaded_at, attachment_purpose
-     FROM transaction_attachments
-     WHERE transaction_id = $1 AND property_id = $2
-     ORDER BY uploaded_at ASC`,
-    [id, propertyId]
-  );
+   // Fetch purpose-aware attachments
+   const attRes = await pool.query(
+     `SELECT id::text, property_id, transaction_id::text, file_name, original_name,
+             mime_type, file_size, storage_path, uploaded_by, uploaded_at, attachment_purpose
+      FROM transaction_attachments
+      WHERE transaction_id = $1 AND property_id = $2
+      ORDER BY uploaded_at ASC`,
+     [id, propertyId]
+   );
 
-  // Fetch authoritative payment settlements
-  // Canonical reservation payment history: exclude DEPOSIT / DEPOSIT_REFUND / DEPOSIT_APPLY
-  // per semantics established in index.ts:7669-7691.
-  // Non-reservation transaction-linked PAYMENT paths are preserved when reservation_id is absent.
-  let pmtRes;
-  if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
-    const resId = Number(tx.reservation_id);
-    pmtRes = await pool.query(
-      `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
-              reference_payment_id, correction_group_id, reason_code, reason_text,
-              created_by, created_at, booking_id, scope, property_id
-       FROM payment_transactions
-       WHERE reservation_id = $1
-         AND scope = 'ROOM_RESERVATION'
-         AND (property_id = $2 OR property_id IS NULL)
-         AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-       UNION ALL
-       SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
-              pt.payment_method, pt.reference_code, pt.status,
-              pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
-              pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
-       FROM payment_transactions pt
-       JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
-       WHERE pt.scope = 'BOOKING_GROUP'
-         AND pt.property_id = $2
-         AND pa.reservation_id = $1
-         AND pa.property_id = $2
-         AND pa.status = 'ACTIVE'
-         AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-       ORDER BY id DESC`,
-      [resId, propertyId]
+   // Fetch authoritative payment settlements
+   // Canonical reservation payment history: exclude DEPOSIT / DEPOSIT_REFUND / DEPOSIT_APPLY
+   // per semantics established in index.ts:7669-7691.
+   // Non-reservation transaction-linked PAYMENT paths are preserved when reservation_id is absent.
+   let pmtRes;
+   if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+     const resId = Number(tx.reservation_id);
+     pmtRes = await pool.query(
+       `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
+               reference_payment_id, correction_group_id, reason_code, reason_text,
+               created_by, created_at, booking_id, scope, property_id
+        FROM payment_transactions
+        WHERE reservation_id = $1
+          AND scope = 'ROOM_RESERVATION'
+          AND (property_id = $2 OR property_id IS NULL)
+          AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        UNION ALL
+        SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
+               pt.payment_method, pt.reference_code, pt.status,
+               pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
+               pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
+        FROM payment_transactions pt
+        JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
+        WHERE pt.scope = 'BOOKING_GROUP'
+          AND pt.property_id = $2
+          AND pa.reservation_id = $1
+          AND pa.property_id = $2
+          AND pa.status = 'ACTIVE'
+          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        ORDER BY id DESC`,
+       [resId, propertyId]
+     );
+   } else {
+     pmtRes = await pool.query(
+       `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
+        FROM payment_transactions
+        WHERE transaction_id = $1 AND property_id = $2
+        ORDER BY created_at DESC`,
+       [id, propertyId]
+     );
+   }
+
+    // UI-3: Canonical hotel collectible balance for reservation-linked transactions.
+    // Delegates to the neutral reservationFinancialCalculator.
+    // Fail-closed: if the calculator throws, the error propagates — no legacy fallback.
+    let canonicalHotelCollectible: any = null;
+    if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+      const resId = Number(tx.reservation_id);
+      const paymentResponsibility = String(tx.payment_responsibility || 'HOTEL_COLLECT');
+      canonicalHotelCollectible = await calculateHotelCollectibleBalance(
+        pool, resId, propertyId, paymentResponsibility
+      );
+    }
+
+    // Fetch audit logs
+    const auditRes = await pool.query(
+      `SELECT audit_id as id, action, new_value as details, timestamp as created_at
+       FROM audit_logs
+       WHERE entity = 'transactions' AND record_id = $1
+       ORDER BY audit_id DESC`,
+      [String(id)]
     );
-  } else {
-    pmtRes = await pool.query(
-      `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
-       FROM payment_transactions
-       WHERE transaction_id = $1 AND property_id = $2
-       ORDER BY created_at DESC`,
-      [id, propertyId]
-    );
-  }
-
-  // Fetch audit logs
-  const auditRes = await pool.query(
-    `SELECT audit_id as id, action, new_value as details, timestamp as created_at
-     FROM audit_logs
-     WHERE entity = 'transactions' AND record_id = $1
-     ORDER BY audit_id DESC`,
-    [String(id)]
-  );
 
   const expansion = siblingExpansionIds([tx]);
   const siblingRes = await pool.query(
@@ -3210,7 +3298,9 @@ export async function getTransactionById(
     lines: linesRes.rows,
     attachments: attRes.rows,
     linked_payments: pmtRes.rows,
-    audit_logs: auditRes.rows
+    audit_logs: auditRes.rows,
+    // UI-3: Canonical hotel collectible balance fields (top-level for frontend convenience)
+    ...(canonicalHotelCollectible || {}),
   };
 }
 

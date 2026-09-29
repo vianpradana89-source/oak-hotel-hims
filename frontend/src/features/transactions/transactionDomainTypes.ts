@@ -148,6 +148,11 @@ export interface TransactionRecord {
   ota_source_name?: string | null;
   /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — which party settles the room charge */
   payment_responsibility?: string | null;
+  // UI-3: Canonical hotel collectible balance (computed from folio for reservation-linked sales)
+  hotel_collectible_total?: number;
+  hotel_collectible_remaining_balance?: number;
+  canonical_amount_paid?: number;
+  canonical_applied_deposit?: number;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
