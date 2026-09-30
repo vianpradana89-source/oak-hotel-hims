@@ -150,7 +150,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     batal: 0,
     hapus: 0
   });
-  const [summary, setSummary] = useState<TransactionSummary>({
+  // SCOPE A: Global period summary — independent of activeTab/operational_sheet
+  const [globalSummary, setGlobalSummary] = useState<TransactionSummary>({
     total_sale: 0,
     total_purchase: 0,
     total_expense: 0,
@@ -265,16 +266,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         if (res.sheet_counts) {
           setSheetCounts(res.sheet_counts);
         }
-        setSummary(res.summary || {
-          total_sale: 0,
-          total_purchase: 0,
-          total_expense: 0,
-          total_income: 0,
-          count_sale: 0,
-          count_purchase: 0,
-          count_expense: 0,
-          count_income: 0
-        });
+        // SCOPE A: Use global_summary for dashboard cards (period-only, tab/sheet-independent)
+        if (res.global_summary) {
+          setGlobalSummary(res.global_summary);
+        }
+        // Table-scoped summary (res.summary) intentionally not stored — cards use globalSummary only.
       }
     } catch (err: any) {
       if (reqId === currentRequestIdRef.current) {
@@ -1307,12 +1303,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'SALE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(summary.total_sale)}
+                {formatIdr(globalSummary.total_sale)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'SALE' ? 'text-emerald-100' : 'text-slate-500'
               }`}>
-                {summary.count_sale} transaksi
+                {globalSummary.count_sale} transaksi
               </div>
             </>
           )}
@@ -1343,12 +1339,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'PURCHASE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(summary.total_purchase)}
+                {formatIdr(globalSummary.total_purchase)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'PURCHASE' ? 'text-blue-100' : 'text-slate-500'
               }`}>
-                {summary.count_purchase} transaksi
+                {globalSummary.count_purchase} transaksi
               </div>
             </>
           )}
@@ -1379,12 +1375,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'EXPENSE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(summary.total_expense)}
+                {formatIdr(globalSummary.total_expense)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'EXPENSE' ? 'text-rose-100' : 'text-slate-500'
               }`}>
-                {summary.count_expense} transaksi
+                {globalSummary.count_expense} transaksi
               </div>
             </>
           )}
@@ -1415,12 +1411,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'INCOME' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(summary.total_income)}
+                {formatIdr(globalSummary.total_income)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'INCOME' ? 'text-teal-100' : 'text-slate-500'
               }`}>
-                {summary.count_income} transaksi
+                {globalSummary.count_income} transaksi
               </div>
             </>
           )}

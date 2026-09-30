@@ -481,7 +481,10 @@ export interface TransactionListFetchStats {
 export interface TransactionQueryResult {
   transactions: TransactionRow[];
   total_count: number;
+  /** Per-tab summary — follows active domain/tab. Kept for existing test contracts. */
   summary: TransactionSummary;
+  /** Global period summary — independent of activeTab/operational_sheet. For dashboard cards. */
+  global_summary: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;

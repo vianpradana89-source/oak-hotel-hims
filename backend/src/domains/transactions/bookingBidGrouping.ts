@@ -332,14 +332,18 @@ function worstVerificationStatus(statuses: Array<string | null | undefined>): 'U
   return undefined;
 }
 
-function buildChild(reservationId: number | null, members: any[]): PenjualanBidChild {
+export function buildChild(reservationId: number | null, members: any[]): PenjualanBidChild {
   const primary = members[0];
   const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
   const discount = members.reduce((sum, row) => sum + roundIdr(row.discount_amount), 0);
   const net = members.reduce((sum, row) => sum + saleNet(row), 0);
   const paid = reservationPaid(primary);
   const remaining = reservationRemaining(primary, net, paid);
-  const canonicalSheet = operationalSheetOf(primary);
+  // Use canonical aggregation across ALL member sheets, not just members[0].
+  // This makes child sheet order-independent: mixed PROSES+PROSES+BATAL => PROSES.
+  const canonicalSheet = deriveGroupOperationalSheet(
+    members.map((member) => operationalSheetOf(member))
+  );
   // DEFECT 2 FIX: use worst verification status across all members, not just primary
   const aggregatedVerification = worstVerificationStatus(members.map((m) => m.verification_status));
   // BUG 1 FIX: overlay must read aggregatedVerification, not primary.verification_status

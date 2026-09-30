@@ -19,8 +19,12 @@ export interface PresentedPagePlan {
   bids: string[];
   transactionIds: number[];
   total_count: number;
+  /** Per-tab summary — follows active domain/tab + selected sheet. Kept for existing contracts. */
   summary: TransactionSummary;
+  /** Sheet counts — domain-filtered but independent of selected operational_sheet (SCOPE B). */
   sheet_counts: TransactionSheetCounts;
+  /** Global period summary — independent of activeTab/operational_sheet (SCOPE A). */
+  global_summary: TransactionSummary;
   effective_date_map: Record<string, string>;
 }
 
@@ -81,8 +85,34 @@ function emptySummary(): TransactionSummary {
 }
 
 /**
+ * Compute scopeBFilterActive: true when ANY Scope-B filter param is supplied.
+ * Scope B = active transaction_type + search + advanced filters.
+ * NOT included: operational_sheet (Scope C), start_date/end_date (Scope A), limit/offset.
+ */
+function computeScopeBFilterActive(params: TransactionFilterParams): boolean {
+  return Boolean(
+    params.transaction_type ||
+    (params.search && params.search.trim()) ||
+    params.source_type ||
+    params.category_code ||
+    params.department_code ||
+    params.payment_status ||
+    params.payment_method ||
+    params.verification_status ||
+    params.receiving_status ||
+    params.transaction_status ||
+    params.supplier_id ||
+    params.reservation_id ||
+    params.booking_id ||
+    (params.party_name && params.party_name.trim())
+  );
+}
+
+/**
  * All Time / unbounded list: page at PRESENTED item keys in SQL.
- * Node only fetches rows for the current page keys (+ later sibling expansion).
+ * Scope A = property + date period only.
+ * Scope B = canonical presented rows intersected with eligible lifecycle keys.
+ * Scope C = Scope B filtered by active operational_sheet.
  */
 export async function queryPresentedPage(
   pool: Pool,
@@ -97,79 +127,66 @@ export async function queryPresentedPage(
   const search = params.search && params.search.trim() ? `%${params.search.trim()}%` : null;
   const startDate = params.start_date || null;
   const endDate = params.end_date || null;
+  const scopeBFilterActive = computeScopeBFilterActive(params);
 
+  // --- Parameter building ---
+  // SCOPE A base: property_id only ($1)
   const values: any[] = [propertyId];
   let idx = 2;
-  const extra: string[] = [];
 
-  if (listType) {
-    extra.push(`t.transaction_type = $${idx++}`);
-    values.push(listType);
-  }
-  if (params.source_type) {
-    extra.push(`t.source_type = $${idx++}`);
-    values.push(params.source_type);
-  }
-  if (params.category_code) {
-    extra.push(`t.category_code = $${idx++}`);
-    values.push(params.category_code);
-  }
-  if (params.department_code) {
-    extra.push(`t.department_code = $${idx++}`);
-    values.push(params.department_code);
-  }
-  if (params.payment_status) {
-    extra.push(`t.payment_status = $${idx++}`);
-    values.push(params.payment_status);
-  }
-  if (params.payment_method) {
-    extra.push(`t.payment_method = $${idx++}`);
-    values.push(params.payment_method);
-  }
-  if (params.verification_status) {
-    extra.push(`t.verification_status = $${idx++}`);
-    values.push(params.verification_status);
-  }
-  if (params.receiving_status) {
-    extra.push(`t.receiving_status = $${idx++}`);
-    values.push(params.receiving_status);
-  }
-  if (params.transaction_status) {
-    extra.push(`UPPER(t.transaction_status) = $${idx++}`);
-    values.push(String(params.transaction_status).toUpperCase());
-  }
-  if (params.supplier_id) {
-    extra.push(`t.supplier_id = $${idx++}`);
-    values.push(params.supplier_id);
-  }
-  if (params.reservation_id) {
-    extra.push(`t.reservation_id = $${idx++}`);
-    values.push(params.reservation_id);
-  }
+  // SCOPE B filter params (NULL-wildcard pattern — empty string/NULL means no filter)
+  if (listType) { values.push(listType); } else { values.push(null); }
+  const txTypeIdx = idx++;
+  if (params.source_type) { values.push(params.source_type); } else { values.push(null); }
+  const sourceTypeIdx = idx++;
+  if (params.category_code) { values.push(params.category_code); } else { values.push(null); }
+  const categoryIdx = idx++;
+  if (params.department_code) { values.push(params.department_code); } else { values.push(null); }
+  const deptIdx = idx++;
+  if (params.payment_status) { values.push(params.payment_status); } else { values.push(null); }
+  const payStatusIdx = idx++;
+  if (params.payment_method) { values.push(params.payment_method); } else { values.push(null); }
+  const payMethodIdx = idx++;
+  if (params.verification_status) { values.push(params.verification_status); } else { values.push(null); }
+  const verifIdx = idx++;
+  if (params.receiving_status) { values.push(params.receiving_status); } else { values.push(null); }
+  const recvIdx = idx++;
+  if (params.transaction_status) { values.push(String(params.transaction_status).toUpperCase()); } else { values.push(null); }
+  const txStatusIdx = idx++;
+  if (params.supplier_id) { values.push(params.supplier_id); } else { values.push(null); }
+  const supplierIdx = idx++;
+  if (params.reservation_id) { values.push(params.reservation_id); } else { values.push(null); }
+  const resvIdx = idx++;
   if (params.booking_id) {
-    extra.push(`(t.booking_id::text = $${idx} OR b.bid = $${idx})`);
     values.push(String(params.booking_id));
-    idx += 1;
+  } else {
+    values.push(null);
   }
+  const bookingIdx = idx++;
   if (params.party_name && params.party_name.trim()) {
-    extra.push(`(t.party_name ILIKE $${idx} OR s.name ILIKE $${idx})`);
     values.push(`%${params.party_name.trim()}%`);
-    idx += 1;
+  } else {
+    values.push(null);
   }
-
-  const extraSql = extra.length > 0 ? `AND ${extra.join(' AND ')}` : '';
+  const partyIdx = idx++;
+  if (search !== null) { values.push(search); } else { values.push(null); }
   const searchIdx = idx++;
-  values.push(search);
+  // SCOPE A period (start/end)
+  if (startDate) { values.push(startDate); } else { values.push(null); }
   const startIdx = idx++;
-  values.push(startDate);
+  if (endDate) { values.push(endDate); } else { values.push(null); }
   const endIdx = idx++;
-  values.push(endDate);
-  const sheetIdx = idx++;
+  // SCOPE C: operational_sheet
   values.push(targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL' ? targetSheet : '');
-  const limitIdx = idx++;
+  const sheetIdx = idx++;
+  // Pagination
   values.push(limit);
-  const offsetIdx = idx++;
+  const limitIdx = idx++;
   values.push(offset);
+  const offsetIdx = idx++;
+  // Scope B filter active gate
+  values.push(scopeBFilterActive);
+  const gateIdx = idx++;
 
   const sql = `
     WITH live AS (
@@ -183,17 +200,30 @@ export async function queryPresentedPage(
         t.receiving_status,
         t.purchase_workflow_status,
         t.source_type,
+        t.category_code,
+        t.department_code,
+        t.payment_status,
+        t.payment_method,
+        t.party_name,
+        t.guest_name_snapshot,
+        t.room_number_snapshot,
+        t.notes,
+        t.transaction_no,
+        t.source_reference,
+        t.description,
         t.net_amount,
         t.correction_group_id,
         t.reversal_of_transaction_id,
-         t.metadata,
-          b.bid AS booking_bid,
-          b.payment_responsibility AS payment_responsibility,
-          r.status AS reservation_status,
-         r.stay_status AS reservation_stay_status,
-          r.cancelled_at AS reservation_cancelled_at,
-          t.reservation_id AS reservation_id,
-          t.verification_status AS verification_status,
+        t.metadata,
+        t.verification_status,
+        t.reservation_id,
+        t.supplier_id,
+        t.booking_id,
+        b.bid AS booking_bid,
+        b.payment_responsibility AS payment_responsibility,
+        r.status AS reservation_status,
+        r.stay_status AS reservation_stay_status,
+        r.cancelled_at AS reservation_cancelled_at,
         ${LIFECYCLE_KEY_SQL} AS lifecycle_key,
         ${STANDALONE_SHEET_SQL} AS standalone_sheet
       FROM transactions t
@@ -202,28 +232,12 @@ export async function queryPresentedPage(
       LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
       WHERE t.property_id = $1
         AND t.deleted_at IS NULL
-        ${extraSql}
+      -- NOTE: NO Scope-B filters here. live is pure SCOPE A base.
     ),
-    search_keys AS (
-      SELECT DISTINCT l.lifecycle_key
-      FROM live l
-      JOIN transactions t ON t.id = l.id
-      LEFT JOIN suppliers s ON s.id = t.supplier_id
-      LEFT JOIN reservations r ON r.id = t.reservation_id
-      LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
-      WHERE $${searchIdx}::text IS NULL
-         OR t.transaction_no ILIKE $${searchIdx}
-         OR t.description ILIKE $${searchIdx}
-         OR t.source_reference ILIKE $${searchIdx}
-         OR t.party_name ILIKE $${searchIdx}
-         OR s.name ILIKE $${searchIdx}
-         OR t.guest_name_snapshot ILIKE $${searchIdx}
-         OR t.room_number_snapshot ILIKE $${searchIdx}
-         OR t.notes ILIKE $${searchIdx}
-         OR b.bid ILIKE $${searchIdx}
-         OR r.booking_number ILIKE $${searchIdx}
-         OR r.guest_name ILIKE $${searchIdx}
-    ),
+
+    -- =========================================================
+    -- LIFECYCLE CANONICAL (computed ONCE on full Scope A base)
+    -- =========================================================
     lifecycle_nets AS (
       SELECT l.lifecycle_key, SUM(l.net_amount)::bigint AS effective_net
       FROM live l
@@ -251,10 +265,9 @@ export async function queryPresentedPage(
       FROM live l
       JOIN lifecycle_nets n ON n.lifecycle_key = l.lifecycle_key
       LEFT JOIN lifecycle_audit la ON la.lifecycle_key = l.lifecycle_key
-      WHERE l.lifecycle_key IN (SELECT lifecycle_key FROM search_keys)
       ORDER BY l.lifecycle_key, ${PRIMARY_STATUS_RANK_SQL.replace(/t\./g, 'l.')}, l.id DESC
     ),
-    primaries_with_effective_date AS (
+    primaries_effective AS (
       SELECT p.*,
         CASE
           WHEN UPPER(p.transaction_type) = 'SALE'
@@ -266,12 +279,13 @@ export async function queryPresentedPage(
         END AS effective_period_date
       FROM primaries p
     ),
-    dated AS (
-      SELECT ped.*
-      FROM primaries_with_effective_date ped
-      WHERE ($${startIdx}::date IS NULL OR ped.effective_period_date >= $${startIdx}::date)
-        AND ($${endIdx}::date IS NULL OR ped.effective_period_date <= $${endIdx}::date)
+    period_primed AS (
+      SELECT pe.*
+      FROM primaries_effective pe
+      WHERE ($${startIdx}::date IS NULL OR pe.effective_period_date >= $${startIdx}::date)
+        AND ($${endIdx}::date IS NULL OR pe.effective_period_date <= $${endIdx}::date)
     ),
+
     booking_sheets AS (
       SELECT b.property_id, b.bid,
         CASE
@@ -283,7 +297,7 @@ export async function queryPresentedPage(
             ) = COUNT(r.id)
           THEN 'BATAL'
           WHEN COUNT(r.id) > 0
-            AND COUNT(r.id) FILTER (WHERE UPPER(r.status) = 'CHECKED_OUT') = COUNT(r.id)
+            AND COUNT(r.id) FILTER(WHERE UPPER(r.status) = 'CHECKED_OUT') = COUNT(r.id)
           THEN 'SELESAI'
           ELSE 'PROSES'
         END AS booking_sheet
@@ -292,14 +306,19 @@ export async function queryPresentedPage(
       WHERE b.property_id = $1
       GROUP BY b.property_id, b.bid
     ),
+
+    -- =========================================================
+    -- SCOPE A: canonical presented (full, unfiltered by domain/search)
+    -- Each row retains lifecycle_keys for Scope-B overlap matching.
+    -- =========================================================
     presented AS (
       SELECT
         CASE
           WHEN UPPER(d.transaction_type) = 'SALE'
            AND BTRIM(COALESCE(d.booking_bid, '')) <> ''
-          THEN 'bid:' || d.property_id::text || ':' || BTRIM(d.booking_bid)
-          ELSE 'tx:' || d.id::text
-        END AS presented_key,
+           THEN 'bid:' || d.property_id::text || ':' || BTRIM(d.booking_bid)
+           ELSE 'tx:' || d.id::text
+          END AS presented_key,
         MAX(COALESCE(d.effective_period_date, d.transaction_date)) AS sort_date,
         MAX(d.transaction_time) AS sort_time,
         MAX(d.id) AS sort_id,
@@ -312,30 +331,31 @@ export async function queryPresentedPage(
         SUM(CASE WHEN UPPER(d.transaction_type) = 'EXPENSE' THEN d.effective_net ELSE 0 END) AS expense_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'INCOME' THEN d.effective_net ELSE 0 END) AS income_net,
         MAX(d.booking_bid) AS booking_bid,
-          CASE
-            -- Rule A: transaction-level terminal status always wins.
-            WHEN BOOL_OR(
-              UPPER(COALESCE(d.transaction_status, ''))
-                IN ('VOIDED', 'CANCELLED', 'REVERSED')
-            ) THEN 'BATAL'
-            -- Rule B: booking_sheet BATAL (cancelled reservation/lifecycle) wins
-            -- over the audit overlay — prevents REJECTED from overriding a
-            -- cancelled stay.
-            WHEN BOOL_OR(bs.booking_sheet = 'BATAL') THEN 'BATAL'
-            -- Rule C: audit overlay — reservation-linked non-POS SALE with
-            -- effective REJECTED becomes PROSES. The REJECTED fact is the
-            -- lifecycle-level aggregation (lifecycle_audit) so a REJECTED on
-            -- a secondary lifecycle member (correction/reversal family)
-            -- survives DISTINCT ON. POS/non-reservation sales are excluded
-            -- and keep their canonical sheet.
-            WHEN BOOL_OR(UPPER(d.transaction_type) = 'SALE')
-              AND BOOL_OR(d.lifecycle_reservation_rejected)
-            THEN 'PROSES'
-            -- Rule D: default to canonical sheet (booking_sheet or standalone).
-            ELSE MAX(COALESCE(bs.booking_sheet, d.standalone_sheet))
-          END AS operational_sheet,
+        CASE
+          -- Rule A: transaction-level terminal status always wins.
+          WHEN NOT (
+            BOOL_OR(UPPER(d.transaction_type) = 'SALE')
+            AND BOOL_OR(BTRIM(COALESCE(d.booking_bid, '')) <> '')
+          )
+          AND BOOL_OR(
+            UPPER(COALESCE(d.transaction_status, ''))
+              IN ('VOIDED', 'CANCELLED', 'REVERSED')
+          ) THEN 'BATAL'
+          -- Rule B: booking_sheet BATAL (cancelled reservation/lifecycle) wins
+          -- over the audit overlay — prevents REJECTED from overriding a
+          -- cancelled stay.
+          WHEN BOOL_OR(bs.booking_sheet = 'BATAL') THEN 'BATAL'
+          -- Rule C: audit overlay — reservation-linked non-POS SALE with
+          -- effective REJECTED becomes PROSES.
+          WHEN BOOL_OR(UPPER(d.transaction_type) = 'SALE')
+            AND BOOL_OR(d.lifecycle_reservation_rejected)
+          THEN 'PROSES'
+          -- Rule D: default to canonical sheet (booking_sheet or standalone).
+          ELSE MAX(COALESCE(bs.booking_sheet, d.standalone_sheet))
+        END AS operational_sheet,
+        ARRAY_AGG(DISTINCT d.lifecycle_key) AS lifecycle_keys,
         ARRAY_AGG(d.id) AS member_ids
-      FROM dated d
+      FROM period_primed d
       LEFT JOIN booking_sheets bs
         ON bs.property_id = d.property_id
        AND bs.bid = d.booking_bid
@@ -343,12 +363,77 @@ export async function queryPresentedPage(
        AND BTRIM(COALESCE(d.booking_bid, '')) <> ''
       GROUP BY 1
     ),
+
+    -- =========================================================
+    -- SCOPE B ELIGIBLE KEYS: derived from raw/live members,
+    -- applying all Scope-B filters (transaction_type, search,
+    -- category, etc.) WITHOUT recomputing lifecycle aggregation.
+    -- Produces one row with eligible_keys text[] (empty if zero match).
+    -- =========================================================
+    scope_b_eligible_lk AS (
+      SELECT COALESCE(
+        ARRAY_AGG(DISTINCT l.lifecycle_key),
+        '{}'::text[]
+      ) AS eligible_keys
+      FROM live l
+      LEFT JOIN suppliers s ON s.id = l.supplier_id
+      LEFT JOIN reservations r ON r.id = l.reservation_id
+      LEFT JOIN bookings b ON b.id = COALESCE(l.booking_id, r.booking_id)
+      WHERE ($${txTypeIdx}::text IS NULL
+             OR UPPER(l.transaction_type) = $${txTypeIdx})
+        AND ($${sourceTypeIdx}::text IS NULL OR l.source_type = $${sourceTypeIdx})
+        AND ($${categoryIdx}::text IS NULL OR l.category_code = $${categoryIdx})
+        AND ($${deptIdx}::text IS NULL OR l.department_code = $${deptIdx})
+        AND ($${payStatusIdx}::text IS NULL OR l.payment_status = $${payStatusIdx})
+        AND ($${payMethodIdx}::text IS NULL OR l.payment_method = $${payMethodIdx})
+        AND ($${verifIdx}::text IS NULL OR l.verification_status = $${verifIdx})
+        AND ($${recvIdx}::text IS NULL OR l.receiving_status = $${recvIdx})
+        AND ($${txStatusIdx}::text IS NULL
+             OR UPPER(l.transaction_status) = $${txStatusIdx})
+        AND ($${supplierIdx}::bigint IS NULL OR l.supplier_id = $${supplierIdx})
+        AND ($${resvIdx}::bigint IS NULL OR l.reservation_id = $${resvIdx})
+        AND ($${bookingIdx}::text IS NULL
+             OR (l.booking_id::text = $${bookingIdx} OR b.bid = $${bookingIdx}))
+        AND ($${partyIdx}::text IS NULL
+             OR l.party_name ILIKE $${partyIdx}
+             OR s.name ILIKE $${partyIdx})
+        AND ($${searchIdx}::text IS NULL
+             OR l.transaction_no ILIKE $${searchIdx}
+             OR l.description ILIKE $${searchIdx}
+             OR l.source_reference ILIKE $${searchIdx}
+             OR l.party_name ILIKE $${searchIdx}
+             OR s.name ILIKE $${searchIdx}
+             OR l.guest_name_snapshot ILIKE $${searchIdx}
+             OR l.room_number_snapshot ILIKE $${searchIdx}
+             OR l.notes ILIKE $${searchIdx}
+             OR b.bid ILIKE $${searchIdx}
+             OR r.booking_number ILIKE $${searchIdx}
+             OR r.guest_name ILIKE $${searchIdx})
+    ),
+
+    -- =========================================================
+    -- SCOPE B: domain-scoped = presented ∩ eligible lifecycle keys
+    -- Gate: when scopeBFilterActive=false, ALL presented rows pass.
+    -- When scopeBFilterActive=true AND eligible_keys empty → ZERO rows.
+    -- =========================================================
+    domain_scoped AS (
+      SELECT p.*
+      FROM presented p
+      CROSS JOIN scope_b_eligible_lk e
+      WHERE NOT $${gateIdx}::bool
+         OR p.lifecycle_keys && e.eligible_keys
+    ),
+
+    -- =========================================================
+    -- SCOPE C: table rows filtered by active operational_sheet
+    -- =========================================================
     filtered AS (
       SELECT *
-      FROM presented
+      FROM domain_scoped
       WHERE $${sheetIdx}::text = '' OR operational_sheet = $${sheetIdx}
     )
     SELECT
+      /* SCOPE C — table-scoped values */
       (SELECT COUNT(*)::int FROM filtered) AS total_count,
       (SELECT COALESCE(SUM(sale_net), 0) FROM filtered WHERE has_sale) AS total_sale,
       (SELECT COALESCE(SUM(purchase_net), 0) FROM filtered WHERE has_purchase) AS total_purchase,
@@ -358,9 +443,20 @@ export async function queryPresentedPage(
       (SELECT COUNT(*)::int FROM filtered WHERE has_purchase) AS count_purchase,
       (SELECT COUNT(*)::int FROM filtered WHERE has_expense) AS count_expense,
       (SELECT COUNT(*)::int FROM filtered WHERE has_income) AS count_income,
-      (SELECT COUNT(*)::int FROM filtered WHERE operational_sheet = 'PROSES') AS sheet_proses,
-      (SELECT COUNT(*)::int FROM filtered WHERE operational_sheet = 'SELESAI') AS sheet_selesai,
-      (SELECT COUNT(*)::int FROM filtered WHERE operational_sheet = 'BATAL') AS sheet_batal,
+      /* SCOPE B — sheet counters, independent of selected sheet */
+      (SELECT COUNT(*)::int FROM domain_scoped WHERE operational_sheet = 'PROSES') AS sheet_proses,
+      (SELECT COUNT(*)::int FROM domain_scoped WHERE operational_sheet = 'SELESAI') AS sheet_selesai,
+      (SELECT COUNT(*)::int FROM domain_scoped WHERE operational_sheet = 'BATAL') AS sheet_batal,
+      /* SCOPE A — global summary, from FULL presented (no Scope-B filter) */
+      (SELECT COALESCE(SUM(sale_net), 0) FROM presented WHERE has_sale) AS global_total_sale,
+      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase) AS global_total_purchase,
+      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense) AS global_total_expense,
+      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income) AS global_total_income,
+      (SELECT COUNT(*)::int FROM presented WHERE has_sale) AS global_count_sale,
+      (SELECT COUNT(*)::int FROM presented WHERE has_purchase) AS global_count_purchase,
+      (SELECT COUNT(*)::int FROM presented WHERE has_expense) AS global_count_expense,
+      (SELECT COUNT(*)::int FROM presented WHERE has_income) AS global_count_income,
+      /* SCOPE C — pagination keys */
       COALESCE(
         (
           SELECT JSON_AGG(page_row)
@@ -425,6 +521,16 @@ export async function queryPresentedPage(
       batal: Number(row.sheet_batal || 0),
       hapus: hapusCount,
     },
+    global_summary: {
+      total_sale: Number(row.global_total_sale || 0),
+      total_purchase: Number(row.global_total_purchase || 0),
+      total_expense: Number(row.global_total_expense || 0),
+      total_income: Number(row.global_total_income || 0),
+      count_sale: Number(row.global_count_sale || 0),
+      count_purchase: Number(row.global_count_purchase || 0),
+      count_expense: Number(row.global_count_expense || 0),
+      count_income: Number(row.global_count_income || 0),
+    },
     effective_date_map: Object.fromEntries(effectiveDateMap.entries()),
   };
 }
@@ -450,6 +556,7 @@ export function emptyPresentedPlan(hapusCount: number): PresentedPagePlan {
     transactionIds: [],
     total_count: 0,
     summary: emptySummary(),
+    global_summary: emptySummary(),
     sheet_counts: { proses: 0, selesai: 0, batal: 0, hapus: hapusCount },
     effective_date_map: {},
   };

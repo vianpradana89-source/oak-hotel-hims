@@ -325,7 +325,10 @@ export interface TransactionSheetCounts {
 export interface TransactionQueryResult {
   transactions: TransactionRecord[];
   total_count: number;
+  /** Per-tab summary — follows active domain/tab. */
   summary: TransactionSummary;
+  /** Global period summary — independent of activeTab/operational_sheet. For dashboard cards. */
+  global_summary: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;

@@ -2675,7 +2675,106 @@ export async function voidTransaction(
  * One property-scoped lookup of all reservation children for SALE bookings
  * represented in the current list page candidates. Used for grouped BID
  * operational status (full booking lifecycle), not period financial totals.
+  */
+
+/**
+ * Build Scope-B conditions for HAPUS table queries.
+ * Uses explicit sequential parameter building (NO regex placeholder renumbering).
+ * Includes: property_id, transaction_type (when active), all advanced filters, period, search, party_name, and deleted_at IS NOT NULL.
+ * The SAME builder powers hapusCount, HAPUS total_count, and HAPUS table rows.
  */
+function buildHapusConditionsAndValues(
+  params: TransactionFilterParams,
+  propertyId: number
+): { conditions: string[]; values: any[] } {
+  const conditions: string[] = ['t.property_id = $1'];
+  const values: any[] = [propertyId];
+  let idx = 2;
+
+  if (params.transaction_type) {
+    conditions.push(`UPPER(t.transaction_type) = $${idx++}`);
+    values.push(params.transaction_type.toUpperCase());
+  }
+  if (params.source_type) {
+    conditions.push(`t.source_type = $${idx++}`);
+    values.push(params.source_type);
+  }
+  if (params.category_code) {
+    conditions.push(`t.category_code = $${idx++}`);
+    values.push(params.category_code);
+  }
+  if (params.department_code) {
+    conditions.push(`t.department_code = $${idx++}`);
+    values.push(params.department_code);
+  }
+  if (params.payment_status) {
+    conditions.push(`t.payment_status = $${idx++}`);
+    values.push(params.payment_status);
+  }
+  if (params.payment_method) {
+    conditions.push(`t.payment_method = $${idx++}`);
+    values.push(params.payment_method);
+  }
+  if (params.verification_status) {
+    conditions.push(`t.verification_status = $${idx++}`);
+    values.push(params.verification_status);
+  }
+  if (params.receiving_status) {
+    conditions.push(`t.receiving_status = $${idx++}`);
+    values.push(params.receiving_status);
+  }
+  if (params.transaction_status) {
+    conditions.push(`UPPER(t.transaction_status) = $${idx++}`);
+    values.push(String(params.transaction_status).toUpperCase());
+  }
+  if (params.supplier_id) {
+    conditions.push(`t.supplier_id = $${idx++}`);
+    values.push(params.supplier_id);
+  }
+  if (params.reservation_id) {
+    conditions.push(`t.reservation_id = $${idx++}`);
+    values.push(params.reservation_id);
+  }
+  if (params.booking_id) {
+    conditions.push(`(t.booking_id::text = $${idx} OR b.bid = $${idx})`);
+    values.push(String(params.booking_id));
+    idx++;
+  }
+  if (params.start_date) {
+    conditions.push(`t.transaction_date >= $${idx++}`);
+    values.push(params.start_date);
+  }
+  if (params.end_date) {
+    conditions.push(`t.transaction_date <= $${idx++}`);
+    values.push(params.end_date);
+  }
+  if (params.party_name && params.party_name.trim()) {
+    conditions.push(`(t.party_name ILIKE $${idx} OR s.name ILIKE $${idx})`);
+    values.push(`%${params.party_name.trim()}%`);
+    idx++;
+  }
+  if (params.search && params.search.trim()) {
+    const searchTerm = `%${params.search.trim()}%`;
+    conditions.push(`(
+      t.transaction_no ILIKE $${idx} OR
+      t.description ILIKE $${idx} OR
+      t.source_reference ILIKE $${idx} OR
+      t.party_name ILIKE $${idx} OR
+      s.name ILIKE $${idx} OR
+      t.guest_name_snapshot ILIKE $${idx} OR
+      t.room_number_snapshot ILIKE $${idx} OR
+      t.notes ILIKE $${idx} OR
+      b.bid ILIKE $${idx} OR
+      r.booking_number ILIKE $${idx} OR
+      r.guest_name ILIKE $${idx}
+    )`);
+    values.push(searchTerm);
+    idx++;
+  }
+  conditions.push('t.deleted_at IS NOT NULL');
+
+  return { conditions, values };
+}
 
 
 /**
@@ -2853,8 +2952,11 @@ export async function getTransactions(
 
   if (usePresentedSqlPaging) {
     const pagePlan = await queryPresentedPage(pool, params, hapusCount);
-    const expandBidSales = unboundedAllTime && !hasSearch;
-    const pageBids = expandBidSales ? pagePlan.bids : [];
+    // Fix: always use SQL-provided bids for hydration when present.
+    // Without this, JS would only get partial member rows from transactionIds,
+    // causing groupSaleLifecycles() to fail to reconstruct the BID properly.
+    // Safety: still gated by pageKeySet (from SQL) and period filter.
+    const pageBids = pagePlan.bids.length > 0 ? pagePlan.bids : [];
     const allTimeCandidates = pagePlan.transactionIds.length === 0 && pageBids.length === 0
       ? { rows: [] as any[] }
       : await pool.query(
@@ -2913,14 +3015,14 @@ export async function getTransactions(
             || primary.reservation_stay_status === 'CANCELLED'))
         ? primary.reservation_cancelled_at?.toISOString?.().slice(0, 10) || primary.reservation_cancelled_at?.slice?.(0, 10)
         : undefined;
-      if (!isLifecyclePrimaryInPeriod(effectiveDate || sqlEffectiveDateMap[presentedKey] || group.primary.transaction_date, params.start_date, params.end_date)) {
-        return false;
-      }
+      const inPeriod = isLifecyclePrimaryInPeriod(effectiveDate || sqlEffectiveDateMap[presentedKey] || group.primary.transaction_date, params.start_date, params.end_date);
+      const memberMatch = group.members.some((member) => candidateIds.has(Number(member.id)));
+      if (!inPeriod) return false;
       if (params.transaction_status) {
         const wanted = String(params.transaction_status).toUpperCase();
         if (String(group.primary.transaction_status || '').toUpperCase() !== wanted) return false;
       }
-      return group.members.some((member) => candidateIds.has(Number(member.id)));
+      return memberMatch;
     });
     const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
     const listType = String(params.transaction_type || '').toUpperCase();
@@ -2941,6 +3043,7 @@ export async function getTransactions(
       transactions: presented,
       total_count: pagePlan.total_count,
       summary: pagePlan.summary,
+      global_summary: pagePlan.global_summary,
       sheet_counts: pagePlan.sheet_counts,
       limit,
       offset,
@@ -3026,14 +3129,85 @@ export async function getTransactions(
     hapus: hapusCount,
   };
 
+  // SCOPE A: Pure property + date period snapshot.
+  // Must NOT inherit domain filters (transaction_type, category_code, etc.)
+  // from baseConditions, because globalSummary represents the full period.
+  //
+  // Canonical lifecycle ordering: build lifecycle groups from FULL non-deleted
+  // property rows FIRST, then filter the canonical groups by effective-period
+  // date. Filtering raw members before groupSaleLifecycles() would change
+  // effective_net_amount, lifecycle primary selection, and global_summary when
+  // a correction/reversal member falls outside the selected period.
+  //
+  // Effective-period semantics: for reservation-linked SALE cancelled stays,
+  // the cancellation date is the effective period date (same rule as SQL).
+  // Partial bounds (start-only / end-only / both / neither) are all supported.
+  const scopeACleanupDates = !params.start_date && !params.end_date;
+  const scopeACleanConditions = ['t.property_id = $1', 't.deleted_at IS NULL'];
+  const scopeACleanValues = [propertyId];
+
+  const scopeARawRes = await pool.query(
+    `${listSelectSql}
+     WHERE ${scopeACleanConditions.join(' AND ')}
+     ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC`,
+    scopeACleanValues
+  );
+  const scopeARawRows = scopeARawRes.rows;
+
+  // Build canonical lifecycle groups from FULL rows (no period pre-filter on members).
+  const scopeAGroupedAll = groupSaleLifecycles(scopeARawRows);
+
+  // Filter canonical lifecycle groups by effective period date.
+  const scopeAEffectivePeriodGroup = (group: { primary: any }): boolean => {
+    if (scopeACleanupDates) return true;
+    const sd = params.start_date ? String(params.start_date) : null;
+    const ed = params.end_date ? String(params.end_date) : null;
+    const primary = group.primary;
+    const effectiveDate = (primary.reservation_cancelled_at
+      && (primary.reservation_status === 'CANCELLED' || primary.reservation_stay_status === 'CANCELLED'))
+      ? primary.reservation_cancelled_at?.toISOString?.().slice(0, 10) || primary.reservation_cancelled_at?.slice?.(0, 10)
+      : undefined;
+    return isLifecyclePrimaryInPeriod(effectiveDate || primary.transaction_date, sd, ed);
+  };
+  const scopeAFilteredGroups = scopeAGroupedAll.filter(scopeAEffectivePeriodGroup);
+
+  // Present canonical primary, then BID grouping.
+  const scopeAPresentedAll = scopeAFilteredGroups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
+  const scopeASaleBidGrouped = presentListWithSaleBidGrouping(scopeAPresentedAll, {
+    lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, scopeAPresentedAll.map(p => p.reservation_id).filter(Boolean)),
+  });
+  const scopeAListSource = scopeASaleBidGrouped || scopeAPresentedAll;
+
+  const globalSummary: TransactionSummary = {
+    total_sale: scopeAListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE')
+      .reduce((sum, row: any) => sum + (row.booking_bid_group?.net != null ? Number(row.booking_bid_group.net || 0) : Number(row.effective_net_amount || 0)), 0),
+    total_purchase: scopeAListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    total_expense: scopeAListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    total_income: scopeAListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    count_sale: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE').length,
+    count_purchase: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE').length,
+    count_expense: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE').length,
+    count_income: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
+  };
+
+  // HAPUS path: explicit condition builder (NO regex placeholder renumbering).
+  // Same Scope B definition powers count, total_count, and table rows.
   if (targetSheet === 'HAPUS') {
-    const hapusWhere = `WHERE ${baseConditions.join(' AND ')} AND t.deleted_at IS NOT NULL`;
+    const { conditions: hapusConds, values: hapusVals } = buildHapusConditionsAndValues(params, propertyId);
+    const hIdx = hapusVals.length + 1;
     const hapusList = await pool.query(
       `${listSelectSql}
-       ${hapusWhere}
+       WHERE ${hapusConds.join(' AND ')}
        ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC
-       LIMIT $${valIdx} OFFSET $${valIdx + 1}`,
-      [...baseValues, limit, offset]
+       LIMIT $${hIdx} OFFSET $${hIdx + 1}`,
+      [...hapusVals, limit, offset]
     );
     const transactions = hapusList.rows.map((row: any) => ({
       ...row,
@@ -3052,7 +3226,13 @@ export async function getTransactions(
         count_expense: 0,
         count_income: 0,
       },
-      sheet_counts,
+      global_summary: globalSummary,
+      sheet_counts: {
+        proses: sheet_counts.proses,
+        selesai: sheet_counts.selesai,
+        batal: sheet_counts.batal,
+        hapus: hapusCount,
+      },
       limit,
       offset,
       list_fetch_stats: {
@@ -3095,14 +3275,15 @@ export async function getTransactions(
   };
 
   return {
-    transactions,
+    transactions: transactions,
     total_count: presented.length,
     summary,
+    global_summary: globalSummary,
     sheet_counts,
     limit,
     offset,
     list_fetch_stats: {
-      mode: 'PERIOD',
+      mode: unboundedAllTime ? 'ALL_TIME' : 'PERIOD',
       fetched_transaction_rows: scopedRows.length,
       presented_total: presented.length,
       presented_page: transactions.length,
