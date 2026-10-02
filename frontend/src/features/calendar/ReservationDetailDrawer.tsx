@@ -164,14 +164,24 @@ function CheckinReadinessChecklist({
     onNavigate(cfg.tab, cfg.anchor);
   };
 
+  const progressPct = totalRows > 0 ? Math.round((metCount / totalRows) * 100) : 0;
+
   return (
-    <div className="space-y-1.5">
-      {/* Progress row */}
-      <div className="flex items-center justify-between text-[11px] font-semibold text-stone-600 mb-1">
-        <span>Kesiapan Check-in</span>
-        <span>
-          {metCount} dari {totalRows} selesai
-        </span>
+    <div className="space-y-2">
+      {/* Progress row with counter + progress bar (uses actual metCount/totalRows) */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[11px] font-semibold text-stone-600">
+          <span>
+            {metCount} dari {totalRows} selesai
+          </span>
+          <span className="text-stone-500 font-medium">{progressPct}%</span>
+        </div>
+        <div className="h-1.5 w-full bg-stone-200 rounded-full overflow-hidden" role="progressbar" aria-label="Kelengkapan persyaratan check-in" aria-valuenow={metCount} aria-valuemin={0} aria-valuemax={totalRows}>
+          <div
+            className={`h-full rounded-full transition-all ${metCount === totalRows ? 'bg-emerald-500' : 'bg-rose-400'}`}
+            style={{ width: `${progressPct}%` }}
+          />
+        </div>
       </div>
 
       {/* Checklist rows */}
@@ -191,13 +201,18 @@ function CheckinReadinessChecklist({
             return true;
           })();
 
+        // Primary (solid) vs secondary (outline) action styling:
+        // "Catat Pembayaran" (PAYMENT_MISSING) is the primary solid-green action;
+        // every other actionable requirement uses an outlined green button.
+        const isPrimaryAction = row.code === 'PAYMENT_MISSING';
+
         return (
           <div
             key={row.code}
             className={`flex items-center gap-2 text-xs py-1.5 px-2.5 rounded-lg border ${
               row.isMet
-                ? 'bg-emerald-50/60 border-emerald-100'
-                : 'bg-amber-50/70 border-amber-200'
+                ? 'bg-white border-emerald-100'
+                : 'bg-rose-50/60 border-rose-200'
             }`}
           >
             {/* Status icon */}
@@ -205,16 +220,16 @@ function CheckinReadinessChecklist({
               className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${
                 row.isMet
                   ? 'bg-emerald-500 text-white'
-                  : 'bg-amber-400 text-white'
+                  : 'bg-rose-500 text-white'
               }`}
             >
-              {row.isMet ? '✓' : '!'}
+              {row.isMet ? '\u2713' : '!'}
             </span>
 
             {/* Label */}
             <span
               className={`flex-1 ${
-                row.isMet ? 'text-emerald-800' : 'text-amber-900'
+                row.isMet ? 'text-emerald-800' : 'text-rose-700 font-medium'
               }`}
             >
               {row.label}
@@ -225,7 +240,7 @@ function CheckinReadinessChecklist({
               className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0 ${
                 row.isMet
                   ? 'bg-emerald-100 text-emerald-800'
-                  : 'bg-amber-100 text-amber-900'
+                  : 'bg-rose-100 text-rose-800'
               }`}
             >
               {row.isMet ? 'Selesai' : 'Belum'}
@@ -236,7 +251,11 @@ function CheckinReadinessChecklist({
               <button
                 type="button"
                 onClick={() => handleAction(row.code, action.needsGate)}
-                className="px-2 py-0.5 bg-emerald-800 hover:bg-emerald-700 text-white text-[10px] font-bold rounded shrink-0 cursor-pointer transition-colors"
+                className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 cursor-pointer transition-colors ${
+                  isPrimaryAction
+                    ? 'bg-emerald-800 hover:bg-emerald-700 text-white'
+                    : 'bg-white border border-emerald-700 hover:bg-emerald-50 text-emerald-800'
+                }`}
                 title={action.actionLabel}
               >
                 {action.actionLabel}
@@ -245,7 +264,7 @@ function CheckinReadinessChecklist({
 
             {/* No-action indicator for not-met rows without a handler */}
             {!row.isMet && !hasActionableButton && (
-              <span className="text-[10px] text-amber-500 shrink-0 italic">
+              <span className="text-[10px] text-rose-500 shrink-0 italic">
                 (aksi tidak tersedia)
               </span>
             )}
@@ -1197,24 +1216,31 @@ export default function ReservationDetailDrawer({
             <div className={`p-3.5 rounded-xl border transition-all ${
               isCheckinReady
                 ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
-                : 'bg-amber-50 border-amber-300 text-amber-950 shadow-xs'
+                : 'bg-rose-50/70 border-rose-200 text-rose-950 shadow-xs'
             }`}>
               <div className="flex items-start gap-2.5">
-                <span className="text-base leading-none mt-0.5">{isCheckinReady ? '✅' : '⚠️'}</span>
+                <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white ${
+                  isCheckinReady
+                    ? 'bg-emerald-500'
+                    : 'bg-rose-500'
+                }`}>
+                  {isCheckinReady ? '\u2713' : '!'}
+                </span>
                 <div className="flex-1 space-y-2">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-bold">
-                      {isCheckinReady
-                        ? 'Persyaratan Check-in Lengkap'
-                        : precheckinEligibility
-                          ? 'Syarat Wajib Check-in Belum Lengkap'
-                          : 'Kesiapan Check-in Belum Dapat Diverifikasi'}
-                    </h4>
+                    <div className="space-y-0.5">
+                      <h4 className="text-xs font-bold">Checklist Check-in</h4>
+                      {!isCheckinReady && (
+                        <p className="text-[11px] text-stone-600">
+                          Lengkapi semua persyaratan berikut sebelum proses check-in.
+                        </p>
+                      )}
+                    </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-semibold border ${
                       isCheckinReady
                         ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
                         : precheckinEligibility
-                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          ? 'bg-rose-100 text-rose-900 border-rose-300'
                           : 'bg-stone-200 text-stone-700 border-stone-300'
                     }`}>
                       {isCheckinReady
@@ -1232,7 +1258,7 @@ export default function ReservationDetailDrawer({
                       hasGuaranteeSection={Boolean(data.id && activePropId)}
                        canEditGuestData={!isCancelled && !isCheckedOut}
                        onNavigate={navigateToRequirementTarget}
-                     />
+                    />
                   ) : precheckinEligibility && missingRequirements.length === 0 ? (
                     <p className="text-xs opacity-90">Semua persyaratan check-in telah terpenuhi.</p>
                   ) : (
