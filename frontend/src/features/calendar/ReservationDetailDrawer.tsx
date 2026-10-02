@@ -17,6 +17,7 @@ import { ComplimentaryActionModal } from './ComplimentaryActionModal';
 import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 import { deriveGuaranteeCloseDecision, type GuaranteeLoadStatus } from '../deposits/guaranteeScopePolicy';
+import { buildCheckinReadinessRows } from './precheckinGateUi';
 import {
   canEditReservationSpecialRequests,
   formatReservationRatePlanLabel,
@@ -63,6 +64,206 @@ interface Props {
   complimentaryRefreshReservationId?: number | null;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   CHECKIN-READINESS CHECKLIST — reusable sub-component
+   Used only in ReservationDetailDrawer.tsx for the actionable
+   "Syarat Wajib Check-in Belum Lengkap" checklist.
+   Each row shows: status icon, label, and (if not met) a direct action button.
+   ───────────────────────────────────────────────────────────────────────── */
+
+interface CheckinReadinessChecklistProps {
+  precheckinEligibility: any;
+  missingRequirements: Array<{ code: string; label?: string }>;
+  canShowPaymentForm: boolean;
+  hasGuaranteeSection: boolean;
+  canEditGuestData: boolean;
+  onNavigate: (tab: string, anchor: string) => void;
+}
+
+/**
+ * Requirement codes that have a navigator action in the drawer.
+ * Each known code maps to a canonical (tab, anchor) pair.
+ * Unknown codes (e.g. PRECHECKIN_EVALUATION_FAILED) are NOT in this map,
+ * so they remain informational / fail-closed with no action button.
+ */
+const REQUIREMENT_ACTION_MAP: Record<
+  string,
+  {
+    actionLabel: string;
+    tab: string;
+    anchor: string;
+    needsGate: 'payment' | 'guarantee' | null;
+  }
+> = {
+  PRIMARY_GUEST_NAME_MISSING: {
+    actionLabel: 'Lengkapi Nama',
+    tab: 'tamu-kamar',
+    anchor: 'guest-card',
+    needsGate: null,
+  },
+  PRIMARY_GUEST_PHONE_MISSING: {
+    actionLabel: 'Lengkapi No. Telp',
+    tab: 'tamu-kamar',
+    anchor: 'guest-phone-section',
+    needsGate: null,
+  },
+  ROOM_NOT_READY: {
+    actionLabel: 'Periksa Kamar',
+    tab: 'tamu-kamar',
+    anchor: 'room-findings-block',
+    needsGate: null,
+  },
+  IDENTITY_DOCUMENT_MISSING: {
+    actionLabel: 'Lengkapi Identitas',
+    tab: 'dokumen',
+    anchor: 'ktp-card',
+    needsGate: null,
+  },
+  PAYMENT_MISSING: {
+    actionLabel: 'Catat Pembayaran',
+    tab: 'pembayaran',
+    anchor: 'payment-form',
+    needsGate: 'payment',
+  },
+  PAYMENT_EVIDENCE_MISSING: {
+    actionLabel: 'Upload Bukti',
+    tab: 'pembayaran',
+    anchor: 'payment-form',
+    needsGate: 'payment',
+  },
+  GUARANTEE_MISSING: {
+    actionLabel: 'Tambah Jaminan',
+    tab: 'deposit-jaminan',
+    anchor: 'deposit-guarantee-section',
+    needsGate: 'guarantee',
+  },
+};
+
+function CheckinReadinessChecklist({
+  precheckinEligibility,
+  missingRequirements,
+  canShowPaymentForm,
+  hasGuaranteeSection,
+  canEditGuestData,
+  onNavigate,
+}: CheckinReadinessChecklistProps) {
+  // Derive display rows from the canonical readiness function in
+  // precheckinGateUi.ts. Every backend missing code is surfaced as a row;
+  // unknown / PRECHECKIN_EVALUATION_FAILED codes are never dropped.
+  const rows = buildCheckinReadinessRows(precheckinEligibility, missingRequirements);
+
+  const metCount = rows.filter(r => r.isMet).length;
+  const totalRows = rows.length;
+
+  const handleAction = (code: string, gate: 'payment' | 'guarantee' | null) => {
+    if (gate === 'payment' && !canShowPaymentForm) return;
+    if (gate === 'guarantee' && !hasGuaranteeSection) return;
+    if ((code === 'PRIMARY_GUEST_NAME_MISSING' || code === 'PRIMARY_GUEST_PHONE_MISSING') && !canEditGuestData) return;
+    const cfg = REQUIREMENT_ACTION_MAP[code];
+    if (!cfg) return;
+    onNavigate(cfg.tab, cfg.anchor);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      {/* Progress row */}
+      <div className="flex items-center justify-between text-[11px] font-semibold text-stone-600 mb-1">
+        <span>Kesiapan Check-in</span>
+        <span>
+          {metCount} dari {totalRows} selesai
+        </span>
+      </div>
+
+      {/* Checklist rows */}
+      {rows.map(row => {
+        // Action config lives in the drawer (UI concern); row metadata
+        // (code/isMet/label) comes from canonical buildCheckinReadinessRows.
+        const action = REQUIREMENT_ACTION_MAP[row.code];
+        const hasActionableButton =
+          !row.isMet &&
+          action &&
+          (() => {
+            if (action.needsGate === 'payment' && !canShowPaymentForm) return false;
+            if (action.needsGate === 'guarantee' && !hasGuaranteeSection) return false;
+            if (row.code === 'PRIMARY_GUEST_NAME_MISSING' || row.code === 'PRIMARY_GUEST_PHONE_MISSING') {
+              if (!canEditGuestData) return false;
+            }
+            return true;
+          })();
+
+        return (
+          <div
+            key={row.code}
+            className={`flex items-center gap-2 text-xs py-1.5 px-2.5 rounded-lg border ${
+              row.isMet
+                ? 'bg-emerald-50/60 border-emerald-100'
+                : 'bg-amber-50/70 border-amber-200'
+            }`}
+          >
+            {/* Status icon */}
+            <span
+              className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${
+                row.isMet
+                  ? 'bg-emerald-500 text-white'
+                  : 'bg-amber-400 text-white'
+              }`}
+            >
+              {row.isMet ? '✓' : '!'}
+            </span>
+
+            {/* Label */}
+            <span
+              className={`flex-1 ${
+                row.isMet ? 'text-emerald-800' : 'text-amber-900'
+              }`}
+            >
+              {row.label}
+            </span>
+
+            {/* Status tag */}
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0 ${
+                row.isMet
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-amber-100 text-amber-900'
+              }`}
+            >
+              {row.isMet ? 'Selesai' : 'Belum'}
+            </span>
+
+            {/* Action button (only for not-met rows with a usable handler) */}
+            {!row.isMet && hasActionableButton && action && (
+              <button
+                type="button"
+                onClick={() => handleAction(row.code, action.needsGate)}
+                className="px-2 py-0.5 bg-emerald-800 hover:bg-emerald-700 text-white text-[10px] font-bold rounded shrink-0 cursor-pointer transition-colors"
+                title={action.actionLabel}
+              >
+                {action.actionLabel}
+              </button>
+            )}
+
+            {/* No-action indicator for not-met rows without a handler */}
+            {!row.isMet && !hasActionableButton && (
+              <span className="text-[10px] text-amber-500 shrink-0 italic">
+                (aksi tidak tersedia)
+              </span>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Note for unmet rows with no action */}
+      {rows.some(r => !r.isMet && !r.hasKnownAction) && (
+        <div className="text-[11px] text-stone-500 mt-1 px-2.5">
+          Beberapa syarat memerlukan tindakan di luar panel ini (misalnya menunggu
+          kamar siap dari Housekeeping).
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ReservationDetailDrawer({
   reservation,
   propertyId,
@@ -82,6 +283,14 @@ export default function ReservationDetailDrawer({
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
+  // Visual tab navigation state (shell only — all tab panes remain React-mounted;
+  // inactive panes use display:none so internal component state survives tab switches).
+  const [activeTab, setActiveTab] = useState<'ringkasan' | 'tamu-kamar' | 'pembayaran' | 'deposit-jaminan' | 'dokumen' | 'riwayat'>('ringkasan');
+  // Per-pane visibility helper: returns 'hidden' when the pane is NOT the active tab.
+  // Keeping every pane mounted (display:none) preserves DepositGuaranteeSection internals,
+  // payment draft state, modal state, etc. while the user switches tabs.
+  const isTabVisible = (tab: 'ringkasan' | 'tamu-kamar' | 'pembayaran' | 'deposit-jaminan' | 'dokumen' | 'riwayat') =>
+    activeTab === tab ? '' : 'hidden';
   const [folioData, setFolioData] = useState<any>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isRepriceModalOpen, setIsRepriceModalOpen] = useState<boolean>(false);
@@ -829,6 +1038,60 @@ export default function ReservationDetailDrawer({
     reservationId: data.id ?? null,
   });
 
+  // Scrolls to an anchor element within the drawer by id.
+  // Fails gracefully if the target is not currently rendered.
+  const scrollToSection = useCallback((sectionId: string) => {
+    const el = document.getElementById(sectionId);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, []);
+
+  // ── CHECKIN-READINESS NAVIGATOR: cross-tab + same-tab navigation ────────
+  const pendingNavRef = useRef<{ tab: string; anchor: string } | null>(null);
+  const navFrameRef = useRef<number | null>(null);
+
+  const navigateToRequirementTarget = useCallback((tab: string, anchor: string) => {
+    // Cancel any pending frame to prevent stale scroll
+    if (navFrameRef.current !== null) {
+      cancelAnimationFrame(navFrameRef.current);
+      navFrameRef.current = null;
+    }
+    if (tab === activeTab) {
+      // Same tab: scroll on next frame (element is already visible)
+      navFrameRef.current = requestAnimationFrame(() => {
+        scrollToSection(anchor);
+        navFrameRef.current = null;
+      });
+    } else {
+      // Cross-tab: store pending target, switch tab; useEffect([activeTab]) handles scroll
+      pendingNavRef.current = { tab, anchor };
+      setActiveTab(tab as typeof activeTab);
+    }
+  }, [activeTab, scrollToSection, setActiveTab]);
+
+  // After activeTab changes, check for pending navigation and scroll
+  useEffect(() => {
+    if (!pendingNavRef.current) return;
+    const pending = pendingNavRef.current;
+    // Only proceed if the tab we're on matches the pending target
+    if (pending.tab !== activeTab) return;
+    pendingNavRef.current = null;
+    navFrameRef.current = requestAnimationFrame(() => {
+      scrollToSection(pending.anchor);
+      navFrameRef.current = null;
+    });
+  }, [activeTab, scrollToSection]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (navFrameRef.current !== null) {
+        cancelAnimationFrame(navFrameRef.current);
+      }
+    };
+  }, []);
+
   return (
     <div className="fixed inset-0 z-50 overflow-hidden bg-black/60 backdrop-blur-xs flex justify-end">
       <div className="relative w-full max-w-2xl bg-white h-full shadow-2xl flex flex-col border-l border-stone-200 overflow-hidden animate-in slide-in-from-right duration-200">
@@ -889,6 +1152,35 @@ export default function ReservationDetailDrawer({
           </div>
         </div>
 
+        {/* Tab Bar — 6 tab shell; all panes stay mounted, inactive panes use display:none */}
+        <div className="flex items-center gap-1 px-4 py-2 bg-white border-b border-stone-200 overflow-x-auto" role="tablist" aria-label="Detail reservasi">
+          {(
+            [
+              { key: 'ringkasan', label: 'Ringkasan' },
+              { key: 'tamu-kamar', label: 'Tamu & Kamar' },
+              { key: 'pembayaran', label: 'Pembayaran' },
+              { key: 'deposit-jaminan', label: 'Deposit & Jaminan' },
+              { key: 'dokumen', label: 'Dokumen' },
+              { key: 'riwayat', label: 'Riwayat' },
+            ] as const
+          ).map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                activeTab === tab.key
+                  ? 'bg-emerald-800 text-white'
+                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200 hover:text-stone-900'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-stone-50/50">
           {loading && (
@@ -897,9 +1189,282 @@ export default function ReservationDetailDrawer({
             </div>
           )}
 
+          {/* GLOBAL (outside tab panes): Check-in Readiness Checklist for BOOKED reservations.
+              Behavior/actions unchanged — only the visibility pattern moved from per-section
+              hideOnRingkasan to this single global placement so the checklist no longer
+              hides when the Ringkasan tab is active. */}
+          {isBooked && (
+            <div className={`p-3.5 rounded-xl border transition-all ${
+              isCheckinReady
+                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                : 'bg-amber-50 border-amber-300 text-amber-950 shadow-xs'
+            }`}>
+              <div className="flex items-start gap-2.5">
+                <span className="text-base leading-none mt-0.5">{isCheckinReady ? '✅' : '⚠️'}</span>
+                <div className="flex-1 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold">
+                      {isCheckinReady
+                        ? 'Persyaratan Check-in Lengkap'
+                        : precheckinEligibility
+                          ? 'Syarat Wajib Check-in Belum Lengkap'
+                          : 'Kesiapan Check-in Belum Dapat Diverifikasi'}
+                    </h4>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-semibold border ${
+                      isCheckinReady
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                        : precheckinEligibility
+                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          : 'bg-stone-200 text-stone-700 border-stone-300'
+                    }`}>
+                      {isCheckinReady
+                        ? 'Siap Check-in'
+                        : precheckinEligibility
+                          ? 'Wajib Dilengkapi'
+                          : 'Belum Terverifikasi'}
+                    </span>
+                  </div>
+                  {precheckinEligibility && missingRequirements.length > 0 ? (
+                    <CheckinReadinessChecklist
+                      precheckinEligibility={precheckinEligibility}
+                      missingRequirements={missingRequirements}
+                      canShowPaymentForm={canShowPaymentForm}
+                      hasGuaranteeSection={Boolean(data.id && activePropId)}
+                       canEditGuestData={!isCancelled && !isCheckedOut}
+                       onNavigate={navigateToRequirementTarget}
+                     />
+                  ) : precheckinEligibility && missingRequirements.length === 0 ? (
+                    <p className="text-xs opacity-90">Semua persyaratan check-in telah terpenuhi.</p>
+                  ) : (
+                    <p className="text-xs text-stone-600">
+                      Kesiapan check-in belum dapat diverifikasi. Pastikan layanan sedang aktif.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Tab Pane: Ringkasan — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('ringkasan')}`} role="tabpanel" aria-label="Ringkasan">
+
+          {/* COMPLIMENTARY SECTION - shown when VIEW permission exists */}
+          {hasViewPermission && (
+            <div className="mt-3 pt-3 border-t border-amber-200">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium text-amber-700">Komplementer</span>
+                {!complimentaryRequest && !complimentaryLoading && !complimentaryError && hasRequestPermission && (
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedComplimentaryAction('REQUEST'); setComplimentaryModalOpen(true); }}
+                    className="text-xs px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors cursor-pointer"
+                    disabled={complimentaryLoading}
+                  >
+                    Ajukan Komplementer
+                  </button>
+                )}
+              </div>
+              {complimentaryLoading && !complimentaryRequest && (
+                <div className="text-xs text-gray-500">Memuat...</div>
+              )}
+              {complimentaryError && (
+                <div className="mt-1 text-xs text-red-500">{complimentaryError}</div>
+              )}
+              {!complimentaryRequest && !complimentaryLoading && !complimentaryError && (
+                <div className="mt-1 text-xs text-gray-500">Belum ada permintaan komplementer.</div>
+              )}
+              {complimentaryRequest && (
+                <>
+                  <div className="mt-1 text-xs text-gray-600">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && <span className="text-amber-600">Menunggu persetujuan</span>}
+                    {complimentaryRequest.status === 'APPROVED' && (
+                      <span className="text-green-600">
+                        Disetujui
+                        {complimentaryRequest.applied_adjustment_amount != null && (
+                          <>  -  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(complimentaryRequest.applied_adjustment_amount)}</>
+                        )}
+                      </span>
+                    )}
+                    {complimentaryRequest.status === 'REJECTED' && <span className="text-red-600">Ditolak</span>}
+                    {complimentaryRequest.status === 'REVOKED' && <span className="text-gray-500">Dicabut</span>}
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-xs text-gray-500">
+                    {complimentaryRequest.category && (
+                      <div>Kategori: <span className="text-gray-700">{complimentaryRequest.category}</span></div>
+                    )}
+                    {complimentaryRequest.reason && (
+                      <div>Alasan: <span className="text-gray-700">{complimentaryRequest.reason}</span></div>
+                    )}
+                    {complimentaryRequest.requestor_name_snapshot && complimentaryRequest.requested_at && (
+                      <div>Pemohon: {complimentaryRequest.requestor_name_snapshot} - {new Date(complimentaryRequest.requested_at).toLocaleDateString('id-ID')}</div>
+                    )}
+                    {complimentaryRequest.status === 'APPROVED' && complimentaryRequest.approver_name_snapshot && complimentaryRequest.approved_at && (
+                      <div>Penyetujui: {complimentaryRequest.approver_name_snapshot} - {new Date(complimentaryRequest.approved_at).toLocaleDateString('id-ID')}</div>
+                    )}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && hasApprovePermission && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('APPROVE'); setComplimentaryModalOpen(true); }}
+                          className="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 text-green-800 rounded transition-colors cursor-pointer"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('REJECT'); setComplimentaryModalOpen(true); }}
+                          className="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 text-red-800 rounded transition-colors cursor-pointer"
+                        >
+                          Reject
+                        </button>
+                      </>
+                    )}
+                    {complimentaryRequest.status === 'APPROVED' && hasRevokePermission && (
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedComplimentaryAction('REVOKE'); setComplimentaryModalOpen(true); }}
+                        className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded transition-colors cursor-pointer"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Section 3: Sumber Reservasi */}
+          <div className="grid grid-cols-1 gap-3">
+            {/* Source */}
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-1.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                Sumber &amp; Saluran
+              </span>
+              <div className="text-xs font-bold text-stone-900">
+                {sourceLabel}
+              </div>
+              {data.referral && (
+                <div className="text-xs text-stone-500 font-mono">
+                  Ref/No. Booking: <strong className="text-stone-800">{data.referral}</strong>
+                </div>
+              )}
+            </div>
+
+          </div>
+
+          {/* Section 4: Detail Menginap & Kamar */}
+          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+            <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+              Detail Menginap &amp; Kamar
+            </span>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              <div className="p-2.5 bg-stone-50 rounded-lg">
+                <span className="text-stone-500 text-xs block mb-0.5">Nomor Kamar</span>
+                <strong className="text-stone-800 font-bold text-sm">
+                  {data.room_number ? `Kamar ${data.room_number}` : 'Belum Ditentukan'}
+                </strong>
+              </div>
+              <div className="p-2.5 bg-stone-50 rounded-lg">
+                <span className="text-stone-500 text-xs block mb-0.5">Tipe Kamar</span>
+                <strong className="text-stone-800 font-semibold text-xs">
+                  {data.room_type_name || data.room_type || data.room_variant || '—'}
+                </strong>
+              </div>
+              <div className="p-2.5 bg-stone-50 rounded-lg">
+                <span className="text-stone-500 text-xs block mb-0.5">Check-in</span>
+                <strong className="text-stone-800 font-mono text-xs">{data.check_in || '—'}</strong>
+              </div>
+              <div className="p-2.5 bg-stone-50 rounded-lg">
+                <span className="text-stone-500 text-xs block mb-0.5">Check-out</span>
+                <strong className="text-stone-800 font-mono text-xs">{data.check_out || '—'}</strong>
+              </div>
+            </div>
+          </div>
+
+          {isBooked && activePropId && Boolean(data.bid) && (
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setIsAddRoomModalOpen(true)}
+                className="px-3 py-2 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+              >
+                + Tambah Kamar
+              </button>
+            </div>
+          )}
+
+          {isCheckedIn && activePropId && (
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setIsRoomMoveModalOpen(true)} className="rounded-lg bg-emerald-800 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">
+                Pindah Kamar
+              </button>
+            </div>
+          )}
+
+          {/* Section 5: Rate Plan & Snapshot Tarif Malam */}
+          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                Rate Plan &amp; Tarif Menginap
+              </span>
+              <span className="text-xs font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
+                {ratePlanLabel}
+              </span>
+            </div>
+
+            {data.is_manual_override && (
+              <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                <span>⚠️</span>
+                <div>
+                  <strong>Tarif Manual Override:</strong> {data.manual_override_reason || 'Tidak ada alasan tercatat'}
+                </div>
+              </div>
+            )}
+
+            {/* Nightly breakdown if rate_snapshot or nightly_rates is available */}
+            {data.rate_snapshot?.nightly_rates && data.rate_snapshot.nightly_rates.length > 0 && (
+              <div className="border border-stone-200 rounded-lg overflow-hidden text-xs">
+                <table className="w-full text-left">
+                  <thead className="bg-stone-100 text-stone-600 font-semibold text-xs">
+                    <tr>
+                      <th className="p-2.5">Tanggal</th>
+                      <th className="p-2.5">Base Rate</th>
+                      <th className="p-2.5">Penyesuaian</th>
+                      <th className="p-2.5 text-right">Tarif Malam</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {data.rate_snapshot.nightly_rates.map((nr: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-stone-50">
+                        <td className="p-2.5 font-mono">{nr.stay_date || nr.hotel_date}</td>
+                        <td className="p-2.5 font-mono">Rp {Number(nr.base_rate || nr.final_room_rate || nr.final_rate || 0).toLocaleString('id-ID')}</td>
+                        <td className="p-2.5 text-stone-500">
+                          {nr.dow_multiplier && nr.dow_multiplier !== 1 ? `DOW x${nr.dow_multiplier} ` : ''}
+                          {nr.seasonal_multiplier && nr.seasonal_multiplier !== 1 ? `Musim x${nr.seasonal_multiplier}` : ''}
+                          {nr.is_manual_override ? 'Manual' : ''}
+                        </td>
+                        <td className="p-2.5 font-mono font-bold text-right text-stone-900">
+                          Rp {Number(nr.final_room_rate || nr.final_rate || nr.total_amount || 0).toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          </div>
+
+          {/* Tab Pane: Tamu & Kamar — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('tamu-kamar')}`} role="tabpanel" aria-label="Tamu & Kamar">
+
           {/* Active Room Findings & Maintenance Blocker Alert */}
           {activeRoomFindings.length > 0 && (
-            <div className="p-4 bg-rose-50 border border-rose-300 rounded-xl space-y-3 text-xs text-rose-950 shadow-xs">
+            <div id="room-findings-block" className="p-4 bg-rose-50 border border-rose-300 rounded-xl space-y-3 text-xs text-rose-950 shadow-xs">
               <div className="flex items-start justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2 font-bold text-rose-800">
                   <span className="text-lg">🚨</span>
@@ -1113,7 +1678,7 @@ export default function ReservationDetailDrawer({
             </div>
 
             {/* Staying Guest */}
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
+            <div id="guest-card" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
               <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
                 Tamu Menginap (Staying Guest)
               </span>
@@ -1127,7 +1692,7 @@ export default function ReservationDetailDrawer({
               </div>
 
               {isEditingPhone ? (
-                <div className="space-y-1.5 pt-1 border-t border-stone-100">
+                <div id="guest-phone-section" className="space-y-1.5 pt-1 border-t border-stone-100">
                   <label className="block text-xs font-bold text-stone-600">
                     Nomor Telepon Tamu <span className="text-rose-500">*</span>
                   </label>
@@ -1162,7 +1727,7 @@ export default function ReservationDetailDrawer({
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center justify-between pt-1 border-t border-stone-100">
+                <div id="guest-phone-section" className="flex items-center justify-between pt-1 border-t border-stone-100">
                   <div className="text-xs text-stone-600 font-mono flex items-center gap-1">
                     <span>📞</span>
                     {data.guest_phone ? (
@@ -1203,321 +1768,10 @@ export default function ReservationDetailDrawer({
             </div>
           </div>
 
-          {/* COMPLIMENTARY SECTION - shown when VIEW permission exists */}
-          {hasViewPermission && (
-            <div className="mt-3 pt-3 border-t border-amber-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium text-amber-700">Komplementer</span>
-                {!complimentaryRequest && !complimentaryLoading && !complimentaryError && hasRequestPermission && (
-                  <button
-                    type="button"
-                    onClick={() => { setSelectedComplimentaryAction('REQUEST'); setComplimentaryModalOpen(true); }}
-                    className="text-xs px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors cursor-pointer"
-                    disabled={complimentaryLoading}
-                  >
-                    Ajukan Komplementer
-                  </button>
-                )}
-              </div>
-              {complimentaryLoading && !complimentaryRequest && (
-                <div className="text-xs text-gray-500">Memuat...</div>
-              )}
-              {complimentaryError && (
-                <div className="mt-1 text-xs text-red-500">{complimentaryError}</div>
-              )}
-              {!complimentaryRequest && !complimentaryLoading && !complimentaryError && (
-                <div className="mt-1 text-xs text-gray-500">Belum ada permintaan komplementer.</div>
-              )}
-              {complimentaryRequest && (
-                <>
-                  <div className="mt-1 text-xs text-gray-600">
-                    {complimentaryRequest.status === 'PENDING_APPROVAL' && <span className="text-amber-600">Menunggu persetujuan</span>}
-                    {complimentaryRequest.status === 'APPROVED' && (
-                      <span className="text-green-600">
-                        Disetujui
-                        {complimentaryRequest.applied_adjustment_amount != null && (
-                          <>  -  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(complimentaryRequest.applied_adjustment_amount)}</>
-                        )}
-                      </span>
-                    )}
-                    {complimentaryRequest.status === 'REJECTED' && <span className="text-red-600">Ditolak</span>}
-                    {complimentaryRequest.status === 'REVOKED' && <span className="text-gray-500">Dicabut</span>}
-                  </div>
-                  <div className="mt-1 space-y-0.5 text-xs text-gray-500">
-                    {complimentaryRequest.category && (
-                      <div>Kategori: <span className="text-gray-700">{complimentaryRequest.category}</span></div>
-                    )}
-                    {complimentaryRequest.reason && (
-                      <div>Alasan: <span className="text-gray-700">{complimentaryRequest.reason}</span></div>
-                    )}
-                    {complimentaryRequest.requestor_name_snapshot && complimentaryRequest.requested_at && (
-                      <div>Pemohon: {complimentaryRequest.requestor_name_snapshot} - {new Date(complimentaryRequest.requested_at).toLocaleDateString('id-ID')}</div>
-                    )}
-                    {complimentaryRequest.status === 'APPROVED' && complimentaryRequest.approver_name_snapshot && complimentaryRequest.approved_at && (
-                      <div>Penyetujui: {complimentaryRequest.approver_name_snapshot} - {new Date(complimentaryRequest.approved_at).toLocaleDateString('id-ID')}</div>
-                    )}
-                  </div>
-                  <div className="mt-2 flex gap-2">
-                    {complimentaryRequest.status === 'PENDING_APPROVAL' && hasApprovePermission && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => { setSelectedComplimentaryAction('APPROVE'); setComplimentaryModalOpen(true); }}
-                          className="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 text-green-800 rounded transition-colors cursor-pointer"
-                        >
-                          Approve
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => { setSelectedComplimentaryAction('REJECT'); setComplimentaryModalOpen(true); }}
-                          className="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 text-red-800 rounded transition-colors cursor-pointer"
-                        >
-                          Reject
-                        </button>
-                      </>
-                    )}
-                    {complimentaryRequest.status === 'APPROVED' && hasRevokePermission && (
-                      <button
-                        type="button"
-                        onClick={() => { setSelectedComplimentaryAction('REVOKE'); setComplimentaryModalOpen(true); }}
-                        className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded transition-colors cursor-pointer"
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* Section 3: Sumber Reservasi & Dokumen KTP */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Source */}
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-1.5">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Sumber &amp; Saluran
-              </span>
-              <div className="text-xs font-bold text-stone-900">
-                {sourceLabel}
-              </div>
-              {data.referral && (
-                <div className="text-xs text-stone-500 font-mono">
-                  Ref/No. Booking: <strong className="text-stone-800">{data.referral}</strong>
-                </div>
-              )}
-            </div>
-
-            {/* KTP Document */}
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Dokumen Identitas (KTP)
-              </span>
-
-              {hasKtpIdentity ? (
-                <div className="flex items-center justify-between text-xs pt-1 border-t border-stone-100">
-                  <div>
-                    <span className="font-bold text-emerald-800 flex items-center gap-1">
-                      <span>✓</span> KTP / Identitas Terlampir
-                    </span>
-                    {ktpIdentityNumber && (
-                      <p className="text-xs text-stone-600 font-mono mt-0.5">NIK: <strong className="text-stone-900">{ktpIdentityNumber}</strong></p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {Boolean(ktpDocPath) && (
-                      <button
-                        type="button"
-                        onClick={() => setIsKtpPreviewOpen(true)}
-                        className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
-                      >
-                        Lihat KTP
-                      </button>
-                    )}
-                    {!isCancelled && !isCheckedOut && (
-                      <button
-                        type="button"
-                        onClick={() => setIsIdentityModalOpen(true)}
-                        className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
-                      >
-                        Ganti KTP
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="pt-1 border-t border-stone-100 flex items-center justify-between">
-                  <span className="text-xs text-rose-600 font-semibold bg-rose-50 px-2 py-0.5 rounded">
-                    ⚠️ Belum ada KTP (Wajib Check-in)
-                  </span>
-                  {!isCancelled && !isCheckedOut && (
-                    <button
-                      type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
-                      className="px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1"
-                    >
-                      <span>📷</span> + Unggah KTP
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
           </div>
 
-          {/* Check-in Readiness Checklist for Booked reservation */}
-          {isBooked && (
-            <div className={`p-3.5 rounded-xl border transition-all ${
-              isCheckinReady
-                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
-                : 'bg-amber-50 border-amber-300 text-amber-950 shadow-xs'
-            }`}>
-              <div className="flex items-start gap-2.5">
-                <span className="text-base leading-none mt-0.5">{isCheckinReady ? '✅' : '⚠️'}</span>
-                <div className="flex-1 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-bold">
-                      {isCheckinReady
-                        ? 'Persyaratan Check-in Lengkap'
-                        : precheckinEligibility
-                          ? 'Syarat Wajib Check-in Belum Lengkap'
-                          : 'Kesiapan Check-in Belum Dapat Diverifikasi'}
-                    </h4>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-semibold border ${
-                      isCheckinReady
-                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                        : precheckinEligibility
-                          ? 'bg-amber-100 text-amber-900 border-amber-300'
-                          : 'bg-stone-200 text-stone-700 border-stone-300'
-                    }`}>
-                      {isCheckinReady
-                        ? 'Siap Check-in'
-                        : precheckinEligibility
-                          ? 'Wajib Dilengkapi'
-                          : 'Belum Terverifikasi'}
-                    </span>
-                  </div>
-                  {precheckinEligibility && missingRequirements.length > 0 ? (
-                    <div className="space-y-1">
-                      {missingRequirements.map((req: any) => (
-                        <div key={req.code} className="flex items-center gap-1.5 text-xs text-rose-700">
-                          <span className="text-rose-500 flex-shrink-0">❌</span>
-                          <span>{req.label}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : precheckinEligibility && missingRequirements.length === 0 ? (
-                    <p className="text-xs opacity-90">Semua persyaratan check-in telah terpenuhi.</p>
-                  ) : (
-                    <p className="text-xs text-stone-600">
-                      Kesiapan check-in belum dapat diverifikasi. Pastikan layanan sedang aktif.
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Section 4: Detail Menginap & Kamar */}
-          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
-            <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-              Detail Menginap &amp; Kamar
-            </span>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-              <div className="p-2.5 bg-stone-50 rounded-lg">
-                <span className="text-stone-500 text-xs block mb-0.5">Nomor Kamar</span>
-                <strong className="text-stone-800 font-bold text-sm">
-                  {data.room_number ? `Kamar ${data.room_number}` : 'Belum Ditentukan'}
-                </strong>
-              </div>
-              <div className="p-2.5 bg-stone-50 rounded-lg">
-                <span className="text-stone-500 text-xs block mb-0.5">Tipe Kamar</span>
-                <strong className="text-stone-800 font-semibold text-xs">
-                  {data.room_type_name || data.room_type || data.room_variant || '—'}
-                </strong>
-              </div>
-              <div className="p-2.5 bg-stone-50 rounded-lg">
-                <span className="text-stone-500 text-xs block mb-0.5">Check-in</span>
-                <strong className="text-stone-800 font-mono text-xs">{data.check_in || '—'}</strong>
-              </div>
-              <div className="p-2.5 bg-stone-50 rounded-lg">
-                <span className="text-stone-500 text-xs block mb-0.5">Check-out</span>
-                <strong className="text-stone-800 font-mono text-xs">{data.check_out || '—'}</strong>
-              </div>
-            </div>
-          </div>
-
-          {isBooked && activePropId && Boolean(data.bid) && (
-            <div className="flex justify-end pt-1">
-              <button
-                type="button"
-                onClick={() => setIsAddRoomModalOpen(true)}
-                className="px-3 py-2 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-              >
-                + Tambah Kamar
-              </button>
-            </div>
-          )}
-
-          {isCheckedIn && activePropId && (
-            <div className="flex justify-end">
-              <button type="button" onClick={() => setIsRoomMoveModalOpen(true)} className="rounded-lg bg-emerald-800 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">
-                Pindah Kamar
-              </button>
-            </div>
-          )}
-
-          {/* Section 5: Rate Plan & Snapshot Tarif Malam */}
-          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Rate Plan &amp; Tarif Menginap
-              </span>
-              <span className="text-xs font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
-                {ratePlanLabel}
-              </span>
-            </div>
-
-            {data.is_manual_override && (
-              <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
-                <span>⚠️</span>
-                <div>
-                  <strong>Tarif Manual Override:</strong> {data.manual_override_reason || 'Tidak ada alasan tercatat'}
-                </div>
-              </div>
-            )}
-
-            {/* Nightly breakdown if rate_snapshot or nightly_rates is available */}
-            {data.rate_snapshot?.nightly_rates && data.rate_snapshot.nightly_rates.length > 0 && (
-              <div className="border border-stone-200 rounded-lg overflow-hidden text-xs">
-                <table className="w-full text-left">
-                  <thead className="bg-stone-100 text-stone-600 font-semibold text-xs">
-                    <tr>
-                      <th className="p-2.5">Tanggal</th>
-                      <th className="p-2.5">Base Rate</th>
-                      <th className="p-2.5">Penyesuaian</th>
-                      <th className="p-2.5 text-right">Tarif Malam</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {data.rate_snapshot.nightly_rates.map((nr: any, idx: number) => (
-                      <tr key={idx} className="hover:bg-stone-50">
-                        <td className="p-2.5 font-mono">{nr.stay_date || nr.hotel_date}</td>
-                        <td className="p-2.5 font-mono">Rp {Number(nr.base_rate || nr.final_room_rate || nr.final_rate || 0).toLocaleString('id-ID')}</td>
-                        <td className="p-2.5 text-stone-500">
-                          {nr.dow_multiplier && nr.dow_multiplier !== 1 ? `DOW x${nr.dow_multiplier} ` : ''}
-                          {nr.seasonal_multiplier && nr.seasonal_multiplier !== 1 ? `Musim x${nr.seasonal_multiplier}` : ''}
-                          {nr.is_manual_override ? 'Manual' : ''}
-                        </td>
-                        <td className="p-2.5 font-mono font-bold text-right text-stone-900">
-                          Rp {Number(nr.final_room_rate || nr.final_rate || nr.total_amount || 0).toLocaleString('id-ID')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          {/* Tab Pane: Pembayaran — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('pembayaran')}`} role="tabpanel" aria-label="Pembayaran">
 
           {/* Section 6: Folio & Ringkasan Pembayaran (Authoritative Derived Output, No Direct Edit) */}
           <div id="folio-section" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
@@ -1535,14 +1789,6 @@ export default function ReservationDetailDrawer({
                       + Tambah Biaya
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => setIsThermalModalOpen(true)}
-                    className="px-2.5 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
-                    title="Cetak thermal receipt (58mm / 80mm)"
-                  >
-                    🖨️ Print
-                  </button>
                 </div>
               <span className={`text-xs font-bold ${remainingBalance > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
                 {remainingBalance > 0 ? `Sisa: Rp ${remainingBalance.toLocaleString('id-ID')}` : 'Lunas (PAID)'}
@@ -1745,7 +1991,7 @@ export default function ReservationDetailDrawer({
 
           {/* Section 7: Tambah Pembayaran Baru (Single Canonical Payment Logging Form) */}
           {canShowPaymentForm && (
-            <form onSubmit={handleAddPayment} className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+            <form id="payment-form" onSubmit={handleAddPayment} className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
               <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
                 + Catat Pembayaran Baru
               </span>
@@ -1816,6 +2062,10 @@ export default function ReservationDetailDrawer({
               </button>
             </form>
           )}
+          </div>
+
+          {/* Tab Pane: Deposit & Jaminan — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('deposit-jaminan')}`} role="tabpanel" aria-label="Deposit & Jaminan">
 
           {/* GUARANTEE-CLOSE-WARNING: persistent banner when terminal + unresolved guarantee */}
           {guaranteeState.status === 'ready' && (
@@ -1854,8 +2104,95 @@ export default function ReservationDetailDrawer({
               />
             </div>
           )}
+          </div>
+
+          {/* Tab Pane: Dokumen — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('dokumen')}`} role="tabpanel" aria-label="Dokumen">
+
+          {/* KTP Document */}
+          <div id="ktp-card" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+              Dokumen Identitas (KTP)
+            </span>
+
+            {hasKtpIdentity ? (
+              <div className="flex items-center justify-between text-xs pt-1 border-t border-stone-100">
+                <div>
+                  <span className="font-bold text-emerald-800 flex items-center gap-1">
+                    <span>✓</span> KTP / Identitas Terlampir
+                  </span>
+                  {ktpIdentityNumber && (
+                    <p className="text-xs text-stone-600 font-mono mt-0.5">NIK: <strong className="text-stone-900">{ktpIdentityNumber}</strong></p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {Boolean(ktpDocPath) && (
+                    <button
+                      type="button"
+                      onClick={() => setIsKtpPreviewOpen(true)}
+                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
+                    >
+                      Lihat KTP
+                    </button>
+                  )}
+                  {!isCancelled && !isCheckedOut && (
+                    <button
+                      type="button"
+                      onClick={() => setIsIdentityModalOpen(true)}
+                      className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                    >
+                      Ganti KTP
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="pt-1 border-t border-stone-100 flex items-center justify-between">
+                <span className="text-xs text-rose-600 font-semibold bg-rose-50 px-2 py-0.5 rounded">
+                  ⚠️ Belum ada KTP (Wajib Check-in)
+                </span>
+                {!isCancelled && !isCheckedOut && (
+                  <button
+                    type="button"
+                    onClick={() => setIsIdentityModalOpen(true)}
+                    className="px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                  >
+                    <span>📷</span> + Unggah KTP
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          </div>
+
+          {/* Tab Pane: Riwayat — always mounted; display:none when inactive */}
+          <div className={`space-y-5 ${isTabVisible('riwayat')}`} role="tabpanel" aria-label="Riwayat">
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                Dokumen &amp; Cetak
+              </span>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsThermalModalOpen(true)}
+                  className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer text-left"
+                >
+                  Cetak Thermal Receipt
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsRegistrationModalOpen(true)}
+                  className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer text-left"
+                >
+                  Form Registrasi
+                </button>
+              </div>
+            </div>
+          </div>
 
           {/* Section 8: Catatan / Special Requests */}
+
           {(notesEditable || specialRequestsNote) && (
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
               <div className="flex items-center justify-between gap-2">
