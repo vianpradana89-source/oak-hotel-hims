@@ -1173,7 +1173,7 @@ export default function ReservationDetailDrawer({
         </div>
 
         {/* Tab Bar — 6 ikon; all panes stay mounted, inactive panes use display:none */}
-        <div className="flex items-center gap-1.5 px-4 py-2 bg-white border-b border-stone-200" role="tablist" aria-label="Detail reservasi">
+        <div className="grid grid-cols-6 shrink-0 px-2 py-2 bg-white border-b border-stone-200" role="tablist" aria-label="Detail reservasi">
           {(
             [
               { key: 'ringkasan', label: 'Ringkasan', icon: (
@@ -1216,28 +1216,29 @@ export default function ReservationDetailDrawer({
             ] as const
           ).map(tab => {
             const isActive = activeTab === tab.key;
+            const tooltipClass =
+              tab.key === 'ringkasan' ? '!left-0 !translate-x-0' :
+              tab.key === 'riwayat'   ? '!left-auto !right-0 !translate-x-0' :
+              undefined;
             return (
-              <Tooltip
-                key={tab.key}
-                content={tab.label}
-                position="bottom"
-                className={tab.key === 'ringkasan' ? '!left-0 !translate-x-0' : undefined}
-              >
-                <button
-                  type="button"
-                  onClick={() => setActiveTab(tab.key)}
-                  role="tab"
-                  aria-selected={isActive}
-                  aria-label={tab.label}
-                  className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
-                    isActive
-                      ? 'bg-emerald-800 text-white'
-                      : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
-                  }`}
-                >
-                  {tab.icon}
-                </button>
-              </Tooltip>
+              <div key={tab.key} className="flex items-center justify-center min-w-0">
+                <Tooltip content={tab.label} position="bottom" className={tooltipClass}>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab(tab.key)}
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-label={tab.label}
+                    className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
+                      isActive
+                        ? 'bg-emerald-800 text-white'
+                        : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
+                    }`}
+                  >
+                    {tab.icon}
+                  </button>
+                </Tooltip>
+              </div>
             );
           })}
         </div>
@@ -1764,34 +1765,36 @@ export default function ReservationDetailDrawer({
                   <label className="block text-xs font-bold text-stone-600">
                     Nomor Telepon Tamu <span className="text-rose-500">*</span>
                   </label>
-                  <div className="flex items-center gap-1.5">
+                  <div className="space-y-1.5">
                     <input
                       type="tel"
                       value={phoneDraft}
                       onChange={e => setPhoneDraft(e.target.value)}
                       placeholder="08xxxxxxxxxx"
-                      className="flex-1 text-xs px-2.5 py-1.5 bg-stone-50 border border-stone-300 rounded-lg font-mono focus:bg-white focus:border-emerald-600 focus:outline-hidden"
+                      className="w-full min-w-0 text-xs px-2.5 py-1.5 bg-stone-50 border border-stone-300 rounded-lg font-mono focus:bg-white focus:border-emerald-600 focus:outline-hidden"
                       autoFocus
                     />
-                    <button
-                      type="button"
-                      disabled={savingPhone}
-                      onClick={handleSavePhone}
-                      className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
-                    >
-                      {savingPhone ? '...' : 'Simpan'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={savingPhone}
-                      onClick={() => {
-                        setIsEditingPhone(false);
-                        setPhoneDraft(data.guest_phone || '');
-                      }}
-                      className="px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
-                    >
-                      Batal
-                    </button>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        disabled={savingPhone}
+                        onClick={handleSavePhone}
+                        className="flex-1 px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                      >
+                        {savingPhone ? '...' : 'Simpan'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={savingPhone}
+                        onClick={() => {
+                          setIsEditingPhone(false);
+                          setPhoneDraft(data.guest_phone || '');
+                        }}
+                        className="flex-1 px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
+                      >
+                        Batal
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
