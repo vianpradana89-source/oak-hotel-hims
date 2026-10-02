@@ -6066,7 +6066,9 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
     const otherChargesRes = await client.query(
       `SELECT COALESCE(SUM(amount), 0) AS other_charges
        FROM folio_entries
-       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION') AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')`,
+       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE
+       AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')
+       AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION', 'DEPOSIT_UNAPPLY')`,
       [reservationId]
     );
     const otherCharges = Number(otherChargesRes.rows[0].other_charges || 0);
@@ -6347,7 +6349,9 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
     const otherChargesRes = await client.query(
       `SELECT COALESCE(SUM(amount), 0) AS other_charges
        FROM folio_entries
-       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION') AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')`,
+       WHERE reservation_id = $1 AND direction = 'DEBIT' AND is_voided = FALSE
+       AND source_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION')
+       AND entry_type NOT IN ('ROOM_CHARGE', 'STAY_EXTENSION', 'DEPOSIT_UNAPPLY')`,
       [reservationId]
     );
     const otherCharges = Number(otherChargesRes.rows[0].other_charges || 0);

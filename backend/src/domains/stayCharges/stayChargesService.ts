@@ -866,7 +866,7 @@ export async function voidFolioEntry(
   }
 
   // 4. Validate entry kind (cannot void payment or reversal rows directly through this endpoint)
-  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.entry_type === 'DEPOSIT_UNAPPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dibalik melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
@@ -1058,7 +1058,7 @@ export async function correctFolioEntry(
     err.code = 'ALREADY_MODIFIED';
     throw err;
   }
-  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.entry_type === 'DEPOSIT_UNAPPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dikoreksi melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';

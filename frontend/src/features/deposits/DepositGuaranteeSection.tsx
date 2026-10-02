@@ -4,12 +4,13 @@ import { useAuth } from '../auth/AuthContext';
 import { getDepositGuaranteeCapabilities } from './depositCapabilities';
 import {
   depositApi, identityCustodyApi,
-  type Deposit, type DepositBalance, type IdentityCustodyRecord,
+  type Deposit, type DepositBalance, type DepositPurpose, type IdentityCustodyRecord,
   type GuaranteeScope,
 } from './depositApi';
 import {
   getGuaranteeScope,
   selectActionableRoomDeposit,
+  selectUnapplyActionableRoomDeposit,
   selectActionableRoomCustody,
   selectActionableGroupDeposit,
   selectActionableGroupCustody,
@@ -38,6 +39,23 @@ const DOC_TYPES = [
   { value: 'PASSPORT', label: 'Passport' },
   { value: 'OTHER', label: 'Lainnya' },
 ];
+
+// DEPOSIT-PURPOSE-PHASE-A: purpose choices + human labels.
+// null/undefined = LEGACY / belum terklasifikasi (baris lama, hanya untuk tampilan).
+const PURPOSE_OPTIONS: Array<{ value: DepositPurpose; label: string; hint: string }> = [
+  { value: 'ADVANCE_PAYMENT', label: 'Uang Muka / DP', hint: 'Menyimpan uang tamu. Kurangi tagihan hanya setelah "Gunakan ke Tagihan".' },
+  { value: 'SECURITY_DEPOSIT', label: 'Jaminan', hint: 'Custody. Dikembalikan setelah check-out, tidak mengurangi tagihan.' },
+];
+
+function purposeLabel(p: DepositPurpose | null | undefined): string {
+  if (p === 'ADVANCE_PAYMENT') return 'Uang Muka / DP';
+  if (p === 'SECURITY_DEPOSIT') return 'Jaminan';
+  return 'Belum Terklasifikasi / Legacy';
+}
+
+function eventTypeLabel(t: string) {
+  return { RECEIVED: 'Diterima', APPLY: 'Digunakan', REFUND: 'Dikembalikan', REVERSAL: 'Dibatalkan', UNAPPLY: 'Penggunaan Dibatalkan' }[t] || t;
+}
 
 function fmtRp(v: number | string | undefined) {
   const n = Number(v || 0);
@@ -70,10 +88,6 @@ function statusBadge(s: string) {
       {l[s] || s}
     </span>
   );
-}
-
-function eventTypeLabel(t: string) {
-  return { RECEIVED: 'Diterima', APPLY: 'Digunakan', REFUND: 'Dikembalikan', REVERSAL: 'Dibatalkan' }[t] || t;
 }
 
 function deriveStatus(d: Deposit[], c: IdentityCustodyRecord[]): string {
@@ -163,6 +177,10 @@ export default function DepositGuaranteeSection({
   // This is order-independent of group deposits and excludes BOOKING_GROUP from actions.
   // The SAME record is used for visibility, amount/balance calculation, and mutation API.
   const actionableRoomDeposit = selectActionableRoomDeposit(deposits);
+  // DEPOSIT-PURPOSE-PHASE-B: dedicated UNAPPLY target. Unlike actionableRoomDeposit,
+  // it MAY return a CLOSED deposit (fully-used ADVANCE_PAYMENT) as long as it still
+  // has applied > 0. This is the ONLY selector wired to the UNAPPLY button/modal.
+  const unapplyActionableRoomDeposit = selectUnapplyActionableRoomDeposit(deposits);
   const actionableRoomCustody = selectActionableRoomCustody(custody);
   const actionableGroupDeposit = selectActionableGroupDeposit(deposits);
   const actionableGroupCustody = selectActionableGroupCustody(custody);
@@ -184,6 +202,7 @@ export default function DepositGuaranteeSection({
   const [showChooser, setShowChooser] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showApply, setShowApply] = useState(false);
+  const [showUnapply, setShowUnapply] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
   const [showGroupRefund, setShowGroupRefund] = useState(false);
   const [showReverse, setShowReverse] = useState(false);
@@ -313,11 +332,15 @@ export default function DepositGuaranteeSection({
                 }`}>
                   {d.scope === 'BOOKING_GROUP' ? 'Deposit Grup' : 'Deposit Kamar'}
                 </div>
-                <div className="px-3 py-2 bg-white space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-stone-500">Status:</span>
-                    <span className="font-semibold">{statusBadge(d.status)}</span>
-                  </div>
+                 <div className="px-3 py-2 bg-white space-y-1">
+                   <div className="flex items-center justify-between text-xs">
+                     <span className="text-stone-500">Jenis:</span>
+                     <span className="font-semibold text-stone-700">{purposeLabel(d.purpose)}</span>
+                   </div>
+                   <div className="flex items-center justify-between text-xs">
+                     <span className="text-stone-500">Status:</span>
+                     <span className="font-semibold">{statusBadge(d.status)}</span>
+                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
                     <div><span className="text-stone-400">Diterima:</span> <span className="font-semibold text-stone-700">{fmtRp(d.balance?.effective_received)}</span></div>
                     <div><span className="text-stone-400">Digunakan:</span> <span className="font-semibold text-emerald-700">{fmtRp(d.balance?.applied)}</span></div>
@@ -359,10 +382,29 @@ export default function DepositGuaranteeSection({
             + Tambah Jaminan
           </button>
         )}
-        {!isClosed && capabilities.canApplyDeposit && actionableRoomDeposit && balance.remaining > 0 && remainingBalance > 0 && (
+        {/* DEPOSIT-PURPOSE-PHASE-A: "Gunakan ke Tagihan" (APPLY) is shown only for
+            ADVANCE_PAYMENT or legacy (NULL purpose) deposits. SECURITY_DEPOSIT is
+            custody-only and must never be applied to charges. */}
+        {!isClosed && capabilities.canApplyDeposit && actionableRoomDeposit
+          && actionableRoomDeposit.purpose !== 'SECURITY_DEPOSIT'
+          && balance.remaining > 0 && remainingBalance > 0 && (
           <button onClick={() => { setError(null); setShowApply(true); }}
             className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition">
             Gunakan ke Tagihan
+          </button>
+        )}
+        {/* DEPOSIT-PURPOSE-PHASE-B: "Batalkan Penggunaan DP" (UNAPPLY) is shown
+            when the UNAPPLY target has a surviving applied amount > 0. This uses
+            the dedicated selectUnapplyActionableRoomDeposit, which (unlike the
+            active-state selector used by Apply/Refund/Reverse) also covers
+            CLOSED deposits — the fully-used ADVANCE_PAYMENT use case. It
+            reverses a prior DEPOSIT_APPLY back to remaining custody. */}
+        {!isClosed && capabilities.canUnapplyDeposit && unapplyActionableRoomDeposit
+          && (unapplyActionableRoomDeposit.balance?.applied ?? 0) > 0
+          && (
+          <button onClick={() => { setError(null); setShowUnapply(true); }}
+            className="px-3 py-1.5 bg-stone-600 text-white text-xs font-semibold rounded-lg hover:bg-stone-700 transition">
+            Batalkan Penggunaan DP
           </button>
         )}
         {capabilities.canRefundDeposit && actionableRoomDeposit && balance.remaining > 0 && (
@@ -583,6 +625,11 @@ export default function DepositGuaranteeSection({
         reservationId={reservationId} propertyId={propertyId}
         onSuccess={refreshAll} deposit={actionableRoomDeposit} remainingBalance={remainingBalance} />
 
+      {/* Unapply Deposit Modal */}
+      <UnapplyDepositModal isOpen={showUnapply} onClose={() => setShowUnapply(false)}
+        reservationId={reservationId} propertyId={propertyId}
+        onSuccess={refreshAll} deposit={unapplyActionableRoomDeposit} />
+
       {/* Refund Deposit Modal */}
       <RefundDepositModal isOpen={showRefund} onClose={() => setShowRefund(false)}
         reservationId={reservationId} propertyId={propertyId}
@@ -698,12 +745,19 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
 }) {
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('CASH');
+  const [purpose, setPurpose] = useState<DepositPurpose>('ADVANCE_PAYMENT');
   const [notes, setNotes] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // DEPOSIT-PURPOSE-PHASE-A: post-receive reminder for ADVANCE_PAYMENT.
+  const [justReceived, setJustReceived] = useState<{ purpose: DepositPurpose; amount: number } | null>(null);
 
   const submit = async () => {
+    // DEPOSIT-PURPOSE-PHASE-A: guard against a duplicate receive on the same
+    // receipt. Once a receive succeeds, `justReceived` is set; a second
+    // submit for the same form is rejected (the user must close + reopen).
+    if (justReceived) { return; }
     const raw = parseInt(String(amount).replace(/\D/g, ''), 10);
     if (!raw || raw <= 0) { setError('Nominal harus lebih dari 0'); return; }
     setBusy(true); setError(null);
@@ -713,15 +767,47 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
         amount: raw, payment_method: method, idempotency_key: uid(),
         notes: notes.trim() || undefined, file: file || undefined,
         scope: guaranteeScope,
+        purpose,
       });
-      onSuccess(); onClose();
+      setJustReceived({ purpose, amount: raw });
+      onSuccess();
     } catch (e: any) { setError(e.message || 'Gagal menerima deposit'); }
     finally { setBusy(false); }
   };
 
+  const handleClose = () => {
+    setJustReceived(null);
+    setAmount(''); setMethod('CASH'); setPurpose('ADVANCE_PAYMENT'); setNotes(''); setFile(null);
+    setError(null);
+    onClose();
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Terima Deposit" size="sm">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Terima Deposit / Jaminan" size="sm">
       <div className="space-y-3">
+        {/* DEPOSIT-PURPOSE-PHASE-A: purpose is mandatory on create. */}
+        <div>
+          <label className="block text-xs font-semibold text-stone-600 mb-1">Jenis Deposit *</label>
+          <div className="space-y-1.5">
+            {PURPOSE_OPTIONS.map(opt => (
+              <button key={opt.value} type="button"
+                onClick={() => { setPurpose(opt.value); setError(null); }}
+                className={`w-full flex items-start gap-2 p-2 border rounded-lg text-left transition ${
+                  purpose === opt.value
+                    ? 'border-emerald-400 bg-emerald-50 ring-1 ring-emerald-300'
+                    : 'border-stone-200 hover:bg-stone-50'
+                }`}>
+                <span className={`mt-0.5 w-3.5 h-3.5 rounded-full border-2 shrink-0 ${
+                  purpose === opt.value ? 'border-emerald-500 bg-emerald-500' : 'border-stone-300'
+                }`} />
+                <span className="flex-1">
+                  <span className="block text-xs font-semibold text-stone-800">{opt.label}</span>
+                  <span className="block text-[10px] text-stone-400 mt-0.5">{opt.hint}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
         <div>
           <label className="block text-xs font-semibold text-stone-600 mb-1">Nominal (IDR) *</label>
           <input type="text" inputMode="numeric" value={amount}
@@ -747,10 +833,38 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
           <input type="file" onChange={e => setFile(e.target.files?.[0] || null)}
             className="w-full text-sm text-stone-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-stone-100 file:text-stone-700 hover:file:bg-stone-200" />
         </div>
+
+        {/* DEPOSIT-PURPOSE-PHASE-A: post-receive reminder.
+            ADVANCE_PAYMENT = uang belum mengurangi outstanding sampai di-APPLY.
+            SECURITY_DEPOSIT = custody, jangan di-APPLY; refund setelah check-out. */}
+        {justReceived && !busy && (
+          <div className={`rounded-lg p-3 text-xs border ${
+            justReceived.purpose === 'ADVANCE_PAYMENT'
+              ? 'bg-amber-50 border-amber-200 text-amber-800'
+              : 'bg-sky-50 border-sky-200 text-sky-800'
+          }`}>
+            <div className="font-bold mb-1">{justReceived.purpose === 'ADVANCE_PAYMENT' ? 'Deposit diterima — belum terpakai' : 'Jaminan diterima — custody'}</div>
+            {justReceived.purpose === 'ADVANCE_PAYMENT' ? (
+              <div>
+                {fmtRp(justReceived.amount)} sudah diterima namun <b>belum mengurangi tagihan tamu</b>.
+                Gunakan tombol <b>"Gunakan ke Tagihan"</b> untuk memotong sisa tagihan.
+              </div>
+            ) : (
+              <div>
+                {fmtRp(justReceived.amount)} ditahan sebagai jaminan. Jaminan tidak mengurangi tagihan;
+                kembalikan melalui <b>"Refund Deposit"</b> setelah check-out.
+              </div>
+            )}
+            <button type="button" onClick={handleClose}
+              className="mt-2 px-2 py-1 bg-white border border-stone-300 rounded text-[11px] font-semibold text-stone-700 hover:bg-stone-50">
+              Mengerti
+            </button>
+          </div>
+        )}
         {error && <div className="text-xs text-red-600 bg-red-50 p-2 rounded-lg">{error}</div>}
         <div className="flex justify-end gap-2 pt-1">
-          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
-          <button disabled={busy || !amount} onClick={submit}
+          <button onClick={handleClose} className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+          <button disabled={busy || !amount || !!justReceived} onClick={submit}
             className="px-4 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition">
             {busy ? 'Memproses...' : 'Terima Deposit'}
           </button>
@@ -775,7 +889,14 @@ function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSucce
 
   useEffect(() => { if (isOpen) setAmount(String(maxApply || '')); }, [isOpen, maxApply]);
 
+  // DEPOSIT-PURPOSE-PHASE-A: SECURITY_DEPOSIT is custody-only and must never be
+  // applied to charges. If the actionable deposit is a security deposit, this
+  // modal should not be reachable in the first place (the parent hides the
+  // "Gunakan ke Tagihan" button for it); this is a defensive guard only.
+  const isSecurityDeposit = deposit?.purpose === 'SECURITY_DEPOSIT';
+
   const submit = async () => {
+    if (isSecurityDeposit) { setError('Jaminan tidak dapat diterapkan ke tagihan.'); return; }
     const raw = parseInt(String(amount).replace(/\D/g, ''), 10);
     if (!raw || raw <= 0) { setError('Nominal harus lebih dari 0'); return; }
     if (raw > available) { setError('Melebihi saldo deposit tersedia'); return; }
@@ -809,9 +930,144 @@ function ApplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSucce
         {error && <div className="text-xs text-red-600 bg-red-50 p-2 rounded-lg">{error}</div>}
         <div className="flex justify-end gap-2 pt-1">
           <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
-          <button disabled={busy || !amount} onClick={submit}
+          <button disabled={busy || !amount || isSecurityDeposit} onClick={submit}
             className="px-4 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition">
             {busy ? 'Memproses...' : 'Gunakan ke Tagihan'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ────────── Unapply Deposit Sub-Modal ────────── */
+
+// DEPOSIT-PURPOSE-PHASE-B: `apply_event_id` is MANDATORY on the backend.
+// The UI MAY auto-select when there is exactly one eligible (active) APPLY
+// event, but it must still send the chosen id on every request.
+function selectUnapplyTargets(deposit: Deposit | undefined): Array<{ id: number; amount: number; remaining: number }> {
+  if (!deposit?.events) return [];
+  const applyEvents = deposit.events.filter(ev => ev.event_type === 'APPLY');
+  const unapplyByTarget = new Map<number, number>();
+  for (const ev of deposit.events) {
+    if (ev.event_type === 'UNAPPLY' && ev.reversal_of_event_id != null) {
+      unapplyByTarget.set(ev.reversal_of_event_id, (unapplyByTarget.get(ev.reversal_of_event_id) || 0) + Number(ev.amount));
+    }
+  }
+  return applyEvents
+    .map(ev => {
+      const unapplied = unapplyByTarget.get(ev.id) || 0;
+      const remaining = Math.max(0, Number(ev.amount) - unapplied);
+      return { id: ev.id, amount: Number(ev.amount), remaining };
+    })
+    .filter(t => t.remaining > 0);
+}
+
+function UnapplyDepositModal({ isOpen, onClose, reservationId, propertyId, onSuccess, deposit }: {
+  isOpen: boolean; onClose: () => void; reservationId: number; propertyId: number;
+  onSuccess: () => void; deposit: Deposit | undefined;
+}) {
+  const availableApplied = deposit?.balance?.applied || 0;
+  const targets = useMemo(() => selectUnapplyTargets(deposit), [deposit]);
+  // DEPOSIT-PURPOSE-PHASE-B: auto-select ONLY when exactly one eligible APPLY
+  // target exists; with multiple targets the operator must choose explicitly.
+  const [selectedApplyEventId, setSelectedApplyEventId] = useState<number | null>(null);
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const first = targets[0];
+    if (targets.length === 1) {
+      // Exactly one eligible APPLY target — auto-select it and pre-fill the
+      // full remaining amount.
+      setSelectedApplyEventId(first.id);
+      setAmount(String(first.remaining));
+    } else {
+      // DEPOSIT-PURPOSE-PHASE-B contract: with multiple eligible APPLY
+      // targets the operator must choose one explicitly. Do NOT
+      // auto-select any target and keep the amount empty until a target
+      // is chosen (the selector pre-fills that target's remaining).
+      setSelectedApplyEventId(null);
+      setAmount('');
+    }
+  }, [isOpen, targets]);
+
+  const currentTarget = targets.find(t => t.id === selectedApplyEventId) || null;
+
+  const submit = async () => {
+    const raw = parseInt(String(amount).replace(/\D/g, ''), 10);
+    if (!raw || raw <= 0) { setError('Nominal harus lebih dari 0'); return; }
+    if (!deposit) { setError('Tidak ada deposit aktif'); return; }
+    if (!currentTarget) { setError('Pilih event penggunaan deposit yang dibatalkan'); return; }
+    if (raw > currentTarget.remaining) {
+      setError(`Melebihi nominal aktif (Rp ${currentTarget.remaining.toLocaleString('id-ID')}) untuk event yang dipilih`);
+      return;
+    }
+    setBusy(true); setError(null);
+    try {
+      // DEPOSIT-PURPOSE-PHASE-B: always send apply_event_id; no backend fallback.
+      await depositApi.unapply(deposit.id, {
+        property_id: propertyId, reservation_id: reservationId,
+        amount: raw, apply_event_id: currentTarget.id, idempotency_key: uid(),
+      });
+      onSuccess(); onClose();
+    } catch (e: any) { setError(e.message || 'Gagal membatalkan penggunaan deposit'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Batalkan Penggunaan Deposit" size="sm">
+      <div className="space-y-3">
+        <div className="bg-stone-50 rounded-lg p-3 text-xs">
+          <span className="text-stone-400">Deposit yang telah digunakan</span>
+          <span className="font-semibold text-stone-800 ml-2">{fmtRp(availableApplied)}</span>
+        </div>
+        {/* DEPOSIT-PURPOSE-PHASE-B: target selection. Auto-selected when there
+            is only one eligible APPLY event, but the operator can still see /
+            change the target explicitly. */}
+        {targets.length > 1 && (
+          <div>
+            <label className="block text-xs font-semibold text-stone-600 mb-1">Pilih Penggunaan Deposit yang Dibatalkan *</label>
+            <select value={selectedApplyEventId ?? ''}
+              onChange={e => {
+                const next = Number(e.target.value);
+                setSelectedApplyEventId(next || null);
+                const target = targets.find(t => t.id === next);
+                if (target) setAmount(String(target.remaining));
+              }}
+              className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm">
+              <option value="" disabled>Pilih event...</option>
+              {targets.map(t => (
+                <option key={t.id} value={t.id}>
+                  Event #{t.id} — terpakai {fmtRp(t.amount)}, tersisa {fmtRp(t.remaining)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {targets.length === 1 && currentTarget && (
+          <div className="text-[11px] text-stone-500 bg-stone-50 rounded p-2">
+            Membatalkan penggunaan event #{currentTarget.id} (tersedia {fmtRp(currentTarget.remaining)})
+          </div>
+        )}
+        <div>
+          <label className="block text-xs font-semibold text-stone-600 mb-1">Nominal Dibatalkan *</label>
+          <input type="text" inputMode="numeric" value={amount}
+            onChange={e => { setAmount(e.target.value.replace(/[^\d]/g, '')); setError(null); }}
+            className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm font-semibold" placeholder="0" />
+          {amount && <div className="text-xs text-stone-400 mt-0.5">{fmtRp(parseInt(amount.replace(/\D/g, ''), 10) || 0)}</div>}
+        </div>
+        <div className="text-[11px] text-stone-400 bg-stone-50 rounded p-2">
+          Tindakan ini mengembalikan nominal ke saldo deposit yang tersedia dan menghapus pemakaian dari tagihan.
+        </div>
+        {error && <div className="text-xs text-red-600 bg-red-50 p-2 rounded-lg">{error}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+          <button disabled={busy || !amount || !currentTarget || currentTarget.remaining <= 0} onClick={submit}
+            className="px-4 py-1.5 bg-stone-600 text-white text-xs font-semibold rounded-lg hover:bg-stone-700 disabled:opacity-50 transition">
+            {busy ? 'Memproses...' : 'Batalkan Penggunaan'}
           </button>
         </div>
       </div>

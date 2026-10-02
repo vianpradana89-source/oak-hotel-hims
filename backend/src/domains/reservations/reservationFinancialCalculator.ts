@@ -66,7 +66,7 @@ export async function calculateReservationFinancials(
   const folioDebitsRes = await client.query(
     `SELECT
        COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN amount
+         WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY') THEN amount
          ELSE 0
        END), 0) AS gross_charges,
        COALESCE(SUM(CASE
@@ -85,7 +85,7 @@ export async function calculateReservationFinancials(
          THEN amount
          ELSE 0
        END), 0) AS commercial_discounts,
-       COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN 1 END)::int as charge_count
+       COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY') THEN 1 END)::int as charge_count
      FROM folio_entries
      WHERE reservation_id = $1`,
     [reservationId]
@@ -128,12 +128,17 @@ export async function calculateReservationFinancials(
   let ordinaryAmountPaid = payState.totalEffectivePaid;
 
   const depositApplyRes = await client.query(
-    `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
+    `SELECT COALESCE(SUM(
+      CASE
+        WHEN entry_type = 'DEPOSIT_APPLY' AND direction = 'CREDIT' THEN amount
+        WHEN entry_type = 'DEPOSIT_UNAPPLY' AND direction = 'DEBIT' THEN -amount
+        ELSE 0
+      END
+    ), 0) AS applied_deposit
      FROM folio_entries
      WHERE reservation_id = $1
        AND property_id = $2
-       AND entry_type = 'DEPOSIT_APPLY'
-       AND direction = 'CREDIT'
+       AND entry_type IN ('DEPOSIT_APPLY', 'DEPOSIT_UNAPPLY')
        AND status = 'POSTED'
        AND is_voided = FALSE
        AND reversal_of_entry_id IS NULL`,
@@ -248,7 +253,7 @@ export async function calculateHotelCollectibleBalance(
     `SELECT
        COALESCE(SUM(CASE
          WHEN direction = 'DEBIT'
-          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
           AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
          THEN amount
          ELSE 0

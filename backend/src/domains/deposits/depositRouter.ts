@@ -3,14 +3,17 @@ import multer from 'multer';
 import type { Pool } from 'pg';
 import { requireAuth, normalizeRoleName, type AuthenticatedRequest } from '../auth/authMiddleware';
 import { isPlatformSuperAdmin } from '../auth/authService';
-import { applyDeposit, getDepositsByReservation, receiveDeposit, refundDeposit, reverseDeposit } from './depositService';
+import { applyDeposit, getDepositsByReservation, receiveDeposit, refundDeposit, reverseDeposit, unapplyDeposit } from './depositService';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 function positiveInt(value: unknown, field: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw Object.assign(new Error(`${field} must be a positive integer`), { statusCode: 400, code: 'VALIDATION_ERROR' });
+    // DEPOSIT-PURPOSE-PHASE-B: a missing/undefined value reports the field name
+    // explicitly so callers (e.g. apply_event_id) get an actionable 400.
+    const label = value === undefined || value === null ? `${field} is required` : `${field} must be a positive integer`;
+    throw Object.assign(new Error(label), { statusCode: 400, code: 'VALIDATION_ERROR' });
   }
   return parsed;
 }
@@ -58,6 +61,9 @@ export function createDepositRouter(pool: Pool): Router {
         reservationId,
         amount: Number(req.body?.amount),
         paymentMethod: req.body?.payment_method,
+        // DEPOSIT-PURPOSE-PHASE-A: purpose wajib eksplisit untuk create baru.
+        // Missing/invalid ditolak di service layer dengan 400 VALIDATION_ERROR.
+        purpose: req.body?.purpose,
         idempotencyKey: idempotencyKey(req),
         actor: actorFor(req),
         notes: req.body?.notes || null,
@@ -117,6 +123,25 @@ export function createDepositRouter(pool: Pool): Router {
         idempotencyKey: idempotencyKey(req),
         actor: actorFor(req),
         reason: req.body?.reason
+      });
+      return res.status(200).json({ status: 'SUCCESS', data: result });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/deposits/:id/unapply', ...allowed, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const result = await unapplyDeposit(pool, {
+        depositId: positiveInt(req.params.id, 'deposit_id'),
+        propertyId: await propertyIdFor(req, pool),
+        reservationId: positiveInt(req.body?.reservation_id, 'reservation_id'),
+        // DEPOSIT-PURPOSE-PHASE-B: apply_event_id is MANDATORY — no fallback.
+        applyEventId: positiveInt(req.body?.apply_event_id, 'apply_event_id'),
+        amount: Number(req.body?.amount),
+        idempotencyKey: idempotencyKey(req),
+        actor: actorFor(req),
+        notes: req.body?.notes || null
       });
       return res.status(200).json({ status: 'SUCCESS', data: result });
     } catch (error) {

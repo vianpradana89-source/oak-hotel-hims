@@ -617,7 +617,7 @@ WITH net_charges AS (
     fe.reservation_id,
     COALESCE(SUM(CASE
       WHEN fe.direction = 'DEBIT'
-        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
       THEN fe.amount ELSE 0 END), 0) AS gross_charges,
     COALESCE(SUM(CASE
       WHEN fe.direction = 'CREDIT'
@@ -638,7 +638,7 @@ WITH net_charges AS (
       THEN fe.amount ELSE 0 END), 0) AS commercial_discounts,
     COUNT(CASE
       WHEN fe.direction = 'DEBIT'
-        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
       THEN 1 END) AS charge_count
   FROM folio_entries fe
   WHERE fe.property_id = $1
@@ -648,12 +648,17 @@ WITH net_charges AS (
 deposit_apply AS (
   SELECT
     fe.reservation_id,
-    COALESCE(SUM(fe.amount), 0) AS applied_deposit
+    COALESCE(SUM(
+      CASE
+        WHEN fe.entry_type = 'DEPOSIT_APPLY' AND fe.direction = 'CREDIT' THEN fe.amount
+        WHEN fe.entry_type = 'DEPOSIT_UNAPPLY' AND fe.direction = 'DEBIT' THEN -fe.amount
+        ELSE 0
+      END
+    ), 0) AS applied_deposit
   FROM folio_entries fe
   WHERE fe.property_id = $1
     AND fe.reservation_id = ANY($2)
-    AND fe.entry_type = 'DEPOSIT_APPLY'
-    AND fe.direction = 'CREDIT'
+    AND fe.entry_type IN ('DEPOSIT_APPLY', 'DEPOSIT_UNAPPLY')
     AND fe.status = 'POSTED'
     AND fe.is_voided = FALSE
     AND fe.reversal_of_entry_id IS NULL
@@ -707,7 +712,7 @@ hotel_collectible AS (
     fe.reservation_id,
     COALESCE(SUM(CASE
       WHEN fe.direction = 'DEBIT'
-        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT')
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
         AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
       THEN fe.amount ELSE 0 END), 0) AS gross_collectible,
     COALESCE(SUM(CASE

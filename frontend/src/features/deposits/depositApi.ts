@@ -1,5 +1,6 @@
 export type DepositStatus = 'RECEIVED' | 'PARTIALLY_USED' | 'CLOSED' | 'CANCELLED';
-export type DepositEventType = 'RECEIVED' | 'APPLY' | 'REFUND' | 'REVERSAL';
+export type DepositEventType = 'RECEIVED' | 'APPLY' | 'REFUND' | 'REVERSAL' | 'UNAPPLY';
+export type DepositPurpose = 'ADVANCE_PAYMENT' | 'SECURITY_DEPOSIT';
 export type IdentityDocumentType = 'KTP' | 'SIM' | 'PASSPORT' | 'OTHER';
 export type GuaranteeScope = 'ROOM_RESERVATION' | 'BOOKING_GROUP';
 
@@ -21,6 +22,11 @@ export interface DepositEvent {
   notes?: string | null;
   created_at: string;
   reversed_event_type?: string | null;
+  /**
+   * DEPOSIT-PURPOSE-PHASE-B: for UNAPPLY events, the id of the APPLY event
+   * being reversed. Present when event_type === 'UNAPPLY'.
+   */
+  reversal_of_event_id?: number | null;
 }
 
 export interface Deposit {
@@ -33,6 +39,13 @@ export interface Deposit {
   original_amount: number;
   payment_method: string;
   status: DepositStatus;
+  /**
+   * Deposit purpose classification.
+   * - 'ADVANCE_PAYMENT' = Uang Muka / DP
+   * - 'SECURITY_DEPOSIT' = Jaminan
+   * - null/undefined   = LEGACY / belum terklasifikasi (baris lama, hanya read)
+   */
+  purpose?: DepositPurpose | null;
   received_by: string;
   notes?: string | null;
   created_at: string;
@@ -88,6 +101,12 @@ export const depositApi = {
     payment_method: string; idempotency_key: string; notes?: string;
     file?: File; evidence_note?: string;
     scope?: GuaranteeScope;
+    /**
+     * DEPOSIT-PURPOSE-PHASE-A: WAJIB untuk create deposit baru.
+     * 'ADVANCE_PAYMENT' (Uang Muka/DP) | 'SECURITY_DEPOSIT' (Jaminan).
+     * Missing/invalid -> backend menolak 400 VALIDATION_ERROR.
+     */
+    purpose: DepositPurpose;
   }) => {
     const fd = new FormData();
     fd.append('property_id', String(data.property_id));
@@ -95,6 +114,7 @@ export const depositApi = {
     fd.append('amount', String(data.amount));
     fd.append('payment_method', data.payment_method);
     fd.append('idempotency_key', data.idempotency_key);
+    fd.append('purpose', data.purpose);
     if (data.notes) fd.append('notes', data.notes);
     if (data.file) fd.append('file', data.file);
     if (data.evidence_note) fd.append('evidence_note', data.evidence_note);
@@ -138,6 +158,22 @@ export const depositApi = {
     idempotency_key: string; reason: string;
   }) =>
     apiFetch<any>(`/api/deposits/${depositId}/reverse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(data),
+    }),
+
+  unapply: (depositId: number, data: {
+    property_id: number; reservation_id: number; amount: number;
+    /**
+     * DEPOSIT-PURPOSE-PHASE-B: MANDATORY. The specific DEPOSIT_APPLY event
+     * id this UNAPPLY targets. Backend rejects missing/invalid value with
+     * 400 VALIDATION_ERROR.
+     */
+    apply_event_id: number;
+    idempotency_key: string; notes?: string;
+  }) =>
+    apiFetch<any>(`/api/deposits/${depositId}/unapply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(data),

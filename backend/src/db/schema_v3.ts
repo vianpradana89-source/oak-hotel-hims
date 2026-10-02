@@ -3644,23 +3644,29 @@ export async function initializeDatabase(pool: Pool) {
         );
       }
       await auditMigrationClient.query(`
-        CREATE TABLE IF NOT EXISTS deposits (
-          id BIGSERIAL PRIMARY KEY,
-          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
-          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
-          deposit_number VARCHAR(40) NOT NULL,
-          original_amount BIGINT NOT NULL CHECK (original_amount > 0),
-          payment_method VARCHAR(30) NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED'
-            CHECK (status IN ('RECEIVED', 'PARTIALLY_USED', 'CLOSED', 'CANCELLED')),
-          received_by VARCHAR(100) NOT NULL,
-          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          notes TEXT,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_deposits_property_number UNIQUE (property_id, deposit_number),
-          CONSTRAINT uq_deposits_event_identity UNIQUE (id, property_id, reservation_id)
-        );
+         CREATE TABLE IF NOT EXISTS deposits (
+           id BIGSERIAL PRIMARY KEY,
+           property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+           reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+           deposit_number VARCHAR(40) NOT NULL,
+           original_amount BIGINT NOT NULL CHECK (original_amount > 0),
+           payment_method VARCHAR(30) NOT NULL,
+           status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED'
+             CHECK (status IN ('RECEIVED', 'PARTIALLY_USED', 'CLOSED', 'CANCELLED')),
+           received_by VARCHAR(100) NOT NULL,
+           received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           notes TEXT,
+           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           -- DEPOSIT-PURPOSE-PHASE-A (canonical fresh schema, hardening #3):
+           -- purpose is nullable, NO DEFAULT. New deposits MUST set it explicitly
+           -- (enforced at service layer). Legacy rows stay NULL = LEGACY/UNKNOWN.
+           -- Check allows NULL (legacy) or one of the two canonical purposes.
+           purpose VARCHAR(30) NULL
+             CHECK (purpose IS NULL OR purpose IN ('ADVANCE_PAYMENT', 'SECURITY_DEPOSIT')),
+           CONSTRAINT uq_deposits_property_number UNIQUE (property_id, deposit_number),
+           CONSTRAINT uq_deposits_event_identity UNIQUE (id, property_id, reservation_id)
+         );
 
         CREATE TABLE IF NOT EXISTS deposit_events (
           id BIGSERIAL PRIMARY KEY,
@@ -3668,7 +3674,7 @@ export async function initializeDatabase(pool: Pool) {
           property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
           reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
           event_type VARCHAR(30) NOT NULL
-            CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL')),
+            CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL', 'UNAPPLY')),
           amount BIGINT NOT NULL CHECK (amount > 0),
           payment_transaction_id INTEGER REFERENCES payment_transactions(id) ON DELETE RESTRICT,
           folio_entry_id INTEGER REFERENCES folio_entries(id) ON DELETE RESTRICT,
@@ -3687,6 +3693,7 @@ export async function initializeDatabase(pool: Pool) {
             OR (event_type = 'APPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NULL)
             OR (event_type = 'REFUND' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
             OR (event_type = 'REVERSAL' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NOT NULL)
+            OR (event_type = 'UNAPPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NOT NULL)
           )
         );
 
@@ -3707,6 +3714,15 @@ export async function initializeDatabase(pool: Pool) {
         CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_events_single_reversal
           ON deposit_events(reversal_of_event_id)
           WHERE event_type = 'REVERSAL';
+        -- DEPOSIT-PURPOSE-PHASE-A (hardening #3): NON-UNIQUE index for UNAPPLY
+        -- target lookups (multiple partial UNAPPLY events may target the same
+        -- APPLY event; per-target uniqueness is service-layer enforced).
+        CREATE INDEX IF NOT EXISTS idx_deposit_events_unapply_target
+          ON deposit_events(reversal_of_event_id)
+          WHERE event_type = 'UNAPPLY';
+        -- DEPOSIT-PURPOSE-PHASE-A (hardening #3): classification lookups.
+        CREATE INDEX IF NOT EXISTS idx_deposits_purpose
+          ON deposits(property_id, purpose);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_refund_reference
           ON payment_transactions(property_id, reference_code)
           WHERE transaction_type = 'DEPOSIT_REFUND' AND reference_code IS NOT NULL;
@@ -3742,6 +3758,229 @@ export async function initializeDatabase(pool: Pool) {
         VALUES ('front_office_deposit_identity_custody_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
+    }
+
+    // 27b. DEPOSIT PURPOSE + UNAPPLY SCHEMA FOUNDATION (PHASE A)
+    // Marker: deposit_purpose_unapply_v1
+    //
+    // Purpose:
+    //   - deposits.purpose: nullable, NO default. New deposits MUST set it
+    //     explicitly (enforced at service layer). Legacy rows remain NULL and
+    //     are treated as LEGACY/UNKNOWN on read — no auto-backfill.
+    //   - deposit_events.event_type: extend to include 'UNAPPLY' so the
+    //     schema supports the future UNAPPLY operation (Phase B service).
+    //   - chk_deposit_event_projection: add UNAPPLY branch (offsets an APPLY
+    //     folio CREDIT; carries both a folio_entry_id and a
+    //     reversal_of_event_id pointing at the UNAPPLY target).
+    //   - NON-UNIQUE index idx_deposit_events_unapply_target on
+    //     reversal_of_event_id WHERE event_type = 'UNAPPLY': multiple
+    //     partial UNAPPLY events may target the same APPLY event; per-target
+    //     uniqueness is enforced at service layer, not DB.
+    //
+    // Safety:
+    //   - Additive & idempotent (ADD COLUMN IF NOT EXISTS / conditional DDL).
+    //   - Single transaction + advisory lock + double-checked marker.
+    //   - No UPDATE/DELETE of business data.
+    const depositPurposeUnapplyMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'deposit_purpose_unapply_v1'"
+    );
+    if ((depositPurposeUnapplyMarker.rowCount ?? 0) === 0) {
+      const dpClient = await auditMigrationClient;
+      await dpClient.query('BEGIN');
+      try {
+        await dpClient.query(
+          "SELECT pg_advisory_xact_lock(hashtext('oak_hims_deposit_purpose_unapply_v1_lock'))"
+        );
+        // Double-check marker inside the lock
+        const recheck = await dpClient.query(
+          "SELECT 1 FROM schema_migrations WHERE version = 'deposit_purpose_unapply_v1'"
+        );
+        if ((recheck.rowCount ?? 0) === 0) {
+          // ── Pre-flight: verify expected current state ────────────────────
+          // deposits & deposit_events must already exist (created by 27 above).
+          const depTable = await dpClient.query(
+            "SELECT to_regclass('public.deposits') AS t, to_regclass('public.deposit_events') AS e"
+          );
+          if (depTable.rows[0]?.t !== 'deposits' || depTable.rows[0]?.e !== 'deposit_events') {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: public.deposits or public.deposit_events does not exist. ' +
+              'The canonical deposit foundation (front_office_deposit_identity_custody_v1) must be applied first.'
+            );
+          }
+
+          // Verify the event_type CHECK constraint is in a known shape before
+          // we extend it. We only proceed if the column exists with a
+          // constraint named chk_deposit_events_event_type_check (PostgreSQL
+          // default naming) OR no named check exists yet (fresh table just
+          // created inline). If an unexpected custom constraint is present we
+          // fail rather than silently DROP/REPLACE it.
+          const evTypeChecks = await dpClient.query(
+            `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+               FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposit_events'
+                AND c.contype = 'c'
+                AND c.conname LIKE '%event_type%'`
+          );
+          const evTypeCheckNames = evTypeChecks.rows.map((r: any) => r.conname);
+          const hasStandardCheck = evTypeCheckNames.length === 1;
+          if (!hasStandardCheck) {
+            // Fail-safe: refuse to guess at an unknown constraint layout.
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: expected exactly one CHECK constraint on ' +
+              'deposit_events referencing event_type, found ' + evTypeCheckNames.length +
+              ' (' + evTypeCheckNames.join(', ') + '). Manual review required before re-running.'
+            );
+          }
+
+          // Verify deposits.purpose does not already exist with a DEFAULT
+          // (which would contradict the no-default design). If present and
+          // has a default, fail. If absent, we create it.
+          const purposeCol = await dpClient.query(
+            `SELECT d.column_default IS NOT NULL AS has_default, d.column_default
+               FROM information_schema.columns d
+              WHERE d.table_schema = 'public' AND d.table_name = 'deposits' AND d.column_name = 'purpose'`
+          );
+          if ((purposeCol.rowCount ?? 0) === 1 && purposeCol.rows[0].has_default) {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: deposits.purpose already exists WITH a default ' +
+              '(' + purposeCol.rows[0].column_default + '). Design requires no default. Manual fix needed.'
+            );
+          }
+
+          // ── 1. Add deposits.purpose (nullable, no default) ──────────────
+          await dpClient.query(`
+            ALTER TABLE deposits
+              ADD COLUMN IF NOT EXISTS purpose VARCHAR(30) NULL
+          `);
+          // Enforce the purpose domain (legacy NULL stays legal; any non-null
+          // value must be one of the two canonical purposes). Idempotent.
+          const purposeCheck = await dpClient.query(
+            `SELECT 1 FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposits'
+                AND c.contype = 'c'
+                AND c.conname = 'chk_deposits_purpose'`
+          );
+          if ((purposeCheck.rowCount ?? 0) === 0) {
+            await dpClient.query(`
+              ALTER TABLE deposits
+                ADD CONSTRAINT chk_deposits_purpose
+                CHECK (purpose IS NULL OR purpose IN ('ADVANCE_PAYMENT', 'SECURITY_DEPOSIT'))
+            `);
+          }
+
+          // ── 2. Extend event_type CHECK constraint to include UNAPPLY ────
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              DROP CONSTRAINT ${evTypeCheckNames[0]}
+          `);
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              ADD CONSTRAINT ${evTypeCheckNames[0]}
+              CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL', 'UNAPPLY'))
+          `);
+
+          // ── 3. Extend projection constraint with UNAPPLY branch ─────────
+          // Find the existing projection check constraint and replace it.
+          const projChecks = await dpClient.query(
+            `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+               FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposit_events'
+                AND c.contype = 'c'
+                AND c.conname LIKE '%projection%'`
+          );
+          if ((projChecks.rowCount ?? 0) !== 1) {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: expected exactly one projection CHECK ' +
+              'constraint on deposit_events, found ' + (projChecks.rowCount ?? 0) + ' (' +
+              projChecks.rows.map((r: any) => r.conname).join(', ') + ').'
+            );
+          }
+          const projName = projChecks.rows[0].conname;
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              DROP CONSTRAINT ${projName}
+          `);
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              ADD CONSTRAINT ${projName} CHECK (
+                (event_type = 'RECEIVED' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'APPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'REFUND' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'REVERSAL' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NOT NULL)
+                OR (event_type = 'UNAPPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NOT NULL)
+              )
+          `);
+
+          // ── 4. Non-UNIQUE index for UNAPPLY target lookups ──────��──────
+          // Multiple partial UNAPPLY events may target the same APPLY event.
+          // Per-target uniqueness is service-layer enforced, not DB-level.
+          await dpClient.query(`
+            CREATE INDEX IF NOT EXISTS idx_deposit_events_unapply_target
+              ON deposit_events (reversal_of_event_id)
+              WHERE event_type = 'UNAPPLY'
+          `);
+
+          // ── 5. Index on deposits.purpose for classification queries ────
+          await dpClient.query(`
+            CREATE INDEX IF NOT EXISTS idx_deposits_purpose
+              ON deposits (property_id, purpose)
+          `);
+
+          // ── 6. Verify final state before committing marker ──────────────
+          const verifyPurpose = await dpClient.query(
+            `SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'deposits' AND column_name = 'purpose'`
+          );
+          if ((verifyPurpose.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: deposits.purpose missing');
+          }
+          const verifyEvType = await dpClient.query(
+            `SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'deposit_events' AND column_name = 'event_type'`
+          );
+          if ((verifyEvType.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: deposit_events.event_type missing');
+          }
+          const verifyUnapplyIdx = await dpClient.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_deposit_events_unapply_target'`
+          );
+          if ((verifyUnapplyIdx.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: idx_deposit_events_unapply_target missing');
+          }
+          const verifyPurposeIdx = await dpClient.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_deposits_purpose'`
+          );
+          if ((verifyPurposeIdx.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: idx_deposits_purpose missing');
+          }
+          const verifyPurposeCheck = await dpClient.query(
+            `SELECT 1 FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposits'
+                AND c.contype = 'c'
+                AND c.conname = 'chk_deposits_purpose'`
+          );
+          if ((verifyPurposeCheck.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: chk_deposits_purpose missing');
+          }
+
+          // ── 7. Write marker ─────────────────────────────────────────────
+          await dpClient.query(`
+            INSERT INTO schema_migrations (version)
+            VALUES ('deposit_purpose_unapply_v1')
+            ON CONFLICT (version) DO NOTHING;
+          `);
+        }
+        await dpClient.query('COMMIT');
+      } catch (err: any) {
+        await dpClient.query('ROLLBACK').catch(() => {});
+        throw new Error(
+          '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] ROLLED BACK: ' + (err?.message || String(err))
+        );
+      }
     }
 
     // 28. CHECKED-IN AUDITED ROOM MOVE LEDGER

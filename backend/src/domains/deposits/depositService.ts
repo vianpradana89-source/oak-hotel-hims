@@ -8,13 +8,15 @@ import type {
   ApplyDepositInput,
   DepositBalanceSummary,
   DepositEventType,
+  DepositPurpose,
   DepositReconciliationIssue,
   DepositScope,
   DepositStatus,
   EvidenceUpload,
   ReceiveDepositInput,
   RefundDepositInput,
-  ReverseDepositInput
+  ReverseDepositInput,
+  UnapplyDepositInput
 } from './depositTypes';
 
 const SUPPORTED_PAYMENT_METHODS = new Set([
@@ -25,6 +27,11 @@ const SUPPORTED_PAYMENT_METHODS = new Set([
   'CARD',
   'DEBIT_CARD',
   'CREDIT_CARD'
+]);
+
+const SUPPORTED_DEPOSIT_PURPOSES = new Set<string>([
+  'ADVANCE_PAYMENT',
+  'SECURITY_DEPOSIT'
 ]);
 
 function domainError(statusCode: number, code: string, message: string, details?: unknown): Error {
@@ -62,6 +69,21 @@ function validateScope(value: unknown): DepositScope {
   throw domainError(400, 'INVALID_SCOPE', `Invalid deposit scope: ${value}. Allowed values: ROOM_RESERVATION, BOOKING_GROUP`);
 }
 
+/**
+ * DEPOSIT-PURPOSE-PHASE-A:
+ * Semua deposit create baru WAJIB purpose explicit (ADVANCE_PAYMENT | SECURITY_DEPOSIT).
+ * Missing / NULL / invalid -> 400 VALIDATION_ERROR (fail-closed, tanpa default).
+ * Deposit lama (baris existing dengan purpose NULL) tetap readable sebagai
+ * LEGACY/UNKNOWN di read path (hydrateDeposit SELECT *); tidak ada backfill.
+ */
+function normalizeDepositPurpose(value: unknown): DepositPurpose {
+  const purpose = String(value ?? '').trim().toUpperCase();
+  if (!SUPPORTED_DEPOSIT_PURPOSES.has(purpose)) {
+    throw domainError(400, 'VALIDATION_ERROR', `Deposit purpose is required for new deposits. Allowed values: ADVANCE_PAYMENT, SECURITY_DEPOSIT (got: ${value === undefined ? 'missing' : JSON.stringify(value)})`);
+  }
+  return purpose as DepositPurpose;
+}
+
 function validateEvidence(file?: EvidenceUpload | null): void {
   if (!file) return;
   const validation = validateEvidenceUpload(file);
@@ -83,6 +105,7 @@ export function deriveDepositBalance(events: any[]): DepositBalanceSummary {
   let applied = 0;
   let refunded = 0;
   let reversedReceived = 0;
+  let unapplied = 0;
 
   for (const event of events) {
     const amount = asInteger(event.amount);
@@ -92,6 +115,17 @@ export function deriveDepositBalance(events: any[]): DepositBalanceSummary {
         break;
       case 'APPLY':
         applied += amount;
+        break;
+      case 'UNAPPLY':
+        // DEPOSIT-PURPOSE-PHASE-A (schema support only):
+        // UNAPPLY events are now permitted by the schema. Balance projection
+        // must remain total over the extended event set: an UNAPPLY reverses a
+        // prior APPLY, so it decrements applied and returns the amount to
+        // remaining custody. The unapplyDeposit service/endpoint itself is
+        // Phase B and is NOT exposed yet — no UNAPPLY event can be created
+        // through any runtime path in Phase A.
+        applied -= amount;
+        unapplied += amount;
         break;
       case 'REFUND':
         refunded += amount;
@@ -109,12 +143,13 @@ export function deriveDepositBalance(events: any[]): DepositBalanceSummary {
 
   effectiveReceived -= reversedReceived;
   const remaining = effectiveReceived - applied - refunded;
-  if (effectiveReceived < 0 || remaining < 0 || applied + refunded > effectiveReceived) {
+  if (effectiveReceived < 0 || remaining < 0 || applied < 0 || applied + refunded > effectiveReceived) {
     throw domainError(409, 'DEPOSIT_INVARIANT_VIOLATION', 'Derived deposit balance is negative or over-consumed', {
       effective_received: effectiveReceived,
       applied,
       refunded,
       reversed_received: reversedReceived,
+      unapplied,
       remaining
     });
   }
@@ -268,13 +303,18 @@ function assertReplayMatches(event: any, expected: {
   amount?: number;
   paymentMethod?: string;
   notes?: string;
+  /** DEPOSIT-PURPOSE-PHASE-B: bind UNAPPLY replay to a specific apply event.
+   *  When provided, the replayed UNAPPLY event's reversal_of_event_id must match. */
+  applyEventId?: number | null;
 }): void {
   const mismatch =
     Number(event.reservation_id) !== expected.reservationId
     || (expected.depositId !== undefined && Number(event.deposit_id) !== expected.depositId)
     || (expected.amount !== undefined && asInteger(event.amount) !== expected.amount)
     || (expected.paymentMethod !== undefined && String(event.payment_method || '').toUpperCase() !== expected.paymentMethod)
-    || (expected.notes !== undefined && String(event.notes || '') !== expected.notes);
+    || (expected.notes !== undefined && String(event.notes || '') !== expected.notes)
+    || (expected.applyEventId !== undefined
+      && Number(event.reversal_of_event_id ?? 0) !== expected.applyEventId);
   if (mismatch) {
     throw domainError(409, 'IDEMPOTENCY_KEY_REUSED', 'Idempotency key was already used with a different request');
   }
@@ -385,6 +425,7 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
   const idempotencyKey = validateIdempotencyKey(input.idempotencyKey);
   validateEvidence(input.evidence);
   const scope = validateScope(input.scope);
+  const purpose = normalizeDepositPurpose(input.purpose);
 
   let savedStorageKey: string | null = null;
   const client = await pool.connect();
@@ -441,10 +482,10 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
     const depositResult = await client.query(
       `INSERT INTO deposits (
          property_id, reservation_id, deposit_number, original_amount,
-         payment_method, status, received_by, notes, booking_id, scope
-       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, $9)
+         payment_method, status, received_by, notes, booking_id, scope, purpose
+       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, $9, $10)
        RETURNING *`,
-      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, resolvedBookingId, scope]
+      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, resolvedBookingId, scope, purpose]
     );
     const deposit = depositResult.rows[0];
 
@@ -465,6 +506,7 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
       payment_transaction_id: payment.id,
       amount,
       payment_method: method,
+      purpose,
       evidence_id: evidence?.id || null,
       actor_user_id: input.actor.userId,
       actor_name: input.actor.name
@@ -494,6 +536,22 @@ export async function applyDeposit(pool: Pool, input: ApplyDepositInput): Promis
     await lockIdempotencyKey(client, propertyId, idempotencyKey);
     const reservation = await lockReservation(client, propertyId, reservationId);
     const deposit = await lockDeposit(client, depositId, propertyId, reservationId);
+
+    // DEPOSIT-PURPOSE-PHASE-A: SECURITY_DEPOSIT is custody-only. It may never be
+    // applied to outstanding charges — the only exit is REFUND after check-out.
+    // Legacy deposits (purpose NULL) are permissive and keep their original
+    // apply behavior (backward-compatible).
+    const depositPurpose = deposit.purpose === undefined || deposit.purpose === null
+      ? null
+      : String(deposit.purpose).trim().toUpperCase();
+    if (depositPurpose !== null && depositPurpose !== 'ADVANCE_PAYMENT') {
+      // Covers SECURITY_DEPOSIT explicitly, and fails closed on any unexpected
+      // non-legacy purpose value so it can never silently apply.
+      throw domainError(409, 'SECURITY_DEPOSIT_APPLY_FORBIDDEN',
+        depositPurpose === 'SECURITY_DEPOSIT'
+          ? 'Jaminan (SECURITY_DEPOSIT) tidak dapat digunakan ke tagihan. Jaminan bersifat custody dan dikembalikan setelah check-out via Refund Deposit.'
+          : `Deposit dengan purpose ${depositPurpose} tidak dapat diterapkan ke tagihan.`);
+    }
 
     const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'APPLY');
     if (replay) {
@@ -559,6 +617,11 @@ export async function applyDeposit(pool: Pool, input: ApplyDepositInput): Promis
       deposit_event_id: eventResult.rows[0].id,
       folio_entry_id: folio.id,
       amount,
+      // DEPOSIT-PURPOSE-PHASE-A: record the deposit's purpose on every APPLY
+      // audit row so classification (advance vs security vs legacy) is explicit.
+      deposit_purpose: deposit.purpose === undefined || deposit.purpose === null
+        ? null
+        : String(deposit.purpose).trim().toUpperCase(),
       actor_user_id: input.actor.userId,
       actor_name: input.actor.name
     }, idempotencyKey);
@@ -888,6 +951,178 @@ export async function reverseDeposit(pool: Pool, input: ReverseDepositInput): Pr
   }
 }
 
+export async function unapplyDeposit(pool: Pool, input: UnapplyDepositInput): Promise<any> {
+  const propertyId = requirePositiveInteger(input.propertyId, 'property_id');
+  const reservationId = requirePositiveInteger(input.reservationId, 'reservation_id');
+  const depositId = requirePositiveInteger(input.depositId, 'deposit_id');
+  const applyEventId = requirePositiveInteger(input.applyEventId, 'apply_event_id');
+  const amount = requirePositiveInteger(input.amount, 'amount');
+  const idempotencyKey = validateIdempotencyKey(input.idempotencyKey);
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await lockIdempotencyKey(client, propertyId, idempotencyKey);
+    const reservation = await lockReservation(client, propertyId, reservationId);
+    const deposit = await lockDeposit(client, depositId, propertyId, reservationId);
+
+    // ── Idempotent replay check (DEPOSIT-PURPOSE-PHASE-B: bind to applyEventId) ─
+    const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'UNAPPLY');
+    if (replay) {
+      assertReplayMatches(replay, { reservationId, depositId, amount, applyEventId });
+      const existing = await hydrateDeposit(client, depositId);
+      await client.query('COMMIT');
+      return { ...existing, event: replay, idempotent_replay: true };
+    }
+
+    // ── Reservation must not be terminal ───────────────────────────────────
+    assertReservationOpenForDeposit(reservation, 'apply'); // unapply is semantically "undoing an apply"; reservation must be open
+
+    // ── Balance check: must have enough applied to unapply ─────────────────
+    // DEPOSIT-PURPOSE-PHASE-B: a fully-applied deposit derives CLOSED status,
+    // but CLOSED with applied > 0 is a VALID unapply state. Only CANCELLED
+    // (fully reversed receipt) or a deposit with zero applied amount blocks.
+    const events = await getEvents(client, depositId);
+    const before = deriveDepositBalance(events);
+    if (before.status === 'CANCELLED') {
+      throw domainError(409, 'DEPOSIT_NOT_OPEN', 'Deposit is not available for unapply');
+    }
+    if (before.applied <= 0) {
+      throw domainError(409, 'INSUFFICIENT_APPLIED_BALANCE', 'Deposit has no applied amount to unapply', {
+        unapply_amount: amount,
+        applied_balance: before.applied
+      });
+    }
+    if (amount > before.applied) {
+      throw domainError(409, 'UNAPPLY_EXCEEDS_APPLIED', 'Unapply amount exceeds the applied deposit balance', {
+        unapply_amount: amount,
+        applied_balance: before.applied
+      });
+    }
+
+    // ── Verify no REVERSAL event has already cancelled the receipt ────────
+    // (REVERSAL implies the whole receipt was undone; unapply is meaningless)
+    const reversalCount = events.filter(e => e.event_type === 'REVERSAL').length;
+    if (reversalCount > 0) {
+      throw domainError(409, 'DEPOSIT_REVERSAL_ALREADY_PROCESSED', 'A reversal of the receipt has already occurred; unapply is not possible');
+    }
+
+    // ── DEPOSIT-PURPOSE-PHASE-B: resolve & validate the target APPLY event ─
+    // `applyEventId` is MANDATORY (no backend auto-select fallback).
+    // It must point to an APPLY event on the SAME deposit, property, and
+    // reservation. Multiple partial UNAPPLY events may target the same APPLY
+    // event; the per-target cumulative cap is enforced here, not at DB level.
+    const targetRes = await client.query(
+      `SELECT e.id, e.event_type, e.amount, e.folio_entry_id,
+              fe.status AS folio_status, fe.is_voided AS folio_is_voided,
+              fe.entry_type AS folio_type, fe.direction AS folio_direction
+       FROM deposit_events e
+       LEFT JOIN folio_entries fe ON fe.id = e.folio_entry_id
+       WHERE e.id = $1
+         AND e.deposit_id = $2
+         AND e.property_id = $3
+         AND e.reservation_id = $4
+         AND e.event_type = 'APPLY'
+         FOR UPDATE OF e`,
+      [applyEventId, depositId, propertyId, reservationId]
+    );
+    if ((targetRes.rowCount ?? 0) === 0) {
+      throw domainError(409, 'APPLY_TARGET_NOT_FOUND', 'The target apply event was not found for this deposit', {
+        apply_event_id: applyEventId,
+        deposit_id: depositId
+      });
+    }
+    const target = targetRes.rows[0];
+    if (target.folio_type !== 'DEPOSIT_APPLY' || target.folio_direction !== 'CREDIT' || target.folio_status !== 'POSTED' || target.folio_is_voided === true) {
+      throw domainError(409, 'APPLY_TARGET_NOT_EFFECTIVE', 'The target apply event is not an effective posted DEPOSIT_APPLY credit');
+    }
+    const targetAmount = asInteger(target.amount);
+
+    // Per-target cumulative UNAPPLY cap: total already-unapplied against this
+    // specific APPLY event must not be exceeded by the new UNAPPLY amount.
+    const priorUnapplyRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_unapplied
+       FROM deposit_events
+       WHERE reversal_of_event_id = $1
+         AND event_type = 'UNAPPLY'`,
+      [applyEventId]
+    );
+    const priorUnapplied = asInteger(priorUnapplyRes.rows[0]?.total_unapplied || 0);
+    const activeTargetAmount = targetAmount - priorUnapplied;
+    if (amount > activeTargetAmount) {
+      throw domainError(409, 'UNAPPLY_EXCEEDS_APPLIED', 'Unapply amount exceeds the active applied amount of the target apply event', {
+        unapply_amount: amount,
+        active_target_amount: activeTargetAmount,
+        apply_event_id: applyEventId
+      });
+    }
+
+    // ── Insert DEPOSIT_UNAPPLY folio entry (DEBIT direction) ──────────────
+    const folioResult = await client.query(
+      `INSERT INTO folio_entries (
+         reservation_id, property_id, entry_type, description, amount, direction,
+         source_type, source_id, status, actor_user_id, actor_name_snapshot,
+         actor_role_snapshot, base_amount, unit_price, quantity, notes
+       ) VALUES ($1, $2, 'DEPOSIT_UNAPPLY', $3, $4, 'DEBIT',
+         'DEPOSIT', $5, 'POSTED', $6, $7, $8, $4, $4, 1, $9)
+       RETURNING *`,
+      [
+        reservationId,
+        propertyId,
+        `Deposit unapplied: ${deposit.deposit_number}`,
+        amount,
+        String(depositId),
+        input.actor.userId,
+        input.actor.name,
+        input.actor.role,
+        input.notes || null
+      ]
+    );
+    const folio = folioResult.rows[0];
+
+    // ── Insert the UNAPPLY deposit event (DEPOSIT-PURPOSE-PHASE-B:
+    //    reversal_of_event_id is MANDATORY for the UNAPPLY projection branch
+    //    of chk_deposit_event_projection — schema_v3.ts:3696) ───────────
+    const eventResult = await client.query(
+      `INSERT INTO deposit_events (
+         deposit_id, property_id, reservation_id, event_type, amount,
+         folio_entry_id, reversal_of_event_id, idempotency_key, performed_by, notes
+       ) VALUES ($1, $2, $3, 'UNAPPLY', $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [depositId, propertyId, reservationId, amount, folio.id, applyEventId, idempotencyKey, input.actor.name, input.notes || null]
+    );
+
+    // ── Recalculate deposit status projection ─────────────────────────────
+    const balance = await updateStatusProjection(client, depositId);
+
+    // ── Recalculate reservation financials (DEPOSIT_UNAPPLY is not a charge) ─
+    const currentFinancials = await recalculateReservationFinancials(client, reservationId, propertyId);
+    const ordinaryFallback = Math.max(0, currentFinancials.amount_paid);
+    const financials = await recalculateReservationFinancials(client, reservationId, propertyId, ordinaryFallback);
+
+    // ── Audit log ──────────────────────────────────────────────────────────
+    await logDepositAudit(client, 'DEPOSIT_UNAPPLIED', propertyId, reservationId, {
+      deposit_id: depositId,
+      deposit_number: deposit.deposit_number,
+      deposit_event_id: eventResult.rows[0].id,
+      folio_entry_id: folio.id,
+      reversal_of_event_id: applyEventId,
+      amount,
+      actor_user_id: input.actor.userId,
+      actor_name: input.actor.name
+    }, idempotencyKey);
+
+    const hydrated = await hydrateDeposit(client, depositId);
+    await client.query('COMMIT');
+    return { deposit: hydrated, event: eventResult.rows[0], folio_entry: folio, balance, reservation_financials: financials };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function reconcileDeposit(client: PoolClient | Pool, depositId: number): Promise<DepositReconciliationIssue[]> {
   const result = await client.query(
     `SELECT
@@ -922,6 +1157,21 @@ export async function reconcileDeposit(client: PoolClient | Pool, depositId: num
   const issues: DepositReconciliationIssue[] = [];
   const paymentProjectionOwners = new Map<number, number>();
   const folioProjectionOwners = new Map<number, number>();
+
+  // DEPOSIT-PURPOSE-PHASE-B: Precompute per-target UNAPPLY cumulative amounts
+  // so we can verify that total UNAPPLY against any single APPLY event never
+  // exceeds that APPLY event's amount (service-layer cap, per schema design).
+  const applyEventAmounts = new Map<number, number>(); // applyEventId -> APPLY event amount
+  const unappliedPerTarget = new Map<number, number>(); // applyEventId -> cumulative UNAPPLY amount
+  for (const row of result.rows) {
+    if (row.event_type === 'APPLY') {
+      applyEventAmounts.set(Number(row.id), asInteger(row.amount));
+    } else if (row.event_type === 'UNAPPLY' && row.reversal_of_event_id) {
+      const targetId = Number(row.reversal_of_event_id);
+      unappliedPerTarget.set(targetId, (unappliedPerTarget.get(targetId) || 0) + asInteger(row.amount));
+    }
+  }
+
   for (const event of result.rows) {
     const amount = asInteger(event.amount);
     const fail = (code: string, message: string) => issues.push({ event_id: Number(event.id), code, message });
@@ -956,6 +1206,40 @@ export async function reconcileDeposit(client: PoolClient | Pool, depositId: num
       if (Number(event.folio_property_id) !== Number(event.property_id)) fail('FOLIO_PROPERTY_MISMATCH', 'Folio projection property differs from event');
       if (Number(event.folio_reservation_id) !== Number(event.reservation_id)) fail('FOLIO_RESERVATION_MISMATCH', 'Folio projection reservation differs from event');
       if (event.folio_source_type !== 'DEPOSIT' || String(event.folio_source_id) !== String(depositId)) fail('FOLIO_SOURCE_MISMATCH', 'Folio projection does not identify the deposit source');
+    } else if (event.event_type === 'UNAPPLY') {
+      // DEPOSIT-PURPOSE-PHASE-B: UNAPPLY reverses a prior DEPOSIT_APPLY CREDIT.
+      // It posts a DEPOSIT_UNAPPLY DEBIT folio entry that is NOT a new charge.
+      // The event's folio_entry_id must point to a DEPOSIT_UNAPPLY DEBIT entry.
+      if (!event.folio_entry_id) fail('FOLIO_PROJECTION_MISSING', 'UNAPPLY event folio projection is missing');
+      if (event.folio_type !== 'DEPOSIT_UNAPPLY' || event.folio_direction !== 'DEBIT' || event.folio_status !== 'POSTED' || event.folio_is_voided === true) {
+        fail('FOLIO_PROJECTION_INVALID', 'UNAPPLY event expects effective posted DEPOSIT_UNAPPLY folio debit');
+      }
+      if (asInteger(event.folio_amount) !== amount) fail('FOLIO_AMOUNT_MISMATCH', 'UNAPPLY folio projection amount differs from deposit event');
+      if (Number(event.folio_property_id) !== Number(event.property_id)) fail('FOLIO_PROPERTY_MISMATCH', 'UNAPPLY folio projection property differs from event');
+      if (Number(event.folio_reservation_id) !== Number(event.reservation_id)) fail('FOLIO_RESERVATION_MISMATCH', 'UNAPPLY folio projection reservation differs from event');
+      if (event.folio_source_type !== 'DEPOSIT' || String(event.folio_source_id) !== String(depositId)) fail('FOLIO_SOURCE_MISMATCH', 'UNAPPLY folio projection does not identify the deposit source');
+      // UNAPPLY does not have a payment_transaction_id — verify it is absent.
+      if (event.payment_transaction_id) fail('PAYMENT_PROJECTION_UNEXPECTED', 'UNAPPLY event must not have a payment projection');
+
+      // DEPOSIT-PURPOSE-PHASE-B (schema_v3.ts:3696): UNAPPLY projection branch
+      // requires reversal_of_event_id IS NOT NULL and must point at an APPLY
+      // event on the same deposit.
+      if (!event.reversal_of_event_id) {
+        fail('UNAPPLY_TARGET_MISSING', 'UNAPPLY event must reference a target APPLY event via reversal_of_event_id');
+      } else if (event.reversed_event_type !== 'APPLY') {
+        fail('UNAPPLY_TARGET_INVALID_TYPE', 'UNAPPLY reversal_of_event_id must point to an APPLY event');
+      } else {
+        const targetId = Number(event.reversal_of_event_id);
+        const targetAmount = applyEventAmounts.get(targetId);
+        if (targetAmount === undefined) {
+          fail('UNAPPLY_TARGET_NOT_FOUND', `UNAPPLY references APPLY event ${targetId} which is not found in this deposit`);
+        } else {
+          const cumulativeUnapplied = unappliedPerTarget.get(targetId) || 0;
+          if (cumulativeUnapplied > targetAmount) {
+            fail('UNAPPLY_EXCEEDS_APPLY_TARGET', `Cumulative UNAPPLY (${cumulativeUnapplied}) exceeds the target APPLY amount (${targetAmount})`);
+          }
+        }
+      }
     }
   }
 

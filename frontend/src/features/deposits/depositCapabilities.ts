@@ -20,6 +20,7 @@ export interface DepositGuaranteeCapabilities {
   canViewSummary: boolean;
   canReceiveDeposit: boolean;
   canApplyDeposit: boolean;
+  canUnapplyDeposit: boolean;
   canRefundDeposit: boolean;
   canReverseDeposit: boolean;
   canHoldIdentity: boolean;
@@ -35,6 +36,7 @@ export function getDepositGuaranteeCapabilities(roleName?: string | null): Depos
         canViewSummary: true,
         canReceiveDeposit: true,
         canApplyDeposit: true,
+        canUnapplyDeposit: true,
         canRefundDeposit: true,
         canReverseDeposit: true,
         canHoldIdentity: true,
@@ -45,6 +47,7 @@ export function getDepositGuaranteeCapabilities(roleName?: string | null): Depos
         canViewSummary: true,
         canReceiveDeposit: true,
         canApplyDeposit: true,
+        canUnapplyDeposit: true,
         canRefundDeposit: true,
         canReverseDeposit: true,
         canHoldIdentity: true,
@@ -55,6 +58,7 @@ export function getDepositGuaranteeCapabilities(roleName?: string | null): Depos
         canViewSummary: false,
         canReceiveDeposit: false,
         canApplyDeposit: false,
+        canUnapplyDeposit: false,
         canRefundDeposit: false,
         canReverseDeposit: false,
         canHoldIdentity: false,

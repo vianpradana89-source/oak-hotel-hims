@@ -306,7 +306,8 @@ async function main() {
       amount: 500000,
       paymentMethod: 'CASH',
       idempotencyKey: `t21-${runId}`,
-      actor: actor()
+      actor: actor(),
+      purpose: 'ADVANCE_PAYMENT',
       // scope omitted — should default to ROOM_RESERVATION
     });
     artifacts.depIds.push(dep.id);
@@ -331,6 +332,7 @@ async function main() {
       propertyId: pid1, reservationId: grpRes1,
       amount: 300000, paymentMethod: 'CASH',
       idempotencyKey: `t22-${runId}`, actor: actor(),
+      purpose: 'SECURITY_DEPOSIT',
       scope: 'BOOKING_GROUP'
     });
     artifacts.depIds.push(dep.id);
@@ -537,6 +539,7 @@ async function main() {
       propertyId: pid1, reservationId: grpRes1,
       amount: 100000, paymentMethod: 'CASH',
       idempotencyKey: `t33-${runId}`, actor: actor(),
+      purpose: 'ADVANCE_PAYMENT',
       scope: 'ROOM_RESERVATION'
     });
     artifacts.depIds.push(directDep.id);

@@ -51,6 +51,9 @@ function applyPool() {
   const received = { id: 1, deposit_id: 10, property_id: 1, reservation_id: 20, event_type: 'RECEIVED', amount: 1000 };
   const events = [received];
   const queries = [];
+  // DEPOSIT-PURPOSE-PHASE-A: legacy deposit rows carry purpose=null; the apply
+  // path must keep its original permissive behavior for them.
+  const DEPOSIT_ROW = { id: 10, property_id: 1, reservation_id: 20, deposit_number: 'DEP-OAK-00001', original_amount: 1000, purpose: null };
   const client = {
     async query(sql, params = []) {
       const text = String(sql);
@@ -59,7 +62,7 @@ function applyPool() {
       if (text.includes('pg_advisory_xact_lock')) return { rows: [{}], rowCount: 1 };
       if (text.includes('FROM reservations r')) return { rows: [{ id: 20, booking_property_id: 1 }], rowCount: 1 };
       if (text.includes('SELECT * FROM deposits') && text.includes('FOR UPDATE')) {
-        return { rows: [{ id: 10, property_id: 1, reservation_id: 20, deposit_number: 'DEP-OAK-00001', original_amount: 1000 }], rowCount: 1 };
+        return { rows: [DEPOSIT_ROW], rowCount: 1 };
       }
       if (text.includes('WHERE e.property_id') && text.includes('idempotency_key')) return { rows: [], rowCount: 0 };
       if (text.includes('INSERT INTO folio_entries')) return { rows: [{ id: 70, amount: params[3], direction: 'CREDIT', entry_type: 'DEPOSIT_APPLY' }], rowCount: 1 };
@@ -72,7 +75,7 @@ function applyPool() {
       if (text.startsWith('UPDATE deposits SET status')) return { rows: [], rowCount: 1 };
       if (text.includes('INSERT INTO audit_logs')) return { rows: [], rowCount: 1 };
       if (text === 'SELECT * FROM deposits WHERE id = $1') {
-        return { rows: [{ id: 10, property_id: 1, reservation_id: 20, deposit_number: 'DEP-OAK-00001', original_amount: 1000, status: 'PARTIALLY_USED' }], rowCount: 1 };
+        return { rows: [{ ...DEPOSIT_ROW, status: 'PARTIALLY_USED' }], rowCount: 1 };
       }
       throw new Error(`Unexpected query: ${text}`);
     },
