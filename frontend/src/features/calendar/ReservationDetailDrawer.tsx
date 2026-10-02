@@ -13,6 +13,7 @@ import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
 import { useAuth } from '../auth/AuthContext';
 import { Modal } from '../../design-system/Modal';
+import { Tooltip } from '../../design-system/Tooltip';
 import { ComplimentaryActionModal } from './ComplimentaryActionModal';
 import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
@@ -1171,33 +1172,74 @@ export default function ReservationDetailDrawer({
           </div>
         </div>
 
-        {/* Tab Bar — 6 tab shell; all panes stay mounted, inactive panes use display:none */}
-        <div className="flex items-center gap-1 px-4 py-2 bg-white border-b border-stone-200 overflow-x-auto" role="tablist" aria-label="Detail reservasi">
+        {/* Tab Bar — 6 ikon; all panes stay mounted, inactive panes use display:none */}
+        <div className="flex items-center gap-1.5 px-4 py-2 bg-white border-b border-stone-200" role="tablist" aria-label="Detail reservasi">
           {(
             [
-              { key: 'ringkasan', label: 'Ringkasan' },
-              { key: 'tamu-kamar', label: 'Tamu & Kamar' },
-              { key: 'pembayaran', label: 'Pembayaran' },
-              { key: 'deposit-jaminan', label: 'Deposit & Jaminan' },
-              { key: 'dokumen', label: 'Dokumen' },
-              { key: 'riwayat', label: 'Riwayat' },
+              { key: 'ringkasan', label: 'Ringkasan', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="2" y="2" width="12" height="12" rx="2" />
+                  <path d="M5 6h6M5 9h4" strokeLinecap="round" />
+                </svg>
+              ) },
+              { key: 'tamu-kamar', label: 'Tamu & Kamar', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <circle cx="8" cy="5.5" r="2.5" />
+                  <path d="M3.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4" strokeLinecap="round" />
+                </svg>
+              ) },
+              { key: 'pembayaran', label: 'Pembayaran', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="1.5" y="3" width="13" height="10" rx="2" />
+                  <path d="M4 7h2M4 9h1" strokeLinecap="round" />
+                  <circle cx="11" cy="8" r="1.5" />
+                </svg>
+              ) },
+              { key: 'deposit-jaminan', label: 'Deposit & Jaminan', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M8 1.8 2.8 3.7v3.9c0 3 2.2 5.3 5.2 6.6 3-1.3 5.2-3.6 5.2-6.6V3.7L8 1.8Z" strokeLinejoin="round" />
+                  <path d="M5.9 8l1.4 1.4 2.8-2.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) },
+              { key: 'dokumen', label: 'Dokumen', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" />
+                  <path d="M9 2v3h3" />
+                </svg>
+              ) },
+              { key: 'riwayat', label: 'Riwayat', icon: (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8Z" />
+                  <path d="M8 5v3l2 1.5" strokeLinecap="round" />
+                </svg>
+              ) },
             ] as const
-          ).map(tab => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              role="tab"
-              aria-selected={activeTab === tab.key}
-              className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                activeTab === tab.key
-                  ? 'bg-emerald-800 text-white'
-                  : 'bg-stone-100 text-stone-600 hover:bg-stone-200 hover:text-stone-900'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+          ).map(tab => {
+            const isActive = activeTab === tab.key;
+            return (
+              <Tooltip
+                key={tab.key}
+                content={tab.label}
+                position="bottom"
+                className={tab.key === 'ringkasan' ? '!left-0 !translate-x-0' : undefined}
+              >
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(tab.key)}
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-label={tab.label}
+                  className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                    isActive
+                      ? 'bg-emerald-800 text-white'
+                      : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
+                  }`}
+                >
+                  {tab.icon}
+                </button>
+              </Tooltip>
+            );
+          })}
         </div>
 
         {/* Scrollable Body */}
@@ -2194,26 +2236,8 @@ export default function ReservationDetailDrawer({
 
           {/* Tab Pane: Riwayat — always mounted; display:none when inactive */}
           <div className={`space-y-5 ${isTabVisible('riwayat')}`} role="tabpanel" aria-label="Riwayat">
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Dokumen &amp; Cetak
-              </span>
-              <div className="flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsThermalModalOpen(true)}
-                  className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer text-left"
-                >
-                  Cetak Thermal Receipt
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsRegistrationModalOpen(true)}
-                  className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer text-left"
-                >
-                  Form Registrasi
-                </button>
-              </div>
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs text-center">
+              <p className="text-xs text-stone-400 italic">Log aktivitas belum tersedia.</p>
             </div>
           </div>
 
@@ -2296,8 +2320,23 @@ export default function ReservationDetailDrawer({
 
         {/* Action Bar Footer — Lifecycle-Aware Single Action Area */}
         <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-3 flex-wrap">
-          {/* Left: Destructive or Informational State */}
+          {/* Left: Printer action + Destructive or Informational State */}
           <div className="flex items-center gap-2">
+            <Tooltip content="Dokumen &amp; Cetak" position="top" className="!left-0 !translate-x-0">
+              <button
+                type="button"
+                onClick={() => setIsThermalModalOpen(true)}
+                aria-label="Dokumen &amp; Cetak"
+                className="w-8 h-8 rounded-lg flex items-center justify-center bg-stone-100 hover:bg-stone-200 text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="7" width="10" height="6" rx="1" />
+                  <path d="M5 7V3.5A1.5 1.5 0 0 1 6.5 2h3A1.5 1.5 0 0 1 11 3.5V7" />
+                  <path d="M5 11h6" strokeLinecap="round" />
+                  <path d="M11 11h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </Tooltip>
             {isCheckedOut && (
               <div className="text-xs text-stone-500 font-medium flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-stone-400"></span>

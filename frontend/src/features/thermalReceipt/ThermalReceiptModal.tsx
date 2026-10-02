@@ -357,8 +357,8 @@ export default function ThermalReceiptModal({
       <Modal
         isOpen={isOpen}
         onClose={handleClose}
-        title="Cetak Thermal Receipt"
-        subtitle="Pilih jenis bukti yang akan dicetak"
+        title="Cetak Dokumen Reservasi"
+        subtitle="Pilih dokumen yang ingin dicetak."
         size="sm"
       >
         <div className="three-selector">
@@ -417,8 +417,8 @@ export default function ThermalReceiptModal({
       <Modal
         isOpen={isOpen}
         onClose={handleClose}
-        title="Cetak Thermal Receipt"
-        subtitle="Pilih jenis bukti yang akan dicetak"
+        title="Cetak Dokumen Reservasi"
+        subtitle="Pilih dokumen yang ingin dicetak."
         size="sm"
       >
         <div className="three-step-indicator">
@@ -480,8 +480,8 @@ export default function ThermalReceiptModal({
       <Modal
         isOpen={isOpen}
         onClose={handleClose}
-        title="Cetak Thermal Receipt"
-        subtitle="Pilih jenis bukti yang akan dicetak"
+        title="Cetak Dokumen Reservasi"
+        subtitle="Pilih dokumen yang ingin dicetak."
         size="sm"
       >
         <div className="three-step-indicator">
@@ -521,8 +521,8 @@ export default function ThermalReceiptModal({
         <Modal
           isOpen={isOpen}
           onClose={handleClose}
-          title="Cetak Thermal Receipt"
-          subtitle={receiptSubtitle || 'Preview dan cetak thermal receipt'}
+          title="Cetak Dokumen Reservasi"
+          subtitle={receiptSubtitle || 'Pratinjau dan cetak dokumen'}
           size="md"
           footer={confirmFooter}
         >
