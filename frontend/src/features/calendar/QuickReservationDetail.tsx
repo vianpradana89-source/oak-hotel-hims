@@ -10,6 +10,7 @@ import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 import {
   formatReservationRatePlanLabel,
   formatReservationSourceLabel,
+  isOtaReservation,
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
 
@@ -241,6 +242,9 @@ export default function QuickReservationDetail({
   const isDayUse = data.stay_type === 'DAY_USE';
   const sourceLabel = formatReservationSourceLabel(data);
   const ratePlanLabel = formatReservationRatePlanLabel(data);
+  // Rate Plan information is hidden for OTA reservations for display clarity.
+  // The data is preserved; only the UI cell is omitted.
+  const hideRatePlan = isOtaReservation(data);
   const specialRequestsNote = reservationSpecialRequestsText(data);
 
   // Financial status & values
@@ -500,20 +504,22 @@ export default function QuickReservationDetail({
 
           {/* Compact reservation context metadata */}
           <div className="p-2.5 bg-white rounded-xl border border-stone-200 space-y-2">
-            <div className="grid grid-cols-2 gap-2">
+            <div className={`grid gap-2 ${hideRatePlan ? 'grid-cols-1' : 'grid-cols-2'}`}>
               <div>
                 <span className="text-[11px] text-stone-500 block font-medium">Sumber</span>
                 <strong className="text-xs font-semibold text-stone-800">{sourceLabel}</strong>
               </div>
-              <div>
-                <span className="text-[11px] text-stone-500 block font-medium">Rate Plan</span>
-                <strong className="text-xs font-semibold text-stone-800">{ratePlanLabel}</strong>
-              </div>
+              {!hideRatePlan && (
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-medium">Rate Plan</span>
+                  <strong className="text-xs font-semibold text-stone-800">{ratePlanLabel}</strong>
+                </div>
+              )}
             </div>
             {specialRequestsNote ? (
               <div className="pt-1 border-t border-stone-100">
                 <span className="text-[11px] text-stone-500 block font-medium">Catatan</span>
-                <p className="text-xs text-stone-800 line-clamp-2" title={specialRequestsNote}>
+                <p className="text-xs text-rose-700 font-semibold line-clamp-2" title={specialRequestsNote}>
                   {specialRequestsNote}
                 </p>
               </div>

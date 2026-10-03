@@ -24,6 +24,7 @@ import {
   canEditReservationSpecialRequests,
   formatReservationRatePlanLabel,
   formatReservationSourceLabel,
+  isOtaReservation,
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
 import ThermalReceiptModal from '../thermalReceipt/ThermalReceiptModal';
@@ -883,6 +884,9 @@ export default function ReservationDetailDrawer({
   const missingRequirements = precheckinEligibility?.missing ?? [];
   const sourceLabel = formatReservationSourceLabel(data);
   const ratePlanLabel = formatReservationRatePlanLabel(data);
+  // Rate Plan information is hidden for OTA reservations for display clarity.
+  // The data (nightly breakdown, prices, manual-override info) is preserved.
+  const hideRatePlan = isOtaReservation(data);
   const specialRequestsNote = reservationSpecialRequestsText(data);
   const notesEditable = canEditReservationSpecialRequests(data.status);
 
@@ -1190,6 +1194,22 @@ export default function ReservationDetailDrawer({
             >
               {remainingBalance === 0 ? 'Lunas' : amountPaid > 0 ? 'Sebagian' : 'Belum Bayar'}
             </span>
+            {/* Printer action — moved from footer to header, just left of the close (X) button */}
+            <Tooltip content="Dokumen &amp; Cetak" position="bottom" className="!left-auto !right-0 !translate-x-0">
+              <button
+                type="button"
+                onClick={() => setIsThermalModalOpen(true)}
+                aria-label="Dokumen &amp; Cetak"
+                className="w-8 h-8 rounded-lg flex items-center justify-center bg-emerald-800/40 hover:bg-emerald-800/70 text-emerald-100 hover:text-white transition-colors cursor-pointer"
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="7" width="10" height="6" rx="1" />
+                  <path d="M5 7V3.5A1.5 1.5 0 0 1 6.5 2h3A1.5 1.5 0 0 1 11 3.5V7" />
+                  <path d="M5 11h6" strokeLinecap="round" />
+                  <path d="M11 11h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </Tooltip>
             <button
               onClick={requestClose}
               className="text-emerald-300 hover:text-white p-1.5 rounded-lg hover:bg-emerald-800/40 cursor-pointer ml-1"
@@ -1505,14 +1525,16 @@ export default function ReservationDetailDrawer({
 
           {/* Section 5: Rate Plan & Snapshot Tarif Malam */}
           <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Rate Plan &amp; Tarif Menginap
-              </span>
-              <span className="text-xs font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
-                {ratePlanLabel}
-              </span>
-            </div>
+            {!hideRatePlan && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                  Rate Plan &amp; Tarif Menginap
+                </span>
+                <span className="text-xs font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
+                  {ratePlanLabel}
+                </span>
+              </div>
+            )}
 
             {data.is_manual_override && (
               <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
@@ -2405,7 +2427,7 @@ export default function ReservationDetailDrawer({
                   </div>
                 </div>
               ) : specialRequestsNote ? (
-                <p className="text-xs text-stone-800 whitespace-pre-wrap">{specialRequestsNote}</p>
+                <p className="text-xs text-rose-700 font-semibold whitespace-pre-wrap">{specialRequestsNote}</p>
               ) : (
                 <p className="text-xs text-stone-500 italic">Belum ada catatan.</p>
               )}
@@ -2415,23 +2437,8 @@ export default function ReservationDetailDrawer({
 
         {/* Action Bar Footer — Lifecycle-Aware Single Action Area */}
         <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-3 flex-wrap">
-          {/* Left: Printer action + Destructive or Informational State */}
+          {/* Left: Destructive or Informational State (printer moved to header) */}
           <div className="flex items-center gap-2">
-            <Tooltip content="Dokumen &amp; Cetak" position="top" className="!left-0 !translate-x-0">
-              <button
-                type="button"
-                onClick={() => setIsThermalModalOpen(true)}
-                aria-label="Dokumen &amp; Cetak"
-                className="w-8 h-8 rounded-lg flex items-center justify-center bg-stone-100 hover:bg-stone-200 text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
-              >
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <rect x="3" y="7" width="10" height="6" rx="1" />
-                  <path d="M5 7V3.5A1.5 1.5 0 0 1 6.5 2h3A1.5 1.5 0 0 1 11 3.5V7" />
-                  <path d="M5 11h6" strokeLinecap="round" />
-                  <path d="M11 11h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h2" strokeLinecap="round" />
-                </svg>
-              </button>
-            </Tooltip>
             {isCheckedOut && (
               <div className="text-xs text-stone-500 font-medium flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-stone-400"></span>
