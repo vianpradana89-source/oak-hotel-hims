@@ -3990,21 +3990,240 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
   }
 });
 
-app.get('/api/reservations/:id/audit', async (req, res) => {
-  const reservationId = Number(req.params.id);
+// ─── RESERVATION AUDIT LOG — helpers ──────────────────────────────────────────
+
+// Cursor format: "<YYYY-MM-DD HH24:MI:SS.US>|<audit_id>"
+// 26-char fixed timestamp (incl. 6-digit microseconds) + '|' + positive integer.
+const CURSOR_TS_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/;
+const CURSOR_ID_MAX = 2147483647; // INTEGER max
+
+function parseAuditCursor(cursorParam: string): { ts: string; id: number } | null {
+  const sepIdx = cursorParam.lastIndexOf('|');
+  if (sepIdx === -1) return null;
+  const ts = cursorParam.substring(0, sepIdx);
+  const idStr = cursorParam.substring(sepIdx + 1);
+  if (!CURSOR_TS_PATTERN.test(ts)) return null;
+  if (!/^\d+$/.test(idStr)) return null;
+  const id = parseInt(idStr, 10);
+  if (!Number.isInteger(id) || id <= 0 || id > CURSOR_ID_MAX) return null;
+
+  // Full calendar validation: year AD >= 1, month 1-12, day within the
+  // actual month length (leap-year aware). Keeps the 6-digit microseconds
+  // intact and rejects any timestamp that to_char would never emit.
+  const parts = ts.split(/[-:.\s]/);
+  if (parts.length !== 7) return null;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  const hour = Number(parts[3]);
+  const minute = Number(parts[4]);
+  const second = Number(parts[5]);
+  const us = parts[6];
+
+  if (year < 1) return null; // year 0000 is not a valid AD year
+  if (month < 1 || month > 12) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (!/^\d{6}$/.test(us)) return null;
+
+  // Days per month (index 1-12)
+  const daysInMonth = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const isLeap = (y: number) => (y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0));
+  const maxDay = month === 2 && isLeap(year) ? 29 : daysInMonth[month];
+  if (day < 1 || day > maxDay) return null;
+
+  return { ts, id };
+}
+
+// Strict limit validation: integer 1–100, reject silently-clamped parseInt
+function parseAuditLimit(raw: any): number | null {
+  if (raw === undefined || raw === null) return 30; // omitted → default
+  const s = String(raw);
+  if (s === '') return 30; // explicit empty param → default
+  if (!/^\d+$/.test(s)) return null; // any whitespace / junk / negative / decimal → reject
+  const n = parseInt(s, 10);
+  if (!Number.isInteger(n) || n < 1 || n > 100) return null;
+  return n;
+}
+
+// Derive actor: prefer historical name snapshot actually written by the writer.
+// Do NOT display actor_user_id as a name. Candidate must be a valid string.
+function deriveActor(row: any, payload: any): string {
+  // 1) Snapshot name fields actually written in new_value by PMS/PAYMENT/DEPOSIT writers
+  if (payload && typeof payload === 'object') {
+    for (const key of ['actor_name_snapshot', 'actor_name', 'performed_by', 'actor']) {
+      const v = payload[key];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+  }
+  // 2) actor_user_id column is a user ID — NOT a display name.
+  //    Do not surface it as actor. Fall through to "Tidak tercatat".
+  return 'Tidak tercatat';
+}
+
+// Human-readable summary from module:action. Amount only when finite number.
+function buildAuditSummary(module: string | null, action: string | null, payload: any): string {
+  const ma = `${module || ''}:${action || ''}`;
+  const fmtRp = (n: number) => `Rp ${n.toLocaleString('id-ID')}`;
+  const safeAmount = (p: any): number | null => {
+    if (p && typeof p === 'object' && p.amount != null) {
+      const n = Number(p.amount);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+  switch (ma) {
+    case 'PMS:CREATE': return 'Reservasi dibuat';
+    case 'PMS:UPDATE':
+    case 'PMS:UPDATE_RESERVATION_DETAIL': return 'Reservasi diperbarui';
+    case 'PMS:CANCEL': return 'Reservasi dibatalkan';
+    case 'PMS:CHECK_IN': return 'Check-in selesai';
+    case 'PMS:CHECK_OUT': return 'Check-out selesai';
+    case 'PMS:EXTEND': return 'Check-out diperpanjang';
+    case 'PMS:SHORTEN': return 'Check-out dipotong';
+    case 'PMS:ROOM_MOVE': return 'Pindah kamar';
+    case 'PMS:CHECKOUT_ROOM_CHECK_REQUESTED': return 'Inspeksi kamar diminta';
+    case 'PAYMENT:PAYMENT_CREATED': {
+      const amt = safeAmount(payload);
+      return amt != null ? `Pembayaran ${fmtRp(amt)}` : 'Pembayaran dicatat';
+    }
+    case 'PAYMENT:PAYMENT_CORRECTED': {
+      const amt = safeAmount(payload);
+      return amt != null ? `Koreksi pembayaran ${fmtRp(amt)}` : 'Koreksi pembayaran dicatat';
+    }
+    case 'PAYMENT:PAYMENT_VOIDED':
+    case 'PAYMENT:PAYMENT_REVOKED':
+      return 'Pembayaran dibatalkan';
+    case 'PAYMENT:PAYMENT_EVIDENCE_UPLOADED':
+      return 'Bukti pembayaran diunggah';
+    case 'DEPOSIT:DEPOSIT_RECEIVED':
+    case 'DEPOSIT:DEPOSIT_CREATED': {
+      const amt = safeAmount(payload);
+      return amt != null ? `Deposit diterima ${fmtRp(amt)}` : 'Deposit diterima';
+    }
+    case 'DEPOSIT:DEPOSIT_APPLIED': {
+      const amt = safeAmount(payload);
+      return amt != null ? `Deposit diterapkan (${fmtRp(amt)})` : 'Deposit diterapkan';
+    }
+    case 'DEPOSIT:DEPOSIT_REFUNDED':
+    case 'DEPOSIT:DEPOSIT_CLEARED':
+      return 'Deposit dikembalikan';
+    case 'DEPOSIT:DEPOSIT_REVERSED':
+      return 'Deposit dibatalkan';
+    case 'DEPOSIT:DEPOSIT_UNAPPLIED':
+      return 'Deposit tidak diterapkan';
+    default:
+      return 'Aktivitas tercatat';
+  }
+}
+
+// ─── RESERVATION AUDIT LOG — endpoint ─────────────────────────────────────────
+app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
+  const rawResId = req.params.id;
+  // Strict: digits-only string, positive, within INTEGER range (SERIAL column).
+  if (!/^\d+$/.test(rawResId)) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Reservation ID must be a positive integer' });
+  }
+  const reservationId = parseInt(rawResId, 10);
+  if (reservationId <= 0 || reservationId > CURSOR_ID_MAX) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Reservation ID must be a positive integer' });
+  }
+
   try {
+    // 1) Scope check BEFORE assertPropertyExists / data read
     const propertyId = assertPropertyId(req.query);
+    await assertPropertyScope(req, propertyId);
     await assertPropertyExists(pool, propertyId);
     await assertReservationBelongsToProperty(pool, reservationId, propertyId);
 
+    // 2) Strict limit validation
+    const limit = parseAuditLimit(req.query.limit);
+    if (limit === null) {
+      return res.status(400).json({ status: 'ERROR', code: 'INVALID_LIMIT', message: 'limit must be an integer between 1 and 100' });
+    }
+
+    // 3) Cursor parsing & strict validation
+    let cursorTs: string | null = null;
+    let cursorId: number | null = null;
+    const cursorParam = req.query.cursor != null ? String(req.query.cursor) : '';
+    if (cursorParam) {
+      const parsed = parseAuditCursor(cursorParam);
+      if (parsed === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'INVALID_CURSOR', message: 'Invalid cursor format' });
+      }
+      cursorTs = parsed.ts;
+      cursorId = parsed.id;
+    }
+
+    // 4) Build query with parameterized LIMIT
+    const whereClause = `
+      WHERE al.property_id = $1
+        AND al.entity = 'RESERVATION'
+        AND al.record_id = $2`;
+
+    let paginationClause = '';
+    const params: any[] = [propertyId, String(reservationId)];
+    if (cursorTs && cursorId !== null) {
+      params.push(cursorTs, cursorId);
+      paginationClause = `
+        AND (al.timestamp, al.audit_id) < ($3::timestamp, $4)`;
+    }
+
+    // Parameterize LIMIT (not string-interpolated)
+    params.push(limit + 1);
+    const limitPlaceholder = `$${params.length}`;
+
     const result = await pool.query(
-      `SELECT * FROM audit_logs
-       WHERE property_id = $2 AND record_id = $1 AND (entity = 'RESERVATION' OR module = 'PAYMENT')
-       ORDER BY timestamp DESC, audit_id DESC
-       LIMIT 30`,
-      [String(reservationId), propertyId]
+      `SELECT al.audit_id,
+              al.module,
+              al.action,
+              to_char(al.timestamp, 'YYYY-MM-DD HH24:MI:SS.US') AS timestamp_text,
+              al.actor_user_id,
+              al.new_value
+       FROM audit_logs al
+       ${whereClause}
+       ${paginationClause}
+       ORDER BY al.timestamp DESC, al.audit_id DESC
+       LIMIT ${limitPlaceholder}`,
+      params
     );
-    res.json({ status: 'OK', data: result.rows });
+
+    const hasMore = result.rows.length > limit;
+    const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+
+    // 5) Map to redacted DTO — never expose raw new_value
+    const entries = rows.map((row: any) => {
+      let payload: any = null;
+      try { payload = row.new_value ? JSON.parse(row.new_value) : null; } catch (_e) { payload = null; }
+
+      const actor = deriveActor(row, payload);
+      const summary = buildAuditSummary(row.module, row.action, payload);
+      const tsText: string = row.timestamp_text || '';
+      // formatted_time: first 19 chars = "YYYY-MM-DD HH:MM:SS"
+      const formattedTime = tsText.substring(0, 19);
+
+      return {
+        audit_id: row.audit_id,
+        module: row.module,
+        action: row.action,
+        summary,
+        actor,
+        formatted_time: formattedTime,
+      };
+    });
+
+    // 6) next_cursor from last row of this page; null on last page
+    let nextCursor: string | null = null;
+    if (hasMore && rows.length > 0) {
+      const lastRow = rows[rows.length - 1];
+      nextCursor = `${lastRow.timestamp_text}|${lastRow.audit_id}`;
+    }
+
+    res.json({
+      status: 'OK',
+      data: entries,
+      has_more: hasMore,
+      next_cursor: nextCursor,
+    });
   } catch (err: any) {
     if (err?.statusCode) {
       return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });

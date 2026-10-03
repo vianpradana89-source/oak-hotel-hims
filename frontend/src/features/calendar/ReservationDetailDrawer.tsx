@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { safeFetchJson } from './calendarApi';
+import { useAuditLog } from './useAuditLog';
 import { EditReservationModal } from './EditReservationModal';
 import BookedReservationRepriceModal from './BookedReservationRepriceModal';
 import { canShowBookedRateCorrection } from './bookedReservationReprice';
@@ -64,6 +65,12 @@ interface Props {
   complimentaryRefreshVersion?: number;
   complimentaryRefreshReservationId?: number | null;
 }
+
+/** One row of the reservation activity log timeline (backend redacted DTO). */
+export type AuditLogEntry = import('./useAuditLog').AuditLogEntry;
+
+/** GET /api/reservations/:id/audit response envelope. */
+export type AuditLogResponse = import('./useAuditLog').AuditLogResponse;
 
 /* ─────────────────────────────────────────────────────────────────────────
    CHECKIN-READINESS CHECKLIST — reusable sub-component
@@ -364,6 +371,10 @@ export default function ReservationDetailDrawer({
     const [pendingGuaranteeClose, setPendingGuaranteeClose] = useState(false);
     const [isThermalModalOpen, setIsThermalModalOpen] = useState(false);
     const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState(false);
+
+    // ---- Activity Log (Riwayat) state — delegated to useAuditLog hook ----
+    // The hook owns entries, hasMore, cursor, loading, error, loadMoreError,
+    // in-flight guard, generation-based stale-context discard, and auto-load.
     const { authFetch, hasGranularPermission } = useAuth();
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
@@ -488,6 +499,25 @@ export default function ReservationDetailDrawer({
       onSelectReservation(targetId, canonicalDto ?? undefined);
     }
   };
+
+  // ---- Activity Log (Riwayat) lazy-load ----
+  // Context key: identifies the reservation/property pair this state belongs to.
+  // When it changes, the useAuditLog hook internally increments its generation
+  // counter, invalidating any in-flight request for the old context.
+
+  // Delegate audit log loading to the extracted hook.
+  // The hook handles:
+  //  - generation-based stale-response discard (incl. catch/finally)
+  //  - in-flight guard preventing double fetch
+  //  - no auto-retry after initial failure
+  //  - load-more with cursor preservation on failure
+  //  - A→B→A protection (first A request still pending when user returns)
+  const auditLog = useAuditLog({
+    propertyId: activePropId,
+    reservationId: reservation?.id ?? detailData?.id ?? null,
+    authFetch,
+    shouldAutoLoad: activeTab === 'riwayat',
+  });
 
   const handleRequestCheckoutInspection = async () => {
     if (!detailData?.id || !activePropId) return;
@@ -2239,8 +2269,70 @@ export default function ReservationDetailDrawer({
 
           {/* Tab Pane: Riwayat — always mounted; display:none when inactive */}
           <div className={`space-y-5 ${isTabVisible('riwayat')}`} role="tabpanel" aria-label="Riwayat">
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs text-center">
-              <p className="text-xs text-stone-400 italic">Log aktivitas belum tersedia.</p>
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs">
+              {auditLog.loading && auditLog.entries.length === 0 ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="animate-spin rounded-full h-5 w-5 border-2 border-emerald-600 border-t-transparent" />
+                </div>
+              ) : auditLog.error && auditLog.entries.length === 0 ? (
+                <div className="text-center py-4">
+                  <p className="text-xs text-rose-600">{auditLog.error}</p>
+                  <button
+                    type="button"
+                    onClick={() => auditLog.retry()}
+                    className="mt-2 text-xs font-bold text-emerald-800 hover:underline cursor-pointer"
+                  >
+                    Coba lagi
+                  </button>
+                </div>
+              ) : auditLog.entries.length === 0 ? (
+                <div className="text-center py-6">
+                  <p className="text-xs text-stone-400 italic">Belum ada aktivitas tercatat.</p>
+                </div>
+              ) : (
+                <div className="space-y-0">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400 mb-3">
+                    Log Aktivitas
+                  </h3>
+                  <ol className="relative border-l border-stone-200 ml-3 space-y-4">
+                    {auditLog.entries.map((entry) => (
+                      <li key={entry.audit_id} className="ml-6 relative">
+                        <span
+                          className="absolute -left-[27px] top-1.5 w-2.5 h-2.5 rounded-full bg-emerald-600 ring-2 ring-white"
+                        />
+                        <p className="text-sm font-medium text-stone-700">{entry.summary}</p>
+                        <p className="text-xs text-stone-400 mt-0.5">
+                          {entry.actor || 'Tidak tercatat'} · {entry.formatted_time}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
+                  {auditLog.loadMoreError && (
+                    <div className="mt-3 text-center">
+                      <p className="text-xs text-rose-600">{auditLog.loadMoreError}</p>
+                      <button
+                        type="button"
+                        onClick={() => auditLog.loadMore()}
+                        className="mt-1 text-xs font-bold text-emerald-800 hover:underline cursor-pointer"
+                      >
+                        Coba lagi
+                      </button>
+                    </div>
+                  )}
+                  {auditLog.hasMore && !auditLog.loadMoreError && (
+                    <div className="mt-4 text-center">
+                      <button
+                        type="button"
+                        onClick={() => auditLog.loadMore()}
+                        disabled={auditLog.loading}
+                        className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                      >
+                        {auditLog.loading ? 'Memuat…' : 'Muat lebih banyak'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
