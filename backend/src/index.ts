@@ -4135,6 +4135,17 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
     await assertPropertyExists(pool, propertyId);
     await assertReservationBelongsToProperty(pool, reservationId, propertyId);
 
+    // 1b) Resolve the property's IANA timezone for display-timezone rendering.
+    //     audit_logs.timestamp is a naive TIMESTAMP (no zone stored); per the
+    //     established codebase convention (reportsRouter "explicit UTC -> zone
+    //     projection", dailyKpiService "treat stored clock as UTC") the stored
+    //     wall-clock is interpreted as UTC and re-projected to the property's
+    //     IANA zone for display ONLY. The stored column, ORDER BY, and keyset
+    //     cursor are all kept on the raw naive value so ordering and
+    //     pagination stability are unaffected by the display conversion.
+    const tzRes = await pool.query('SELECT timezone FROM properties WHERE id = $1', [propertyId]);
+    const propertyTz = resolvePropertyTimezone(tzRes.rows[0] ? tzRes.rows[0].timezone : null);
+
     // 2) Strict limit validation
     const limit = parseAuditLimit(req.query.limit);
     if (limit === null) {
@@ -4155,6 +4166,8 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
     }
 
     // 4) Build query with parameterized LIMIT
+    //    $1 = property_id, $2 = record_id, [cursor: $3 ts, $4 id],
+    //    [tz param], [limit+1]. tz is parameterized (never hard-coded offset).
     const whereClause = `
       WHERE al.property_id = $1
         AND al.entity = 'RESERVATION'
@@ -4168,6 +4181,11 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
         AND (al.timestamp, al.audit_id) < ($3::timestamp, $4)`;
     }
 
+    // Property timezone is parameterized for the display-only projection.
+    // The naive stored column (ORDER BY + keyset cursor) is never zone-shifted.
+    params.push(propertyTz);
+    const tzPlaceholder = `$${params.length}`;
+
     // Parameterize LIMIT (not string-interpolated)
     params.push(limit + 1);
     const limitPlaceholder = `$${params.length}`;
@@ -4177,6 +4195,7 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
               al.module,
               al.action,
               to_char(al.timestamp, 'YYYY-MM-DD HH24:MI:SS.US') AS timestamp_text,
+              to_char(al.timestamp AT TIME ZONE 'UTC' AT TIME ZONE ${tzPlaceholder}, 'YYYY-MM-DD HH24:MI:SS.US') AS timestamp_display,
               al.actor_user_id,
               al.new_value
        FROM audit_logs al
@@ -4197,9 +4216,11 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
 
       const actor = deriveActor(row, payload);
       const summary = buildAuditSummary(row.module, row.action, payload);
-      const tsText: string = row.timestamp_text || '';
-      // formatted_time: first 19 chars = "YYYY-MM-DD HH:MM:SS"
-      const formattedTime = tsText.substring(0, 19);
+      // formatted_time: display projection of the naive timestamp into the
+      // property's IANA zone. Raw timestamp_text is kept ONLY for next_cursor
+      // (keyset stability) and is never shown to the user.
+      const tsDisplay: string = row.timestamp_display || '';
+      const formattedTime = tsDisplay.substring(0, 19);
 
       return {
         audit_id: row.audit_id,

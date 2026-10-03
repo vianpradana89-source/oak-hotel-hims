@@ -858,6 +858,169 @@ async function main() {
       pass(14, 'response shape {status, data:[DTO], has_more, next_cursor}');
     }
 
+    // ── S15: timezone projection (naive UTC -> property zone) ──
+    //    The audit_logs.timestamp column is a naive TIMESTAMP stored as UTC
+    //    (CURRENT_TIMESTAMP on a UTC-session DB). The endpoint must project it
+    //    to the property's IANA zone for display via
+    //      timestamp AT TIME ZONE 'UTC' AT TIME ZONE $tz
+    //    while keeping ORDER BY / keyset cursor on the raw column.
+    {
+      // For the test property (timezone = 'Asia/Jakarta', UTC+7):
+      //   stored 14:12 UTC -> displayed 21:12 WIB
+      //   stored 23:30 UTC -> displayed 06:30 next day (date rollover)
+      const tzUtcTs1 = '2030-09-01 14:12:00.000000';
+      const tzUtcTs2 = '2030-09-01 23:30:00.000000';
+      await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resIdA, propertyId: testPropertyId, actorUserId: '42', newValue: { amount: 1 }, timestamp: tzUtcTs1 });
+      await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resIdA, propertyId: testPropertyId, actorUserId: '42', newValue: { amount: 2 }, timestamp: tzUtcTs2 });
+
+      const res = await getAudit(testPropertyId, resIdA, { limit: 100 });
+      assert.strictEqual(res.status, 200, 'S15 endpoint 200');
+      // formatted_time = to_char(naiveUtc AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jakarta', 'YYYY-M-D HH24:MI:SS.US').substring(0,19).
+      //  14:12:00 UTC + 7h -> 2030-09-01 21:12:00   (exact, 19 chars)
+      //  23:30:00 UTC + 7h -> 2030-09-02 06:30:00   (date rollover, exact)
+      const expected1 = '2030-09-01 21:12:00';
+      const expected2 = '2030-09-02 06:30:00';
+      assert(
+        res.body.data.some(e => e.formatted_time === expected1),
+        `S15 14:12:00 UTC must render exactly as "${expected1}" in Asia/Jakarta, got: ${JSON.stringify(res.body.data.map(d=>d.formatted_time))}`
+      );
+      assert(
+        res.body.data.some(e => e.formatted_time === expected2),
+        `S15 23:30:00 UTC must render exactly as "${expected2}" (date rollover), got: ${JSON.stringify(res.body.data.map(d=>d.formatted_time))}`
+      );
+
+      // Direct check: fetch limit=1 so the newest row (23:30 -> 06:30 next day,
+      // which is the latest in naive DESC order) is the only one; its next_cursor
+      // must carry the RAW naive timestamp (2030-09-01 23:30:00.000000), not the
+      // shifted 2030-09-02 06:30:00.
+      const page1 = await getAudit(testPropertyId, resIdA, { limit: 1 });
+      assert.strictEqual(page1.status, 200, 'S15 page1 limit=1 endpoint 200');
+      assert.strictEqual(page1.body.has_more, true, 'S15 page1 limit=1 has_more');
+      const cursorTsRaw = page1.body.next_cursor.split('|')[0];
+      assert.strictEqual(cursorTsRaw, tzUtcTs2, `S15 next_cursor must carry RAW naive timestamp (not zone-shifted); got "${cursorTsRaw}"`);
+      // The formatted_time of that single row IS zone-shifted:
+      assert.strictEqual(page1.body.data[0].formatted_time, expected2, `S15 limit=1 formatted_time must be exact zone-shifted value, got "${page1.body.data[0].formatted_time}"`);
+      pass(15, 'timezone projection: 14:12UTC→21:12JKT, 23:30UTC→06:30next-day, cursor raw naive (exact match)');
+    }
+
+    // ── S16: different property zone is honored (not hard-coded +7h) ──
+    //    Create a second reservation audit with a zone different from Jakarta.
+    //    Use 'Asia/Singapore' (UTC+8) via a distinct property to prove the
+    //    zone comes from properties.timezone, not a fixed offset.
+    {
+      // Update a new property's timezone to Asia/Singapore and create a fresh
+      // reservation + audit row there.
+      const singPropId = await (async () => {
+        const r = await testPool.query(
+          `INSERT INTO properties (name, address, phone, property_code, timezone, currency_code)
+           VALUES ($1,'Addr','081',$2,'Asia/Singapore','IDR') RETURNING id`,
+          [`AuditV2 Sgp`, `S16P`]
+        );
+        createdPropertyIds.push(Number(r.rows[0].id));
+        return Number(r.rows[0].id);
+      })();
+
+      const resSgp = await (async () => {
+        const room = await testPool.query(
+          `INSERT INTO rooms (property_id, room_number, name, status, is_active)
+           VALUES ($1,$2,'S16 Room','VACANT_CLEAN',TRUE) RETURNING id`,
+          [singPropId, `S16R${Date.now().toString(36).slice(-3).toUpperCase()}`]
+        );
+        createdRoomIds.push(room.rows[0].id);
+        const booking = await testPool.query(
+          `INSERT INTO bookings (property_id, bid, guest_name_snapshot, booking_status, created_at, updated_at)
+           VALUES ($1,$2,'S16 Guest','ACTIVE',NOW(),NOW()) RETURNING id`,
+          [singPropId, `S16B${Date.now().toString(36).slice(-5).toUpperCase()}`]
+        );
+        createdBookingIds.push(booking.rows[0].id);
+        const resv = await testPool.query(
+          `INSERT INTO reservations (booking_id, room_id, guest_name, check_in, check_out,
+             total_price, amount_paid, remaining_balance, status, stay_status, payment_status, stay_sequence)
+           VALUES ($1,$2,'S16 Guest','2030-09-01','2030-09-03',100000,0,100000,'BOOKED','RESERVED','UNPAID',1) RETURNING id`,
+          [booking.rows[0].id, room.rows[0].id]
+        );
+        createdReservationIds.push(resv.rows[0].id);
+        return resv.rows[0].id;
+      })();
+
+      // 14:12 UTC in Asia/Singapore (+8) = 22:12, NOT 21:12.
+      const tsUtc = '2030-09-01 14:12:00.000000';
+      await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resSgp, propertyId: singPropId, actorUserId: '42', newValue: { amount: 1 }, timestamp: tsUtc });
+
+      const res = await getAudit(singPropId, resSgp, { limit: 10 });
+      assert.strictEqual(res.status, 200, 'S16 sgp endpoint 200');
+      const row = res.body.data.find(e => e.formatted_time && e.formatted_time.includes('2030-09-01 22:12'));
+      assert(row, `S16 14:12 UTC must render as 22:12 in Asia/Singapore (+8), got: ${JSON.stringify(res.body.data.map(d=>d.formatted_time))}`);
+      pass(16, 'different property zone honored (Asia/Singapore +8: 14:12UTC→22:12, not +7)');
+    }
+
+    // ── S17: cursor pagination + ordering stable across zone boundary ──
+    //    Insert 3 rows that, after the zone shift, cross a date boundary.
+    //    Confirm (a) every paginated request returns 200, (b) the full
+    //    audit_id sequence produced by walking pages of limit=2 equals the
+    //    single-shot DESC sequence (no duplication, no skip, last page
+    //    reached), and (c) the 3 fixture rows appear in the correct order.
+    {
+      // Naive column values: tsB > tsA > tsC, so DESC order is tsB, tsA, tsC.
+      const tsB = '2030-10-01 23:59:59.999999'; // newest
+      const tsA = '2030-10-01 23:59:59.999998';
+      const tsC = '2030-10-01 23:59:59.999997'; // oldest of the three
+      const idTsC = await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resIdA, propertyId: testPropertyId, actorUserId: '42', newValue: { amount: 1 }, timestamp: tsC });
+      const idTsA = await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resIdA, propertyId: testPropertyId, actorUserId: '42', newValue: { amount: 2 }, timestamp: tsA });
+      const idTsB = await insertAudit({ module: 'DEPOSIT', action: 'DEPOSIT_RECEIVED', entity: 'RESERVATION', recordId: resIdA, propertyId: testPropertyId, actorUserId: '42', newValue: { amount: 3 }, timestamp: tsB });
+
+      // Reference: single-shot full page in DESC order (limit 100 covers all rows).
+      const single = await getAudit(testPropertyId, resIdA, { limit: 100 });
+      assert.strictEqual(single.status, 200, 'S17 single-shot endpoint 200');
+      assert.strictEqual(single.body.has_more, false, 'S17 single-shot limit=100 must not have more');
+      const referenceOrder = single.body.data.map(e => e.audit_id);
+
+      // Walk pages of limit=2 until the last page is reached.
+      let cursor = null;
+      const seen = [];
+      let reachedLast = false;
+      let pages = 0;
+      for (let i = 0; i < 100; i++) {
+        const page = await getAudit(testPropertyId, resIdA, { limit: 2, cursor });
+        assert.strictEqual(page.status, 200, `S17 page ${i} must return 200, got ${page.status}`);
+        pages++;
+        for (const e of page.body.data) seen.push(e.audit_id);
+        if (!page.body.has_more) {
+          assert.strictEqual(page.body.next_cursor, null, `S17 last page next_cursor must be null, got ${page.body.next_cursor}`);
+          reachedLast = true;
+          break;
+        }
+        assert(page.body.next_cursor, `S17 page ${i} has_more but next_cursor missing`);
+        cursor = page.body.next_cursor;
+      }
+      assert(reachedLast, 'S17 pagination must reach the last page (has_more=false)');
+
+      // (b) Full sequence equality: pagination order === single-shot order.
+      assert.deepStrictEqual(
+        seen, referenceOrder,
+        `S17 paginated audit_id sequence must equal single-shot sequence; paginated=${JSON.stringify(seen)} single=${JSON.stringify(referenceOrder)}`
+      );
+      // No duplication / no skip (implied by equality, asserted explicitly too).
+      assert.strictEqual(seen.length, new Set(seen).size, `S17 pagination must not duplicate rows, got ${JSON.stringify(seen)}`);
+
+      // (c) The 3 fixture rows must be present and in the correct DESC order
+      //     (tsB newest → tsA → tsC oldest), each exactly once.
+      const idxB = seen.indexOf(idTsB);
+      const idxA = seen.indexOf(idTsA);
+      const idxC = seen.indexOf(idTsC);
+      assert(idxB !== -1 && idxA !== -1 && idxC !== -1,
+        `S17 all 3 fixture rows must appear in pagination; idxB=${idxB} idxA=${idxA} idxC=${idxC} in ${JSON.stringify(seen)}`);
+      assert(idxB < idxA && idxA < idxC,
+        `S17 fixture rows must appear in correct DESC order (tsB,tsA,tsC); got idxB=${idxB},idxA=${idxA},idxC=${idxC}`);
+      assert(
+        seen.filter(x => x === idTsB).length === 1 &&
+        seen.filter(x => x === idTsA).length === 1 &&
+        seen.filter(x => x === idTsC).length === 1,
+        'S17 each fixture row must appear exactly once'
+      );
+      pass(17, `cursor pagination across zone boundary: ${seen.length} rows in ${pages} pages == single-shot; 3 fixtures in correct order, no dup/skip`);
+    }
+
     // ── Frontend state-machine tests are now in the frontend hook suite
     //    (frontend/src/features/calendar/__tests__/useAuditLog.test.ts).
     //    No standalone copy lives in this backend test file.
