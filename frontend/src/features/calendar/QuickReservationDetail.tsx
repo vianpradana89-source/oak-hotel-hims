@@ -21,6 +21,10 @@ import {
 } from './precheckinGateUi';
 import { useWhatsAppQuickAction } from './useWhatsAppQuickAction';
 import WhatsAppQuickActionModal from './WhatsAppQuickActionModal';
+import ThermalReceiptModal from '../thermalReceipt/ThermalReceiptModal';
+import RegistrationFormModal from '../print/registration/RegistrationFormModal';
+import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
+import { Tooltip } from '../../design-system/Tooltip';
 
 export { CANONICAL_CHECKIN_REQUIREMENT_LABELS };
 
@@ -39,6 +43,9 @@ export interface QuickReservationDetailProps {
   // COMPLIMENTARY REALTIME: parent-owned refresh signal for complimentary changes.
   complimentaryRefreshVersion?: number;
   complimentaryRefreshReservationId?: number | null;
+  // Print: property branding & info for ThermalReceiptModal (optional; modal uses defaults when null)
+  propertyBranding?: PropertyBrandingConfig | null;
+  propertyInfo?: { id?: number; name?: string; address?: string | null; phone?: string | null } | null;
 }
 
 export default function QuickReservationDetail({
@@ -55,10 +62,14 @@ export default function QuickReservationDetail({
   onRefresh,
   complimentaryRefreshVersion,
   complimentaryRefreshReservationId,
+  propertyBranding,
+  propertyInfo,
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [isMoreActionsOpen, setIsMoreActionsOpen] = useState<boolean>(false);
+  const [isThermalModalOpen, setIsThermalModalOpen] = useState<boolean>(false);
+  const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState<boolean>(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [bidCopied, setBidCopied] = useState<boolean>(false);
   const [requestingInspection, setRequestingInspection] = useState<boolean>(false);
@@ -455,14 +466,32 @@ export default function QuickReservationDetail({
             </h3>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 text-base font-bold transition-colors cursor-pointer shrink-0"
-            aria-label="Tutup Ringkasan"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Printer action — opens the same print picker as the full drawer */}
+            <Tooltip content="Dokumen &amp; Cetak" position="bottom" className="!left-auto !right-0 !translate-x-0">
+              <button
+                type="button"
+                onClick={() => setIsThermalModalOpen(true)}
+                aria-label="Dokumen &amp; Cetak"
+                className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-500 hover:text-stone-800 hover:bg-stone-200 transition-colors cursor-pointer"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="7" width="10" height="6" rx="1" />
+                  <path d="M5 7V3.5A1.5 1.5 0 0 1 6.5 2h3A1.5 1.5 0 0 1 11 3.5V7" />
+                  <path d="M5 11h6" strokeLinecap="round" />
+                  <path d="M11 11h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </Tooltip>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 text-base font-bold transition-colors cursor-pointer shrink-0"
+              aria-label="Tutup Ringkasan"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Content Body (flex-1 min-h-0 overflow-y-auto) */}
@@ -1035,6 +1064,42 @@ export default function QuickReservationDetail({
         guestPhone={guestPhone}
         hooks={waHooks}
       />
+
+      {/* Print: Thermal Receipt + Registration Form (same modals as the full drawer) */}
+      {isThermalModalOpen && activePropId && (
+        <ThermalReceiptModal
+          isOpen={isThermalModalOpen}
+          onClose={() => setIsThermalModalOpen(false)}
+          reservationId={Number(reservation.id)}
+          propertyId={activePropId}
+          reservation={data}
+          propertyBranding={propertyBranding ?? null}
+          propertyInfo={propertyInfo}
+          authFetch={authFetch}
+          onOpenRegistrationForm={() => {
+            setIsThermalModalOpen(false);
+            setIsRegistrationModalOpen(true);
+          }}
+        />
+      )}
+
+      {isRegistrationModalOpen && activePropId && (
+        <RegistrationFormModal
+          isOpen={isRegistrationModalOpen}
+          onClose={() => setIsRegistrationModalOpen(false)}
+          reservationId={Number(reservation.id)}
+          propertyId={activePropId}
+          reservation={data}
+          propertyBranding={propertyBranding ?? undefined}
+          propertyInfo={propertyInfo ? {
+            id: propertyInfo.id,
+            name: propertyInfo.name,
+            address: propertyInfo.address ?? undefined,
+            phone: propertyInfo.phone ?? undefined,
+          } : undefined}
+          authFetch={authFetch}
+        />
+      )}
     </>
   );
 }

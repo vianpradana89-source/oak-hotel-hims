@@ -4734,6 +4734,8 @@ function AppContent() {
             }}
             complimentaryRefreshVersion={complimentaryRefresh.version}
             complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
+            propertyBranding={activeBranding || null}
+            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
           />
       )}
 
