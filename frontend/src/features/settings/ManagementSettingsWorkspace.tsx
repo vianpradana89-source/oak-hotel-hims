@@ -93,9 +93,9 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     setIsLoading(true);
     try {
       const [featuresRes, hkSetRes, hkTplRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/properties/${propertyId}/features`),
-        fetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`),
-        fetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`)
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/features`),
+        authenticatedFetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`),
+        authenticatedFetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`)
       ]);
 
       if (featuresRes.ok) {
