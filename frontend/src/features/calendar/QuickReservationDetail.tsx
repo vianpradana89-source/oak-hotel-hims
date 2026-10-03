@@ -1065,40 +1065,50 @@ export default function QuickReservationDetail({
         hooks={waHooks}
       />
 
-      {/* Print: Thermal Receipt + Registration Form (same modals as the full drawer) */}
-      {isThermalModalOpen && activePropId && (
-        <ThermalReceiptModal
-          isOpen={isThermalModalOpen}
-          onClose={() => setIsThermalModalOpen(false)}
-          reservationId={Number(reservation.id)}
-          propertyId={activePropId}
-          reservation={data}
-          propertyBranding={propertyBranding ?? null}
-          propertyInfo={propertyInfo}
-          authFetch={authFetch}
-          onOpenRegistrationForm={() => {
-            setIsThermalModalOpen(false);
-            setIsRegistrationModalOpen(true);
-          }}
-        />
-      )}
+      {/* Print: Thermal Receipt + Registration Form (same modals as the full drawer)
+          Rendered in a local layer above the quick-summary card (z-60).
+          The shared Modal inside uses z-50; this wrapper lifts the whole print layer
+          to z-[70] so both the print picker/preview and the registration form sit
+          above the card. Only rendered when one of the print modals is open; no
+          backdrop handler added here — the shared Modal's own backdrop/close
+          behaviour is preserved. */}
+      {(isThermalModalOpen || isRegistrationModalOpen) && activePropId && (
+        <div className="fixed inset-0 z-[70]">
+          {isThermalModalOpen && (
+            <ThermalReceiptModal
+              isOpen={isThermalModalOpen}
+              onClose={() => setIsThermalModalOpen(false)}
+              reservationId={Number(reservation.id)}
+              propertyId={activePropId}
+              reservation={data}
+              propertyBranding={propertyBranding ?? null}
+              propertyInfo={propertyInfo}
+              authFetch={authFetch}
+              onOpenRegistrationForm={() => {
+                setIsThermalModalOpen(false);
+                setIsRegistrationModalOpen(true);
+              }}
+            />
+          )}
 
-      {isRegistrationModalOpen && activePropId && (
-        <RegistrationFormModal
-          isOpen={isRegistrationModalOpen}
-          onClose={() => setIsRegistrationModalOpen(false)}
-          reservationId={Number(reservation.id)}
-          propertyId={activePropId}
-          reservation={data}
-          propertyBranding={propertyBranding ?? undefined}
-          propertyInfo={propertyInfo ? {
-            id: propertyInfo.id,
-            name: propertyInfo.name,
-            address: propertyInfo.address ?? undefined,
-            phone: propertyInfo.phone ?? undefined,
-          } : undefined}
-          authFetch={authFetch}
-        />
+          {isRegistrationModalOpen && (
+            <RegistrationFormModal
+              isOpen={isRegistrationModalOpen}
+              onClose={() => setIsRegistrationModalOpen(false)}
+              reservationId={Number(reservation.id)}
+              propertyId={activePropId}
+              reservation={data}
+              propertyBranding={propertyBranding ?? undefined}
+              propertyInfo={propertyInfo ? {
+                id: propertyInfo.id,
+                name: propertyInfo.name,
+                address: propertyInfo.address ?? undefined,
+                phone: propertyInfo.phone ?? undefined,
+              } : undefined}
+              authFetch={authFetch}
+            />
+          )}
+        </div>
       )}
     </>
   );
