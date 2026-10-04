@@ -63,6 +63,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/attendance\/(check-in|check-out)$/, resources: ['Employee Mobile'], action: 'view' },
   { pattern: /^\/api\/attendance/, resources: ['Employee Mobile'] },
 
+  { pattern: /^\/api\/pos\/menu\/categories(\/|$)/, resources: ['Master Produk'] },
   { pattern: /^\/api\/pos\/menu\/items/, resources: ['Master Produk'] },
   { pattern: /^\/api\/pos\/menu(\/|$)/, resources: ['POS', 'Master Produk'] },
   { pattern: /^\/api\/pos/, resources: ['POS'] },
