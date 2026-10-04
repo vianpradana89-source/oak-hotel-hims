@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -322,6 +323,18 @@ import { computeRequestHash } from './utils/hash';
 app.use(async (req, res, next) => {
   // Only for mutating methods
   if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();
+  // Bypass cache global HANYA untuk POST /api/pos/orders:
+  // Dedup POS ditangani di domain (unique partial index di pos_orders + replay
+  // dari data order tersimpan). Cache global (idempotency_keys) tidak diaktifkan
+  // untuk rute ini agar replay tidak melewati pemeriksaan auth/property-scope.
+  if (req.method === 'POST' && req.path === '/api/pos/orders') return next();
+  // Non-canonical variants of /api/pos/orders (trailing slash / case difference) → 404.
+  // Express default (case-sensitive routing=false, strict routing=false) routes these
+  // to the same POS handler; reject here BEFORE global cache lookup so they never
+  // create or read idempotency_keys.
+  if (req.method === 'POST' && /^\/api\/pos\/orders\/?$/i.test(req.path) && req.path !== '/api/pos/orders') {
+    return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
+  }
   const key = req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || req.headers['Idempotency-Key'.toLowerCase()];
   if (!key) return next();
 
@@ -5968,19 +5981,64 @@ app.get('/api/pos/orders', async (req, res) => {
     if (!Number.isInteger(propertyId) || propertyId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
     }
+
+    // Property scope: user token properti harus cocok (kecuali super admin platform).
+    // Dilebihkan SEBELUM query keberadaan properti agar token A → properti B
+    // (ada maupun tidak ada) selalu 403 tanpa membocorkan data order.
+    try {
+      await assertPropertyScope(req, propertyId);
+    } catch (scopeErr: any) {
+      const sc = scopeErr?.statusCode ?? 403;
+      return res.status(sc).json({
+        status: 'ERROR',
+        code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
+        message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
+      });
+    }
+
     const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
     if ((propCheck.rowCount ?? 0) === 0) {
       return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
     }
 
-    const orders = await pool.query(`
-      SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
-      FROM pos_orders po
-      LEFT JOIN pos_order_items poi ON poi.order_id = po.id
-      WHERE po.property_id = $1
-      GROUP BY po.id
-      ORDER BY po.created_at DESC
-    `, [propertyId]);
+    // Opsional: filter per reservation_id + ownership check (reservasi milik properti).
+    let reservationFilter: number | null = null;
+    const reservationRaw = req.query.reservation_id;
+    if (reservationRaw !== undefined && reservationRaw !== null && String(reservationRaw).trim() !== '') {
+      reservationFilter = Number(reservationRaw);
+      if (!Number.isInteger(reservationFilter) || reservationFilter <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation_id' });
+      }
+      // Validasi reservasi ada & milik properti yang diminta.
+      const resOwn = await pool.query(
+        'SELECT b.property_id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE r.id = $1',
+        [reservationFilter]
+      );
+      if ((resOwn.rowCount ?? 0) === 0) {
+        return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: `reservation ${reservationFilter} not found` });
+      }
+      if (Number(resOwn.rows[0].property_id) !== propertyId) {
+        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'reservation belongs to a different property' });
+      }
+    }
+
+    const orderQuery = reservationFilter
+      ? `
+        SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
+        FROM pos_orders po
+        LEFT JOIN pos_order_items poi ON poi.order_id = po.id
+        WHERE po.property_id = $1 AND po.reservation_id = $2
+        GROUP BY po.id
+        ORDER BY po.created_at DESC`
+      : `
+        SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
+        FROM pos_orders po
+        LEFT JOIN pos_order_items poi ON poi.order_id = po.id
+        WHERE po.property_id = $1
+        GROUP BY po.id
+        ORDER BY po.created_at DESC`;
+    const orderParams: any[] = reservationFilter ? [propertyId, reservationFilter] : [propertyId];
+    const orders = await pool.query(orderQuery, orderParams);
 
     for (const order of orders.rows) {
       const items = await pool.query(
@@ -6011,8 +6069,65 @@ app.post('/api/pos/orders', async (req, res) => {
   }
 
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ status: 'ERROR', message: 'items must not be empty' });
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'items must not be empty' });
   }
+
+  // Validasi quantity: setiap item wajib quantity integer > 0.
+  for (let i = 0; i < items.length; i++) {
+    const qty = Number(items[i].quantity ?? 1);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: `items[${i}].quantity must be a positive integer`
+      });
+    }
+  }
+
+  // Property scope: user token properti harus cocok (kecuali super admin platform).
+  try {
+    await assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    const sc = scopeErr?.statusCode ?? 403;
+    return res.status(sc).json({
+      status: 'ERROR',
+      code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
+      message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
+    });
+  }
+
+  // ─── Idempotency key (opsional; backward compat: tanpa key = normal insert) ───
+  // Key diambil dari header Idempotency-Key. Validasi: string 1–150 char.
+  const rawKey = String(
+    req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || ''
+  ).trim();
+  let idempotencyKey: string | null = null;
+  if (rawKey.length > 0) {
+    if (rawKey.length > 150 || /\s/.test(rawKey)) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'Idempotency-Key must be 1–150 non-whitespace characters'
+      });
+    }
+    idempotencyKey = rawKey;
+  }
+
+  // Fingerprint: hash payload bisnis tervalidasi/ternormalisasi.
+  // Mengandung property, reservation, items (menu_item_id + quantity + notes),
+  // meja, nama — TIDAK memakai harga master terkini (harga di-snapshot di DB).
+  const fingerprintPayload = JSON.stringify({
+    property_id: propertyId,
+    reservation_id: reservation_id ?? null,
+    table_number: table_number ?? 'Walk In',
+    guest_name: guest_name ?? 'Guest',
+    items: items.map((it: any) => ({
+      menu_item_id: Number(it.menu_item_id),
+      quantity: Number(it.quantity ?? 1),
+      notes: it.notes ?? null
+    }))
+  });
+  const fingerprint = computeRequestHash('POST', '/api/pos/orders', fingerprintPayload);
 
   const client = await pool.connect();
   try {
@@ -6041,7 +6156,54 @@ app.post('/api/pos/orders', async (req, res) => {
       }
     }
 
-    // Validate all menu items belong to the same property
+    // ─── Replay path: jika idempotency_key ada, cek order existing DULU ───
+    // Dilakukan SEBELUM validasi produk aktif agar replay order committed tidak
+    // bergantung pada status is_active produk (produk bisa nonaktif kemudian).
+    // Fingerprint cocok → 200 replay; fingerprint beda → 409.
+    if (idempotencyKey) {
+      const existingCheck = await client.query(
+        `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
+                po.table_number, po.guest_name, po.status, po.total_amount,
+                po.created_at, po.updated_at,
+                po.request_fingerprint AS stored_fingerprint
+         FROM pos_orders po
+         WHERE po.property_id = $1 AND po.idempotency_key = $2
+         FOR UPDATE`,
+        [propertyId, idempotencyKey]
+      );
+      if (hasRows(existingCheck)) {
+        const existing = existingCheck.rows[0];
+        // Fingerprint cocok → replay (kembalikan order + items tersimpan, TANPA recompute harga).
+        if (existing.stored_fingerprint === fingerprint) {
+          const existingItems = await client.query(
+            `SELECT poi.*, pmi.name, pmi.item_code
+             FROM pos_order_items poi
+             LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+             WHERE poi.order_id = $1`,
+            [existing.id]
+          );
+          await client.query('COMMIT');
+          res.status(200).json({
+            status: 'REPLAY',
+            code: 'IDEMPOTENT_REPLAY',
+            data: { ...existing, items: existingItems.rows }
+          });
+          return;
+        }
+        // Fingerprint beda → 409: key sama tapi payload berbeda.
+        await client.query('ROLLBACK');
+        res.status(409).json({
+          status: 'CONFLICT',
+          code: 'IDEMPOTENCY_KEY_CONFLICT',
+          message: 'Idempotency-Key sudah dipakai untuk payload berbeda'
+        });
+        return;
+      }
+      // Order belum ada untuk key ini → lanjut validasi produk aktif + INSERT.
+    }
+
+    // Validasi produk aktif: hanya untuk pembuatan order BARU.
+    // Replay (di atas) sudah mengembalikan 200/409 tanpa melewati blok ini.
     for (const item of items) {
       const menuItem = await client.query(
         'SELECT id, price, name, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
@@ -6049,7 +6211,7 @@ app.post('/api/pos/orders', async (req, res) => {
       );
       if (!hasRows(menuItem)) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ status: 'ERROR', message: `Menu item ${item.menu_item_id} not found` });
+        return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
       }
       if (Number(menuItem.rows[0].property_id) !== propertyId) {
         await client.query('ROLLBACK');
@@ -6057,14 +6219,86 @@ app.post('/api/pos/orders', async (req, res) => {
       }
     }
 
-    const initialStatus = (req.body.status || 'OPEN').toUpperCase();
-    const orderNumber = `POS-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Date.now().toString().slice(-6)}`;
-    const orderInsert = await client.query(
-      `INSERT INTO pos_orders (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status)
-       VALUES ($1, $2, $3, $4, $5, 0, $6)
-       RETURNING *`,
-      [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In', guest_name || 'Guest', initialStatus]
-    );
+    // ─── Insert path (order baru, status DIPAKSA OPEN) ───
+    // Status di-create selalu OPEN — payload tidak boleh memilih status lain.
+    // Ini menjamin tidak ada projection transaksi/folio saat create.
+    const orderStatus = 'OPEN';
+    // order_number: POS-YYYYMMDD-<UUID> (49 char, muat dalam VARCHAR(50)).
+    // crypto.randomUUID() penuh — TIDAK dipotong; unique per request, bebas bentrokan konkuren.
+    // Dipakai kedua path: dengan & tanpa idempotency key. Nomor historis tidak diubah.
+    const posDateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const orderNumber = `POS-${posDateStr}-${crypto.randomUUID()}`;
+
+    let orderInsert: any;
+    if (idempotencyKey) {
+      // INSERT dengan ON CONFLICT untuk concurrent dedup:
+      // Jika request konkuren menang lebih dulu → rowCount = 0, ambil yang existing.
+      orderInsert = await client.query(
+        `INSERT INTO pos_orders
+           (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
+            idempotency_key, request_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
+          ON CONFLICT (property_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+          DO NOTHING
+          RETURNING *`,
+        [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
+          guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint]
+      );
+      if ((orderInsert.rowCount ?? 0) === 0) {
+        // Konkuren: request lain sudah commit lebih dulu untuk key yang sama.
+        // Ambil order existing + items, validasi fingerprint.
+        const winnerCheck = await client.query(
+          `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
+                  po.table_number, po.guest_name, po.status, po.total_amount,
+                  po.created_at, po.updated_at,
+                  po.request_fingerprint AS stored_fingerprint
+           FROM pos_orders po
+           WHERE po.property_id = $1 AND po.idempotency_key = $2
+           FOR UPDATE`,
+          [propertyId, idempotencyKey]
+        );
+        if (!hasRows(winnerCheck)) {
+          // Tidak mungkin terjadi (rowCount=0 tapi SELECT kosong) — error tak terduga.
+          await client.query('ROLLBACK');
+          return res.status(500).json({ status: 'ERROR', code: 'IDEMPOTENCY_INTERNAL', message: 'Idempotency conflict tidak terduga' });
+        }
+        const winner = winnerCheck.rows[0];
+        if (winner.stored_fingerprint !== fingerprint) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            status: 'CONFLICT',
+            code: 'IDEMPOTENCY_KEY_CONFLICT',
+            message: 'Idempotency-Key sudah dipakai untuk payload berbeda'
+          });
+        }
+        // Fingerprint cocok → replay data tersimpan (tanpa recompute harga).
+        const winnerItems = await client.query(
+          `SELECT poi.*, pmi.name, pmi.item_code
+           FROM pos_order_items poi
+           LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+           WHERE poi.order_id = $1`,
+          [winner.id]
+        );
+        await client.query('COMMIT');
+        res.status(200).json({
+          status: 'REPLAY',
+          code: 'IDEMPOTENT_REPLAY',
+          data: { ...winner, items: winnerItems.rows }
+        });
+        return;
+      }
+    } else {
+      // Tanpa key (backward compat) → INSERT biasa.
+      orderInsert = await client.query(
+        `INSERT INTO pos_orders
+           (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
+            idempotency_key, request_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7)
+         RETURNING *`,
+        [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
+         guest_name || 'Guest', orderStatus, fingerprint]
+      );
+    }
 
     const orderId = orderInsert.rows[0].id;
     let totalAmount = 0;
@@ -6091,21 +6325,8 @@ app.post('/api/pos/orders', async (req, res) => {
       [totalAmount, orderId]
     );
 
-    // Auto-project to canonical SALE transaction if order is in posted/paid state.
-    // The success flag gates the post-COMMIT TransactionUpdated invalidation so a
-    // failed projection never emits a misleading "sync completed" event.
-    let transactionProjectionSucceeded = false;
-    if (['PAID', 'COMPLETED', 'POSTED', 'CLOSED'].includes(initialStatus)) {
-      try {
-        await projectPosOrderToTransaction(client, orderId, {
-          propertyId,
-          actorName: req.body.actor_name || 'Staff POS'
-        });
-        transactionProjectionSucceeded = true;
-      } catch (pErr: any) {
-        console.warn('[Transactions] POS order creation projection warning:', pErr.message);
-      }
-    }
+    // Status OPEN → TIDAK ada projection transaksi. Tidak perlu guard status.
+    // (Code lama yang cek PAID/COMPLETED/POSTED/CLOSED dihapus karena status dipaksa OPEN.)
 
     await client.query('COMMIT');
     broadcastEvent('PosOrderCreated', {
@@ -6116,33 +6337,13 @@ app.post('/api/pos/orders', async (req, res) => {
       timestamp: new Date().toISOString()
     }, propertyId);
 
-    // Post-COMMIT realtime invalidation: emit canonical transaction-domain
-    // event ONLY when the projection actually completed successfully.
-    // "TransactionUpdated" means the sync finished and consumers should refetch;
-    // it must never mean "an attempt was made".
-    if (transactionProjectionSucceeded) {
-      try {
-        broadcastEvent(
-          'TransactionUpdated',
-          {
-            source_type: 'POS_ORDER',
-            source_id: orderId,
-            transaction_type: 'SALE',
-            mutation: 'PROJECTED',
-            order_id: orderId,
-            order_number: orderNumber,
-            timestamp: new Date().toISOString()
-          },
-          propertyId
-        );
-      } catch (_e) {
-        // realtime failure must not fail POS order creation
-      }
-    }
-
     res.status(201).json({ status: 'SUCCESS', data: updatedOrder.rows[0] });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {
+      // transaksi sudah terminated / sudah commit — abaikan
+    }
     res.status(500).json({ status: 'ERROR', message: err.message });
   } finally {
     client.release();
