@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 
 export interface PosMenuItem {
   id: number;
@@ -23,8 +23,13 @@ interface Props {
   propertyId: number | null;
   posMenu: PosMenuItem[];
   posOrders: PosOrderItem[];
-  onCreateDemoOrder: () => void | Promise<void>;
+  /** Aksi pembuat order contoh — nonaktifkan (undefined) di konteks modal agar tidak menghasilkan transaksi nyata. */
+  onCreateDemoOrder?: () => void | Promise<void>;
   onRefresh?: () => void;
+  /** Notifikasi perubahan isi cart ke parent (untuk guard close modal). */
+  onCartChange?: (hasItems: boolean) => void;
+  /** Request sedang berjalan di parent — disable aksi terkait. */
+  busy?: boolean;
 }
 
 function formatIDR(amount: number): string {
@@ -40,14 +45,21 @@ export default function PosWorkspace({
   posMenu,
   posOrders,
   onCreateDemoOrder,
-  onRefresh
+  onRefresh,
+  onCartChange,
+  busy = false
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [cart, setCart] = useState<{ item: PosMenuItem; qty: number }[]>([]);
   const [tableNumber, setTableNumber] = useState('Table 1');
   const [guestName, setGuestName] = useState('Walk-in Guest');
+
+  // Notifikasi parent saat isi cart berubah (untuk guard close modal).
+  useEffect(() => {
+    onCartChange?.(cart.length > 0);
+  }, [cart, onCartChange]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -124,30 +136,35 @@ export default function PosWorkspace({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {onRefresh && (
-            <button
-              type="button"
-              onClick={onRefresh}
-              className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer"
-              title="Refresh Data"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onCreateDemoOrder}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-            </svg>
-            Buat Demo Order
-          </button>
-        </div>
+          <div className="flex items-center gap-2">
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={onRefresh}
+                disabled={busy}
+                className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Refresh Data"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            )}
+            {/* Tombol demo order hanya muncul bila parent menyediakan aksi (halaman penuh).
+                Di modal, onCreateDemoOrder tidak diteruskan → tidak menghasilkan transaksi nyata. */}
+            {onCreateDemoOrder && !busy && (
+              <button
+                type="button"
+                onClick={onCreateDemoOrder}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                [Demo] Buat Order Contoh
+              </button>
+            )}
+          </div>
       </div>
 
       {/* KPI Stats */}
@@ -368,20 +385,24 @@ export default function PosWorkspace({
                 <span>Subtotal</span>
                 <span>{formatIDR(cartSubtotal)}</span>
               </div>
-              <div className="flex justify-between text-sm font-black text-gray-900">
+              <div className="flex justify-between items-center text-sm font-black text-gray-900">
                 <span>Grand Total</span>
                 <span>{formatIDR(cartSubtotal)}</span>
               </div>
+              <div className="flex items-center gap-1.5 text-[11px] text-amber-700">
+                <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 font-semibold">DEMO</span>
+                <span>Simulasi cart — tidak tersimpan, tidak dibayar, tidak diposting ke folio.</span>
+              </div>
               <button
                 type="button"
-                disabled={cart.length === 0}
+                disabled={cart.length === 0 || busy}
                 onClick={() => {
-                  alert(`Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} berhasil diproses!`);
+                  alert(`[DEMO] Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} (simulasi, tidak tersimpan/diposting).`);
                   setCart([]);
                 }}
-                className="w-full py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
+                className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
               >
-                Simpan &amp; Bayar Order
+                [Demo] Simpan &amp; Bayar Order
               </button>
             </div>
           </div>

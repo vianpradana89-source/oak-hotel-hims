@@ -48,7 +48,7 @@ import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
-import PosWorkspace from './features/pos/PosWorkspace';
+import PosModal from './features/pos/PosModal';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
@@ -287,6 +287,18 @@ function AppContent() {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [propertyBrandings, setPropertyBrandings] = useState<Record<number, PropertyBrandingConfig>>({});
 
+  // State POS modal (dibuka dari tombol header, bukan halaman penuh).
+  const [showPosModal, setShowPosModal] = useState<boolean>(false);
+  const [posCartHasItems, setPosCartHasItems] = useState<boolean>(false);
+  const [posBusy, setPosBusy] = useState<boolean>(false);
+  // Ref sinkron untuk guard in-flight (cegah submit ganda & close saat request berjalan).
+  // Ref diperbarui di jalur yang sama dengan state agar guard selalu sinkron di tick yang sama.
+  const posBusyRef = useRef<boolean>(false);
+  const setPosBusySync = (v: boolean) => {
+    posBusyRef.current = v;
+    setPosBusy(v);
+  };
+
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
       const next = !prev;
@@ -312,13 +324,52 @@ function AppContent() {
     setSelectedMenu(menu);
   };
 
+  // Guard close POS modal (dipakai X, Escape, backdrop, dan tombol navigasi).
+  // Batal close → cart & properti tetap; setuju → tutup & buang draft.
+  // Cek ref sinkron (bukan state) agar guard aman di tick yang sama.
+  const requestClosePosModal = () => {
+    if (posBusyRef.current) return; // request sedang berjalan — cegah close yang berisiko
+    if (posCartHasItems) {
+      const ok = window.confirm('Tutup POS? Draft pesanan yang belum tersimpan akan dibuang.');
+      if (!ok) return;
+    }
+    setShowPosModal(false);
+    setPosCartHasItems(false);
+    setPosBusySync(false);
+  };
+
+  // Buka POS dari header (mengikuti permission POS yang sudah ada).
+  const openPosModal = () => {
+    if (!isNavAllowed(effectiveAccess?.effective, 'POS')) return;
+    setShowPosModal(true);
+  };
+
   const handleSelectProperty = (val: number) => {
     if (Number.isInteger(val) && val > 0) {
+      // Pindah properti saat modal POS terbuka → guard (kondisi #6 & #5).
+      if (showPosModal) {
+        if (posBusyRef.current) {
+          // Request sedang berjalan — cegah ganti properti yang membatalkan/berisiko.
+          window.alert('Menunggu proses POS selesai. Coba lagi setelahnya.');
+          return;
+        }
+        if (posCartHasItems) {
+          const ok = window.confirm(
+            'Ganti properti? Draft POS yang belum tersimpan akan dibuang karena tiap properti punya menu berbeda.'
+          );
+          if (!ok) return;
+        }
+      }
       setTransactionReservations([]);
       setTransactionError(null);
       setDailyOperations(null);
       transactionRequestVersionRef.current++;
       dailyOperationsRequestVersionRef.current++;
+      operationsRequestVersionRef.current++; // invalidasi in-flight fetch operasi/POS properti lama
+      // Buang draft POS saat pindah properti agar cart tidak bercampur lintas properti.
+      setShowPosModal(false);
+      setPosCartHasItems(false);
+      setPosBusySync(false);
       setPropertyId(val);
     }
   };
@@ -532,6 +583,8 @@ function AppContent() {
   const [dailyOperations, setDailyOperations] = useState<any | null>(null);
   const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
+  // Versi request operasi (incl. data POS) — cegah respons properti lama menimpa properti baru.
+  const operationsRequestVersionRef = useRef(0);
   const [occupancyRefreshTrigger, setOccupancyRefreshTrigger] = useState<number>(0);
   const selectedMenuRef = useRef(selectedMenu);
   selectedMenuRef.current = selectedMenu;
@@ -1324,15 +1377,19 @@ function AppContent() {
 
   const fetchOperationsData = async () => {
     if (propertyId === null) {
+      operationsRequestVersionRef.current++;
       setPosMenu([]);
       setPosOrders([]);
       setFinanceSummary(null);
       return;
     }
     const targetPropertyId = propertyId;
+    const requestVersion = ++operationsRequestVersionRef.current;
     setPosMenu([]);
     setPosOrders([]);
     setFinanceSummary(null);
+    const isStale = () =>
+      operationsRequestVersionRef.current !== requestVersion || targetPropertyId !== propertyId;
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes, checkoutRes] = await Promise.all([
         authFetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
@@ -1344,6 +1401,7 @@ function AppContent() {
         authFetch('/api/hr/payroll'),
         authFetch(`/api/housekeeping/checkout-inspections?property_id=${targetPropertyId}`)
       ]);
+      if (isStale()) return; // properti berganti atau request lebih baru — abaikan respons lama
 
       const housekeepingData = await housekeepingRes.json();
       const maintenanceData = await maintenanceRes.json();
@@ -1354,7 +1412,7 @@ function AppContent() {
       const payrollData = await payrollRes.json();
       const checkoutData = await checkoutRes.json();
 
-      if (targetPropertyId !== propertyId) return;
+      if (isStale()) return; // cegah data properti lama menimpa properti baru
       if (housekeepingData?.status === 'OK') setHousekeepingTasks(housekeepingData.data || []);
       if (checkoutData?.status === 'OK') {
         setCheckoutInspections(checkoutData.data?.inspections || []);
@@ -1483,26 +1541,6 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to fetch room audit', error);
       return [];
-    }
-  };
-
-  const createPosOrder = async () => {
-    if (propertyId === null) return;
-    const sampleItems = posMenu.slice(0, 2).map((item: any) => ({ menu_item_id: item.id, quantity: 1 }));
-
-    try {
-      const res = await authFetch('/api/pos/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ property_id: propertyId, table_number: '101', guest_name: 'Walk In Guest', items: sampleItems })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Failed to create POS order');
-      fetchOperationsData();
-      alert('POS order created');
-    } catch (error) {
-      console.error('Create POS order failed', error);
-      alert(`Gagal buat POS order: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
@@ -3776,7 +3814,7 @@ function AppContent() {
             .slice(0, 2) || 'OP',
         }}
         onLogout={logout}
-        onOpenPos={() => handleSelectMenu('POS')}
+        onOpenPos={isNavAllowed(effectiveAccess?.effective, 'POS') ? openPosModal : undefined}
         propertyBranding={activeBranding}
       />
 
@@ -4469,16 +4507,6 @@ function AppContent() {
           />
         )}
 
-        {selectedMenu === 'POS' && (
-          <PosWorkspace
-            propertyId={propertyId}
-            posMenu={posMenu}
-            posOrders={posOrders}
-            onCreateDemoOrder={createPosOrder}
-            onRefresh={() => void fetchOperationsData()}
-          />
-        )}
-
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
             propertyId={propertyId}
@@ -4518,6 +4546,19 @@ function AppContent() {
         )}
         </main>
       </div>
+
+      {/* POS Modal (dibuka dari tombol header; mengikuti permission POS) */}
+      <PosModal
+        open={showPosModal}
+        propertyId={propertyId}
+        posMenu={posMenu}
+        posOrders={posOrders}
+        onRefresh={() => void fetchOperationsData()}
+        onRequestClose={requestClosePosModal}
+        cartHasItems={posCartHasItems}
+        busy={posBusy}
+        onCartChange={setPosCartHasItems}
+      />
 
       {/* Checkout Room Inspection Modal */}
       {selectedCheckoutInspection && (
