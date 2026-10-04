@@ -5,6 +5,17 @@ backend/dist/
 frontend/dist/
 .env
 backend/.env
+.env.*
+backend/.env.*
+*.env
+*.credential*
+credentials/
+*.json.key
+service-account*.json
+google_credentials*.json
+oak-hotel-backend-env-*.txt
+oak-hotel-db-*.sql
+*.sql
 .git
 .gitignore
 backups/
@@ -12,7 +23,6 @@ storage/
 uploads/
 backend/storage/
 backend/uploads/
-*.sql
 *-env-*.txt
 *.log
 .DS_Store
