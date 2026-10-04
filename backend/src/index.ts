@@ -5327,6 +5327,11 @@ app.get('/api/pos/menu', async (req, res) => {
     if (!Number.isInteger(propertyId) || propertyId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
     }
+
+    // Scope check BEFORE any property read: reject out-of-scope or nonexistent
+    // property ids early so the client never learns about data it cannot access.
+    await assertPropertyScope(req, propertyId);
+
     const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
     if ((propCheck.rowCount ?? 0) === 0) {
       return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
@@ -5343,7 +5348,12 @@ app.get('/api/pos/menu', async (req, res) => {
 
     res.json({ status: 'OK', data: { categories: categories.rows, items: items.rows } });
   } catch (err: any) {
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: statusCode === 500 ? 'Internal server error' : err.message
+    });
   }
 });
 
@@ -5354,6 +5364,25 @@ app.post('/api/pos/menu/items', async (req, res) => {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id, name, and price are required' });
     }
     const propId = Number(property_id);
+    if (!Number.isInteger(propId) || propId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+    }
+    // Validate price BEFORE any DB read/write: must be a finite number >= 0.
+    // Reject boolean, array, object, whitespace-only/empty string, null,
+    // and values whose Number() conversion is non-finite or negative.
+    // Non-empty numeric strings are accepted via Number() conversion.
+    const priceNum = Number(price);
+    if (typeof price === 'boolean' || Array.isArray(price) || (price !== null && typeof price === 'object')) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number' });
+    }
+    if (price === null || (typeof price === 'string' && price.trim() === '') || !Number.isFinite(priceNum) || priceNum < 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number >= 0' });
+    }
+    const propName = String(name).trim();
+    if (!propName) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be a non-empty string' });
+    }
+    await assertPropertyScope(req, propId);
     let categoryId = null;
     if (category_name && String(category_name).trim()) {
       const catCheck = await pool.query(
@@ -5378,11 +5407,16 @@ app.post('/api/pos/menu/items', async (req, res) => {
       `INSERT INTO pos_menu_items (property_id, category_id, item_code, name, description, price, is_active)
        VALUES ($1, $2, $3, $4, $5, $6, TRUE)
        RETURNING *`,
-      [propId, categoryId, code, String(name).trim(), description ? String(description).trim() : null, Number(price)]
+      [propId, categoryId, code, propName, description ? String(description).trim() : null, priceNum]
     );
     res.status(201).json({ status: 'OK', data: { ...result.rows[0], category_name: category_name || 'Food & Beverage' } });
   } catch (err: any) {
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: statusCode === 500 ? 'Internal server error' : err.message
+    });
   }
 });
 
@@ -5400,6 +5434,7 @@ app.delete('/api/pos/menu/items/:id', async (req, res) => {
     if (!Number.isInteger(propertyId) || propertyId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
     }
+    await assertPropertyScope(req, propertyId);
     const updateResult = await pool.query(
       'UPDATE pos_menu_items SET is_active = FALSE WHERE id = $1 AND property_id = $2 RETURNING id',
       [itemId, propertyId]
@@ -5409,7 +5444,12 @@ app.delete('/api/pos/menu/items/:id', async (req, res) => {
     }
     res.json({ status: 'OK', message: 'Item nonaktif' });
   } catch (err: any) {
-    res.status(500).json({ status: 'ERROR', message: err.message });
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({
+      status: 'ERROR',
+      code: err.code || 'INTERNAL_ERROR',
+      message: statusCode === 500 ? 'Internal server error' : err.message
+    });
   }
 });
 
