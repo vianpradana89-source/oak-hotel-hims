@@ -31,14 +31,27 @@ export interface POSOrderPanelProps {
   propertyId: number;
   /** reservation_id untuk filter order per reservasi */
   reservationId: number;
-  /** Callback untuk membuka PosModal dengan property_id + reservation_id terikat */
-  onOpenPosModal: (propertyId: number, reservationId: number) => void;
+  /**
+   * Callback untuk membuka PosModal dengan property_id + reservation_id terikat.
+   * `context` berisi identitas reservasi untuk menginisialisasi field POS
+   * (nama tamu, nomor kamar) hanya saat draft baru; tidak menyentuh snapshot.
+   */
+  onOpenPosModal: (
+    propertyId: number,
+    reservationId: number,
+    context?: { guestName?: string | null; roomNumber?: string | null },
+  ) => void;
   /** true saat user boleh melihat panel POS (di-resolve di parent: atomic key + platform super admin) */
   canViewPos?: boolean;
   /** true saat user boleh menambah order — gate "Tambah Order" DI PANEL */
   canEditPos: boolean;
   /** Nama tamu dari reservasi — identifikasi panel + default "Nama Tamu" */
   guestName?: string | null;
+  /**
+   * Nomor kamar dari reservasi — teruskan ke PosModal sebagai inisialisasi
+   * default "Nomor Kamar" (bukan "Nomor Meja"). Hanya dipakai saat draft baru.
+   */
+  roomNumber?: string | null;
   /** Bilah kecil identitas reservasi yang sedang dipesan */
   reservationLabel?: string;
   /**
@@ -127,6 +140,7 @@ export default function POSOrderPanel({
   canEditPos,
   canViewPos = true,
   guestName,
+  roomNumber,
   reservationLabel,
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
@@ -264,7 +278,7 @@ export default function POSOrderPanel({
         {canEditPos && (
           <button
             type="button"
-            onClick={() => onOpenPosModal(propertyId, reservationId)}
+            onClick={() => onOpenPosModal(propertyId, reservationId, { guestName, roomNumber })}
             className="px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
           >
             + Tambah Order

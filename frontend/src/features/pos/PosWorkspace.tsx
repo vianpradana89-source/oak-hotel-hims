@@ -85,6 +85,17 @@ interface Props {
    * Identitas reservasi/tamu — ditampilkan di header modal bila scoped.
    */
   reservationLabel?: string;
+  /**
+   * Nama tamu dari reservasi — inisialisasi field "Nama Tamu" HANYA saat
+   * draft baru (cart kosong & snapshot null & tidak pending/unresolved).
+   * Tidak menyentuh draft yang sudah ada.
+   */
+  guestNameInitial?: string | null;
+  /**
+   * Nomor kamar dari reservasi — ditampilkan sebagai identitas di header
+   * POS. TIDAK mengisi field "Nomor Meja" atau payload `table_number`.
+   */
+  roomNumberInitial?: string | null;
   /** Callback sukses — parent bisa refresh order list dsb. */
   onOrderCreated?: (order: PosOrderItem) => void;
   /** Gate "Simpan Pesanan": hanya true bila user punya izin edit POS. */
@@ -125,6 +136,8 @@ export default function PosWorkspace({
   authFetch,
   reservationId,
   reservationLabel,
+  guestNameInitial,
+  roomNumberInitial,
   onOrderCreated,
   canEditPos = true,
 }: Props) {
@@ -174,6 +187,21 @@ export default function PosWorkspace({
   /** Fingerprint draft (urutan item, id menu, qty) — bukan untuk dikirim, hanya pembanding snapshot. */
   const fingerprintCart = (lines: { item: { id: number }; qty: number }[]): string =>
     lines.map((l) => `${l.item.id}x${l.qty}`).join('|');
+
+  // ── Inisialisasi identitas dari reservasi (hanya saat draft baru) ─────────
+  // guestNameInitial mengisi ulang field "Nama Tamu" HANYA saat:
+  //   - cart kosong (draft baru, belum ada item)
+  //   - snapshot null (tidak ada pengajuan pending/unresolved)
+  //   - tidak sedang saving (request tidak in-flight)
+  // Nomor kamar & reservation_id TIDAK mengisi field meja/guest; mereka
+  // hanya ditampilkan sebagai identitas di header. Jika kondisi di atas
+  // tidak terpenuhi, nilai lama dipertahankan agar draft & snapshot tidak
+  // berubah.
+  useEffect(() => {
+    if (guestNameInitial != null && cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
+      setGuestName(guestNameInitial);
+    }
+  }, [guestNameInitial]);
 
   // Draft baru (cart dikosongkan setelah sukses, lalu user mulai memilih lagi)
   // → siklus pengajuan baru: snapshot/ambiguitas lama tidak berlaku lagi.
@@ -558,12 +586,27 @@ export default function PosWorkspace({
             </span>
             <span className="text-xs text-gray-400">•</span>
             <span className="text-xs text-gray-500">Property #{propertyId || 1}</span>
-            {reservationLabel && (
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                {reservationLabel}
-              </span>
-            )}
           </div>
+
+          {/* Konteks reservasi — hanya tampil bila POS dibuka dari reservasi */}
+          {reservationId != null && (
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                {reservationLabel || `Reservasi #${reservationId}`}
+              </span>
+              {guestNameInitial && (
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
+                  Tamu: {guestNameInitial}
+                </span>
+              )}
+              {roomNumberInitial && (
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                  Kamar {roomNumberInitial}
+                </span>
+              )}
+            </div>
+          )}
+
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">Point of Sale (POS) &amp; F&amp;B</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Workspace operasional kasir restoran, pesanan meja tamu hotel, dan penjualan langsung.

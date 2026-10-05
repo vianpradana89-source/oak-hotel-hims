@@ -305,6 +305,11 @@ function AppContent() {
   // (multi-property belum didukung: modal menampilkan menu properti scope, menolak bila
   // scope prop berbeda dari properti aktif karena menu yang muat = properti aktif).
   const [posModalPropertyId, setPosModalPropertyId] = useState<number | null>(null);
+  // Identitas reservasi untuk menginisialisasi field PosWorkspace SAAT DRAFT BARU.
+  // Tidak menyentuh draft yang sudah ada, snapshot pending, atau snapshot unresolved.
+  // Di-set null saat buka dari header (konteks umum) atau saat modal ditutup/pindah properti.
+  const [posModalGuestName, setPosModalGuestName] = useState<string | null>(null);
+  const [posModalRoomNumber, setPosModalRoomNumber] = useState<string | null>(null);
 
   // Ref sinkron status PosWorkspace — dipakai guard close/pindah konteks SEMUA jalur.
   // - pendingRef: request POST in-flight (saving) — cegah close/switch (draft akan dibuang).
@@ -378,13 +383,18 @@ function AppContent() {
     posUnresolvedRef.current = false;
     setPosModalReservationId(null);
     setPosModalPropertyId(null);
+    setPosModalGuestName(null);
+    setPosModalRoomNumber(null);
   };
 
   // Buka POS dari header (permission view dari getPosAccess, sama dengan enforcement backend).
+  // Konteks umum: tanpa reservation_id, tanpa identitas reservasi.
   const openPosModal = () => {
     if (!posAccess.canViewPos) return;
     setPosModalReservationId(null);
     setPosModalPropertyId(null); // konteks umum — mengikuti properti aktif
+    setPosModalGuestName(null);   // tidak ada identitas reservasi
+    setPosModalRoomNumber(null);
     setShowPosModal(true);
   };
 
@@ -393,7 +403,14 @@ function AppContent() {
   // Bila propId berbeda dari properti aktif, menu yang dimuat masih milik properti
   // aktif (App memuat posMenu untuk propertyId aktif) — tolak dengan pesan jelas,
   // jangan switch diam-diam (multi-property belum didukung).
-  const openPosModalForReservation = (propId: number, resId: number) => {
+  // context berisi identitas reservasi (nama tamu, nomor kamar) yang hanya
+  // dipakai untuk menginisialisasi field PosWorkspace saat draft baru —
+  // tidak menyentuh draft/snapshot yang sudah ada.
+  const openPosModalForReservation = (
+    propId: number,
+    resId: number,
+    context?: { guestName?: string | null; roomNumber?: string | null },
+  ) => {
     if (!posAccess.canViewPos) return;
     if (propId !== propertyId) {
       window.alert(
@@ -404,6 +421,8 @@ function AppContent() {
     }
     setPosModalReservationId(resId);
     setPosModalPropertyId(propId);
+    setPosModalGuestName(context?.guestName ?? null);
+    setPosModalRoomNumber(context?.roomNumber ?? null);
     setShowPosModal(true);
   };
 
@@ -446,6 +465,8 @@ function AppContent() {
       posUnresolvedRef.current = false;
       setPosModalReservationId(null);
       setPosModalPropertyId(null);
+      setPosModalGuestName(null);
+      setPosModalRoomNumber(null);
       setPropertyId(val);
     }
   };
@@ -4636,7 +4657,12 @@ function AppContent() {
         onCartChange={setPosCartHasItems}
         authFetch={authFetch}
         reservationId={posModalReservationId}
+        reservationLabel={
+          posModalReservationId != null ? `Reservasi #${posModalReservationId}` : undefined
+        }
         canEditPos={posAccess.canEditPos}
+        guestNameInitial={posModalGuestName}
+        roomNumberInitial={posModalRoomNumber}
         onOrderCreated={() => {
           setPosOrdersRefreshReservationId(posModalReservationId);
           setPosOrdersRefreshVersion((v) => v + 1);

@@ -30,6 +30,17 @@ interface PosModalProps {
   reservationId?: number | null;
   /** Identitas reservasi/tamu untuk header modal. */
   reservationLabel?: string;
+  /**
+   * Nama tamu dari reservasi — inisialisasi field "Nama Tamu" PosWorkspace
+   * HANYA saat draft baru (cart kosong & snapshot null). Tidak menyentuh
+   * draft yang sudah ada atau snapshot pending/unresolved.
+   */
+  guestNameInitial?: string | null;
+  /**
+   * Nomor kamar dari reservasi — ditampilkan sebagai identitas di header
+   * PosWorkspace. TIDAK mengisi field "Nomor Meja" atau payload table_number.
+   */
+  roomNumberInitial?: string | null;
   /** Gate "Simpan Pesanan" — dari getPosAccess. */
   canEditPos?: boolean;
   /** Callback setelah order berhasil dibuat */
@@ -59,6 +70,8 @@ export default function PosModal({
   authFetch,
   reservationId,
   reservationLabel,
+  guestNameInitial,
+  roomNumberInitial,
   canEditPos = true,
   onOrderCreated
 }: PosModalProps) {
@@ -210,6 +223,8 @@ export default function PosModal({
             authFetch={authFetch}
             reservationId={reservationId}
             reservationLabel={reservationLabel}
+            guestNameInitial={guestNameInitial}
+            roomNumberInitial={roomNumberInitial}
             canEditPos={canEditPos}
             onOrderCreated={onOrderCreated}
           />

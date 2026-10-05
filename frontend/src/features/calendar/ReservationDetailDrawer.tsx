@@ -68,7 +68,11 @@ interface Props {
   complimentaryRefreshVersion?: number;
   complimentaryRefreshReservationId?: number | null;
   /** Buka PosModal scoped ke reservation ini (dipanggil dari POSOrderPanel "Tambah Order") */
-  onOpenPosModal?: (propertyId: number, reservationId: number) => void;
+  onOpenPosModal?: (
+    propertyId: number,
+    reservationId: number,
+    context?: { guestName?: string | null; roomNumber?: string | null },
+  ) => void;
   /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
   posOrdersRefreshVersion?: number;
   posOrdersRefreshReservationId?: number | null;
@@ -2193,6 +2197,7 @@ export default function ReservationDetailDrawer({
               canViewPos={posAccess.canViewPos}
               canEditPos={posAccess.canEditPos}
               guestName={data?.guest_name || data?.booker_name || undefined}
+              roomNumber={data?.room_number || undefined}
               reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
               posOrdersRefreshVersion={posOrdersRefreshVersion}
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
