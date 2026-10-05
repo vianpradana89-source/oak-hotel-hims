@@ -3141,6 +3141,7 @@ async function getCanonicalReservationDto(clientOrPool: any, reservationId: numb
 app.get('/api/reservations', async (req, res) => {
   try {
     const propertyId = assertPropertyId(req.query);
+    await assertPropertyScope(req, propertyId);
     await assertPropertyExists(pool, propertyId);
 
     const conditions: string[] = ['b.property_id = $1'];
@@ -3258,8 +3259,7 @@ app.get('/api/reservations', async (req, res) => {
         r.amount_paid,
         r.remaining_balance,
         r.payment_status,
-        r.stay_sequence,
-        r.created_at
+        r.stay_sequence
       FROM reservations r
       JOIN bookings b ON b.id = r.booking_id
       LEFT JOIN rooms ro ON ro.id = r.room_id
