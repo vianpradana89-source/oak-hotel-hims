@@ -43,6 +43,12 @@ interface PosModalProps {
   roomNumberInitial?: string | null;
   /** Gate "Simpan Pesanan" — dari getPosAccess. */
   canEditPos?: boolean;
+  /**
+   * Tampilkan GuestPicker di mode POS header (tanpa reservation scoped).
+   * Hanya bila `reservationId === null` dan ini `true`.
+   * App bertanggung jawab memverifikasi izin Kalender:view.
+   */
+  canPickGuest?: boolean;
   /** Callback setelah order berhasil dibuat */
   onOrderCreated?: (order: PosOrderItem) => void;
 }
@@ -73,6 +79,7 @@ export default function PosModal({
   guestNameInitial,
   roomNumberInitial,
   canEditPos = true,
+  canPickGuest = false,
   onOrderCreated
 }: PosModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -226,6 +233,7 @@ export default function PosModal({
             guestNameInitial={guestNameInitial}
             roomNumberInitial={roomNumberInitial}
             canEditPos={canEditPos}
+            canPickGuest={canPickGuest}
             onOrderCreated={onOrderCreated}
           />
         </div>

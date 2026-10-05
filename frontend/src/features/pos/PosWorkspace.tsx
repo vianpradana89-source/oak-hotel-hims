@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import GuestPicker from './GuestPicker';
 
 export interface PosMenuItem {
   id: number;
@@ -12,6 +13,7 @@ export interface PosMenuItem {
 export interface PosOrderItem {
   id: number;
   order_number: string;
+  reservation_id?: number | null;
   table_number?: string;
   guest_name?: string;
   status: string;
@@ -100,6 +102,13 @@ interface Props {
   onOrderCreated?: (order: PosOrderItem) => void;
   /** Gate "Simpan Pesanan": hanya true bila user punya izin edit POS. */
   canEditPos?: boolean;
+  /**
+   * Tampilkan GuestPicker di mode POS header (tanpa reservation_id scoped).
+   * Hanya dirender bila `reservationId === null` dan prop ini `true`.
+   * Caller (App) bertanggung jawab memastikan user punya Kalender:view
+   * sebelum meneruskan `true`.
+   */
+  canPickGuest?: boolean;
 }
 
 function formatIDR(amount: number): string {
@@ -140,6 +149,7 @@ export default function PosWorkspace({
   roomNumberInitial,
   onOrderCreated,
   canEditPos = true,
+  canPickGuest = false,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -147,6 +157,20 @@ export default function PosWorkspace({
   const [cart, setCart] = useState<{ item: PosMenuItem; qty: number }[]>([]);
   const [tableNumber, setTableNumber] = useState('Table 1');
   const [guestName, setGuestName] = useState('Walk-in Guest');
+
+  // ── GuestPicker state (hanya aktif di mode POS header) ──────────────────
+  // pickedGuest: reservasi tamu menginap yang dipilih dari picker.
+  // null = pelanggan manual (tanpa reservation_id).
+  // TIDAK di-reset oleh pergantian cart (pergantian pilihan tidak menghapus cart).
+  // Dihapus hanya saat modal ditutup/dibuka ulang (parent reset state).
+  const [pickedGuest, setPickedGuest] = useState<{
+    reservation_id: number;
+    guest_name: string | null;
+    room_number: string | null;
+  } | null>(null);
+  // GuestPicker hanya tampil di mode header (tanpa reservation scoped)
+  // dan bila user punya izin Kalender:view (canPickGuest dari App).
+  const showGuestPicker = reservationId === null && canPickGuest && propertyId !== null;
 
   // ── Save-order state (real API, bukan demo) ─────────────────────────────
   const [saving, setSaving] = useState(false);
@@ -184,9 +208,17 @@ export default function PosWorkspace({
   // tick di belakang; ref dicek secara sinkron sebelum request dimulai.
   const submittingRef = useRef(false);
 
-  /** Fingerprint draft (urutan item, id menu, qty) — bukan untuk dikirim, hanya pembanding snapshot. */
-  const fingerprintCart = (lines: { item: { id: number }; qty: number }[]): string =>
-    lines.map((l) => `${l.item.id}x${l.qty}`).join('|');
+  /**
+   * Fingerprint draft (urutan item, id menu, qty) + konteks reservasi terpilih.
+   * Konteks reservasi: pickedGuest?.reservation_id (mode header) atau
+   * reservationId (mode scoped). Bila konteks berubah, fingerprint berubah →
+   * snapshot lama tidak terpakai, key baru dibuat.
+   */
+  const fingerprintCart = (
+    lines: { item: { id: number }; qty: number }[],
+    resId: number | null,
+  ): string =>
+    lines.map((l) => `${l.item.id}x${l.qty}`).join('|') + `|res:${resId ?? 'null'}`;
 
   // ── Inisialisasi identitas dari reservasi (hanya saat draft baru) ─────────
   // guestNameInitial mengisi ulang field "Nama Tamu" HANYA saat:
@@ -344,7 +376,9 @@ export default function PosWorkspace({
     //  - selain itu → bahan baru: body fresh + key baru, snapshot DIAMANKAN
     //    sebelum request pertama.
     const snapshot = idempotencySnapshotRef.current;
-    const fp = fingerprintCart(cart);
+    // Effective reservation_id: scoped mode (prop) > pickedGuest (header mode) > null
+    const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+    const fp = fingerprintCart(cart, effectiveResId);
     const isRetryUnresolved = snapshot !== null && snapshot.unresolved;
     const reusable =
       snapshot !== null && !snapshot.unresolved && snapshot.cartFingerprint === fp;
@@ -360,17 +394,24 @@ export default function PosWorkspace({
     } else {
       // unit_price TIDAK dikirim dari klien — harga adalah otoritas backend
       // (fingerprint & snapshot harga memakai harga master di server).
+      // guest_name: bila tamu reservasi dipilih, nama dari reservasi;
+      // bila pelanggan manual, nama yang diketik user.
+      const effectiveGuestName = pickedGuest
+        ? (pickedGuest.guest_name ?? '')
+        : guestName;
       const payload: Record<string, unknown> = {
         property_id: propertyId,
         table_number: tableNumber.trim() || null,
-        guest_name: guestName.trim() || null,
+        guest_name: effectiveGuestName.trim() || null,
         items: cart.map((line) => ({
           menu_item_id: line.item.id,
           quantity: line.qty,
         })),
       };
-      if (reservationId !== null && reservationId !== undefined) {
-        payload.reservation_id = reservationId;
+      // reservation_id mengikuti reservasi terpilih (scoped atau pickedGuest);
+      // pelanggan manual (tanpa reservasi) TIDAK membawa reservation_id.
+      if (effectiveResId !== null) {
+        payload.reservation_id = effectiveResId;
       }
       bodyJson = JSON.stringify(payload);
       key = generateUUIDv4();
@@ -416,6 +457,7 @@ export default function PosWorkspace({
           const createdOrder: PosOrderItem = {
             id: Number(raw!.id),
             order_number: raw!.order_number,
+            reservation_id: (typeof raw!.reservation_id === 'number' && raw!.reservation_id > 0) ? raw!.reservation_id : null,
             status: raw!.status,
             total_amount: raw!.total_amount,
             table_number: typeof raw!.table_number === 'string' ? raw!.table_number : undefined,
@@ -566,7 +608,7 @@ export default function PosWorkspace({
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
       onRequestPending?.(false);
     }
-  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, authFetch, onOrderCreated, onRefresh, canEditPos]);
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos]);
 
   // Retry handler: membaca snapshot (key + body terseri) PERSIS.
   // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
@@ -787,27 +829,126 @@ export default function PosWorkspace({
               </div>
 
               {/* Table & Guest Form — terkunci saat pending/ambigu agar
-                  payload replay tetap identik dengan snapshot */}
-              <div className={`grid grid-cols-2 gap-2 my-3 ${draftLocked ? 'opacity-60' : ''}`}>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-gray-500">Nomor Meja</label>
-                  <input
-                    type="text"
-                    value={tableNumber}
-                    onChange={(e) => setTableNumber(e.target.value)}
-                    disabled={draftLocked}
-                    className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
-                  <input
-                    type="text"
-                    value={guestName}
-                    onChange={(e) => setGuestName(e.target.value)}
-                    disabled={draftLocked}
-                    className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
-                  />
+                   payload replay tetap identik dengan snapshot */}
+              <div className={`my-3 space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
+                {/* ── Mode POS header: pilih tamu menginap ATAU pelanggan manual ── */}
+                {showGuestPicker && !pickedGuest && (
+                  <div>
+                    <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">Tamu</label>
+                    <GuestPicker
+                      propertyId={propertyId!}
+                      authFetch={authFetch}
+                      disabled={draftLocked}
+                      onGuestSelected={(g) => {
+                        // Guard: jangan ubah pickedGuest/nama/konteks saat
+                        // draft ter-lock atau request sedang in-flight.
+                        if (draftLocked || submittingRef.current) return;
+                        setPickedGuest(g);
+                        // Set guest_name dari reservasi — hanya bila draft masih kosong
+                        // (tidak menyentuh draft yang sudah ada).
+                        if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
+                          setGuestName(g.guest_name || 'Walk-in Guest');
+                        }
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* ── Tamu reservasi dipilih: identitas read-only ── */}
+                {showGuestPicker && pickedGuest && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase font-bold text-gray-500">Tamu Terhubung</span>
+                      <button
+                        type="button"
+                        onClick={() => setPickedGuest(null)}
+                        disabled={draftLocked}
+                        className="text-[10px] text-gray-400 hover:text-gray-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                        Kamar {pickedGuest.room_number || '-'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
+                        {pickedGuest.guest_name || 'Tamu'}
+                      </span>
+                      {pickedGuest.reservation_id && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-purple-50 text-purple-800 border border-purple-200">
+                          Res #{String(pickedGuest.reservation_id)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Form input: Nomor Meja (hanya saat pelanggan manual) + Nama Tamu ── */}
+                <div className="grid grid-cols-2 gap-2">
+                  {/* Nomor Meja (manual) ATAU Kamar readonly (reservasi scoped/header) */}
+                  {reservationId != null ? (
+                    // Dari reservasi asal (scoped): Kamar readonly memakai roomNumberInitial
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
+                      <input
+                        type="text"
+                        value={roomNumberInitial ?? ''}
+                        readOnly
+                        disabled
+                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                      />
+                    </div>
+                  ) : showGuestPicker && pickedGuest ? (
+                    // Dari header dengan tamu terpilih: Kamar readonly memakai pickedGuest.room_number
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
+                      <input
+                        type="text"
+                        value={pickedGuest.room_number || ''}
+                        readOnly
+                        disabled
+                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                      />
+                    </div>
+                  ) : (
+                    // Pelanggan manual: Nomor Meja editable
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Nomor Meja</label>
+                      <input
+                        type="text"
+                        value={tableNumber}
+                        onChange={(e) => setTableNumber(e.target.value)}
+                        disabled={draftLocked}
+                        className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
+                      />
+                    </div>
+                  )}
+                  {/* Nama Tamu — read-only bila reservasi terhubung (header/scoped),
+                      input biasa bila pelanggan manual */}
+                  {(showGuestPicker && pickedGuest) || reservationId != null ? (
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
+                      <input
+                        type="text"
+                        value={pickedGuest ? (pickedGuest.guest_name ?? '') : (guestNameInitial ?? guestName)}
+                        readOnly
+                        disabled
+                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
+                      <input
+                        type="text"
+                        value={guestName}
+                        onChange={(e) => setGuestName(e.target.value)}
+                        disabled={draftLocked}
+                        className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
 

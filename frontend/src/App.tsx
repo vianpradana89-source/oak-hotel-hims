@@ -329,6 +329,16 @@ function AppContent() {
     [effectiveAccess, hasGranularPermission],
   );
 
+  // Izin untuk GuestPicker di POS header: user harus punya Kalender:view.
+  // Pola sama dengan getPosAccess: effective grid + fallback granular.
+  const canPickGuest = useMemo(() => {
+    if (effectiveAccess?.is_platform_super_admin) return true;
+    const cell = effectiveAccess?.effective?.['Kalender']?.view;
+    if (cell) return cell.allowed;
+    // Fallback granular (bila grid efektif belum termuat):
+    return hasGranularPermission('reservations.view') && hasGranularPermission('rooms.view');
+  }, [effectiveAccess, hasGranularPermission]);
+
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
       const next = !prev;
@@ -4663,10 +4673,12 @@ function AppContent() {
         canEditPos={posAccess.canEditPos}
         guestNameInitial={posModalGuestName}
         roomNumberInitial={posModalRoomNumber}
-        onOrderCreated={() => {
-          setPosOrdersRefreshReservationId(posModalReservationId);
+        onOrderCreated={(order) => {
+          const resId = order?.reservation_id ?? null;
+          setPosOrdersRefreshReservationId(resId);
           setPosOrdersRefreshVersion((v) => v + 1);
         }}
+        canPickGuest={canPickGuest}
         onRequestPending={(pending) => { posRequestPendingRef.current = pending; }}
         onUnresolvedChange={(unresolved) => { posUnresolvedRef.current = unresolved; }}
       />

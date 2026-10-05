@@ -3202,6 +3202,14 @@ app.get('/api/reservations', async (req, res) => {
       paramIndex++;
     }
 
+    // Stay status filter (opsional — untuk filter tamu menginap)
+    if (req.query.stay_status) {
+      const stayStatusParam = String(req.query.stay_status).trim().toUpperCase();
+      conditions.push(`UPPER(r.stay_status) = $${paramIndex}`);
+      params.push(stayStatusParam);
+      paramIndex++;
+    }
+
     // Search filter
     if (req.query.search) {
       const searchPattern = `%${String(req.query.search).trim()}%`;
@@ -3259,7 +3267,8 @@ app.get('/api/reservations', async (req, res) => {
         r.amount_paid,
         r.remaining_balance,
         r.payment_status,
-        r.stay_sequence
+        r.stay_sequence,
+        r.stay_status
       FROM reservations r
       JOIN bookings b ON b.id = r.booking_id
       LEFT JOIN rooms ro ON ro.id = r.room_id
