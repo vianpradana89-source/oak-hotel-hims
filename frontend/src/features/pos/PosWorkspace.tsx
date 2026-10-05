@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 
 export interface PosMenuItem {
   id: number;
@@ -17,19 +17,78 @@ export interface PosOrderItem {
   status: string;
   total_amount: number | string;
   created_at?: string;
+  items?: {
+    id: number;
+    menu_item_id: number;
+    name: string;
+    quantity: number;
+    unit_price: number | string;
+    line_total: number | string;
+  }[];
+}
+
+/**
+ * Response shape ACTUAL dari POST /api/pos/orders (handler backend):
+ *  - create → 201 { status:'SUCCESS', data: <pos_order> }
+ *  - replay → 200 { status:'REPLAY',  data: { ...pos_order, items: [...] } }
+ * Order berada LANGSUNG di json.data — bukan json.data.order.
+ * items hanya hadir pada path replay; harga adalah milik backend.
+ */
+interface PosCreateOrderResponse {
+  status: string;
+  data: {
+    id: number;
+    order_number: string;
+    status: string;
+    total_amount: number | string;
+    table_number?: string | null;
+    guest_name?: string | null;
+    reservation_id?: number | null;
+    created_at?: string | null;
+    items?: unknown[];
+  };
 }
 
 interface Props {
   propertyId: number | null;
   posMenu: PosMenuItem[];
   posOrders: PosOrderItem[];
-  /** Aksi pembuat order contoh — nonaktifkan (undefined) di konteks modal agar tidak menghasilkan transaksi nyata. */
+  /** Tampilkan tombol "Buat Order Contoh" (mode halaman penuh, TIDAK untuk modal). */
   onCreateDemoOrder?: () => void | Promise<void>;
   onRefresh?: () => void;
   /** Notifikasi perubahan isi cart ke parent (untuk guard close modal). */
   onCartChange?: (hasItems: boolean) => void;
-  /** Request sedang berjalan di parent — disable aksi terkait. */
+  /**
+   * Notifikasi request in-flight (saving=true saat request berjalan, false
+   * saat selesai). Parent (PosModal/App) memakai ref sinkron untuk guard
+   * close/pindah konteks. TERPISAH dari `busy` parent: `busy` hanya mengunci
+   * mutasi draft, TIDAK memblokir Retry.
+   */
+  onRequestPending?: (pending: boolean) => void;
+  /**
+   * Notifikasi status unresolved (snapshot ambigu dipertahankan).
+   * Parent memakai ref sinkron untuk guard close/pindah konteks yang
+   * akan membuang snapshot. Retry tetap dapat digunakan saat unresolved.
+   */
+  onUnresolvedChange?: (unresolved: boolean) => void;
+  /** Request sedang berjalan di parent — kunci mutasi draft (bukan Retry). */
   busy?: boolean;
+  /**
+   * Authenticated fetch — jika disediakan, "Simpan Pesanan" akan melakukan
+   * POST /api/pos/orders dengan Idempotency-Key. Tanpa ini, tombol tetap
+   * menunjukkan demo alert (backward-compatible untuk halaman penuh).
+   */
+  authFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** reservation_id untuk scope order ke reservasi tertentu */
+  reservationId?: number | null;
+  /**
+   * Identitas reservasi/tamu — ditampilkan di header modal bila scoped.
+   */
+  reservationLabel?: string;
+  /** Callback sukses — parent bisa refresh order list dsb. */
+  onOrderCreated?: (order: PosOrderItem) => void;
+  /** Gate "Simpan Pesanan": hanya true bila user punya izin edit POS. */
+  canEditPos?: boolean;
 }
 
 function formatIDR(amount: number): string {
@@ -40,6 +99,19 @@ function formatIDR(amount: number): string {
   }).format(amount);
 }
 
+/** Generate UUID v4 (fallback jika crypto.randomUUID tidak tersedia) */
+function generateUUIDv4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Manual v4 fallback
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
 export default function PosWorkspace({
   propertyId,
   posMenu,
@@ -47,7 +119,14 @@ export default function PosWorkspace({
   onCreateDemoOrder,
   onRefresh,
   onCartChange,
-  busy = false
+  onRequestPending,
+  onUnresolvedChange,
+  busy = false,
+  authFetch,
+  reservationId,
+  reservationLabel,
+  onOrderCreated,
+  canEditPos = true,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -56,10 +135,72 @@ export default function PosWorkspace({
   const [tableNumber, setTableNumber] = useState('Table 1');
   const [guestName, setGuestName] = useState('Walk-in Guest');
 
+  // ── Save-order state (real API, bukan demo) ─────────────────────────────
+  const [saving, setSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<{ ok: boolean; message: string; order?: PosOrderItem } | null>(null);
+  // Ambiguous state: hasil request tidak diketahui (network error / timeout /
+  // 5xx / respons sukses malformed). Draft + snapshot dipertahankan untuk retry.
+  const [ambiguous, setAmbiguous] = useState(false);
+
+  /**
+   * Idempotency snapshot — dibuat SEKALI sebelum pengiriman pertama.
+   * Retry WAJIB membaca pasangan (key, bodyJson) ini PERSIS — payload tidak
+   * pernah di-rebuild dari state UI (state bisa berubah setelah snapshot).
+   * cartFingerprint dipakai untuk memblokir submit BAHAN BARU setelah ada
+   * snapshot (backend membalas 409 fingerprint mismatch bila key lama dipakai
+   * untuk draft berbeda).
+   *
+   * `unresolved` = pengajuan sudah pernah menghasilkan status ambigu
+   * (network/timeout, 5xx, atau respons 200/201 malformed). Selaam
+   * unresolved:
+   *  - retry WAJIB memakai (key, bodyJson) tersimpan persis — fingerprint
+   *    draft TIDAK diperiksa lagi (draft ter-lock, snapshot tetap valid);
+   *  - penolakan definitif 4xx TIDAK membuang snapshot, TIDAK membuat key
+   *    baru, TIDAK mengurai unresolved — draft tetap terkunci dan alasan
+   *    penolakan ditampilkan;
+   *  - snapshot baru boleh dibuat hanya setelah draft bersih (cart kosong
+   *    pasca-sukses) sehingga siklus pengajuan baru dimulai dari nol.
+   */
+  const idempotencySnapshotRef = useRef<{
+    key: string;
+    bodyJson: string;
+    cartFingerprint: string;
+    unresolved: boolean;
+  } | null>(null);
+  // Ref sinkron untuk guard submit ganda — state `saving` bisa tertinggal satu
+  // tick di belakang; ref dicek secara sinkron sebelum request dimulai.
+  const submittingRef = useRef(false);
+
+  /** Fingerprint draft (urutan item, id menu, qty) — bukan untuk dikirim, hanya pembanding snapshot. */
+  const fingerprintCart = (lines: { item: { id: number }; qty: number }[]): string =>
+    lines.map((l) => `${l.item.id}x${l.qty}`).join('|');
+
+  // Draft baru (cart dikosongkan setelah sukses, lalu user mulai memilih lagi)
+  // → siklus pengajuan baru: snapshot/ambiguitas lama tidak berlaku lagi.
+  useEffect(() => {
+    if (cart.length > 0 && saveResult?.ok) {
+      setSaveResult(null);
+      setAmbiguous(false);
+      idempotencySnapshotRef.current = null;
+    }
+  }, [cart.length]);
+
   // Notifikasi parent saat isi cart berubah (untuk guard close modal).
   useEffect(() => {
     onCartChange?.(cart.length > 0);
   }, [cart, onCartChange]);
+
+  // Notifikasi request in-flight ke parent (sinkron, dipakai guard close/switch).
+  useEffect(() => {
+    onRequestPending?.(saving);
+  }, [saving, onRequestPending]);
+
+  // Notifikasi status unresolved (snapshot ambigu) ke parent.
+  // Parent memakai ref sinkron: saat unresolved, close/property-switch yang
+  // membuang snapshot harus dicegah; Retry tetap bisa digunakan.
+  useEffect(() => {
+    onUnresolvedChange?.(ambiguous);
+  }, [ambiguous, onUnresolvedChange]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -80,7 +221,17 @@ export default function PosWorkspace({
     });
   }, [posMenu, searchQuery, selectedCategory]);
 
+  /**
+   * Draft terkunci saat request pending (`saving`/`busy`) ATAU hasil ambigu —
+   * mutasi item/qty/hapus/meja/nama dilarang agar payload yang di-replay
+   * (snapshot) tetap identik dengan draft di layar.
+   * `busy` (parent) mengunci mutasi draft tetapi TIDAK memblokir Retry —
+   * Retry hanya dicek oleh `saving` (request in-flight sendiri).
+   */
+  const draftLocked = saving || busy || ambiguous;
+
   const addToCart = (item: PosMenuItem) => {
+    if (draftLocked) return;
     setCart((prev) => {
       const idx = prev.findIndex((p) => p.item.id === item.id);
       if (idx >= 0) {
@@ -93,10 +244,12 @@ export default function PosWorkspace({
   };
 
   const removeFromCart = (itemId: number) => {
+    if (draftLocked) return;
     setCart((prev) => prev.filter((p) => p.item.id !== itemId));
   };
 
   const updateCartQty = (itemId: number, delta: number) => {
+    if (draftLocked) return;
     setCart((prev) => {
       return prev
         .map((p) => {
@@ -118,17 +271,298 @@ export default function PosWorkspace({
     return posOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
   }, [posOrders]);
 
+  // ── Simpan Pesanan (real API) ──────────────────────────────────────────────
+  // Strategi:
+  //  1. Draft tanpa snapshot (atau draft berbeda dari snapshot) → bangun
+  //     payload, buat UUID key baru, SIMPAN snapshot (key + body terseri +
+  //     fingerprint draft) SEBELUM request pertama.
+  //  2. Draft sama dengan snapshot → replay snapshot PERSIS (key & body
+  //     tidak pernah di-rebuild dari state).
+  //  3. Draft berubah sejak snapshot → snapshot lama tidak terpakai
+  //     (menghindari 409 fingerprint mismatch) → jalur 1 dengan key baru.
+  // Hasil:
+  //  - 200/201 + json.data valid → sukses: reset cart, snapshot, key, ambigu.
+  //  - 200/201 + json.data MALFORMED → AMBIGU: draft & snapshot TIDAK
+  //     dikosongkan — hasil belum pasti.
+  //  - Ditolak definitif (4xx) → snapshot dibuang; status ambigu dari
+  //     pengajuan sebelumnya TIDAK dihapus oleh penolakan definitif.
+  //  - Network error / 5xx → AMBIGU: snapshot & draft dipertahankan.
+  const handleSaveOrder = useCallback(async () => {
+    if (submittingRef.current || busy || cart.length === 0 || propertyId === null) return;
+    // Gate permission diperiksa SEBELUM apapun — termasuk retry:
+    // penolakan permission tidak boleh membangun payload baru, tidak boleh
+    // menyentuh snapshot, dan tidak boleh mengubah status unresolved.
+    if (!canEditPos) {
+      setSaveResult({
+        ok: false,
+        message: 'Anda tidak memiliki izin untuk membuat order POS.',
+      });
+      return;
+    }
+    if (!authFetch) return; // fallback: no API — should not reach here in modal context
+
+    // Guard sinkron — dicek sebelum await sehingga submit ganda pada tick
+    // yang sama tidak melewatkan state `saving` yang masih tertinggal.
+    submittingRef.current = true;
+    setSaving(true);
+    // Notifikasi pending LANGSUNG (sinkron, bukan menunggu useEffect) — parent
+    // (App) memakai ref, jadi guard close/switch aktif sebelum await pertama.
+    onRequestPending?.(true);
+
+    // Pilih jalur snapshot:
+    //  - unresolved (pernah ambigu) → key/body tersimpan PERSIS, tanpa
+    //    memeriksa fingerprint draft (draft ter-lock, snapshot tetap valid).
+    //  - snapshot reusable (fingerprint masih cocok) → pakai key lama.
+    //  - selain itu → bahan baru: body fresh + key baru, snapshot DIAMANKAN
+    //    sebelum request pertama.
+    const snapshot = idempotencySnapshotRef.current;
+    const fp = fingerprintCart(cart);
+    const isRetryUnresolved = snapshot !== null && snapshot.unresolved;
+    const reusable =
+      snapshot !== null && !snapshot.unresolved && snapshot.cartFingerprint === fp;
+
+    let key: string;
+    let bodyJson: string;
+    if (isRetryUnresolved && snapshot) {
+      key = snapshot.key;
+      bodyJson = snapshot.bodyJson;
+    } else if (reusable && snapshot) {
+      key = snapshot.key;
+      bodyJson = snapshot.bodyJson;
+    } else {
+      // unit_price TIDAK dikirim dari klien — harga adalah otoritas backend
+      // (fingerprint & snapshot harga memakai harga master di server).
+      const payload: Record<string, unknown> = {
+        property_id: propertyId,
+        table_number: tableNumber.trim() || null,
+        guest_name: guestName.trim() || null,
+        items: cart.map((line) => ({
+          menu_item_id: line.item.id,
+          quantity: line.qty,
+        })),
+      };
+      if (reservationId !== null && reservationId !== undefined) {
+        payload.reservation_id = reservationId;
+      }
+      bodyJson = JSON.stringify(payload);
+      key = generateUUIDv4();
+      // Snapshot DIAMANKAN sebelum request pertama — retry wajib memakai
+      // pasangan (key, bodyJson) ini persis.
+      idempotencySnapshotRef.current = { key, bodyJson, cartFingerprint: fp, unresolved: false };
+    }
+
+    try {
+      const res = await authFetch('/api/pos/orders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': key,
+        },
+        body: bodyJson,
+      });
+
+      if (res.status === 200 || res.status === 201) {
+        // Sukses — order ada LANGSUNG di json.data (bukan data.order):
+        // create → 201 { status:'SUCCESS', data: <order row> }
+        // replay → 200 { status:'REPLAY', data: {...row, items} }
+        const json = (await res.json().catch(() => null)) as PosCreateOrderResponse | null;
+        const raw = json?.data;
+        const totalValue = raw && (raw.total_amount !== undefined && raw.total_amount !== null)
+          ? Number(raw.total_amount)
+          : NaN;
+        // Validasi sukses: id integer positif; order_number/status string
+        // tidak kosong setelah trim; total hadir, finite, dan >= 0.
+        const valid =
+          raw !== null &&
+          typeof raw === 'object' &&
+          Number.isInteger(Number(raw.id)) &&
+          Number(raw.id) > 0 &&
+          typeof raw.order_number === 'string' &&
+          raw.order_number.trim().length > 0 &&
+          typeof raw.status === 'string' &&
+          raw.status.trim().length > 0 &&
+          Number.isFinite(totalValue) &&
+          totalValue >= 0;
+
+        if (valid) {
+          const createdOrder: PosOrderItem = {
+            id: Number(raw!.id),
+            order_number: raw!.order_number,
+            status: raw!.status,
+            total_amount: raw!.total_amount,
+            table_number: typeof raw!.table_number === 'string' ? raw!.table_number : undefined,
+            guest_name: typeof raw!.guest_name === 'string' ? raw!.guest_name : undefined,
+            created_at: typeof raw!.created_at === 'string' ? raw!.created_at : undefined,
+            items: Array.isArray(raw!.items) ? (raw!.items as PosOrderItem['items']) : undefined,
+          };
+          setSaveResult({
+            ok: true,
+            message: `Order ${createdOrder.order_number} tersimpan (${createdOrder.status}).`,
+            order: createdOrder,
+          });
+          // Sukses nyata: reset draft + snapshot + key + ambigu.
+          // Notifikasi unresolved=false LANGSUNG (sinkron, bukan menunggu
+          // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
+          onUnresolvedChange?.(false);
+          setCart([]);
+          setAmbiguous(false);
+          idempotencySnapshotRef.current = null;
+          // Refresh/callback pasca-sukses TIDAK boleh mengubah hasil:
+          // order sudah tervalidasi dari respons POST — kegagalan callback
+          // (atau pemanggilan apa pun setelahnya) tidak membuat order jadi
+          // ambigu dan tidak memicu submit ulang.
+          try {
+            onOrderCreated?.(createdOrder);
+            onRefresh?.();
+          } catch (cbErr) {
+            console.error('[PosWorkspace] post-success callback failed (order tetap tersimpan):', cbErr);
+          }
+        } else {
+          // Respons sukses tapi shape MALFORMED → hasil belum diketahui.
+          // Snapshot ditandai unresolved: draft, key, dan body dipertahankan
+          // penuh — retry berikutnya memakai snapshot tersimpan PERSIS.
+          if (idempotencySnapshotRef.current) {
+            idempotencySnapshotRef.current.unresolved = true;
+          }
+          // Notifikasi unresolved LANGSUNG (sinkron, bukan menunggu useEffect) —
+          // parent aktifkan guard close/switch sebelum pending dilepas di finally.
+          onUnresolvedChange?.(true);
+          setAmbiguous(true);
+          setSaveResult({
+            ok: false,
+            message:
+              'Server membalas sukses tetapi data order tidak lengkap. Hasil belum diketahui — draft dan idempotency key dipertahankan. Gunakan "Coba Lagi" untuk memverifikasi.',
+          });
+        }
+      } else if (res.status === 409) {
+        // Ditolak definitif: key dipakai untuk payload berbeda (fingerprint
+        // mismatch). Hanya pengajuan yang BELUM PERNAH ambigu boleh
+        // membuang snapshot — bila unresolved, snapshot & key dipertahankan
+        // dan draft tetap terkunci (jangan buat key baru).
+        const errData: any = await res.json().catch(() => ({}));
+        const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+        setSaveResult({
+          ok: false,
+          message:
+            errData.message ||
+            (unresolvedNow
+              ? 'Idempotency key masih terpakai untuk pengajuan belum terselesaikan — hasil sebelumnya belum diketahui. Draft tetap terkunci; gunakan "Coba Lagi".'
+              : 'Konflik: idempotency key sudah dipakai untuk payload berbeda.'),
+        });
+        if (!unresolvedNow) {
+          idempotencySnapshotRef.current = null;
+        }
+      } else if (res.status === 400 || res.status === 422) {
+        const errData: any = await res.json().catch(() => ({}));
+        const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+        setSaveResult({
+          ok: false,
+          message:
+            errData.message ||
+            (unresolvedNow
+              ? 'Permintaan ditolak (HTTP ' + res.status + '), tetapi pengajuan sebelumnya masih belum terselesaikan — hasil belum diketahui. Draft tetap terkunci; gunakan "Coba Lagi".'
+              : 'Data order tidak valid. Periksa kembali.'),
+        });
+        if (!unresolvedNow) {
+          idempotencySnapshotRef.current = null;
+        }
+      } else if (res.status === 401 || res.status === 403) {
+        const errData: any = await res.json().catch(() => ({}));
+        const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+        setSaveResult({
+          ok: false,
+          message:
+            errData.message ||
+            (unresolvedNow
+              ? 'Akses ditolak (HTTP ' + res.status + '), tetapi pengajuan sebelumnya masih belum terselesaikan — hasil belum diketahui. Draft tetap terkunci; gunakan "Coba Lagi".'
+              : 'Anda tidak memiliki akses untuk membuat order POS.'),
+        });
+        if (!unresolvedNow) {
+          idempotencySnapshotRef.current = null;
+        }
+      } else if (res.status >= 500) {
+        // 5xx → hasil tak pasti (order mungkin sudah commit di server).
+        // Snapshot ditandai unresolved & draft DIPERTAHANKAN.
+        const errData: any = await res.json().catch(() => ({}));
+        if (idempotencySnapshotRef.current) {
+          idempotencySnapshotRef.current.unresolved = true;
+        }
+        // Notifikasi unresolved LANGSUNG — guard close/switch aktif sebelum
+        // pending dilepas di finally.
+        onUnresolvedChange?.(true);
+        setAmbiguous(true);
+        setSaveResult({
+          ok: false,
+          message:
+            `${errData.message || `Server error (HTTP ${res.status}).`} ` +
+            'Hasil penyimpanan belum diketahui — draft dan idempotency key dipertahankan. Gunakan "Coba Lagi".',
+        });
+      } else {
+        // 4xx lain (mis. 404 menu/meja tidak ditemukan) → ditolak definitif.
+        const errData: any = await res.json().catch(() => ({}));
+        const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+        setSaveResult({
+          ok: false,
+          message:
+            errData.message ||
+            (unresolvedNow
+              ? 'Permintaan ditolak (HTTP ' + res.status + '), tetapi pengajuan sebelumnya masih belum terselesaikan — hasil belum diketahui. Draft tetap terkunci; gunakan "Coba Lagi".'
+              : `Gagal menyimpan order (HTTP ${res.status}).`),
+        });
+        if (!unresolvedNow) {
+          idempotencySnapshotRef.current = null;
+        }
+      }
+    } catch (networkErr) {
+      // Network error / timeout / abort → hasil tak diketahui.
+      // Snapshot ditandai unresolved; draft + (key, body) dipertahankan
+      // penuh agar retry memakai payload yang persis sama.
+      if (idempotencySnapshotRef.current) {
+        idempotencySnapshotRef.current.unresolved = true;
+      }
+      // Notifikasi unresolved LANGSUNG — guard close/switch aktif sebelum
+      // pending dilepas di finally.
+      onUnresolvedChange?.(true);
+      setAmbiguous(true);
+      setSaveResult({
+        ok: false,
+        message:
+          'Hasil penyimpanan belum diketahui. Draft dan idempotency key dipertahankan — gunakan "Coba Lagi" untuk retry.',
+      });
+      console.error('[PosWorkspace] network/timeout on save order:', networkErr);
+    } finally {
+      submittingRef.current = false;
+      setSaving(false);
+      // Lepaskan pending LANGSUNG di tick yang sama (sinkron) — parent (App)
+      // memakai ref, jadi guard close/switch terbebas tepat saat request selesai.
+      // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
+      onRequestPending?.(false);
+    }
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, authFetch, onOrderCreated, onRefresh, canEditPos]);
+
+  // Retry handler: membaca snapshot (key + body terseri) PERSIS.
+  // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
+  // draft yang berubah membuat snapshot lama tidak terpakai dan key baru dibuat.
+  const handleRetrySave = useCallback(() => {
+    void handleSaveOrder();
+  }, [handleSaveOrder]);
+
   return (
     <div className="space-y-6 pb-12">
       {/* Header Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-gray-200/80 shadow-xs">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider bg-purple-50 text-purple-800 border border-purple-200/60 uppercase">
               Departemen Operasional POS
             </span>
             <span className="text-xs text-gray-400">•</span>
             <span className="text-xs text-gray-500">Property #{propertyId || 1}</span>
+            {reservationLabel && (
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                {reservationLabel}
+              </span>
+            )}
           </div>
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">Point of Sale (POS) &amp; F&amp;B</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
@@ -266,7 +700,9 @@ export default function PosWorkspace({
                 <div
                   key={item.id}
                   onClick={() => addToCart(item)}
-                  className="bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all cursor-pointer group"
+                  className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all group ${
+                    draftLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
+                  }`}
                 >
                   <div>
                     <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
@@ -307,14 +743,16 @@ export default function PosWorkspace({
                 </span>
               </div>
 
-              {/* Table & Guest Form */}
-              <div className="grid grid-cols-2 gap-2 my-3">
+              {/* Table & Guest Form — terkunci saat pending/ambigu agar
+                  payload replay tetap identik dengan snapshot */}
+              <div className={`grid grid-cols-2 gap-2 my-3 ${draftLocked ? 'opacity-60' : ''}`}>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-gray-500">Nomor Meja</label>
                   <input
                     type="text"
                     value={tableNumber}
                     onChange={(e) => setTableNumber(e.target.value)}
+                    disabled={draftLocked}
                     className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                   />
                 </div>
@@ -324,6 +762,7 @@ export default function PosWorkspace({
                     type="text"
                     value={guestName}
                     onChange={(e) => setGuestName(e.target.value)}
+                    disabled={draftLocked}
                     className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                   />
                 </div>
@@ -351,7 +790,8 @@ export default function PosWorkspace({
                         <button
                           type="button"
                           onClick={() => updateCartQty(item.id, -1)}
-                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300"
+                          disabled={draftLocked}
+                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           -
                         </button>
@@ -359,14 +799,16 @@ export default function PosWorkspace({
                         <button
                           type="button"
                           onClick={() => updateCartQty(item.id, 1)}
-                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300"
+                          disabled={draftLocked}
+                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           +
                         </button>
                         <button
                           type="button"
                           onClick={() => removeFromCart(item.id)}
-                          className="text-red-500 hover:text-red-700 ml-1"
+                          disabled={draftLocked}
+                          className="text-red-500 hover:text-red-700 ml-1 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -389,21 +831,74 @@ export default function PosWorkspace({
                 <span>Grand Total</span>
                 <span>{formatIDR(cartSubtotal)}</span>
               </div>
-              <div className="flex items-center gap-1.5 text-[11px] text-amber-700">
-                <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 font-semibold">DEMO</span>
-                <span>Simulasi cart — tidak tersimpan, tidak dibayar, tidak diposting ke folio.</span>
-              </div>
-              <button
-                type="button"
-                disabled={cart.length === 0 || busy}
-                onClick={() => {
-                  alert(`[DEMO] Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} (simulasi, tidak tersimpan/diposting).`);
-                  setCart([]);
-                }}
-                className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
-              >
-                [Demo] Simpan &amp; Bayar Order
-              </button>
+              {!authFetch && (
+                <div className="flex items-center gap-1.5 text-[11px] text-amber-700">
+                  <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 font-semibold">DEMO</span>
+                  <span>Simulasi cart — tidak tersimpan, tidak dibayar, tidak diposting ke folio.</span>
+                </div>
+              )}
+                {/* Real save action — replace demo alert when authFetch is provided */}
+                {authFetch ? (
+                  <>
+                    {!canEditPos && (
+                      <p className="text-[11px] text-stone-500 mb-1">
+                        Anda tidak memiliki izin untuk membuat order POS.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!canEditPos || cart.length === 0 || saving || busy}
+                      onClick={() => void handleSaveOrder()}
+                      className="w-full py-2.5 rounded-xl bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
+                    >
+                      {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
+                    </button>
+                  {(ambiguous || saveResult) && (
+                    <div
+                      className={`rounded-lg p-2 text-[11px] font-medium ${
+                        saveResult?.ok
+                          ? 'bg-emerald-50 border border-emerald-300 text-emerald-800'
+                          : 'bg-red-50 border border-red-200 text-red-800'
+                      }`}
+                    >
+                       {ambiguous && (
+                         <>
+                           <p className="font-semibold mb-1">Hasil penyimpanan belum diketahui</p>
+                           <p className="mb-2">
+                             Draft &amp; idempotency key terkunci dan tidak dapat diubah —
+                             hanya tombol "Coba Lagi" yang dapat menyelesaikan keadaan ini.
+                             Gunakan tombol di bawah untuk mengirim ulang dengan key &amp;
+                             payload yang sama (aman — tidak membuat order duplikat).
+                             Draft baru dapat dibuat HANYA SETELAH replay sukses terverifikasi.
+                           </p>
+                         </>
+                       )}
+                      {saveResult && <p>{saveResult.message}</p>}
+                      {(ambiguous || !saveResult?.ok) && (
+                         <button
+                           type="button"
+                           onClick={handleRetrySave}
+                           disabled={saving || !canEditPos}
+                           className="mt-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-[11px] font-bold cursor-pointer"
+                         >
+                          Coba Lagi
+                        </button>
+                      )}
+                    </div>
+                  )}                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={cart.length === 0 || busy}
+                  onClick={() => {
+                    alert(`[DEMO] Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} (simulasi, tidak tersimpan/diposting).`);
+                    setCart([]);
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
+                >
+                  [Demo] Simpan &amp; Bayar Order
+                </button>
+              )}
             </div>
           </div>
         </div>

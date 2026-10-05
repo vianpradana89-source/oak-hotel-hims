@@ -16,6 +16,24 @@ interface PosModalProps {
   busy: boolean;
   /** Notifikasi perubahan isi cart (true/false) ke parent. */
   onCartChange?: (hasItems: boolean) => void;
+  /** Notifikasi request in-flight dari PosWorkspace (sinkron, ref di App). */
+  onRequestPending?: (pending: boolean) => void;
+  /** Notifikasi status unresolved dari PosWorkspace (snapshot ambigu). */
+  onUnresolvedChange?: (unresolved: boolean) => void;
+  /**
+   * Authenticated fetch dari useAuth() — diteruskan ke PosWorkspace agar
+   * "Simpan Pesanan" melakukan POST /api/pos/orders nyata.
+   * Jika undefined, tombol tetap menunjukkan mode demo (backward-compatible).
+   */
+  authFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** reservation_id untuk scope order ke reservasi tertentu */
+  reservationId?: number | null;
+  /** Identitas reservasi/tamu untuk header modal. */
+  reservationLabel?: string;
+  /** Gate "Simpan Pesanan" — dari getPosAccess. */
+  canEditPos?: boolean;
+  /** Callback setelah order berhasil dibuat */
+  onOrderCreated?: (order: PosOrderItem) => void;
 }
 
 /**
@@ -35,7 +53,14 @@ export default function PosModal({
   onRequestClose,
   cartHasItems,
   busy,
-  onCartChange
+  onCartChange,
+  onRequestPending,
+  onUnresolvedChange,
+  authFetch,
+  reservationId,
+  reservationLabel,
+  canEditPos = true,
+  onOrderCreated
 }: PosModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
@@ -171,14 +196,21 @@ export default function PosModal({
         {/* Konten: scroll internal desktop; fullscreen mobile */}
         <div className="flex-1 overflow-y-auto p-3 sm:p-4">
           {/* onCreateDemoOrder sengaja TIDAK diteruskan ke PosWorkspace di dalam modal
-              agar tombol "Buat Order Contoh" tidak muncul dan tidak ada transaksi nyata. */}
+              agar tombol "Buat Order Contoh" tidak muncul dan tidak ada transaksi demo. */}
           <PosWorkspace
             propertyId={propertyId}
             posMenu={posMenu}
             posOrders={posOrders}
             onRefresh={onRefresh}
             onCartChange={onCartChange}
+            onRequestPending={onRequestPending}
+            onUnresolvedChange={onUnresolvedChange}
             busy={busy}
+            authFetch={authFetch}
+            reservationId={reservationId}
+            reservationLabel={reservationLabel}
+            canEditPos={canEditPos}
+            onOrderCreated={onOrderCreated}
           />
         </div>
       </div>

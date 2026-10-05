@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { safeFetchJson } from './calendarApi';
 import { useAuditLog } from './useAuditLog';
 import { EditReservationModal } from './EditReservationModal';
@@ -18,6 +18,8 @@ import { Tooltip } from '../../design-system/Tooltip';
 import { ComplimentaryActionModal } from './ComplimentaryActionModal';
 import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import POSOrderPanel from '../pos/POSOrderPanel';
+import { getPosAccess } from '../pos/posPermissions';
 import { deriveGuaranteeCloseDecision, type GuaranteeLoadStatus } from '../deposits/guaranteeScopePolicy';
 import { buildCheckinReadinessRows } from './precheckinGateUi';
 import {
@@ -65,6 +67,11 @@ interface Props {
   // complimentary section without remounting or reloading the full reservation detail.
   complimentaryRefreshVersion?: number;
   complimentaryRefreshReservationId?: number | null;
+  /** Buka PosModal scoped ke reservation ini (dipanggil dari POSOrderPanel "Tambah Order") */
+  onOpenPosModal?: (propertyId: number, reservationId: number) => void;
+  /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
+  posOrdersRefreshVersion?: number;
+  posOrdersRefreshReservationId?: number | null;
 }
 
 /** One row of the reservation activity log timeline (backend redacted DTO). */
@@ -308,6 +315,9 @@ export default function ReservationDetailDrawer({
   propertyInfo,
   complimentaryRefreshVersion,
   complimentaryRefreshReservationId,
+  onOpenPosModal,
+  posOrdersRefreshVersion,
+  posOrdersRefreshReservationId,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -376,7 +386,11 @@ export default function ReservationDetailDrawer({
     // ---- Activity Log (Riwayat) state — delegated to useAuditLog hook ----
     // The hook owns entries, hasMore, cursor, loading, error, loadMoreError,
     // in-flight guard, generation-based stale-context discard, and auto-load.
-    const { authFetch, hasGranularPermission } = useAuth();
+    const { authFetch, hasGranularPermission, effectiveAccess } = useAuth();
+    const posAccess = useMemo(
+      () => getPosAccess(effectiveAccess, hasGranularPermission),
+      [effectiveAccess, hasGranularPermission],
+    );
 
   // KTP-MATCH-1 Patch K1: use canonical PRIMARY_GUEST document, never fall back
   // to legacy reservation.ktp_path when a PG relation exists.
@@ -2169,6 +2183,22 @@ export default function ReservationDetailDrawer({
               </button>
             </form>
           )}
+
+          {/* POS Orders — daftar pesanan + tambah order scoped ke reservasi ini */}
+          {activePropId && data?.id != null && onOpenPosModal && posAccess.canViewPos && (
+            <POSOrderPanel
+              propertyId={activePropId}
+              reservationId={Number(data.id)}
+              onOpenPosModal={onOpenPosModal}
+              canViewPos={posAccess.canViewPos}
+              canEditPos={posAccess.canEditPos}
+              guestName={data?.guest_name || data?.booker_name || undefined}
+              reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
+              posOrdersRefreshVersion={posOrdersRefreshVersion}
+              posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+            />
+          )}
+
           </div>
 
           {/* Tab Pane: Deposit & Jaminan — always mounted; display:none when inactive */}

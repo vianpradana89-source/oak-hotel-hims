@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { normalizeHotelDate } from './calendarDates';
 import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { safeFetchJson } from './calendarApi';
@@ -7,6 +7,8 @@ import { ComplimentaryActionModal } from './ComplimentaryActionModal';
 import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import POSOrderPanel from '../pos/POSOrderPanel';
+import { getPosAccess } from '../pos/posPermissions';
 import {
   formatReservationRatePlanLabel,
   formatReservationSourceLabel,
@@ -46,6 +48,11 @@ export interface QuickReservationDetailProps {
   // Print: property branding & info for ThermalReceiptModal (optional; modal uses defaults when null)
   propertyBranding?: PropertyBrandingConfig | null;
   propertyInfo?: { id?: number; name?: string; address?: string | null; phone?: string | null } | null;
+  /** Buka PosModal scoped ke reservation ini (dipanggil dari POSOrderPanel "Tambah Order") */
+  onOpenPosModal?: (propertyId: number, reservationId: number) => void;
+  /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
+  posOrdersRefreshVersion?: number;
+  posOrdersRefreshReservationId?: number | null;
 }
 
 export default function QuickReservationDetail({
@@ -64,6 +71,9 @@ export default function QuickReservationDetail({
   complimentaryRefreshReservationId,
   propertyBranding,
   propertyInfo,
+  onOpenPosModal,
+  posOrdersRefreshVersion,
+  posOrdersRefreshReservationId,
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -74,7 +84,11 @@ export default function QuickReservationDetail({
   const [bidCopied, setBidCopied] = useState<boolean>(false);
   const [requestingInspection, setRequestingInspection] = useState<boolean>(false);
   const [inspectionFeedback, setInspectionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const { authFetch, hasGranularPermission } = useAuth();
+  const { authFetch, hasGranularPermission, effectiveAccess } = useAuth();
+  const posAccess = useMemo(
+    () => getPosAccess(effectiveAccess, hasGranularPermission),
+    [effectiveAccess, hasGranularPermission],
+  );
 
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number }>({ top: 100, left: 100 });
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -740,6 +754,21 @@ export default function QuickReservationDetail({
               compact
               isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={handleRefresh}
+            />
+          )}
+
+          {/* POS Orders — daftar pesanan + tambah order scoped ke reservasi ini */}
+          {data?.id && activePropId && onOpenPosModal && posAccess.canViewPos && (
+            <POSOrderPanel
+              propertyId={activePropId}
+              reservationId={Number(data.id)}
+              onOpenPosModal={onOpenPosModal}
+              canViewPos={posAccess.canViewPos}
+              canEditPos={posAccess.canEditPos}
+              guestName={data?.guest_name || data?.booker_name || undefined}
+              reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
+              posOrdersRefreshVersion={posOrdersRefreshVersion}
+              posOrdersRefreshReservationId={posOrdersRefreshReservationId}
             />
           )}
 

@@ -49,6 +49,7 @@ import ProductInventorySection from './features/productInventory/ProductInventor
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
 import PosModal from './features/pos/PosModal';
+import { getPosAccess } from './features/pos/posPermissions';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
@@ -143,7 +144,7 @@ function localDateISO(value: Date | string | undefined) {
 }
 
 function AppContent() {
-  const { user, logout, authFetch, effectiveAccess } = useAuth();
+  const { user, logout, authFetch, effectiveAccess, hasGranularPermission } = useAuth();
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
@@ -298,6 +299,30 @@ function AppContent() {
     posBusyRef.current = v;
     setPosBusy(v);
   };
+  // reservation_id untuk scope POS order ke reservasi tertentu (dari detail view).
+  const [posModalReservationId, setPosModalReservationId] = useState<number | null>(null);
+  // property_id scope POS modal — TIDAK mengikuti propertyId aktif bila berbeda
+  // (multi-property belum didukung: modal menampilkan menu properti scope, menolak bila
+  // scope prop berbeda dari properti aktif karena menu yang muat = properti aktif).
+  const [posModalPropertyId, setPosModalPropertyId] = useState<number | null>(null);
+
+  // Ref sinkron status PosWorkspace — dipakai guard close/pindah konteks SEMUA jalur.
+  // - pendingRef: request POST in-flight (saving) — cegah close/switch (draft akan dibuang).
+  // - unresolvedRef: snapshot ambigu dipertahankan — cegah close/switch yang membuang snapshot,
+  //   TAPI TIDAK memblokir tombol Retry di dalam PosWorkspace (Retry hanya dicek oleh saving lokal).
+  const posRequestPendingRef = useRef<boolean>(false);
+  const posUnresolvedRef = useRef<boolean>(false);
+
+  // Scoped refresh POS daftar: App menerbitkan version bump + scope, detail view
+  // meneruskannya ke POSOrderPanel; panel refetch hanya bila scope cocok.
+  const [posOrdersRefreshVersion, setPosOrdersRefreshVersion] = useState<number>(0);
+  const [posOrdersRefreshReservationId, setPosOrdersRefreshReservationId] = useState<number | null>(null);
+
+  // Permission POS (pola getPosAccess — sama dengan enforcement backend).
+  const posAccess = useMemo(
+    () => getPosAccess(effectiveAccess, hasGranularPermission),
+    [effectiveAccess, hasGranularPermission],
+  );
 
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
@@ -327,8 +352,21 @@ function AppContent() {
   // Guard close POS modal (dipakai X, Escape, backdrop, dan tombol navigasi).
   // Batal close → cart & properti tetap; setuju → tutup & buang draft.
   // Cek ref sinkron (bukan state) agar guard aman di tick yang sama.
+  // Ref pending/unresolved dipisahkan:
+  //  - pending: request in-flight → cegah close/switch (draft akan dibuang).
+  //  - unresolved: snapshot ambigu → CEGAH close/switch (snapshot tidak boleh
+  //    dibuang sebelum replay sukses terverifikasi); TIDAK memblokir Retry.
   const requestClosePosModal = () => {
-    if (posBusyRef.current) return; // request sedang berjalan — cegah close yang berisiko
+    if (posRequestPendingRef.current) return; // request sedang berjalan — cegah close yang berisiko
+    if (posUnresolvedRef.current) {
+      // Snapshot ambigu aktif — close/switch akan membuang draft & key yang
+      // belum terverifikasi. Tidak ada jalur confirm: tolak dan kembalikan.
+      window.alert(
+        'Tutup POS ditolak: order sebelumnya belum terselesaikan. ' +
+        'Gunakan "Coba Lagi" di panel POS untuk memverifikasi hasil sebelum menutup.'
+      );
+      return;
+    }
     if (posCartHasItems) {
       const ok = window.confirm('Tutup POS? Draft pesanan yang belum tersimpan akan dibuang.');
       if (!ok) return;
@@ -336,21 +374,55 @@ function AppContent() {
     setShowPosModal(false);
     setPosCartHasItems(false);
     setPosBusySync(false);
+    posRequestPendingRef.current = false;
+    posUnresolvedRef.current = false;
+    setPosModalReservationId(null);
+    setPosModalPropertyId(null);
   };
 
-  // Buka POS dari header (mengikuti permission POS yang sudah ada).
+  // Buka POS dari header (permission view dari getPosAccess, sama dengan enforcement backend).
   const openPosModal = () => {
-    if (!isNavAllowed(effectiveAccess?.effective, 'POS')) return;
+    if (!posAccess.canViewPos) return;
+    setPosModalReservationId(null);
+    setPosModalPropertyId(null); // konteks umum — mengikuti properti aktif
+    setShowPosModal(true);
+  };
+
+  // Buka POS dari reservation detail (scoped ke property_id + reservation_id).
+  // propId adalah properti reservasi tersebut; TIDAK mengabaikan sebagai _propId.
+  // Bila propId berbeda dari properti aktif, menu yang dimuat masih milik properti
+  // aktif (App memuat posMenu untuk propertyId aktif) — tolak dengan pesan jelas,
+  // jangan switch diam-diam (multi-property belum didukung).
+  const openPosModalForReservation = (propId: number, resId: number) => {
+    if (!posAccess.canViewPos) return;
+    if (propId !== propertyId) {
+      window.alert(
+        `POS untuk reservasi di properti #${propId} belum didukung — properti aktif adalah #${propertyId}. ` +
+        'Pindah ke properti tersebut dahulu, lalu coba lagi.'
+      );
+      return;
+    }
+    setPosModalReservationId(resId);
+    setPosModalPropertyId(propId);
     setShowPosModal(true);
   };
 
   const handleSelectProperty = (val: number) => {
     if (Number.isInteger(val) && val > 0) {
-      // Pindah properti saat modal POS terbuka → guard (kondisi #6 & #5).
+      // Pindah properti saat modal POS terbuka → guard SEMUA jalur (sinkron ref).
       if (showPosModal) {
-        if (posBusyRef.current) {
+        if (posRequestPendingRef.current) {
           // Request sedang berjalan — cegah ganti properti yang membatalkan/berisiko.
           window.alert('Menunggu proses POS selesai. Coba lagi setelahnya.');
+          return;
+        }
+        if (posUnresolvedRef.current) {
+          // Snapshot ambigu aktif — pindah properti membuang draft & key yang
+          // belum terverifikasi. Tidak ada jalur confirm: tolak dan kembalikan.
+          window.alert(
+            'Ganti properti ditolak: order POS sebelumnya belum terselesaikan. ' +
+            'Gunakan "Coba Lagi" di panel POS untuk memverifikasi hasil dahulu.'
+          );
           return;
         }
         if (posCartHasItems) {
@@ -370,6 +442,10 @@ function AppContent() {
       setShowPosModal(false);
       setPosCartHasItems(false);
       setPosBusySync(false);
+      posRequestPendingRef.current = false;
+      posUnresolvedRef.current = false;
+      setPosModalReservationId(null);
+      setPosModalPropertyId(null);
       setPropertyId(val);
     }
   };
@@ -4550,7 +4626,7 @@ function AppContent() {
       {/* POS Modal (dibuka dari tombol header; mengikuti permission POS) */}
       <PosModal
         open={showPosModal}
-        propertyId={propertyId}
+        propertyId={posModalPropertyId ?? propertyId}
         posMenu={posMenu}
         posOrders={posOrders}
         onRefresh={() => void fetchOperationsData()}
@@ -4558,6 +4634,15 @@ function AppContent() {
         cartHasItems={posCartHasItems}
         busy={posBusy}
         onCartChange={setPosCartHasItems}
+        authFetch={authFetch}
+        reservationId={posModalReservationId}
+        canEditPos={posAccess.canEditPos}
+        onOrderCreated={() => {
+          setPosOrdersRefreshReservationId(posModalReservationId);
+          setPosOrdersRefreshVersion((v) => v + 1);
+        }}
+        onRequestPending={(pending) => { posRequestPendingRef.current = pending; }}
+        onUnresolvedChange={(unresolved) => { posUnresolvedRef.current = unresolved; }}
       />
 
       {/* Checkout Room Inspection Modal */}
@@ -4775,9 +4860,12 @@ function AppContent() {
             }}
             complimentaryRefreshVersion={complimentaryRefresh.version}
             complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
-            propertyBranding={activeBranding || null}
-            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
-          />
+             propertyBranding={activeBranding || null}
+             propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+             onOpenPosModal={openPosModalForReservation}
+             posOrdersRefreshVersion={posOrdersRefreshVersion}
+             posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+           />
       )}
 
       {selectedRes && (
@@ -4801,10 +4889,13 @@ function AppContent() {
           checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
           complimentaryRefreshVersion={complimentaryRefresh.version}
           complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
-          propertyBranding={activeBranding || null}
-          propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
-          />
-        )}
+           propertyBranding={activeBranding || null}
+           propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+           onOpenPosModal={openPosModalForReservation}
+           posOrdersRefreshVersion={posOrdersRefreshVersion}
+           posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+           />
+         )}
 
       <CheckoutGuaranteeConfirmationModal
         isOpen={checkoutConfirmOpen}
