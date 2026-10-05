@@ -144,7 +144,8 @@ export default function PosModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center bg-black/50 sm:bg-slate-900/60 sm:p-6"
+      className="fixed inset-0 z-[80] flex items-stretch sm:items-center sm:justify-center bg-black/50 sm:bg-slate-900/60 sm:p-6"
+      data-pos-modal-overlay="true"
       onMouseDown={(e) => {
         // Tutup hanya saat klik backdrop (bukan panel).
         if (e.target === e.currentTarget && !busy) onRequestClose();

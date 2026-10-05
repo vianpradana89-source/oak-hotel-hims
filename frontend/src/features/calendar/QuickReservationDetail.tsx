@@ -208,9 +208,15 @@ export default function QuickReservationDetail({
   }, [updatePosition]);
 
   // Close on Escape or outside click
+  // POS overlay di atas reservasi: skip close logic saat POS terbuka
+  // agar reservasi tetap terbuka di belakang dan fokus/Escape di POS.
   useEffect(() => {
+    const posOverlayPresent = () =>
+      !!document.querySelector('[data-pos-modal-overlay="true"]');
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (posOverlayPresent()) return; // POS teratas — jangan tutup reservasi
         if (isMoreActionsOpen) {
           setIsMoreActionsOpen(false);
         } else {
@@ -224,6 +230,8 @@ export default function QuickReservationDetail({
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if ((target as Element).closest?.('[data-portal-overlay]')) return;
         if ((target as Element).closest?.('[role="dialog"]')) return;
+        // Klik di dalam POS overlay (backdrop atau panel) → skip close reservasi
+        if ((target as Element).closest?.('[data-pos-modal-overlay]')) return;
         onClose();
       }
       if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
