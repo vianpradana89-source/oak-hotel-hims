@@ -207,9 +207,16 @@ function effectiveSaleAmounts(members: BookingSalesDetailSaleInput[]): { gross: 
 }
 
 function unattachedPaid(row: BookingSalesDetailSaleInput, net: number): number {
+  // paid_amount tersedia (termasuk 0) → gunakan nilai tersimpan
   if (row.paid_amount !== undefined && row.paid_amount !== null && String(row.paid_amount) !== '') {
     return roundIdr(row.paid_amount);
   }
+  // POS tanpa paid_amount → 0 (jangan fallback ke net)
+  const sourceType = String(row.source_type || '').toUpperCase();
+  if (sourceType === 'POS_ORDER' || sourceType === 'POS') {
+    return 0;
+  }
+  // Non-POS: pertahankan fallback PAID→net existing
   if (String(row.payment_status || '').toUpperCase() === 'PAID') return net;
   return 0;
 }
@@ -264,7 +271,13 @@ export function assembleBookingSalesDetail(input: {
     const amounts = effectiveSaleAmounts(group.members);
     const sourceType = String(group.primary.source_type || 'OTHER_SALE').toUpperCase();
     const reservationId = asPositiveInt(group.primary.reservation_id);
-    const paid = reservationId ? 0 : unattachedPaid(group.primary, amounts.net);
+    // POS SALE: paid_amount sudah termasuk pos_settlements (LATERAL JOIN).
+    // Untuk POS terhubung reservation, tetap hitung paid dari LATERAL JOIN
+    // (tidak di-kanonisasi ke reservation financials kamar).
+    const isPosSource = sourceType === 'POS_ORDER' || sourceType === 'POS';
+    const paid = (reservationId && !isPosSource)
+      ? 0
+      : unattachedPaid(group.primary, amounts.net);
     return {
       reservationId,
       sourceType,
@@ -273,7 +286,9 @@ export function assembleBookingSalesDetail(input: {
       discount: amounts.discount,
       net: amounts.net,
       paid,
-      remaining: reservationId ? 0 : Math.max(0, amounts.net - paid),
+      remaining: (reservationId && !isPosSource)
+        ? 0
+        : Math.max(0, amounts.net - paid),
     };
   });
 
@@ -285,6 +300,11 @@ export function assembleBookingSalesDetail(input: {
       const gross = groups.reduce((sum, group) => sum + group.gross, 0);
       const discount = groups.reduce((sum, group) => sum + group.discount, 0);
       const net = groups.reduce((sum, group) => sum + group.net, 0);
+      // POS paid: sum dari effective groups yang source_type-nya POS (sudah termasuk settlement).
+      // Room paid: dari canonical reservation financials (tidak diubah).
+      const posGroupPaid = groups
+        .filter((g) => g.sourceType === 'POS_ORDER' || g.sourceType === 'POS')
+        .reduce((sum, g) => sum + g.paid, 0);
       const paid = (() => {
         const rid = asPositiveInt(reservation.id);
         const fin = rid && input.reservationFinancials
@@ -292,12 +312,16 @@ export function assembleBookingSalesDetail(input: {
               ? input.reservationFinancials.get(rid)
               : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
           : null;
+        let roomPaid: number;
         if (fin && typeof fin === 'object') {
           const canonicalPaid = roundIdr((fin as any).amount_paid ?? 0);
           const canonicalAppliedDeposit = roundIdr((fin as any).applied_deposit ?? 0);
-          return canonicalPaid + canonicalAppliedDeposit;
+          roomPaid = canonicalPaid + canonicalAppliedDeposit;
+        } else {
+          roomPaid = roundIdr(reservation.amount_paid);
         }
-        return roundIdr(reservation.amount_paid);
+        // Agregat child = pembayaran kamar + pembayaran POS (masing-masing tepat sekali).
+        return roomPaid + posGroupPaid;
       })();
       const remaining = (() => {
         const rid = asPositiveInt(reservation.id);
@@ -306,12 +330,22 @@ export function assembleBookingSalesDetail(input: {
               ? input.reservationFinancials.get(rid)
               : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
           : null;
+        let roomRemaining: number;
         if (fin && typeof fin === 'object') {
-          return Math.max(0, roundIdr((fin as any).hotel_collectible_remaining_balance ?? 0));
+          roomRemaining = Math.max(0, roundIdr((fin as any).hotel_collectible_remaining_balance ?? 0));
+        } else {
+          const roomNet = groups
+            .filter((g) => g.sourceType !== 'POS_ORDER' && g.sourceType !== 'POS')
+            .reduce((sum, g) => sum + g.net, 0);
+          roomRemaining = reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
+            ? Math.max(0, roundIdr(reservation.remaining_balance))
+            : Math.max(0, roomNet - (paid - posGroupPaid));
         }
-        return reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
-          ? Math.max(0, roundIdr(reservation.remaining_balance))
-          : Math.max(0, net - paid);
+        // Sisa child = sisa kamar + sisa POS
+        const posGroupRemaining = groups
+          .filter((g) => g.sourceType === 'POS_ORDER' || g.sourceType === 'POS')
+          .reduce((sum, g) => sum + g.remaining, 0);
+        return roomRemaining + posGroupRemaining;
       })();
       // Resolve payment_responsibility once (same fin lookup as remaining)
       const rid = asPositiveInt(reservation.id);

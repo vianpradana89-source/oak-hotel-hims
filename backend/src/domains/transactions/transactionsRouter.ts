@@ -608,11 +608,11 @@ export function createTransactionsRouter(pool: Pool): Router {
          data: updated
        });
      } catch (err: any) {
-       return res.status(err.statusCode || 400).json({
-         success: false,
-         error: err.message
-       });
-     }
+      return res.status(err.statusCode || 400).json({
+        success: false,
+        error: err.message
+      });
+    }
    });
 
   /**
@@ -634,7 +634,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         actor_user_id: actor_user_id || (req as any).user?.id || null
       });
 
-      return res.json({
+       return res.json({
         success: true,
         message: 'Pelunasan transaksi berhasil dicatat',
         data: updated
@@ -642,6 +642,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }

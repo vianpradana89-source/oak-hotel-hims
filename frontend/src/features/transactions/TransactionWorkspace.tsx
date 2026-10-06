@@ -932,10 +932,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     if (item.kind === 'standalone') {
       const t = item.tx;
       const party = t.party_name || t.guest_name_snapshot || t.supplier_name || '-';
-      const paid = t.reservation_amount_paid != null ? Number(t.reservation_amount_paid) : Number(t.paid_amount || 0);
-      const remaining = t.reservation_remaining_balance != null
-        ? Number(t.reservation_remaining_balance)
-        : Number(t.outstanding_amount || 0);
+      const isPosSource = String(t.source_type || '').toUpperCase() === 'POS_ORDER' || String(t.source_type || '').toUpperCase() === 'POS';
+      const paid = isPosSource
+        ? Number(t.paid_amount || 0)
+        : (t.reservation_amount_paid != null ? Number(t.reservation_amount_paid) : Number(t.paid_amount || 0));
+      const remaining = isPosSource
+        ? Number(t.outstanding_amount || 0)
+        : (t.reservation_remaining_balance != null
+          ? Number(t.reservation_remaining_balance)
+          : Number(t.outstanding_amount || 0));
       return (
         <tr
           key={t.id}

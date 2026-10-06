@@ -243,6 +243,13 @@ function canonicalBookingId(rows: any[]): number | string | null {
 }
 
 function reservationPaid(row: any): number {
+  // POS SALE: paid_amount sudah termasuk pos_settlements (LATERAL JOIN).
+  // Jangan pakai canonical_effective_paid / reservation_amount_paid karena
+  // itu mengukur pembayaran kamar, bukan pembayaran POS langsung.
+  const srcType = String(row.source_type || '').toUpperCase();
+  if (srcType === 'POS_ORDER' || srcType === 'POS') {
+    return roundIdr(row.paid_amount);
+  }
   if (row.canonical_effective_paid != null) {
     return roundIdr(row.canonical_effective_paid);
   }
@@ -253,6 +260,12 @@ function reservationPaid(row: any): number {
 }
 
 function reservationRemaining(row: any, net: number, paid: number): number {
+  // POS SALE: pakai net - paid (yang sudah termasuk pos_settlements dari LATERAL JOIN).
+  // Jangan pakai canonical_remaining_balance karena itu menghitung sisa kamar.
+  const srcType = String(row.source_type || '').toUpperCase();
+  if (srcType === 'POS_ORDER' || srcType === 'POS') {
+    return Math.max(0, net - paid);
+  }
   if (row.canonical_remaining_balance != null) {
     return Math.max(0, roundIdr(row.canonical_remaining_balance));
   }
@@ -337,8 +350,46 @@ export function buildChild(reservationId: number | null, members: any[]): Penjua
   const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
   const discount = members.reduce((sum, row) => sum + roundIdr(row.discount_amount), 0);
   const net = members.reduce((sum, row) => sum + saleNet(row), 0);
-  const paid = reservationPaid(primary);
-  const remaining = reservationRemaining(primary, net, paid);
+
+  // Split members into POS and room (non-POS) groups so that the room
+  // component is computed once from canonical reservation financials and
+  // the POS component is summed from each POS SALE member's own paid_amount.
+  // This avoids double-counting when a room member and POS members share the
+  // same reservation_id, and it keeps the result independent of which
+  // member happens to be primary (members[0]).
+  const isPosMember = (row: any): boolean => {
+    const st = String(row.source_type || '').toUpperCase();
+    return st === 'POS_ORDER' || st === 'POS';
+  };
+  const posMembers = members.filter(isPosMember);
+  const roomMembers = members.filter((row) => !isPosMember(row));
+
+  // POS paid: sum of paid_amount across all POS members.
+  // Each POS SALE member's paid_amount already includes its own pos_settlements
+  // (via the LATERAL JOIN in listSelectSql), so no further settlement lookup needed.
+  const posPaid = posMembers.reduce((sum, m) => sum + roundIdr(m.paid_amount), 0);
+  const posRemaining = posMembers.reduce(
+    (sum, m) => sum + Math.max(0, saleNet(m) - roundIdr(m.paid_amount)), 0
+  );
+
+  // Room component: computed ONCE from the first room member's canonical
+  // reservation financials (canonical_effective_paid / canonical_remaining_balance).
+  // All room members for the same reservation share the same per-reservation
+  // canonical values, so using any one of them is correct.
+  // If no room member is present (e.g., filtered out by source_type), the
+  // room component is 0.
+  const roomNet = roomMembers.reduce((sum, row) => sum + saleNet(row), 0);
+  let roomPaid = 0;
+  let roomRemaining = 0;
+  if (roomMembers.length > 0) {
+    const roomRef = roomMembers[0];
+    roomPaid = reservationPaid(roomRef);
+    roomRemaining = reservationRemaining(roomRef, roomNet, roomPaid);
+  }
+
+  const paid = roomPaid + posPaid;
+  const remaining = roomRemaining + posRemaining;
+
   // Use canonical aggregation across ALL member sheets, not just members[0].
   // This makes child sheet order-independent: mixed PROSES+PROSES+BATAL => PROSES.
   const canonicalSheet = deriveGroupOperationalSheet(

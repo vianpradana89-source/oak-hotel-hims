@@ -2276,6 +2276,7 @@ export async function settleTransactionPayment(
 
     const txRes = await client.query(
       `SELECT t.id, t.transaction_no, t.transaction_type, t.net_amount, t.payment_status,
+              t.source_type,
               t.reservation_id, t.booking_id,
               COALESCE(pmt.total_paid, 0)::bigint AS paid_amount,
               COALESCE(b.payment_responsibility, 'HOTEL_COLLECT') AS payment_responsibility
@@ -2298,6 +2299,18 @@ export async function settleTransactionPayment(
     }
 
     const tx = txRes.rows[0];
+
+    // A. Guard: POS_ORDER/POS tidak boleh dilunasi manual — harus melalui pembayaran POS.
+    const txSourceType = String(tx.source_type || '').trim().toUpperCase();
+    if (txSourceType === 'POS_ORDER' || txSourceType === 'POS') {
+      const err: any = new Error(
+        'Pembayaran POS tidak dapat dilakukan melalui pelunasan manual. Gunakan pembayaran POS.'
+      );
+      err.statusCode = 409;
+      err.code = 'POS_PAYMENT_ROUTE_REQUIRED';
+      throw err;
+    }
+
     const netAmount = Number(tx.net_amount) || 0;
     const currentPaid = Number(tx.paid_amount) || 0;
     const outstanding = Math.max(0, netAmount - currentPaid);
@@ -2927,11 +2940,31 @@ export async function getTransactions(
     LEFT JOIN room_types rt_current ON rt_current.id = rm.room_type_id AND rt_current.property_id = t.property_id
     LEFT JOIN room_types rt_booked ON rt_booked.id = r.booked_room_type_id_snapshot AND rt_booked.property_id = t.property_id
     LEFT JOIN LATERAL (
-      SELECT SUM(pt.amount)::bigint AS total_paid
-      FROM payment_transactions pt
-      WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
-        AND pt.status = 'SUCCESS'
-        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      SELECT CASE
+        WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS') THEN
+          COALESCE(
+            (SELECT SUM(a.amount)::numeric
+             FROM payment_transactions a
+             WHERE a.transaction_id = t.id
+               AND a.status = 'SUCCESS'
+               AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+          ) + COALESCE(
+            (SELECT SUM(b2.amount)::numeric
+             FROM pos_settlements b2
+             WHERE b2.transaction_id = t.id
+               AND b2.property_id = t.property_id
+               AND b2.pos_order_id::text = t.source_id
+               AND b2.status = 'SUCCESS'), 0
+          )
+        ELSE
+          COALESCE(
+            (SELECT SUM(a.amount)::numeric
+             FROM payment_transactions a
+             WHERE (a.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND a.reservation_id = t.reservation_id))
+               AND a.status = 'SUCCESS'
+               AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+          )
+      END AS total_paid
     ) pmt ON TRUE
   `;
 
@@ -3324,7 +3357,7 @@ export async function getTransactionById(
              rev_orig.transaction_no as original_transaction_no,
             rev_repl.transaction_no as reversal_transaction_no,
     COALESCE(pmt.total_paid, 0) AS paid_amount,
-             GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
+              GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
       FROM transactions t
        LEFT JOIN suppliers s ON s.id = t.supplier_id
        LEFT JOIN reservations r ON r.id = t.reservation_id
@@ -3333,11 +3366,31 @@ export async function getTransactionById(
        LEFT JOIN transactions rev_orig ON rev_orig.id = t.reversal_of_transaction_id
       LEFT JOIN transactions rev_repl ON rev_repl.reversal_of_transaction_id = t.id
       LEFT JOIN LATERAL (
-        SELECT SUM(pt.amount)::bigint AS total_paid
-        FROM payment_transactions pt
-        WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
-          AND pt.status = 'SUCCESS'
-          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        SELECT CASE
+          WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS') THEN
+            COALESCE(
+              (SELECT SUM(a.amount)::numeric
+               FROM payment_transactions a
+               WHERE a.transaction_id = t.id
+                 AND a.status = 'SUCCESS'
+                 AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+            ) + COALESCE(
+              (SELECT SUM(b2.amount)::numeric
+               FROM pos_settlements b2
+               WHERE b2.transaction_id = t.id
+                 AND b2.property_id = t.property_id
+                 AND b2.pos_order_id::text = t.source_id
+                 AND b2.status = 'SUCCESS'), 0
+            )
+          ELSE
+            COALESCE(
+              (SELECT SUM(a.amount)::numeric
+               FROM payment_transactions a
+               WHERE (a.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND a.reservation_id = t.reservation_id))
+                 AND a.status = 'SUCCESS'
+                 AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+            )
+        END AS total_paid
       ) pmt ON TRUE
       WHERE t.id = $1 AND t.property_id = $2`,
      [id, propertyId]

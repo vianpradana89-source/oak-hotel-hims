@@ -134,11 +134,31 @@ export async function getBookingSalesDetail(
         COALESCE(pmt.total_paid, 0) AS paid_amount
       FROM transactions t
       LEFT JOIN LATERAL (
-        SELECT SUM(pt.amount)::bigint AS total_paid
-        FROM payment_transactions pt
-        WHERE pt.transaction_id = t.id
-          AND pt.status = 'SUCCESS'
-          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        SELECT CASE
+          WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS') THEN
+            COALESCE(
+              (SELECT SUM(a.amount)::numeric
+               FROM payment_transactions a
+               WHERE a.transaction_id = t.id
+                 AND a.status = 'SUCCESS'
+                 AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+            ) + COALESCE(
+              (SELECT SUM(b2.amount)::numeric
+               FROM pos_settlements b2
+               WHERE b2.transaction_id = t.id
+                 AND b2.property_id = t.property_id
+                 AND b2.pos_order_id::text = t.source_id
+                 AND b2.status = 'SUCCESS'), 0
+            )
+          ELSE
+            COALESCE(
+              (SELECT SUM(a.amount)::numeric
+               FROM payment_transactions a
+               WHERE a.transaction_id = t.id
+                 AND a.status = 'SUCCESS'
+                 AND a.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')), 0
+            )
+        END AS total_paid
       ) pmt ON TRUE
       WHERE t.property_id = $1
         AND t.deleted_at IS NULL
@@ -205,7 +225,7 @@ export async function getBookingSalesDetail(
       UNION ALL
       SELECT
         NULL::bigint AS allocation_id,
-        NULL::bigint AS pa_reservation_id,
+        pt.reservation_id::bigint AS pa_reservation_id,
         pt.id AS payment_id,
         pt.transaction_id,
         pt.transaction_type,

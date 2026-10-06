@@ -441,6 +441,34 @@ export async function payPosOrderCash(
       );
     }
 
+    // (d) Cek pembayaran legacy existing yang terhubung langsung ke SALE order.
+    // Jika ada row payment_transactions SUCCESS (PAYMENT/CORRECTION_REPLACEMENT)
+    // dengan nominal positif untuk SALE transaction ini, tolak CASH penuh karena
+    // tahap ini belum mendukung melanjutkan pembayaran parsial legacy.
+    const legacyPayQ = await poolClient.query(
+      `SELECT EXISTS(
+         SELECT 1
+         FROM payment_transactions pt
+         JOIN transactions t ON t.id = pt.transaction_id
+         WHERE t.property_id = $1
+           AND t.source_type IN ('POS_ORDER', 'POS')
+           AND t.source_id = $2
+           AND t.reversal_of_transaction_id IS NULL
+           AND t.transaction_type = 'SALE'
+           AND pt.status = 'SUCCESS'
+           AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+           AND pt.amount > 0
+       ) AS has_legacy_payment`,
+      [propertyId, String(orderId)]
+    );
+    if (legacyPayQ.rows[0]?.has_legacy_payment === true) {
+      throw new PosSettlementError(
+        409,
+        'POS_EXISTING_PAYMENT_NOT_SUPPORTED',
+        'Order POS sudah memiliki pembayaran sebelumnya. Pembayaran Tunai penuh tidak dapat dilanjutkan. Hubungi petugas berwenang untuk meninjau pembayaran existing.'
+      );
+    }
+
     // ── Order harus dapat dibayar: status OPEN & nominal positif ────────
     if (orderStatus !== 'OPEN') {
       throw new PosSettlementError(
