@@ -103,12 +103,25 @@ interface Props {
   /** Gate "Simpan Pesanan": hanya true bila user punya izin edit POS. */
   canEditPos?: boolean;
   /**
+   * Buka modal pembayaran CASH untuk order yang baru dibuat.
+   * Dipanggil setelah create-order sukses dari dalam PosWorkspace
+   * (tombol "Bayar CASH" di hasil sukses). `context` berisi data order
+   * yang baru dibuat + properti/reservasi aktif.
+   */
+  onOpenCashPayment?: (ctx: import('./PosPayCashModal').PosPayCashOrderContext) => void;
+  /**
    * Tampilkan GuestPicker di mode POS header (tanpa reservation_id scoped).
    * Hanya dirender bila `reservationId === null` dan prop ini `true`.
    * Caller (App) bertanggung jawab memastikan user punya Kalender:view
    * sebelum meneruskan `true`.
    */
   canPickGuest?: boolean;
+  /**
+   * Signal pembayaran sukses dari App: propertyId + orderId dari settlement
+   * terverifikasi. Bila cocok saveResult.order, status lokal diubah PAID dan
+   * tombol "Bayar CASH" hilang.
+   */
+  paidOrderId?: PosOrderPaidSignal | null;
 }
 
 function formatIDR(amount: number): string {
@@ -132,6 +145,16 @@ function generateUUIDv4(): string {
   });
 }
 
+/**
+ * Signal pembayaran sukses dari App (propertyId + orderId dari settlement
+ * terverifikasi). PosModal meneruskan ke PosWorkspace; bila cocok dengan
+ * order hasil create-session ini, status lokal diubah menjadi PAID.
+ */
+export interface PosOrderPaidSignal {
+  propertyId: number;
+  orderId: number;
+}
+
 export default function PosWorkspace({
   propertyId,
   posMenu,
@@ -150,6 +173,8 @@ export default function PosWorkspace({
   onOrderCreated,
   canEditPos = true,
   canPickGuest = false,
+  onOpenCashPayment,
+  paidOrderId,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -207,6 +232,57 @@ export default function PosWorkspace({
   // Ref sinkron untuk guard submit ganda — state `saving` bisa tertinggal satu
   // tick di belakang; ref dicek secara sinkron sebelum request dimulai.
   const submittingRef = useRef(false);
+
+  /**
+   * Context identitas pembayaran — SIMPAN SEKALI saat create-order sukses.
+   * Dipakai tombol "Bayar CASH": jangan fallback ke pilihan tamu/reservasi
+   * yang berubah kemudian (guestName draft, pickedGuest, dsb.).
+   * reservation_id null (order umum) TIDAK boleh berubah menjadi reservasi
+   * yang baru dipilih setelah order dibuat.
+   */
+  const payCtxRef = useRef<import('./PosPayCashModal').PosPayCashOrderContext | null>(null);
+
+  /**
+   * ID order yang status lokalnya diubah menjadi PAID oleh signal
+   * `paidOrderId` (App → PosModal → PosWorkspace). Dibersihkan saat
+   * siklus draft baru dimulai (cart diisi lagi setelah sukses).
+   */
+  const [localPaidOrderId, setLocalPaidOrderId] = useState<number | null>(null);
+
+  // Ref sinkron: orderId yang sudah diterapkan status PAID lokal.
+  // Mencegah effect re-menerapkan perubahan saveResult bila paidOrderId
+  // prop tetap tidak null antar render (mis. App belum reset setelah tutup
+  // modal pembayaran) — satu pembaruan per order, tanpa loop render.
+  const appliedPaidOrderIdRef = useRef<number | null>(null);
+
+  // Effect: signal pembayaran dari App — bila cocok saveResult.order
+  // (propertyId EKSAK + orderId EKSAK), tandai order lokal sebagai PAID.
+  // Hanya berlaku SATU KALI per order (appliedPaidOrderIdRef).
+  useEffect(() => {
+    if (!paidOrderId) return;
+    // Jangan terapkan dua kali untuk order yang sama.
+    if (appliedPaidOrderIdRef.current === paidOrderId.orderId) return;
+
+    const sr = saveResult;
+    if (
+      sr?.ok &&
+      sr.order &&
+      sr.order.id === paidOrderId.orderId &&
+      // propertyId harus cocok EKSAK (null TIDAK diterima sebagai kecocokan)
+      propertyId != null &&
+      paidOrderId.propertyId === propertyId &&
+      // Jangan buat objek saveResult baru bila sudah PAID
+      sr.order.status !== 'PAID'
+    ) {
+      setLocalPaidOrderId(sr.order.id);
+      appliedPaidOrderIdRef.current = sr.order.id;
+      setSaveResult({
+        ok: true,
+        message: `Order ${sr.order.order_number} LUNAS (pembayaran CASH terverifikasi).`,
+        order: { ...sr.order, status: 'PAID' },
+      });
+    }
+  }, [paidOrderId, saveResult, propertyId]);
 
   /**
    * Fingerprint draft (urutan item, id menu, qty) + konteks reservasi terpilih.
@@ -470,13 +546,43 @@ export default function PosWorkspace({
             message: `Order ${createdOrder.order_number} tersimpan (${createdOrder.status}).`,
             order: createdOrder,
           });
+          // Simpan context identitas pembayaran SEKALI (idempotent: jangan
+          // timpa bila sudah ada untuk order ini — retry replay menghasilkan
+          // order sama dan context tetap milik pengajuan pertama).
+          if (!payCtxRef.current || payCtxRef.current.orderId !== createdOrder.id) {
+            const effResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+            // Kamar tamu terpilih HARUS cocok reservasi order:
+            //  - scoped mode → roomNumberInitial (prop dari reservasi)
+            //  - header mode + pickedGuest → room_number dari reservasi picked
+            //  - pelanggan umum (resId null) → null, jangan fallback
+            const effRoomNo =
+              effResId != null
+                ? (reservationId != null ? roomNumberInitial : pickedGuest?.room_number) ?? null
+                : null;
+            const effGuestName =
+              createdOrder.guest_name ??
+              (effResId != null
+                ? (reservationId != null ? guestNameInitial : pickedGuest?.guest_name) ?? null
+                : null);
+            payCtxRef.current = {
+              orderId: createdOrder.id,
+              propertyId: propertyId!,
+              orderNumber: createdOrder.order_number,
+              totalAmount: createdOrder.total_amount,
+              guestName: effGuestName,
+              roomNumber: effRoomNo,
+              reservationId: effResId,
+            };
+          }
           // Sukses nyata: reset draft + snapshot + key + ambigu.
           // Notifikasi unresolved=false LANGSUNG (sinkron, bukan menunggu
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
-          onUnresolvedChange?.(false);
-          setCart([]);
-          setAmbiguous(false);
-          idempotencySnapshotRef.current = null;
+           onUnresolvedChange?.(false);
+           setCart([]);
+           setAmbiguous(false);
+           setLocalPaidOrderId(null);
+           appliedPaidOrderIdRef.current = null;
+           idempotencySnapshotRef.current = null;
           // Refresh/callback pasca-sukses TIDAK boleh mengubah hasil:
           // order sudah tervalidasi dari respons POST — kegagalan callback
           // (atau pemanggilan apa pun setelahnya) tidak membuat order jadi
@@ -1057,17 +1163,42 @@ export default function PosWorkspace({
                            </p>
                          </>
                        )}
-                      {saveResult && <p>{saveResult.message}</p>}
-                      {(ambiguous || !saveResult?.ok) && (
-                         <button
-                           type="button"
-                           onClick={handleRetrySave}
-                           disabled={saving || !canEditPos}
-                           className="mt-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-[11px] font-bold cursor-pointer"
-                         >
-                          Coba Lagi
-                        </button>
-                      )}
+                       {saveResult && <p>{saveResult.message}</p>}
+                       {(ambiguous || !saveResult?.ok) && (
+                          <button
+                            type="button"
+                            onClick={handleRetrySave}
+                            disabled={saving || !canEditPos}
+                            className="mt-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-[11px] font-bold cursor-pointer"
+                          >
+                           Coba Lagi
+                         </button>
+                       )}
+                        {/* Bayar CASH — hanya untuk order sukses + izin edit + callback tersedia */}
+                        {saveResult?.ok && saveResult.order && canEditPos && onOpenCashPayment &&
+                          propertyId != null &&
+                          payCtxRef.current &&
+                          payCtxRef.current.orderId === saveResult.order.id &&
+                          saveResult.order.status === 'OPEN' &&
+                          localPaidOrderId !== saveResult.order.id && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                // Pakai context tersimpan (bukan state UI saat ini)
+                                // agar identitas pembayaran stabil.
+                                onOpenCashPayment(payCtxRef.current!);
+                              }}
+                              className="mt-2 px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded text-[11px] font-bold cursor-pointer"
+                            >
+                              Bayar CASH
+                            </button>
+                          )}
+                        {/* Indikator order sudah LUNAS (lokal atau dari signal App) */}
+                        {saveResult?.ok && saveResult.order && localPaidOrderId === saveResult.order.id && (
+                          <div className="mt-2 text-[11px] font-semibold text-emerald-700">
+                            ✓ LUNAS — pembayaran CASH terverifikasi
+                          </div>
+                        )}
                     </div>
                   )}                </>
               ) : (

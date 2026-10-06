@@ -49,6 +49,8 @@ import ProductInventorySection from './features/productInventory/ProductInventor
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
 import PosModal from './features/pos/PosModal';
+import PosPayCashModal, { type PosPayCashOrderContext } from './features/pos/PosPayCashModal';
+import type { PosOrderPaidSignal } from './features/pos/PosWorkspace';
 import { getPosAccess } from './features/pos/posPermissions';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
@@ -318,6 +320,21 @@ function AppContent() {
   const posRequestPendingRef = useRef<boolean>(false);
   const posUnresolvedRef = useRef<boolean>(false);
 
+  // ── State & refs KHUSUS modal pembayaran CASH (PosPayCashModal) ──────
+  // Dipisahkan dari refs create-order (posRequestPendingRef/posUnresolvedRef).
+  // Ref pending/unresolved untuk pembayaran dipakai guard close/switch.
+  const [showPosCashPayment, setShowPosCashPayment] = useState<boolean>(false);
+  const [posCashPaymentContext, setPosCashPaymentContext] =
+    useState<PosPayCashOrderContext | null>(null);
+  const posCashPaymentPendingRef = useRef<boolean>(false);
+  const posCashPaymentUnresolvedRef = useRef<boolean>(false);
+  /**
+   * Signal pembayaran sukses: propertyId + orderId dari settlement terverifikasi.
+   * Diisi oleh callback onPaid PosPayCashModal; diteruskan ke PosModal → PosWorkspace
+   * untuk mengubah status order lokal menjadi PAID.
+   */
+  const [paidPosOrder, setPaidPosOrder] = useState<PosOrderPaidSignal | null>(null);
+
   // Scoped refresh POS daftar: App menerbitkan version bump + scope, detail view
   // meneruskannya ke POSOrderPanel; panel refetch hanya bila scope cocok.
   const [posOrdersRefreshVersion, setPosOrdersRefreshVersion] = useState<number>(0);
@@ -382,6 +399,16 @@ function AppContent() {
       );
       return;
     }
+    // Guard: modal pembayaran CASH masih terbuka → TOLAK close POS asal.
+    // Jangan menutup modal pembayaran otomatis dari handler parent —
+    // user harus tutup pembayaran dahulu (pending/unresolved/aksi sukses).
+    if (showPosCashPayment) {
+      window.alert(
+        'Tutup POS ditolak: modal pembayaran CASH sedang terbuka. ' +
+        'Tutup modal pembayaran dahulu.',
+      );
+      return;
+    }
     if (posCartHasItems) {
       const ok = window.confirm('Tutup POS? Draft pesanan yang belum tersimpan akan dibuang.');
       if (!ok) return;
@@ -395,6 +422,7 @@ function AppContent() {
     setPosModalPropertyId(null);
     setPosModalGuestName(null);
     setPosModalRoomNumber(null);
+    setPaidPosOrder(null);
   };
 
   // Buka POS dari header (permission view dari getPosAccess, sama dengan enforcement backend).
@@ -436,6 +464,51 @@ function AppContent() {
     setShowPosModal(true);
   };
 
+  // ── Helper: buka modal pembayaran CASH (PosPayCashModal) ──────────────
+  // Gate izin edit POS + validasi propertyId sesuai properti aktif.
+  // Tolak penggantian context jika modal pembayaran sudah terbuka —
+  // jangan menimpa atau remount pembayaran aktif.
+  const openPosCashPayment = (ctx: PosPayCashOrderContext) => {
+    // Gate: izin edit POS existing
+    if (!posAccess.canEditPos) return;
+    // Validasi propertyId sesuai properti aktif (multi-property belum didukung)
+    if (ctx.propertyId !== propertyId) {
+      window.alert(
+        `Pembayaran untuk properti #${ctx.propertyId} belum didukung — ` +
+        `properti aktif adalah #${propertyId}. Pindah ke properti tersebut dahulu.`,
+      );
+      return;
+    }
+    // Jika modal pembayaran sudah terbuka, TOLAK penggantian context
+    // (jangan menimpa snapshot/keadaan pembayaran aktif).
+    if (showPosCashPayment && posCashPaymentContext) {
+      window.alert(
+        'Modal pembayaran sedang terbuka — tutup dahulu sebelum membuka pembayaran lain.',
+      );
+      return;
+    }
+    setPosCashPaymentContext(ctx);
+    setShowPosCashPayment(true);
+  };
+
+  // ── Helper: tutup modal pembayaran CASH ───────────────────────────────
+  // Menolak close saat pending/unresolved (sinkron ref).
+  // Sukses pembayaran TIDAK otomatis menutup — modal receipt tetap tampil.
+  const requestClosePosCashPayment = () => {
+    if (posCashPaymentPendingRef.current) return;
+    if (posCashPaymentUnresolvedRef.current) {
+      window.alert(
+        'Tutup ditolak: hasil pembayaran belum diketahui. ' +
+        'Gunakan "Coba Lagi" untuk memverifikasi sebelum menutup.',
+      );
+      return;
+    }
+    setShowPosCashPayment(false);
+    setPosCashPaymentContext(null);
+    posCashPaymentPendingRef.current = false;
+    posCashPaymentUnresolvedRef.current = false;
+  };
+
   const handleSelectProperty = (val: number) => {
     if (Number.isInteger(val) && val > 0) {
       // Pindah properti saat modal POS terbuka → guard SEMUA jalur (sinkron ref).
@@ -461,6 +534,17 @@ function AppContent() {
           if (!ok) return;
         }
       }
+      // Guard modal pembayaran CASH saat pindah properti:
+      // TOLAK pindah properti selagi modal pembayaran terbuka (pending,
+      // unresolved, ATAU success receipt) — jangan tutup otomatis dari
+      // handler parent. User harus tutup pembayaran dahulu.
+      if (showPosCashPayment) {
+        window.alert(
+          'Ganti properti ditolak: modal pembayaran CASH sedang terbuka. ' +
+          'Tutup modal pembayaran dahulu, lalu pindah properti.',
+        );
+        return;
+      }
       setTransactionReservations([]);
       setTransactionError(null);
       setDailyOperations(null);
@@ -477,6 +561,7 @@ function AppContent() {
       setPosModalPropertyId(null);
       setPosModalGuestName(null);
       setPosModalRoomNumber(null);
+      setPaidPosOrder(null);
       setPropertyId(val);
     }
   };
@@ -637,6 +722,16 @@ function AppContent() {
   // Refetch after the ReservationDetailDrawer closes (mutations may have
   // settled a deposit / returned KTP). Guarded to avoid loops.
   const handleGuaranteeQueueDrawerClose = useCallback(() => {
+    // Guard: modal pembayaran CASH masih terbuka → TOLAK close drawer asal.
+    // Jangan tutup modal pembayaran otomatis dari handler parent —
+    // user harus tutup pembayaran dahulu (pending / unresolved / success receipt).
+    if (showPosCashPayment) {
+      window.alert(
+        'Tolak menutup detail reservasi: modal pembayaran CASH sedang terbuka. ' +
+        'Tutup modal pembayaran dahulu.',
+      );
+      return;
+    }
     setSelectedRes(null);
     setSelectedFolio(null);
     setPaymentDraft('');
@@ -4681,7 +4776,42 @@ function AppContent() {
         canPickGuest={canPickGuest}
         onRequestPending={(pending) => { posRequestPendingRef.current = pending; }}
         onUnresolvedChange={(unresolved) => { posUnresolvedRef.current = unresolved; }}
+        onOpenCashPayment={openPosCashPayment}
+        payCashModalPresent={showPosCashPayment && posCashPaymentContext !== null}
+        paidOrderId={paidPosOrder}
       />
+
+      {/* Modal pembayaran CASH POS — dimiliki App, bukan consumer. */}
+      {showPosCashPayment && posCashPaymentContext && (
+        <PosPayCashModal
+          order={posCashPaymentContext}
+          authFetch={authFetch}
+          canEditPos={posAccess.canEditPos}
+          onRequestClose={requestClosePosCashPayment}
+          onRequestPending={(pending) => { posCashPaymentPendingRef.current = pending; }}
+          onUnresolvedChange={(unresolved) => { posCashPaymentUnresolvedRef.current = unresolved; }}
+          onPaid={(result) => {
+            // Simpan signal pembayaran sukses (propertyId + orderId dari settlement terverifikasi)
+            // untuk diteruskan ke PosWorkspace → status lokal PAID.
+            const ctx = posCashPaymentContext;
+            if (ctx) {
+              setPaidPosOrder({ propertyId: ctx.propertyId, orderId: ctx.orderId });
+            }
+            // Refresh panel reservasi sesuai reservationId pada context pembayaran.
+            const resId = ctx?.reservationId ?? null;
+            setPosOrdersRefreshReservationId(resId);
+            setPosOrdersRefreshVersion((v) => v + 1);
+            // Success TIDAK otomatis menutup modal receipt.
+            void result;
+          }}
+          onRefresh={() => {
+            // Refresh daftar order terkait (dipanggil setelah sukses terverifikasi).
+            const resId = posCashPaymentContext?.reservationId ?? null;
+            setPosOrdersRefreshReservationId(resId);
+            setPosOrdersRefreshVersion((v) => v + 1);
+          }}
+        />
+      )}
 
       {/* Checkout Room Inspection Modal */}
       {selectedCheckoutInspection && (
@@ -4881,14 +5011,24 @@ function AppContent() {
           anchorRect={quickReservation.anchorRect}
           anchorPoint={quickReservation.anchorPoint}
           propertyId={propertyId ?? quickReservation.reservation?.property_id ?? null}
-          onClose={() => setQuickReservation(null)}
+          onClose={() => {
+            // Guard: modal pembayaran CASH masih terbuka → tolak close quick detail asal.
+            if (showPosCashPayment) {
+              window.alert(
+                'Tolak menutup detail cepat: modal pembayaran CASH sedang terbuka. ' +
+                'Tutup modal pembayaran dahulu.',
+              );
+              return;
+            }
+            setQuickReservation(null);
+          }}
           onOpenFullDetail={(res) => {
             const target = res || quickReservation.reservation;
             setQuickReservation(null);
             setSelectedRes(target);
             fetchReservationFolio(Number(target.id));
           }}
-            onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
+          onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
             onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
             onCancel={(resId) => handleReservationCancel(resId)}
             onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
@@ -4900,10 +5040,11 @@ function AppContent() {
             complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
              propertyBranding={activeBranding || null}
              propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
-             onOpenPosModal={openPosModalForReservation}
-             posOrdersRefreshVersion={posOrdersRefreshVersion}
-             posOrdersRefreshReservationId={posOrdersRefreshReservationId}
-           />
+            onOpenPosModal={openPosModalForReservation}
+            posOrdersRefreshVersion={posOrdersRefreshVersion}
+            posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+            onOpenCashPayment={openPosCashPayment}
+          />
       )}
 
       {selectedRes && (
@@ -4929,10 +5070,11 @@ function AppContent() {
           complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
            propertyBranding={activeBranding || null}
            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
-           onOpenPosModal={openPosModalForReservation}
-           posOrdersRefreshVersion={posOrdersRefreshVersion}
-           posOrdersRefreshReservationId={posOrdersRefreshReservationId}
-           />
+            onOpenPosModal={openPosModalForReservation}
+            posOrdersRefreshVersion={posOrdersRefreshVersion}
+            posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+            onOpenCashPayment={openPosCashPayment}
+            />
          )}
 
       <CheckoutGuaranteeConfirmationModal

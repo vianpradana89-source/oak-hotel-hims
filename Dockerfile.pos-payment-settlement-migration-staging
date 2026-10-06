@@ -1,0 +1,42 @@
+# Migration POS Payment Settlement (CASH) — Staging Runner
+# 2-stage build: TypeScript source → dist, lalu runtime node:20-slim.
+
+# ═══════════════════════════════════════════════════════════
+# Stage 1: Build backend TypeScript
+# ═══════════════════════════════════════════════════════════
+FROM node:20-slim AS backend-builder
+
+WORKDIR /app
+
+COPY backend/package.json backend/package-lock.json ./backend/
+
+RUN npm --prefix backend ci --include=optional
+
+COPY backend/ ./backend/
+
+RUN npm --prefix backend run build
+
+
+# ═══════════════════════════════════════════════════════════
+# Stage 2: Runtime
+# ══════════════════════════════════════════════════���════════
+FROM node:20-slim AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Production-only deps
+COPY backend/package.json backend/package-lock.json ./backend/
+RUN npm --prefix backend ci --omit=dev --include=optional \
+    && npm cache clean --force
+
+# Compiled backend (hanya modul migration yang diperlukan runner)
+COPY --from=backend-builder /app/backend/dist/db/migrations/pos_payment_settlement_v1.js ./backend/dist/db/migrations/
+
+# Runner staging script
+COPY backend/scripts/run_pos_payment_settlement_migration_staging.js ./backend/scripts/
+
+# Default: --check; override via --entrypoint atau --args
+ENTRYPOINT ["node", "backend/scripts/run_pos_payment_settlement_migration_staging.js"]
+CMD ["--check"]

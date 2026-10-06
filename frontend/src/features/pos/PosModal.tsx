@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import PosWorkspace from './PosWorkspace';
-import type { PosMenuItem, PosOrderItem } from './PosWorkspace';
+import type { PosMenuItem, PosOrderItem, PosOrderPaidSignal } from './PosWorkspace';
 
 interface PosModalProps {
   open: boolean;
@@ -51,6 +51,20 @@ interface PosModalProps {
   canPickGuest?: boolean;
   /** Callback setelah order berhasil dibuat */
   onOrderCreated?: (order: PosOrderItem) => void;
+  /** Buka modal pembayaran CASH untuk order yang baru dibuat (forward ke App). */
+  onOpenCashPayment?: (ctx: import('./PosPayCashModal').PosPayCashOrderContext) => void;
+  /**
+   * Signal pembayaran sukses dari App (propertyId + orderId dari settlement
+   * terverifikasi). Bila cocok saveResult.order PosWorkspace, status lokal
+   * diubah menjadi PAID dan tombol Bayar CASH hilang.
+   */
+  paidOrderId?: PosOrderPaidSignal | null;
+  /**
+   * true saat overlay PosPayCashModal sedang terbuka di atas PosModal.
+   * PosModal mengabaikan Escape/focus-trap/outside-click/X saat flag ini true,
+   * agar event tidak menembus ke dialog di bawah.
+   */
+  payCashModalPresent?: boolean;
 }
 
 /**
@@ -80,7 +94,10 @@ export default function PosModal({
   roomNumberInitial,
   canEditPos = true,
   canPickGuest = false,
-  onOrderCreated
+  onOrderCreated,
+  onOpenCashPayment,
+  paidOrderId,
+  payCashModalPresent = false,
 }: PosModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
@@ -88,6 +105,8 @@ export default function PosModal({
   onRequestCloseRef.current = onRequestClose;
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  const payCashModalPresentRef = useRef(payCashModalPresent);
+  payCashModalPresentRef.current = payCashModalPresent;
 
   // Fokus masuk ke panel saat buka; kembalikan fokus saat tutup.
   useEffect(() => {
@@ -115,9 +134,16 @@ export default function PosModal({
 
   // Keyboard: Escape → satu jalur guard close; Tab/Shift+Tab → focus trap;
   // semua handler memakai ref agar tidak menutup halaman belakang dari focus lama.
+  // payCashModalPresentRef: abaikan Escape di PosModal saat overlay pembayaran
+  // CASH teratas — pembayaran punya guard close-nya sendiri di PosPayCashModal.
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     const key = e.key;
     if (key === 'Escape') {
+      if (payCashModalPresentRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       if (!busyRef.current) {
         e.preventDefault();
         e.stopPropagation();
@@ -158,7 +184,7 @@ export default function PosModal({
       e.preventDefault();
       first.focus();
     }
-  }, []);
+  }, [panelRef, busyRef, onRequestCloseRef, payCashModalPresentRef]);
 
   if (!open) return null;
 
@@ -166,7 +192,11 @@ export default function PosModal({
     <div
       className="fixed inset-0 z-[80] flex items-stretch sm:items-center sm:justify-center bg-black/50 sm:bg-slate-900/60 sm:p-6"
       data-pos-modal-overlay="true"
+      data-pos-pay-cash-modal-present={payCashModalPresent || undefined}
       onMouseDown={(e) => {
+        // Abaikan klik backdrop PosModal saat overlay pembayaran hadir —
+        // pembayaran punya guard-nya sendiri.
+        if (payCashModalPresent) return;
         // Tutup hanya saat klik backdrop (bukan panel).
         if (e.target === e.currentTarget && !busy) onRequestClose();
       }}
@@ -200,11 +230,19 @@ export default function PosModal({
             <button
               type="button"
               onClick={() => {
+                // Guard: tidak menutup POS asal saat overlay pembayaran hadir.
+                if (payCashModalPresentRef.current) return;
                 if (!busy) onRequestClose();
               }}
-              disabled={busy}
+              disabled={busy || payCashModalPresent}
               aria-label="Tutup POS"
-              title={busy ? 'Menunggu proses selesai…' : 'Tutup POS'}
+              title={
+                payCashModalPresent
+                  ? 'Pembayaran CASH sedang berlangsung…'
+                  : busy
+                  ? 'Menunggu proses selesai…'
+                  : 'Tutup POS'
+              }
               className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -235,6 +273,8 @@ export default function PosModal({
             canEditPos={canEditPos}
             canPickGuest={canPickGuest}
             onOrderCreated={onOrderCreated}
+            onOpenCashPayment={onOpenCashPayment}
+            paidOrderId={paidOrderId}
           />
         </div>
       </div>

@@ -1,0 +1,55 @@
+# Cloud Build: build + push image migration POS Payment Settlement (CASH) staging.
+# HANYA build & push - TIDAK deploy service, TIDAK execute Cloud Run Job.
+#
+# Substitusi WAJIB (tanpa default "latest"):
+#   _SOURCE_SHA: commit SHA 40-hex yang menjadi target build.
+#
+# Validasi SHA dilakukan di step preflight SEBELUM docker build/push:
+#   - harus ada
+#   - harus 40 karakter hex
+# Jika gagal -> build berhenti, tidak ada image yang di-build atau di-push.
+steps:
+  # ── 1. Preflight: validasi _SOURCE_SHA ──────────────────────────────────
+  - id: 'validate-source-sha'
+    name: 'gcr.io/cloud-builders/gcloud:latest'
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "$_SOURCE_SHA" ]; then
+          echo "ERROR: _SOURCE_SHA tidak di-set. Berlaku wajib eksplisit (tanpa default latest)."
+          exit 1
+        fi
+        if ! echo "$_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+          echo "ERROR: _SOURCE_SHA harus 40-hex, diterima: ${_SOURCE_SHA}"
+          exit 1
+        fi
+        echo "Validasi _SOURCE_SHA lulus: ${_SOURCE_SHA}"
+
+  # ── 2. Build image ───────────────────────────────────────────────────────
+  - id: 'build-image'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -f
+      - Dockerfile.pos-payment-settlement-migration-staging
+      - -t
+      - 'asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-payment-settlement-migration-staging:$_SOURCE_SHA'
+      - .
+
+  # ── 3. Push image (tag yang SAMA dengan build) ───────────────────────────
+  - id: 'push-image'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - 'asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-payment-settlement-migration-staging:$_SOURCE_SHA'
+
+images:
+  - 'asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-payment-settlement-migration-staging:$_SOURCE_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _SOURCE_SHA: ''

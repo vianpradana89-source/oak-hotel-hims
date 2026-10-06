@@ -1,0 +1,76 @@
+# =============================================================================
+# Env non-secret untuk Cloud Run Job: pos-payment-settlement-migration-staging
+# DB_PASSWORD datang dari Secret Manager (jangan taruh di sini).
+# =============================================================================
+DB_HOST: "/cloudsql/oak-lawang-pms:asia-southeast2:oak-hims-staging-db15"
+DB_PORT: "5432"
+DB_USER: "postgres"
+DB_NAME: "oak_hotel_db"
+NODE_ENV: "production"
+
+# =============================================================================
+# CONTOH PERINTAH CLOUD RUN JOB (SEMUA BARIS DI BAWAH ADALAH KETERANGAN,
+# BUKAN ENV YANG DIBACA --env-vars-file. COPY-PASTE TANPA tanda # untuk pakai.)
+#
+# Image (hasil Cloud Build):
+#   asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/
+#     oak-hims-pos-payment-settlement-migration-staging:<_SOURCE_SHA>
+#
+# Entrypoint dipertahankan dari Dockerfile:
+#   ENTRYPOINT ["node", "backend/scripts/run_pos_payment_settlement_migration_staging.js"]
+# Jadi --args hanya meneruskan flag --check / --apply.
+# =============================================================================
+
+# # 1) --check (read-only readiness)
+# gcloud run jobs create pos-payment-settlement-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --image=asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-payment-settlement-migration-staging:<_SOURCE_SHA> \
+#   --args="--check" \
+#   --set-cloudsql-instances=oak-lawang-pms:asia-southeast2:oak-hims-staging-db15 \
+#   --tasks=1 \
+#   --parallelism=1 \
+#   --max-retries=0 \
+#   --env-vars-file=pos-payment-settlement-staging-job-env.yaml \
+#   --service-account=549046591118-compute@developer.gserviceaccount.com \
+#   --update-secrets \
+#     DB_PASSWORD=oak-hims-staging-db-postgres-password:2
+
+# # 2) --apply (DDL + marker)
+# gcloud run jobs create pos-payment-settlement-staging-apply \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --image=asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-payment-settlement-migration-staging:<_SOURCE_SHA> \
+#   --args="--apply" \
+#   --set-cloudsql-instances=oak-lawang-pms:asia-southeast2:oak-hims-staging-db15 \
+#   --tasks=1 \
+#   --parallelism=1 \
+#   --max-retries=0 \
+#   --env-vars-file=pos-payment-settlement-staging-job-env.yaml \
+#   --service-account=549046591118-compute@developer.gserviceaccount.com \
+#   --update-secrets \
+#     DB_PASSWORD=oak-hims-staging-db-postgres-password:2
+
+# # 3) Eksekusi --check (wait)
+# gcloud run jobs execute pos-payment-settlement-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
+
+# # 4) Eksekusi --apply (wait)  -- JANGAN jalankan sebelum --check lulus
+# gcloud run jobs execute pos-payment-settlement-staging-apply \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
+
+# # 5) Rerun --apply (idempotent, expect already-applied)
+# gcloud run jobs execute pos-payment-settlement-staging-apply \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
+
+# # 6) Verifikasi akhir --check setelah apply
+# gcloud run jobs execute pos-payment-settlement-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait

@@ -36,6 +36,7 @@ import {
 import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
+import { payPosOrderCash, PosSettlementError } from './domains/pos/posSettlementService';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
 import {
   listEffectiveArrivalsForDate,
@@ -328,11 +329,30 @@ app.use(async (req, res, next) => {
   // dari data order tersimpan). Cache global (idempotency_keys) tidak diaktifkan
   // untuk rute ini agar replay tidak melewati pemeriksaan auth/property-scope.
   if (req.method === 'POST' && req.path === '/api/pos/orders') return next();
+  // Bypass cache global untuk POST /api/pos/orders/:id/pay (settlement CASH):
+  // Canonical path harus memiliki segmen <id> murni digit lalu /pay, tanpa
+  // trailing slash. Dedup ditangani di domain service
+  // (uq_pos_settlements_order + uq_pos_settlements_idempotency +
+  // request_fingerprint). Cache global (idempotency_keys) TIDAK dipakai agar
+  // replay tidak melewati auth/permission/property-scope.
+  if (req.method === 'POST' && /^\/api\/pos\/orders\/\d+\/pay$/.test(req.path)) return next();
   // Non-canonical variants of /api/pos/orders (trailing slash / case difference) → 404.
   // Express default (case-sensitive routing=false, strict routing=false) routes these
   // to the same POS handler; reject here BEFORE global cache lookup so they never
   // create or read idempotency_keys.
   if (req.method === 'POST' && /^\/api\/pos\/orders\/?$/i.test(req.path) && req.path !== '/api/pos/orders') {
+    return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
+  }
+  // Non-canonical variants of /api/pos/orders/:id/pay (case difference,
+  // non-digit id, extra segments, trailing slash) → 404 SEBELUM cache global.
+  // Express default (case-sensitive routing=false, strict routing=false)
+  // me-routing varian ini ke handler yang sama; kita tolak di sini agar
+  // varian tidak pernah menulis/membaca idempotency_keys.
+  if (
+    req.method === 'POST' &&
+    /^\/api\/pos\/orders\/.+\/pay\/?$/i.test(req.path) &&
+    !/^\/api\/pos\/orders\/\d+\/pay$/.test(req.path)
+  ) {
     return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
   }
   const key = req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || req.headers['Idempotency-Key'.toLowerCase()];
@@ -6354,6 +6374,139 @@ app.post('/api/pos/orders', async (req, res) => {
       // transaksi sudah terminated / sudah commit — abaikan
     }
     res.status(500).json({ status: 'ERROR', message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// POS CASH SETTLEMENT — POST /api/pos/orders/:id/pay
+//
+// Lapisan endpoint HANYA melakukan authorization + orkestrasi:
+//   1. Bypass cache global idempotency ditangani di middleware (bypass path
+//      canonical /api/pos/orders/<digits>/pay + 404 varian case/trailing
+//      slash) — DILAKUKAN SEBELUM handler.
+//   2. Auth (onboardingSecurityGuard) + permission POS edit
+//      (createOperationalAccessGuard) sudah berjalan sebagai middleware global.
+//   3. Handler: validasi :id & body, assertPropertyScope, panggil service.
+// Service (payPosOrderCash) memiliki BEGIN/COMMIT/ROLLBACK sendiri; handler
+// tidak membuka transaksi tambahan. created → 201; replay → 200.
+// Identitas fingerprint internal service TIDAK berubah:
+// computeCashSettlementFingerprint memakai path '/api/pos/orders/pay/cash'
+// sebagai bagian hashing (bukan path HTTP publik).
+// ─────────────────────────���───────────────────────────────────────────────
+app.post('/api/pos/orders/:id/pay', async (req, res) => {
+  const { property_id: propertyIdRaw, payment_method: paymentMethod } = req.body;
+
+  // Order ID dari path :id (canonical /api/pos/orders/:id/pay).
+  // Validasi: seluruh string harus digit, integer positif, maksimum 2147483647 (INTEGER).
+  const orderIdRaw = req.params.id;
+  if (orderIdRaw === undefined || orderIdRaw === null || String(orderIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'order id is required' });
+  }
+  if (!/^\d+$/.test(String(orderIdRaw))) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Invalid order id' });
+  }
+  const orderId = Number(orderIdRaw);
+  if (!Number.isInteger(orderId) || orderId <= 0 || orderId > 2147483647) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Invalid order id' });
+  }
+
+  // property_id wajib dari body.
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  // Tolak metode selain CASH (metode tunggal di tahap ini).
+  if (paymentMethod !== undefined && paymentMethod !== null && String(paymentMethod).toUpperCase() !== 'CASH') {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'UNSUPPORTED_PAYMENT_METHOD',
+      message: 'Hanya metode pembayaran CASH yang didukung pada tahap ini'
+    });
+  }
+
+  // Property scope: user token properti harus cocok (kecuali super admin platform).
+  // Dijalankan SEBELUM service/replay, menggunakan aktor terautentikasi.
+  try {
+    await assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    const sc = scopeErr?.statusCode ?? 403;
+    return res.status(sc).json({
+      status: 'ERROR',
+      code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
+      message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
+    });
+  }
+
+  // Idempotency-Key WAJIB (header). Validasi: string 1–150 non-whitespace.
+  const rawKey = String(
+    req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || ''
+  ).trim();
+  if (rawKey.length === 0) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'Idempotency-Key header is required'
+    });
+  }
+  if (rawKey.length > 150 || /\s/.test(rawKey)) {
+    return res.status(400).json({
+      status: 'ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'Idempotency-Key must be 1–150 non-whitespace characters'
+    });
+  }
+  const idempotencyKey = rawKey;
+
+  // Aktor dari user terautentikasi — TIDAK dari body klien.
+  const actorName = req.user?.full_name || req.user?.username || null;
+  const actorUserId = req.user?.id?.toString() || null;
+
+  let client: import('pg').PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (connectErr: any) {
+    console.error('POS cash settlement pool.connect error', connectErr?.message || connectErr);
+    res.status(500).json({ status: 'ERROR', message: 'Database connection error' });
+    return;
+  }
+  try {
+    const result = await payPosOrderCash(client, {
+      propertyId,
+      orderId,
+      idempotencyKey,
+      actorName: actorName ?? undefined,
+      actorUserId: actorUserId ?? undefined,
+      correlationId: undefined
+    });
+
+    const statusCode = result.created ? 201 : result.replayed ? 200 : 200;
+    res.status(statusCode).json({
+      status: result.created ? 'SUCCESS' : 'REPLAY',
+      data: {
+        settlement: result.settlement,
+        sale: result.sale,
+        created: result.created,
+        replayed: result.replayed
+      }
+    });
+  } catch (err: any) {
+    if (err instanceof PosSettlementError) {
+      res.status(err.statusCode).json({
+        status: 'ERROR',
+        code: err.code,
+        message: err.message
+      });
+      return;
+    }
+    // Error internal — tanpa membocorkan SQL/credential.
+    console.error('POS cash settlement error', err?.code || err);
+    res.status(500).json({ status: 'ERROR', message: 'Internal settlement error' });
   } finally {
     client.release();
   }

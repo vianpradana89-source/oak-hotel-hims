@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { safeFetchJson } from '../calendar/calendarApi';
 import type { SafeFetchResult } from '../calendar/calendarApi';
+import type { PosPayCashOrderContext } from './PosPayCashModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,8 @@ export interface POSOrderPanelProps {
    */
   posOrdersRefreshVersion?: number;
   posOrdersRefreshReservationId?: number | null;
+  /** Buka modal pembayaran CASH untuk order terpilih (forward ke App). */
+  onOpenCashPayment?: (ctx: PosPayCashOrderContext) => void;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -144,6 +147,7 @@ export default function POSOrderPanel({
   reservationLabel,
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
+  onOpenCashPayment,
 }: POSOrderPanelProps) {
   const { authFetch } = useAuth();
 
@@ -346,8 +350,32 @@ export default function POSOrderPanel({
                 {order.guest_name ? ` · ${order.guest_name}` : ''}
                 {order.created_at ? ` · ${formatDate(order.created_at)}` : ''}
               </div>
-              <div className="mt-1 text-right font-bold text-stone-900">
-                {formatIDR(Number(order.total_amount || 0))}
+              <div className="mt-1 flex items-center justify-between">
+                <span className="font-bold text-stone-900">
+                  {formatIDR(Number(order.total_amount || 0))}
+                </span>
+                {/* Bayar CASH hanya untuk order OPEN + izin edit POS.
+                    Hilang saat status berubah (PAID/CANCELLED/CLOSED). */}
+                {canEditPos && order.status === 'OPEN' && onOpenCashPayment && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenCashPayment({
+                        orderId: order.id,
+                        propertyId,
+                        orderNumber: order.order_number,
+                        totalAmount: order.total_amount,
+                        guestName: order.guest_name ?? guestName ?? null,
+                        roomNumber: roomNumber ?? null,
+                        reservationId: order.reservation_id ?? reservationId,
+                      });
+                    }}
+                    className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    Bayar CASH
+                  </button>
+                )}
               </div>
             </div>
           ))}

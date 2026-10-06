@@ -57,6 +57,8 @@ export interface QuickReservationDetailProps {
   /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
   posOrdersRefreshVersion?: number;
   posOrdersRefreshReservationId?: number | null;
+  /** Buka modal pembayaran CASH untuk order POS (forward ke App). */
+  onOpenCashPayment?: (ctx: import('../pos/PosPayCashModal').PosPayCashOrderContext) => void;
 }
 
 export default function QuickReservationDetail({
@@ -78,6 +80,7 @@ export default function QuickReservationDetail({
   onOpenPosModal,
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
+  onOpenCashPayment,
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -214,13 +217,16 @@ export default function QuickReservationDetail({
   // Close on Escape or outside click
   // POS overlay di atas reservasi: skip close logic saat POS terbuka
   // agar reservasi tetap terbuka di belakang dan fokus/Escape di POS.
+  // Overlay pembayaran CASH (data-pos-cash-payment-overlay) juga skip close —
+  // pembayaran punya guard close-nya sendiri di PosPayCashModal.
   useEffect(() => {
-    const posOverlayPresent = () =>
-      !!document.querySelector('[data-pos-modal-overlay="true"]');
+    const topOverlayPresent = () =>
+      !!document.querySelector('[data-pos-modal-overlay="true"]') ||
+      !!document.querySelector('[data-pos-cash-payment-overlay="true"]');
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (posOverlayPresent()) return; // POS teratas — jangan tutup reservasi
+        if (topOverlayPresent()) return; // Overlay teratas — jangan tutup reservasi
         if (isMoreActionsOpen) {
           setIsMoreActionsOpen(false);
         } else {
@@ -234,8 +240,11 @@ export default function QuickReservationDetail({
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if ((target as Element).closest?.('[data-portal-overlay]')) return;
         if ((target as Element).closest?.('[role="dialog"]')) return;
-        // Klik di dalam POS overlay (backdrop atau panel) → skip close reservasi
-        if ((target as Element).closest?.('[data-pos-modal-overlay]')) return;
+        // Klik di dalam POS / pembayaran overlay → skip close reservasi
+        if (
+          (target as Element).closest?.('[data-pos-modal-overlay]') ||
+          (target as Element).closest?.('[data-pos-cash-payment-overlay]')
+        ) return;
         onClose();
       }
       if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
@@ -782,6 +791,7 @@ export default function QuickReservationDetail({
               reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
               posOrdersRefreshVersion={posOrdersRefreshVersion}
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+              onOpenCashPayment={onOpenCashPayment}
             />
           )}
 

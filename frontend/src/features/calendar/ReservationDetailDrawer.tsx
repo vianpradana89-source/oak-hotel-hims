@@ -76,6 +76,8 @@ interface Props {
   /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
   posOrdersRefreshVersion?: number;
   posOrdersRefreshReservationId?: number | null;
+  /** Buka modal pembayaran CASH untuk order POS (forward ke App). */
+  onOpenCashPayment?: (ctx: import('../pos/PosPayCashModal').PosPayCashOrderContext) => void;
 }
 
 /** One row of the reservation activity log timeline (backend redacted DTO). */
@@ -322,6 +324,7 @@ export default function ReservationDetailDrawer({
   onOpenPosModal,
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
+  onOpenCashPayment,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -974,6 +977,16 @@ export default function ReservationDetailDrawer({
   }, [data.id, isCurrentTerminal]);
 
   const requestClose = useCallback(() => {
+    // Guard: modal pembayaran CASH teratas → tolak close drawer asal.
+    // Jangan tutup drawer otomatis dari handler ini — user harus tutup
+    // pembayaran dahulu. Cek sinkron via DOM (data attr overlay pembayaran).
+    if (document.querySelector('[data-pos-cash-payment-overlay="true"]')) {
+      window.alert(
+        'Tolak menutup detail reservasi: modal pembayaran CASH sedang terbuka. ' +
+        'Tutup modal pembayaran dahulu.',
+      );
+      return;
+    }
     if (!isCurrentTerminal) {
       onClose();
       return;
@@ -2201,6 +2214,7 @@ export default function ReservationDetailDrawer({
               reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
               posOrdersRefreshVersion={posOrdersRefreshVersion}
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+              onOpenCashPayment={onOpenCashPayment}
             />
           )}
 
