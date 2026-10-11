@@ -197,6 +197,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const lines = data?.lines || [];
   const attachments = data?.attachments || [];
   const payments = data?.linked_payments || [];
+  type LinkedPayment = NonNullable<TransactionRecord['linked_payments']>[number];
+  // Detect POS transaction
+  const txSourceType = String(tx?.source_type || '').toUpperCase();
+  const isPosTx = txSourceType === 'POS_ORDER' || txSourceType === 'POS';
 
   const formatIdr = (val: number | undefined | string) => {
     if (val === undefined || val === null) return 'Rp 0';
@@ -828,54 +832,67 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   <span className="text-base text-emerald-800 font-mono">{formatIdr(tx.net_amount)}</span>
                 </div>
 
-                <div className="pt-2 border-t border-slate-200/80 grid grid-cols-2 gap-2 text-xs">
-                  {!isReservationLinked && (
-                    <div className="p-2 bg-white rounded-xl border border-slate-200">
-                      <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
-                      <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
-                    </div>
-                  )}
-                  {isReservationLinked ? (
-                    <>
-                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Ditagih Hotel</span>
-                        <span className="font-mono font-bold text-amber-700">{formatIdr(hotelCollectibleTotal)}</span>
-                      </div>
-                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Dibayar ke Hotel</span>
-                        <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAmountPaid)}</span>
-                      </div>
-                      <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <span className="text-[10px] text-amber-600 font-bold block">Deposit Digunakan</span>
-                        <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAppliedDeposit)}</span>
-                      </div>
-                      <div className={`p-2 rounded-xl border ${hotelCollectibleRemaining > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
-                        <span className="text-[10px] font-bold block">Sisa Tagihan Hotel</span>
-                        <span className={`font-mono font-bold ${hotelCollectibleRemaining > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
-                          {formatIdr(hotelCollectibleRemaining)}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="p-2 bg-white rounded-xl border border-slate-200">
-                        <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
-                        <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
-                          {formatIdr(outstanding)}
-                        </span>
-                      </div>
-                    </>
-                  )}
-                </div>
+                 <div className="pt-2 border-t border-slate-200/80 grid grid-cols-2 gap-2 text-xs">
+                   {isPosTx ? (
+                     <>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar (POS)</span>
+                         <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
+                       </div>
+                       <div className={`p-2 rounded-xl border ${outstanding > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                         <span className="text-[10px] font-bold block">Sisa Tagihan (POS)</span>
+                         <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                           {formatIdr(outstanding)}
+                         </span>
+                       </div>
+                     </>
+                   ) : !isReservationLinked ? (
+                     <>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
+                         <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
+                       </div>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
+                         <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
+                           {formatIdr(outstanding)}
+                         </span>
+                       </div>
+                     </>
+                   ) : (
+                     <>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Ditagih Hotel</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(hotelCollectibleTotal)}</span>
+                       </div>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Dibayar ke Hotel</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAmountPaid)}</span>
+                       </div>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Deposit Digunakan</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAppliedDeposit)}</span>
+                       </div>
+                       <div className={`p-2 rounded-xl border ${hotelCollectibleRemaining > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                         <span className="text-[10px] font-bold block">Sisa Tagihan Hotel</span>
+                         <span className={`font-mono font-bold ${hotelCollectibleRemaining > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                           {formatIdr(hotelCollectibleRemaining)}
+                         </span>
+                       </div>
+                     </>
+                   )}
+                 </div>
               </div>
 
               {/* Settlement History & Actions */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Riwayat Pembayaran & Pelunasan ({payments.length})
+                    {isPosTx
+                      ? `Pembayaran POS (${payments.length})`
+                      : `Pembayaran Sebelumnya (${payments.length})`}
                   </span>
-                  {!showSettleForm && canSettle && (
+                  {!showSettleForm && canSettle && !isPosTx && (
                     <button
                       type="button"
                       onClick={() => {
@@ -966,7 +983,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {/* Payments Table */}
                 {payments.length === 0 ? (
                   <div className="p-3 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                    Belum ada riwayat pembayaran yang tercatat
+                    {isPosTx ? 'Belum ada pembayaran POS yang tercatat' : 'Belum ada riwayat pembayaran yang tercatat'}
                   </div>
                 ) : (
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
@@ -974,19 +991,54 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       <thead className="bg-slate-50 border-b border-slate-200 text-slate-400 uppercase text-[10px]">
                         <tr>
                           <th className="py-2 px-3">Waktu</th>
-                          <th className="py-2 px-2">No. Bayar</th>
+                          {isPosTx ? (
+                            <>
+                              <th className="py-2 px-2">Referensi</th>
+                              <th className="py-2 px-2">Sumber</th>
+                            </>
+                          ) : (
+                            <th className="py-2 px-2">No. Bayar</th>
+                          )}
                           <th className="py-2 px-2">Metode</th>
                           <th className="py-2 px-3 text-right">Nominal</th>
                           <th className="py-2 px-2 text-center">Status</th>
+                          <th className="py-2 px-2 text-right">Pencatat</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium">
-                        {payments.map((p) => (
+                        {payments.map((p: LinkedPayment) => (
                           <tr key={p.id} className="hover:bg-slate-50/60">
                             <td className="py-2 px-3 text-slate-500 whitespace-nowrap">
-                              {new Date(p.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}
+                              {p.created_at ? new Date(p.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' }) : '-'}
                             </td>
-                            <td className="py-2 px-2 font-mono font-semibold text-slate-800">{p.reference_code || (p as any).payment_no || '-'}</td>
+                            {isPosTx ? (
+                              <>
+                                <td className="py-2 px-2 font-mono text-slate-600">
+                                  {p.source === 'POS_SETTLEMENT'
+                                    ? `PS-${p.settlement_id ?? p.id}`
+                                    : p.source === 'PAYMENT_TRANSACTION'
+                                      ? `PT-${p.payment_id ?? p.id}`
+                                      : String(p.id)}
+                                </td>
+                                <td className="py-2 px-2">
+                                  {p.source === 'POS_SETTLEMENT' ? (
+                                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                      Pembayaran POS
+                                    </span>
+                                  ) : p.source === 'PAYMENT_TRANSACTION' ? (
+                                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                      Pembayaran Sebelumnya
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-500">-</span>
+                                  )}
+                                </td>
+                              </>
+                            ) : (
+                              <td className="py-2 px-2 font-mono text-slate-600">
+                                {p.reference_code || p.payment_no || '-'}
+                              </td>
+                            )}
                             <td className="py-2 px-2 text-slate-700">{p.payment_method}</td>
                             <td className="py-2 px-3 text-right font-mono font-bold text-emerald-800">
                               {formatIdr(p.amount)}
@@ -995,6 +1047,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
                                 {p.status}
                               </span>
+                            </td>
+                            <td className="py-2 px-2 text-right text-slate-500">
+                              {p.created_by || '-'}
                             </td>
                           </tr>
                         ))}

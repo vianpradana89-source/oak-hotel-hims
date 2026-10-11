@@ -249,12 +249,39 @@ export interface TransactionRecord {
   lines?: TransactionLine[];
   attachments?: TransactionAttachment[];
   linked_payments?: Array<{
-    id: number;
-    transaction_type: string;
-    amount: number;
+    id: number | string;
+    source?: 'POS_SETTLEMENT' | 'PAYMENT_TRANSACTION' | undefined;
+    settlement_id?: number;
+    pos_order_id?: number | null;
+    payment_id?: number;
+    payment_no?: string | null;
+    scope?: string;
+    transaction_type?: string;
+    amount: number | string;
     payment_method: string;
     reference_code: string | null;
     status: string;
+    created_by?: string | null;
+    created_at: string;
+  }>;
+  /**
+   * POS settlements specific to this transaction (SALE POS_ORDER/POS).
+   * Separate from linked_payments to avoid ID collision and to make it
+   * clear that pos_settlements are NOT room-balance components.
+   * Empty array for non-POS transactions.
+   *
+   * ID fields are string because the backend SQL casts BIGINT to ::text.
+   * amount is string because NUMERIC is returned as string by pg driver.
+   */
+  pos_settlements?: Array<{
+    settlement_id: string;
+    property_id: number;
+    pos_order_id: string;
+    sale_id: string;
+    amount: string;
+    payment_method: string;
+    settlement_status: string;
+    created_by: string | null;
     created_at: string;
   }>;
   audit_logs?: Array<{

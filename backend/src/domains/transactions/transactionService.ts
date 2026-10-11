@@ -3424,53 +3424,145 @@ export async function getTransactionById(
      [id, propertyId]
    );
 
-   // Fetch authoritative payment settlements
-   // Canonical reservation payment history: exclude DEPOSIT / DEPOSIT_REFUND / DEPOSIT_APPLY
-   // per semantics established in index.ts:7669-7691.
-   // Non-reservation transaction-linked PAYMENT paths are preserved when reservation_id is absent.
-   let pmtRes;
-   if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
-     const resId = Number(tx.reservation_id);
-     pmtRes = await pool.query(
-       `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
-               reference_payment_id, correction_group_id, reason_code, reason_text,
-               created_by, created_at, booking_id, scope, property_id
-        FROM payment_transactions
-        WHERE reservation_id = $1
-          AND scope = 'ROOM_RESERVATION'
-          AND (property_id = $2 OR property_id IS NULL)
-          AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-        UNION ALL
-        SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
-               pt.payment_method, pt.reference_code, pt.status,
-               pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
-               pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
-        FROM payment_transactions pt
-        JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
-        WHERE pt.scope = 'BOOKING_GROUP'
-          AND pt.property_id = $2
-          AND pa.reservation_id = $1
-          AND pa.property_id = $2
-          AND pa.status = 'ACTIVE'
-          AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-        ORDER BY id DESC`,
-       [resId, propertyId]
-     );
-   } else {
-     pmtRes = await pool.query(
-       `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
-        FROM payment_transactions
-        WHERE transaction_id = $1 AND property_id = $2
-        ORDER BY created_at DESC`,
-       [id, propertyId]
-     );
-   }
+    // Fetch authoritative payment settlements
+    //
+    // For POS_ORDER / POS source types:
+    //   - linked_payments = pos_settlements (via transaction_id) +
+    //                       payment_transactions that directly reference this SALE.
+    //   - Do NOT use reservation-based payment history (kamar).
+    //
+    // For all other source types with reservation_id > 0:
+    //   - Canonical reservation payment history (kamar + booking_group allocations).
+    //
+    // For non-reservation, non-POS:
+    //   - payment_transactions WHERE transaction_id = t.id (non-folio linked).
+    const srcType = String(tx.source_type || '').toUpperCase();
+    const isPosSource = srcType === 'POS_ORDER' || srcType === 'POS';
+    const isResLinked = tx.reservation_id != null && Number(tx.reservation_id) > 0;
+
+    let pmtRes: any;
+    let posSettlements: any[] = [];
+    if (isPosSource) {
+      // ── POS: settlement + legacy payment yang langsung menunjuk SALE ──
+      // pos_settlements: pembayaran POS yang tercatat di tabel terpisah.
+      const psRes = await pool.query(
+        `SELECT id::text AS settlement_id,
+                property_id,
+                pos_order_id::text AS pos_order_id,
+                transaction_id::text AS sale_id,
+                amount,
+                payment_method,
+                status AS settlement_status,
+                created_by,
+                created_at
+         FROM pos_settlements
+         WHERE property_id = $1
+           AND transaction_id::text = $2
+           AND pos_order_id::text = $3
+           AND status = 'SUCCESS'
+         ORDER BY id ASC`,
+        [propertyId, String(id), String(tx.source_id)]
+      );
+      posSettlements = psRes.rows;
+
+      // Legacy payment_transactions yang LANGSUNG menunjuk SALE POS
+      // (bukan berdasarkan reservation_id).
+      const legacyPmtRes = await pool.query(
+        `SELECT id::text AS payment_id,
+                transaction_id::text AS linked_tx_id,
+                reservation_id::text AS res_id,
+                booking_id::text AS booking_id,
+                scope,
+                transaction_type,
+                amount,
+                payment_method,
+                reference_code,
+                status AS pt_status,
+                property_id,
+                created_by,
+                created_at
+         FROM payment_transactions
+         WHERE property_id = $1
+           AND transaction_id::text = $2
+         ORDER BY id ASC`,
+        [propertyId, String(id)]
+      );
+      // Merge: prefix ID agar settlement_id dan payment_id tidak bertabrakan.
+      // Settlement: key = 'ps:<id>', Payment: key = 'pt:<id>'
+      const mergedPayments = [
+        ...posSettlements.map((s: any) => ({
+          id: `ps:${s.settlement_id}`,
+          source: 'POS_SETTLEMENT' as const,
+          settlement_id: Number(s.settlement_id),
+          pos_order_id: s.pos_order_id ? Number(s.pos_order_id) : null,
+          amount: s.amount,
+          payment_method: s.payment_method,
+          reference_code: null as string | null,
+          status: s.settlement_status,
+          created_by: s.created_by,
+          created_at: s.created_at,
+        })),
+        ...legacyPmtRes.rows.map((p: any) => ({
+          id: `pt:${p.payment_id}`,
+          source: 'PAYMENT_TRANSACTION' as const,
+          payment_id: Number(p.payment_id),
+          scope: p.scope,
+          transaction_type: p.transaction_type,
+          amount: p.amount,
+          payment_method: p.payment_method,
+          reference_code: p.reference_code,
+          status: p.pt_status,
+          created_by: p.created_by,
+          created_at: p.created_at,
+        })),
+      ];
+      pmtRes = { rows: mergedPayments };
+    } else if (isResLinked) {
+      // ── Non-POS reservation-linked: kamar payment history (existing) ──
+      const resId = Number(tx.reservation_id);
+      pmtRes = await pool.query(
+        `SELECT id, reservation_id, transaction_type, amount, payment_method, reference_code, status,
+                reference_payment_id, correction_group_id, reason_code, reason_text,
+                created_by, created_at, booking_id, scope, property_id
+         FROM payment_transactions
+         WHERE reservation_id = $1
+           AND scope = 'ROOM_RESERVATION'
+           AND (property_id = $2 OR property_id IS NULL)
+           AND transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+         UNION ALL
+         SELECT pt.id, pt.reservation_id, pt.transaction_type, pa.allocated_amount AS amount,
+                pt.payment_method, pt.reference_code, pt.status,
+                pt.reference_payment_id, pt.correction_group_id, pt.reason_code, pt.reason_text,
+                pt.created_by, pt.created_at, pt.booking_id, pt.scope, pt.property_id
+         FROM payment_transactions pt
+         JOIN payment_allocations pa ON pa.payment_transaction_id = pt.id
+         WHERE pt.scope = 'BOOKING_GROUP'
+           AND pt.property_id = $2
+           AND pa.reservation_id = $1
+           AND pa.property_id = $2
+           AND pa.status = 'ACTIVE'
+           AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+         ORDER BY id DESC`,
+        [resId, propertyId]
+      );
+    } else {
+      // ── Non-POS, non-reservation: transaction-linked payment ──
+      pmtRes = await pool.query(
+        `SELECT id, transaction_type, amount, payment_method, reference_code, status, created_by, created_at
+         FROM payment_transactions
+         WHERE transaction_id = $1 AND property_id = $2
+         ORDER BY created_at DESC`,
+        [id, propertyId]
+      );
+    }
 
     // UI-3: Canonical hotel collectible balance for reservation-linked transactions.
     // Delegates to the neutral reservationFinancialCalculator.
     // Fail-closed: if the calculator throws, the error propagates — no legacy fallback.
+    // For POS_ORDER/POS: NOT populated — pos_settlements is a separate payment
+    // domain, not a component of the room collectible balance.
     let canonicalHotelCollectible: any = null;
-    if (tx.reservation_id != null && Number(tx.reservation_id) > 0) {
+    if (isResLinked && !isPosSource) {
       const resId = Number(tx.reservation_id);
       const paymentResponsibility = String(tx.payment_responsibility || 'HOTEL_COLLECT');
       canonicalHotelCollectible = await calculateHotelCollectibleBalance(
@@ -3533,8 +3625,13 @@ export async function getTransactionById(
     lines: linesRes.rows,
     attachments: attRes.rows,
     linked_payments: pmtRes.rows,
+    // POS settlements as a separate field — frontend can display them
+    // distinctly from legacy payment_transactions.
+    pos_settlements: posSettlements,
     audit_logs: auditRes.rows,
     // UI-3: Canonical hotel collectible balance fields (top-level for frontend convenience)
+    // For POS_ORDER/POS: canonicalHotelCollectible is NOT populated —
+    // it is a room-balance concept, not a POS concept.
     ...(canonicalHotelCollectible || {}),
   };
 }
