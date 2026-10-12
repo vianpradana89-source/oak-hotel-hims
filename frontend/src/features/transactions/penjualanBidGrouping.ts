@@ -27,6 +27,10 @@ export interface PenjualanBidChild {
   canonical_operational_sheet?: OperationalSheet;
   /** 'UNVERIFIED' | 'VERIFIED' | 'REJECTED' — worst member verification for audit display */
   audit_verification_status?: VerificationStatus;
+  /** POS: jumlah order status OPEN atau PAID (hanya ada bila user punya pos.view) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN (hanya ada bila user punya pos.view) */
+  pos_open_count?: number;
 }
 
 export interface PenjualanBidGroup {

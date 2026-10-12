@@ -3062,7 +3062,8 @@ export async function getTransactions(
     const saleBidGrouped = listType === 'SALE' || listType === ''
       ? presentListWithSaleBidGrouping(presentedAll, {
            lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean)),
-        })
+           includePosStats: params.includePosStats ?? false,
+         })
       : null;
     const listSource = saleBidGrouped || presentedAll;
     const pageKeySet = new Set(pagePlan.keys);

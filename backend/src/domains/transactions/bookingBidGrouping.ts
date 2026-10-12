@@ -26,6 +26,10 @@ export interface PenjualanBidChild {
   canonical_operational_sheet?: OperationalSheet;
   /** UI-1: worst member verification for audit display */
   audit_verification_status?: 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
+  /** POS: jumlah order status OPEN atau PAID untuk reservasi ini (hanya saat includePosStats=true) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN untuk reservasi ini (hanya saat includePosStats=true) */
+  pos_open_count?: number;
 }
 
 export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
@@ -115,10 +119,20 @@ export interface BookingReservationLifecycleRow {
   stay_status?: string | null;
   canonical_effective_paid?: number;
   canonical_remaining_balance?: number;
+  /** POS: jumlah order status OPEN atau PAID (hanya diisi bila includePosStats=true) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN (hanya diisi bila includePosStats=true) */
+  pos_open_count?: number;
 }
 
 export interface BidGroupingOptions {
   lifecycleReservations?: BookingReservationLifecycleRow[];
+  /**
+   * Ketika true, statistik POS (pos_order_count, pos_open_count) diikutkan
+   * pada setiap child. Ditetapkan oleh router dari permission pos.view.
+   * Default: false — field tidak ada pada output.
+   */
+  includePosStats?: boolean;
 }
 
 /** Stay-child sheet from reservation lifecycle. Paid/unpaid is ignored. */
@@ -345,7 +359,7 @@ function worstVerificationStatus(statuses: Array<string | null | undefined>): 'U
   return undefined;
 }
 
-export function buildChild(reservationId: number | null, members: any[]): PenjualanBidChild {
+export function buildChild(reservationId: number | null, members: any[], includePosStats?: boolean): PenjualanBidChild {
   const primary = members[0];
   const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
   const discount = members.reduce((sum, row) => sum + roundIdr(row.discount_amount), 0);
@@ -422,7 +436,10 @@ export function buildChild(reservationId: number | null, members: any[]): Penjua
       operational_sheet: appliedSheet,
       canonical_operational_sheet: canonicalSheet,
       audit_verification_status: aggregatedVerification,
-    };
+      ...(includePosStats && primary.pos_order_count != null
+        ? { pos_order_count: primary.pos_order_count, pos_open_count: primary.pos_open_count ?? 0 }
+        : {}),
+  };
 }
 
 function unattachedFinancial(rows: any[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {
@@ -448,7 +465,8 @@ function unattachedFinancial(rows: any[]): { gross: number; discount: number; ne
 function buildGroup(
   bid: string,
   members: any[],
-  lifecycleSheets: Map<string, OperationalSheet[]>
+  lifecycleSheets: Map<string, OperationalSheet[]>,
+  includePosStats?: boolean
 ): PenjualanBidGroupPayload & { primary: any; members: any[] } {
   const reservationMembers = members.filter(hasReservationChild);
   const unattachedMembers = members.filter((row) => !hasReservationChild(row));
@@ -462,7 +480,7 @@ function buildGroup(
   const children = [...byChild.entries()]
     .map(([key, childMembers]) => {
       const reservationId = key.startsWith('r:') ? Number(key.slice(2)) : null;
-      return buildChild(reservationId && Number.isFinite(reservationId) ? reservationId : null, childMembers);
+      return buildChild(reservationId && Number.isFinite(reservationId) ? reservationId : null, childMembers, includePosStats);
     })
     .sort((a, b) => {
       const seqCmp = Number(a.stay_sequence || 0) - Number(b.stay_sequence || 0);
@@ -560,6 +578,12 @@ export function presentBidGroupedSales(presented: any[], options?: BidGroupingOp
           ...sourceRow,
           canonical_effective_paid: canonicalSettlement.canonical_effective_paid,
           canonical_remaining_balance: canonicalSettlement.canonical_remaining_balance,
+          ...(options?.includePosStats
+            ? {
+                pos_order_count: canonicalSettlement.pos_order_count ?? 0,
+                pos_open_count:  canonicalSettlement.pos_open_count  ?? 0,
+              }
+            : {}),
         }
       : sourceRow;
 
@@ -576,11 +600,11 @@ export function presentBidGroupedSales(presented: any[], options?: BidGroupingOp
     const existing = bidIndex.get(storageKey);
     if (existing === undefined) {
       bidIndex.set(storageKey, items.length);
-      items.push({ kind: 'bid_group', group: buildGroup(bid, [row], lifecycleSheets) });
+      items.push({ kind: 'bid_group', group: buildGroup(bid, [row], lifecycleSheets, options?.includePosStats) });
     } else {
       const item = items[existing];
       if (item.kind !== 'bid_group') continue;
-      item.group = buildGroup(bid, [...item.group.members, row], lifecycleSheets);
+      item.group = buildGroup(bid, [...item.group.members, row], lifecycleSheets, options?.includePosStats);
     }
   }
 
@@ -795,15 +819,26 @@ folio_payment_fallback AS (
         AND fe.entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
         AND fe.reversal_of_entry_id IS NULL
       THEN fe.amount ELSE 0 END), 0)
-    - COALESCE(SUM(CASE
-      WHEN fe.direction = 'DEBIT'
+     - COALESCE(SUM(CASE
+       WHEN fe.direction = 'DEBIT'
         AND fe.entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL')
-      THEN fe.amount ELSE 0 END), 0) AS folio_paid
+       THEN fe.amount ELSE 0 END), 0) AS folio_paid
   FROM folio_entries fe
   WHERE fe.property_id = $1
     AND fe.reservation_id = ANY($2)
   GROUP BY fe.reservation_id
-)
+),
+ pos_counts AS (
+   SELECT
+     po.reservation_id,
+     COUNT(*) AS pos_order_count,
+     SUM(CASE WHEN po.status = 'OPEN' THEN 1 ELSE 0 END) AS pos_open_count
+   FROM pos_orders po
+   WHERE po.property_id = $1
+     AND po.reservation_id = ANY($2)
+     AND po.status IN ('OPEN', 'PAID')
+   GROUP BY po.reservation_id
+ )
 SELECT
   b.property_id,
   r.booking_id,
@@ -830,7 +865,9 @@ SELECT
   COALESCE(hc.gross_collectible, 0) AS gross_collectible,
   COALESCE(hc.collectible_reversals, 0) AS collectible_reversals,
   COALESCE(nf.nightly_sum, 0) AS nightly_sum,
-  COALESCE(fpf.folio_paid, 0) AS folio_paid
+  COALESCE(fpf.folio_paid, 0) AS folio_paid,
+  COALESCE(pc.pos_order_count, 0) AS pos_order_count,
+  COALESCE(pc.pos_open_count, 0) AS pos_open_count
 FROM reservations r
 JOIN bookings b ON b.id = r.booking_id
 LEFT JOIN net_charges nc ON nc.reservation_id = r.id
@@ -840,6 +877,7 @@ LEFT JOIN allocated a ON a.reservation_id = r.id
 LEFT JOIN hotel_collectible hc ON hc.reservation_id = r.id
 LEFT JOIN nightly_fallback nf ON nf.reservation_id = r.id
 LEFT JOIN folio_payment_fallback fpf ON fpf.reservation_id = r.id
+LEFT JOIN pos_counts pc ON pc.reservation_id = r.id
 WHERE b.property_id = $1
   AND r.id = ANY($2)
 ORDER BY r.booking_id, r.stay_sequence, r.id
@@ -863,7 +901,24 @@ ORDER BY r.booking_id, r.stay_sequence, r.id
     const directSourceCnt = Number(row.direct_source_cnt || 0);
     const allocEffectiveCnt = Number(row.alloc_effective_cnt || 0);
     const directHistoryCnt = Number(row.direct_history_cnt || 0);
-    const allocHistoryCnt = Number(row.alloc_history_cnt || 0);
+     const allocHistoryCnt = Number(row.alloc_history_cnt || 0);
+
+    // POS stats — normalisasi dari string BIGINT → number, validasi SafeInteger non-negatif
+    const posOrderCountRaw = Number(row.pos_order_count ?? 0);
+    if (!Number.isSafeInteger(posOrderCountRaw) || posOrderCountRaw < 0) {
+      const errMsg = `loadBookingReservationLifecycle: pos_order_count invalid (reservation_id=${row.reservation_id}): ${String(row.pos_order_count)}`;
+      console.error('[bookingBidGrouping]', errMsg);
+      throw new Error(errMsg);
+    }
+    const posOpenCountRaw = Number(row.pos_open_count ?? 0);
+    if (!Number.isSafeInteger(posOpenCountRaw) || posOpenCountRaw < 0) {
+      const errMsg = `loadBookingReservationLifecycle: pos_open_count invalid (reservation_id=${row.reservation_id}): ${String(row.pos_open_count)}`;
+      console.error('[bookingBidGrouping]', errMsg);
+      throw new Error(errMsg);
+    }
+    const posOrderCount = posOrderCountRaw;
+    const posOpenCount = posOpenCountRaw;
+
 
     // Legacy fallback for ordinary payment — parity with calculateReservationFinancials
     let ordinaryAmountPaid = directPaid + allocatedPaid;
@@ -914,6 +969,8 @@ ORDER BY r.booking_id, r.stay_sequence, r.id
       ...row,
       canonical_effective_paid: canonicalEffectivePaid,
       canonical_remaining_balance: remaining,
+      pos_order_count: posOrderCount,
+      pos_open_count: posOpenCount,
     };
   });
 }

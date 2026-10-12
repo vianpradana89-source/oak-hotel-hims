@@ -37,6 +37,9 @@ import { PurchaseTransactionEditor } from './PurchaseTransactionEditor';
 import { ExpenseTransactionEditor } from './ExpenseTransactionEditor';
 import { IncomeTransactionEditor } from './IncomeTransactionEditor';
 import { VendorSupplierMasterPage } from '../vendors/VendorSupplierMasterPage';
+import { useAuth } from '../auth/AuthContext';
+import { getPosAccess } from '../pos/posPermissions';
+import POSOrderPanel from '../pos/POSOrderPanel';
 
 interface TransactionWorkspaceProps {
   propertyId: number;
@@ -192,6 +195,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [expenseLoadingIds, setExpenseLoadingIds] = useState<Set<number | string>>(new Set());
   const [expenseExpandErrors, setExpenseExpandErrors] = useState<Map<number | string, string>>(new Map());
 
+  // POS: indikator + panel read-only pada child kamar
+  // Key = "{propertyId}:{reservationId}" agar reset saat property/konteks berubah
+  const [expandedPosResKey, setExpandedPosResKey] = useState<string | null>(null);
+
   // PURCHASE-2A3: inline lifecycle control per-cell loading state
   const [lifecycleSaving, setLifecycleSaving] = useState<Record<string, boolean>>({});
 
@@ -217,6 +224,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   // Used to show placeholders on summary cards and sheet counts
   // while the new data is being fetched, preventing stale numbers.
   const [isQueryLoading, setIsQueryLoading] = useState<boolean>(false);
+
+  // POS access: resolve canViewPos dari auth context (pola sama dengan ReservationDetailDrawer)
+  const { hasGranularPermission, effectiveAccess } = useAuth();
+  const posAccess = useMemo(
+    () => getPosAccess(effectiveAccess, hasGranularPermission),
+    [effectiveAccess, hasGranularPermission],
+  );
+
+  // Reset panel POS saat permission hilang (mis. token expired / role dihapus)
+  useEffect(() => {
+    if (!posAccess.canViewPos) setExpandedPosResKey(null);
+  }, [posAccess.canViewPos]);
 
   useEffect(() => {
     fetchCategoriesApi(propertyId)
@@ -306,6 +325,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setExpenseDetailCache(new Map());
     setExpenseLoadingIds(new Set());
     setExpenseExpandErrors(new Map());
+    setExpandedPosResKey(null);
   }, [propertyId, activeTab, operationalStatus, startDate, endDate, debouncedSearch, page]);
 
   useEffect(() => {
@@ -1105,34 +1125,82 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                        <th className="py-1.5 px-3 text-right">Sisa</th>
                        <th className="py-1.5 px-3 text-center">Status</th>
                        <th className="py-1.5 px-3 text-center">Penanggung</th>
+                       <th className="py-1.5 px-3 text-center">POS</th>
                        <th className="py-1.5 px-3 text-center">Aksi</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {group.children.map((child) => (
-                      <tr key={child.reservation_id || child.primary_transaction_id} className="border-t border-slate-100">
-                        <td className="py-1.5 px-3 font-semibold text-slate-800 whitespace-nowrap">{child.room_number || '-'}</td>
-                        <td className="py-1.5 px-3 text-slate-700 whitespace-nowrap">{child.room_type_name || '-'}</td>
-                        <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_in)}</td>
-                        <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_out)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.gross)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(child.discount)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">{formatIdr(child.net)}</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
-                        <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
-                        <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
-                        <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(child.payment_responsibility)}</td>
-                        <td className="py-1.5 px-3 text-center whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => openDetailDrawer(child.primary_transaction_id)}
-                            className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
-                          >
-                            Detail
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {group.children.map((child) => {
+                      const posResKey = child.reservation_id != null ? `${propertyId}:${child.reservation_id}` : null;
+                      const posIsExpanded = posResKey !== null && expandedPosResKey === posResKey;
+                      const togglePos = () => setExpandedPosResKey(posIsExpanded ? null : posResKey);
+                      const showPosIndicator = posAccess.canViewPos
+                        && child.reservation_id != null
+                        && (child.pos_order_count ?? 0) > 0;
+                      const posLabel = (child.pos_order_count ?? 0) > 0
+                        ? `${child.pos_order_count} POS${(child.pos_open_count ?? 0) > 0 ? ` · ${child.pos_open_count} belum dibayar` : ''}`
+                        : null;
+                      return (
+                        <React.Fragment key={child.reservation_id || child.primary_transaction_id}>
+                          <tr className="border-t border-slate-100">
+                            <td className="py-1.5 px-3 font-semibold text-slate-800 whitespace-nowrap">{child.room_number || '-'}</td>
+                            <td className="py-1.5 px-3 text-slate-700 whitespace-nowrap">{child.room_type_name || '-'}</td>
+                            <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_in)}</td>
+                            <td className="py-1.5 px-3 text-slate-600 whitespace-nowrap">{formatStayShortDate(child.check_out)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.gross)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(child.discount)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">{formatIdr(child.net)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
+                            <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
+                            <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(child.payment_responsibility)}</td>
+                            <td className="py-1.5 px-3 text-center whitespace-nowrap">
+                              {showPosIndicator && posLabel ? (
+                                <button
+                                  type="button"
+                                  aria-expanded={posIsExpanded}
+                                  aria-controls={posResKey ? `pos-panel-${posResKey}` : undefined}
+                                  onClick={togglePos}
+                                  className={`px-1.5 py-0.5 text-[10px] font-semibold rounded border transition-colors cursor-pointer ${
+                                    posIsExpanded
+                                      ? 'bg-amber-50 border-amber-300 text-amber-800'
+                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-300'
+                                  }`}
+                                >
+                                  {posLabel}
+                                </button>
+                              ) : (
+                                <span className="text-slate-300 text-[10px]">—</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-3 text-center whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => openDetailDrawer(child.primary_transaction_id)}
+                                className="px-2 py-0.5 text-[10px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
+                              >
+                                Detail
+                              </button>
+                            </td>
+                          </tr>
+                          {showPosIndicator && posIsExpanded && posResKey && (
+                            <tr id={`pos-panel-${posResKey}`} className="bg-slate-50/50">
+                              <td colSpan={13} className="px-3 py-2">
+                                <POSOrderPanel
+                                  propertyId={propertyId}
+                                  reservationId={child.reservation_id!}
+                                  onOpenPosModal={() => {}}
+                                  canViewPos={posAccess.canViewPos}
+                                  canEditPos={false}
+                                  roomNumber={child.room_number || undefined}
+                                  reservationLabel={`Kamar ${child.room_number || ''}`}
+                                />
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

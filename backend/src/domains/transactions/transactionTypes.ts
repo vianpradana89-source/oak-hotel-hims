@@ -451,6 +451,12 @@ export interface TransactionFilterParams {
   supplier_id?: number;
   limit?: number;
   offset?: number;
+  /**
+   * Ketika true, statistik POS (pos_order_count, pos_open_count)
+   * diikutkan pada booking_bid_group.children. Ditetapkan oleh router
+   * dari permission pos.view. Default: false — field tidak ada.
+   */
+  includePosStats?: boolean;
 }
 
 export interface TransactionSummary {

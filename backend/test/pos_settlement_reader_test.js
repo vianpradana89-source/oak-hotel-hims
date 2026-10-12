@@ -2092,6 +2092,534 @@ async function main() {
       );
     }
 
+    // ── S8: includePosStats pada getTransactions — pos_order_count / pos_open_count ─
+    // Fixture:
+    //   Kamar: folio ROOM_CHARGE nyata + SALE 500000, payment kamar 200000.
+    //   POS A (OPEN):  25000 — tanpa SALE/settlement.
+    //   POS B (PAID):  75000 — satu SALE + settlement SUCCESS 75000.
+    //   POS C (VOIDED):40000 — tanpa SALE/settlement.
+    //
+    // includePosStats=true  → pos_order_count=2 (OPEN+PAID), pos_open_count=1 (OPEN).
+    // includePosStats=false → kedua key ABSENT (hasOwnProperty=false), bukan 0.
+    // includePosStats omitted → sama, key ABSENT.
+    //
+    // Total keuangan pada ketiga hasil:
+    //   net=575000 (room 500000 + POS B SALE 75000; OPEN & VOIDED tidak masuk),
+    //   paid=275000 (kamar 200000 + settlement POS B 75000),
+    //   remaining=300000.
+    {
+      const propId8 = await createFixtureProperty(client, 'S8');
+      const chain8 = await createReservationChain(client, propId8, 'Tamu-S8');
+      const { reservation: reservationId8, booking: bookingId8, bid: bid8 } = chain8;
+
+      // ── Fixture: folio + SALE kamar + payment kamar ─────────────────────────
+      const folioEntryId8 = await createFolioEntry(
+        client, reservationId8, propId8, 'ROOM_CHARGE', 500000
+      );
+      const roomTxId8 = await createRoomSaleTransaction(
+        client, propId8, reservationId8, bookingId8, 500000, String(folioEntryId8)
+      );
+      const payId8 = await createPaymentTransaction(
+        client, propId8, null, 200000, 'CASH', reservationId8, bookingId8
+      );
+      void payId8;
+
+      // ── Fixture: POS A OPEN — tanpa SALE, tanpa settlement ────────────────
+      const order8a = await createFixturePosOrder(client, propId8, 25000, reservationId8);
+
+      // ── Fixture: POS B PAID — SALE + settlement SUCCESS ───────────────────
+      const order8b = await createFixturePosOrder(client, propId8, 75000, reservationId8);
+      await client.query(`UPDATE pos_orders SET status = 'PAID' WHERE id = $1`, [order8b]);
+      const posTxId8 = await createPosSaleTransaction(
+        client, propId8, order8b, 75000, reservationId8, bookingId8
+      );
+      const settleId8 = await createPosSettlement(client, propId8, order8b, posTxId8, 75000);
+      void settleId8;
+
+      // ── Fixture: POS C VOIDED — tanpa SALE, tanpa settlement ──────────────
+      const order8c = await createFixturePosOrder(client, propId8, 40000, reservationId8);
+      await client.query(`UPDATE pos_orders SET status = 'VOIDED' WHERE id = $1`, [order8c]);
+
+      // ── Verifikasi status fixture ───────────────────────────────────────────
+      const statusCheck8 = await client.query(
+        `SELECT
+           (SELECT status FROM pos_orders WHERE id = $1) AS s_a,
+           (SELECT status FROM pos_orders WHERE id = $2) AS s_b,
+           (SELECT status FROM pos_orders WHERE id = $3) AS s_c`,
+        [order8a, order8b, order8c]
+      );
+      ok(
+        'S8 fixture: POS A status=OPEN',
+        String(statusCheck8.rows[0].s_a).toUpperCase() === 'OPEN',
+        `got ${statusCheck8.rows[0].s_a}`
+      );
+      ok(
+        'S8 fixture: POS B status=PAID',
+        String(statusCheck8.rows[0].s_b).toUpperCase() === 'PAID',
+        `got ${statusCheck8.rows[0].s_b}`
+      );
+      ok(
+        'S8 fixture: POS C status=VOIDED',
+        String(statusCheck8.rows[0].s_c).toUpperCase() === 'VOIDED',
+        `got ${statusCheck8.rows[0].s_c}`
+      );
+
+      // ── Fixture Properti B: isolasi — group/child B tidak bocor ke response A ─
+      // Properti B memiliki reservation chain sendiri, folio kamar nyata,
+      // dan satu POS OPEN (tanpa SALE/settlement).  Dibuat SEBELUM pembacaan
+      // reader pertama agar seluruh fixture A+B sudah ada sebelum snapshot.
+      const propId8B = await createFixtureProperty(client, 'S8B');
+      const chain8B = await createReservationChain(client, propId8B, 'Tamu-S8B');
+      const {
+        reservation: reservationId8B,
+        booking: bookingId8B,
+        bid: bid8B,
+      } = chain8B;
+
+      // Folio ROOM_CHARGE nyata 500000 agar group dapat dibaca.
+      const folioEntryId8B = await createFolioEntry(
+        client, reservationId8B, propId8B, 'ROOM_CHARGE', 500000
+      );
+      const roomTxId8B = await createRoomSaleTransaction(
+        client, propId8B, reservationId8B, bookingId8B, 500000, String(folioEntryId8B)
+      );
+      void roomTxId8B;
+
+      // Satu POS OPEN 25000 terkait reservationId8B — tanpa SALE, tanpa settlement.
+      const order8B = await createFixturePosOrder(client, propId8B, 25000, reservationId8B);
+      // order8B sudah tracked oleh createFixturePosOrder; verifikasi status tetap OPEN.
+      const statusCheck8B = await client.query(
+        `SELECT status FROM pos_orders WHERE id = $1`,
+        [order8B]
+      );
+      ok(
+        'S8B fixture: POS OPEN status=OPEN',
+        String(statusCheck8B.rows[0].status).toUpperCase() === 'OPEN',
+        `got ${statusCheck8B.rows[0].status}`
+      );
+
+      // ── Helper: cari child berdasarkan reservationId dan bookingBid ────────
+      // Group dicari berdasarkan bookingBid, child berdasarkan reservationId.
+      function findChildByReservation(listRes, reservationId, bookingBid) {
+        const row = listRes.transactions.find(
+          (r) =>
+            r.booking_bid_group &&
+            String(r.booking_bid_group.bid || '').toUpperCase() === String(bookingBid).toUpperCase()
+        );
+        if (!row) return null;
+        const group = row.booking_bid_group;
+        const child = group.children
+          ? group.children.find(
+              (c) => Number(c.reservation_id) === Number(reservationId)
+            )
+          : undefined;
+        return { row, group, child };
+      }
+
+      // ── Helper: asersi keuangan (net/paid/remaining) ──────────────────────
+      function assertFinancials(prefix, group, child) {
+        // net: group-level atau child-level.
+        const netSrc = group ? group.net : (child ? child.net : undefined);
+        const paidSrc = group ? group.paid : (child ? child.paid : undefined);
+        const remSrc = group ? group.remaining : (child ? child.remaining : undefined);
+        ok(
+          `${prefix}: net=575000`,
+          Number(netSrc) === 575000,
+          `got ${netSrc}`
+        );
+        ok(
+          `${prefix}: paid=275000`,
+          Number(paidSrc) === 275000,
+          `got ${paidSrc}`
+        );
+        ok(
+          `${prefix}: remaining=300000`,
+          Number(remSrc) === 300000,
+          `got ${remSrc}`
+        );
+      }
+
+      // ── Helper: snapshot keenam tabel (dibatasi property_id) ──────────────
+      async function snapshotS8(propertyId) {
+        const q = await client.query(
+          `SELECT
+             (SELECT COUNT(*) FROM pos_orders          WHERE property_id = $1::int) AS pos_orders,
+             (SELECT COUNT(*) FROM transactions        WHERE property_id = $1::int AND deleted_at IS NULL) AS transactions,
+             (SELECT COUNT(*) FROM pos_settlements     WHERE property_id = $1::int) AS pos_settlements,
+             (SELECT COUNT(*) FROM payment_transactions WHERE property_id = $1::int) AS payment_transactions,
+             (SELECT COUNT(*) FROM folio_entries       WHERE property_id = $1::int) AS folio_entries,
+             (SELECT COUNT(*) FROM audit_logs          WHERE property_id = $1::int) AS audit_logs`,
+          [propertyId]
+        );
+        return q.rows[0];
+      }
+
+      // ── Snapshot SEBELUM pembacaan reader pertama ──────────────────────────
+      const snap8BeforeA = await snapshotS8(propId8);
+      const snap8BeforeB = await snapshotS8(propId8B);
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 1) includePosStats=true
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const listRes8 = await getTransactions(pool, {
+          property_id: propId8,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const found8 = findChildByReservation(listRes8, reservationId8, bid8);
+        ok(
+          'S8a includePosStats=true: baris booking_bid_group ditemukan (oleh bid8)',
+          Boolean(found8 && found8.row),
+          `rows=${listRes8.transactions.length} bid8=${bid8}`
+        );
+        if (found8 && found8.row) {
+          ok(
+            'S8a includePosStats=true: child ditemukan oleh reservation_id',
+            Boolean(found8.child),
+            `reservation_id=${reservationId8}`
+          );
+          if (found8.child) {
+            const c = found8.child;
+            ok(
+              'S8a includePosStats=true: pos_order_count ada (hasOwnProperty)',
+              Object.prototype.hasOwnProperty.call(c, 'pos_order_count'),
+              `keys=${Object.keys(c).filter((k) => k.startsWith('pos_')).join(',')}`
+            );
+            ok(
+              'S8a includePosStats=true: pos_open_count ada (hasOwnProperty)',
+              Object.prototype.hasOwnProperty.call(c, 'pos_open_count'),
+              `keys=${Object.keys(c).filter((k) => k.startsWith('pos_')).join(',')}`
+            );
+            ok(
+              'S8a includePosStats=true: pos_order_count=2 (OPEN+PAID)',
+              Number(c.pos_order_count) === 2,
+              `got ${c.pos_order_count}`
+            );
+            ok(
+              'S8a includePosStats=true: pos_open_count=1 (OPEN only)',
+              Number(c.pos_open_count) === 1,
+              `got ${c.pos_open_count}`
+            );
+            ok(
+              'S8a includePosStats=true: pos_order_count tipe number & SafeInteger',
+              typeof c.pos_order_count === 'number' && Number.isSafeInteger(c.pos_order_count) && c.pos_order_count >= 0,
+              `got ${c.pos_order_count} (${typeof c.pos_order_count})`
+            );
+            ok(
+              'S8a includePosStats=true: pos_open_count tipe number & SafeInteger',
+              typeof c.pos_open_count === 'number' && Number.isSafeInteger(c.pos_open_count) && c.pos_open_count >= 0,
+              `got ${c.pos_open_count} (${typeof c.pos_open_count})`
+            );
+            assertFinancials('S8a includePosStats=true', found8.group, c);
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 2) includePosStats=false secara eksplisit
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const listRes8b = await getTransactions(pool, {
+          property_id: propId8,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: false,
+        });
+        const found8b = findChildByReservation(listRes8b, reservationId8, bid8);
+        ok(
+          'S8b includePosStats=false: baris booking_bid_group ditemukan (oleh bid8)',
+          Boolean(found8b && found8b.row),
+          `rows=${listRes8b.transactions.length} bid8=${bid8}`
+        );
+        if (found8b && found8b.row) {
+          ok(
+            'S8b includePosStats=false: child ditemukan oleh reservation_id',
+            Boolean(found8b.child),
+            `reservation_id=${reservationId8}`
+          );
+          if (found8b.child) {
+            const c = found8b.child;
+            ok(
+              'S8b includePosStats=false: pos_order_count ABSENT (hasOwnProperty=false)',
+              !Object.prototype.hasOwnProperty.call(c, 'pos_order_count'),
+              `got ${c.pos_order_count} (key exists: ${Object.prototype.hasOwnProperty.call(c, 'pos_order_count')})`
+            );
+            ok(
+              'S8b includePosStats=false: pos_open_count ABSENT (hasOwnProperty=false)',
+              !Object.prototype.hasOwnProperty.call(c, 'pos_open_count'),
+              `got ${c.pos_open_count} (key exists: ${Object.prototype.hasOwnProperty.call(c, 'pos_open_count')})`
+            );
+            assertFinancials('S8b includePosStats=false', found8b.group, c);
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 3) includePosStats tidak diberikan (default)
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const listRes8c = await getTransactions(pool, {
+          property_id: propId8,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          // includePosStats sengaja tidak diberikan → default false
+        });
+        const found8c = findChildByReservation(listRes8c, reservationId8, bid8);
+        ok(
+          'S8c includePosStats=omitted: baris booking_bid_group ditemukan (oleh bid8)',
+          Boolean(found8c && found8c.row),
+          `rows=${listRes8c.transactions.length} bid8=${bid8}`
+        );
+        if (found8c && found8c.row) {
+          ok(
+            'S8c includePosStats=omitted: child ditemukan oleh reservation_id',
+            Boolean(found8c.child),
+            `reservation_id=${reservationId8}`
+          );
+          if (found8c.child) {
+            const c = found8c.child;
+            ok(
+              'S8c includePosStats=omitted: pos_order_count ABSENT (hasOwnProperty=false)',
+              !Object.prototype.hasOwnProperty.call(c, 'pos_order_count'),
+              `got ${c.pos_order_count} (key exists: ${Object.prototype.hasOwnProperty.call(c, 'pos_order_count')})`
+            );
+            ok(
+              'S8c includePosStats=omitted: pos_open_count ABSENT (hasOwnProperty=false)',
+              !Object.prototype.hasOwnProperty.call(c, 'pos_open_count'),
+              `got ${c.pos_open_count} (key exists: ${Object.prototype.hasOwnProperty.call(c, 'pos_open_count')})`
+            );
+            assertFinancials('S8c includePosStats=omitted', found8c.group, c);
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 4) includePosStats=true — Properti B: pos_order_count=1, pos_open_count=1
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const listRes8B = await getTransactions(pool, {
+          property_id: propId8B,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const found8B = findChildByReservation(listRes8B, reservationId8B, bid8B);
+        ok(
+          'S8B includePosStats=true: baris booking_bid_group ditemukan (oleh bid8B)',
+          Boolean(found8B && found8B.row),
+          `rows=${listRes8B.transactions.length} bid8B=${bid8B}`
+        );
+        if (found8B && found8B.row) {
+          ok(
+            'S8B includePosStats=true: child ditemukan oleh reservationId8B',
+            Boolean(found8B.child),
+            `reservationId8B=${reservationId8B}`
+          );
+          if (found8B.child) {
+            const cb = found8B.child;
+            ok(
+              'S8B includePosStats=true: pos_order_count ada (hasOwnProperty)',
+              Object.prototype.hasOwnProperty.call(cb, 'pos_order_count'),
+              `keys=${Object.keys(cb).filter((k) => k.startsWith('pos_')).join(',')}`
+            );
+            ok(
+              'S8B includePosStats=true: pos_open_count ada (hasOwnProperty)',
+              Object.prototype.hasOwnProperty.call(cb, 'pos_open_count'),
+              `keys=${Object.keys(cb).filter((k) => k.startsWith('pos_')).join(',')}`
+            );
+            ok(
+              'S8B includePosStats=true: pos_order_count=1',
+              Number(cb.pos_order_count) === 1,
+              `got ${cb.pos_order_count}`
+            );
+            ok(
+              'S8B includePosStats=true: pos_open_count=1',
+              Number(cb.pos_open_count) === 1,
+              `got ${cb.pos_open_count}`
+            );
+            ok(
+              'S8B includePosStats=true: pos_order_count tipe number & SafeInteger',
+              typeof cb.pos_order_count === 'number' && Number.isSafeInteger(cb.pos_order_count) && cb.pos_order_count >= 0,
+              `got ${cb.pos_order_count} (${typeof cb.pos_order_count})`
+            );
+            ok(
+              'S8B includePosStats=true: pos_open_count tipe number & SafeInteger',
+              typeof cb.pos_open_count === 'number' && Number.isSafeInteger(cb.pos_open_count) && cb.pos_open_count >= 0,
+              `got ${cb.pos_open_count} (${typeof cb.pos_open_count})`
+            );
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 5) Isolasi: Response A tak memuat BID/child B, dan sebaliknya.
+      //    Periksa SELURUH group/children di response, bukan hanya row pertama.
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        // Response A (includePosStats=true, property A).
+        const listRes8IsoA = await getTransactions(pool, {
+          property_id: propId8,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const allGroupsA = listRes8IsoA.transactions
+          .map((r) => r.booking_bid_group)
+          .filter(Boolean);
+        const leakedBid8BtoA = allGroupsA.some(
+          (g) => String(g.bid || '').toUpperCase() === String(bid8B).toUpperCase()
+        );
+        ok(
+          'S8 isolasi: response A tidak memuat bid8B di group manapun',
+          !leakedBid8BtoA,
+          `bid8B=${bid8B} ditemukan di response A (groups=${allGroupsA.length})`
+        );
+        const allChildrenA = allGroupsA.flatMap((g) => g.children || []);
+        const leakedRes8BtoA = allChildrenA.some(
+          (c) => Number(c.reservation_id) === Number(reservationId8B)
+        );
+        ok(
+          'S8 isolasi: response A tidak memuat child reservationId8B',
+          !leakedRes8BtoA,
+          `reservationId8B=${reservationId8B} ditemukan di children response A (${allChildrenA.length} child)`
+        );
+
+        // Response B (includePosStats=true, property B).
+        const listRes8IsoB = await getTransactions(pool, {
+          property_id: propId8B,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const allGroupsB = listRes8IsoB.transactions
+          .map((r) => r.booking_bid_group)
+          .filter(Boolean);
+        const leakedBid8toB = allGroupsB.some(
+          (g) => String(g.bid || '').toUpperCase() === String(bid8).toUpperCase()
+        );
+        ok(
+          'S8 isolasi: response B tidak memuat bid8 di group manapun',
+          !leakedBid8toB,
+          `bid8=${bid8} ditemukan di response B (groups=${allGroupsB.length})`
+        );
+        const allChildrenB = allGroupsB.flatMap((g) => g.children || []);
+        const leakedRes8toB = allChildrenB.some(
+          (c) => Number(c.reservation_id) === Number(reservationId8)
+        );
+        ok(
+          'S8 isolasi: response B tidak memuat child reservationId8',
+          !leakedRes8toB,
+          `reservationId8=${reservationId8} ditemukan di children response B (${allChildrenB.length} child)`
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 6) Panggilan ulang reader A dan B dengan includePosStats=true
+      //    Verifikasi count & keuangan tetap sama.
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        // ── Properti A: ulang includePosStats=true ───────────────────────────
+        const listRes8ReA = await getTransactions(pool, {
+          property_id: propId8,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const found8ReA = findChildByReservation(listRes8ReA, reservationId8, bid8);
+        ok(
+          'S8r ulang A: baris booking_bid_group ditemukan (oleh bid8)',
+          Boolean(found8ReA && found8ReA.row),
+          `rows=${listRes8ReA.transactions.length} bid8=${bid8}`
+        );
+        ok(
+          'S8r ulang A: child ditemukan oleh reservationId8',
+          Boolean(found8ReA && found8ReA.child),
+          `reservationId8=${reservationId8}`
+        );
+        if (found8ReA && found8ReA.child) {
+          const cA = found8ReA.child;
+          ok(
+            'S8r ulang A: pos_order_count=2',
+            Number(cA.pos_order_count) === 2,
+            `got ${cA.pos_order_count}`
+          );
+          ok(
+            'S8r ulang A: pos_open_count=1',
+            Number(cA.pos_open_count) === 1,
+            `got ${cA.pos_open_count}`
+          );
+          assertFinancials('S8r ulang A', found8ReA.group, cA);
+        }
+
+        // ── Properti B: ulang includePosStats=true ───────────────────────────
+        const listRes8ReB = await getTransactions(pool, {
+          property_id: propId8B,
+          transaction_type: 'SALE',
+          limit: 50,
+          offset: 0,
+          includePosStats: true,
+        });
+        const found8ReB = findChildByReservation(listRes8ReB, reservationId8B, bid8B);
+        ok(
+          'S8r ulang B: baris booking_bid_group ditemukan (oleh bid8B)',
+          Boolean(found8ReB && found8ReB.row),
+          `rows=${listRes8ReB.transactions.length} bid8B=${bid8B}`
+        );
+        ok(
+          'S8r ulang B: child ditemukan oleh reservationId8B',
+          Boolean(found8ReB && found8ReB.child),
+          `reservationId8B=${reservationId8B}`
+        );
+        if (found8ReB && found8ReB.child) {
+          const cB = found8ReB.child;
+          ok(
+            'S8r ulang B: pos_order_count=1',
+            Number(cB.pos_order_count) === 1,
+            `got ${cB.pos_order_count}`
+          );
+          ok(
+            'S8r ulang B: pos_open_count=1',
+            Number(cB.pos_open_count) === 1,
+            `got ${cB.pos_open_count}`
+          );
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 7) Snapshot AKHIR A dan B — keenam tabel harus tetap sama.
+      //    Snapshot akhir diambil SETELAH seluruh pembacaan ulang selesai.
+      // ═══════════════════════════════════════════════════════════════════════
+      {
+        const snap8AfterA = await snapshotS8(propId8);
+        const snap8AfterB = await snapshotS8(propId8B);
+
+        const tables = ['pos_orders', 'transactions', 'pos_settlements', 'payment_transactions', 'folio_entries', 'audit_logs'];
+        for (const t of tables) {
+          ok(
+            `S8 snapshot A: ${t} tidak berubah`,
+            Number(snap8BeforeA[t]) === Number(snap8AfterA[t]),
+            `before=${snap8BeforeA[t]} after=${snap8AfterA[t]}`
+          );
+        }
+        for (const t of tables) {
+          ok(
+            `S8 snapshot B: ${t} tidak berubah`,
+            Number(snap8BeforeB[t]) === Number(snap8AfterB[t]),
+            `before=${snap8BeforeB[t]} after=${snap8AfterB[t]}`
+          );
+        }
+      }
+    }
+
   } catch (err) {
     // Kegagalan utama tercatat sebagai kegagalan → exit nonzero.
     mainError = err;

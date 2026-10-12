@@ -38,7 +38,7 @@ import {
   ReceivingStatus,
   AttachmentPurpose
 } from './transactionTypes';
-import { isPlatformSuperAdmin, verifyToken } from '../auth/authService';
+import { isPlatformSuperAdmin, verifyToken, getUserEffectivePermissions } from '../auth/authService';
 import {
   getScopedTransactionAttachment,
   resolveSafeTransactionAttachmentPath,
@@ -201,6 +201,20 @@ export function createTransactionsRouter(pool: Pool): Router {
         limit: req.query.limit ? Number(req.query.limit) : 50,
         offset: req.query.offset ? Number(req.query.offset) : 0,
       };
+
+      // Statistik POS (pos_order_count / pos_open_count) hanya dikirim bila
+      // pengguna memiliki permission pos.view. Ditetapkan di router, bukan
+      // dari req.query / req.body, agar tidak dapat di-inject oleh client.
+      let includePosStats = false;
+      try {
+        const permKeys = await getUserEffectivePermissions(pool, scoped.user.id);
+        includePosStats = permKeys.includes('pos.view');
+      } catch {
+        // getUserEffectivePermissions gagal (mis. akun dihapus di tengah request)
+        // → default false; tidak bocorkan statistik POS.
+        includePosStats = false;
+      }
+      params.includePosStats = includePosStats;
 
       const result = await getTransactions(pool, params);
       return res.json({
