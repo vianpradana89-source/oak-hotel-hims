@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
+import type { PosPayCashOrderContext } from './PosPayCashModal';
 
 export interface PosMenuItem {
   id: number;
@@ -50,6 +51,15 @@ interface PosCreateOrderResponse {
     items?: unknown[];
   };
 }
+
+/**
+ * Hasil `handleSaveOrder`:
+ *  - ok: true  → order tervalidasi + payContext (context pembayaran)
+ *  - ok: false → tanpa order/payContext (gagal, ditolak, atau ambiguous)
+ */
+export type PosSaveOrderResult =
+  | { ok: true; order: PosOrderItem; payContext: PosPayCashOrderContext }
+  | { ok: false };
 
 interface Props {
   propertyId: number | null;
@@ -108,7 +118,7 @@ interface Props {
    * (tombol "Bayar CASH" di hasil sukses). `context` berisi data order
    * yang baru dibuat + properti/reservasi aktif.
    */
-  onOpenCashPayment?: (ctx: import('./PosPayCashModal').PosPayCashOrderContext) => void;
+  onOpenCashPayment?: (ctx: PosPayCashOrderContext) => void;
   /**
    * Tampilkan GuestPicker di mode POS header (tanpa reservation_id scoped).
    * Hanya dirender bila `reservationId === null` dan prop ini `true`.
@@ -240,7 +250,7 @@ export default function PosWorkspace({
    * reservation_id null (order umum) TIDAK boleh berubah menjadi reservasi
    * yang baru dipilih setelah order dibuat.
    */
-  const payCtxRef = useRef<import('./PosPayCashModal').PosPayCashOrderContext | null>(null);
+  const payCtxRef = useRef<PosPayCashOrderContext | null>(null);
 
   /**
    * ID order yang status lokalnya diubah menjadi PAID oleh signal
@@ -423,8 +433,8 @@ export default function PosWorkspace({
   //  - Ditolak definitif (4xx) → snapshot dibuang; status ambigu dari
   //     pengajuan sebelumnya TIDAK dihapus oleh penolakan definitif.
   //  - Network error / 5xx → AMBIGU: snapshot & draft dipertahankan.
-  const handleSaveOrder = useCallback(async () => {
-    if (submittingRef.current || busy || cart.length === 0 || propertyId === null) return;
+  const handleSaveOrder = useCallback(async (): Promise<PosSaveOrderResult> => {
+    if (submittingRef.current || busy || cart.length === 0 || propertyId === null) return { ok: false };
     // Gate permission diperiksa SEBELUM apapun — termasuk retry:
     // penolakan permission tidak boleh membangun payload baru, tidak boleh
     // menyentuh snapshot, dan tidak boleh mengubah status unresolved.
@@ -433,10 +443,9 @@ export default function PosWorkspace({
         ok: false,
         message: 'Anda tidak memiliki izin untuk membuat order POS.',
       });
-      return;
+      return { ok: false };
     }
-    if (!authFetch) return; // fallback: no API — should not reach here in modal context
-
+    if (!authFetch) return { ok: false }; // fallback: no API — should not reach here in modal context
     // Guard sinkron — dicek sebelum await sehingga submit ganda pada tick
     // yang sama tidak melewatkan state `saving` yang masih tertinggal.
     submittingRef.current = true;
@@ -546,43 +555,47 @@ export default function PosWorkspace({
             message: `Order ${createdOrder.order_number} tersimpan (${createdOrder.status}).`,
             order: createdOrder,
           });
-          // Simpan context identitas pembayaran SEKALI (idempotent: jangan
-          // timpa bila sudah ada untuk order ini — retry replay menghasilkan
-          // order sama dan context tetap milik pengajuan pertama).
-          if (!payCtxRef.current || payCtxRef.current.orderId !== createdOrder.id) {
-            const effResId = reservationId ?? pickedGuest?.reservation_id ?? null;
-            // Kamar tamu terpilih HARUS cocok reservasi order:
-            //  - scoped mode → roomNumberInitial (prop dari reservasi)
-            //  - header mode + pickedGuest → room_number dari reservasi picked
-            //  - pelanggan umum (resId null) → null, jangan fallback
-            const effRoomNo =
-              effResId != null
-                ? (reservationId != null ? roomNumberInitial : pickedGuest?.room_number) ?? null
-                : null;
-            const effGuestName =
-              createdOrder.guest_name ??
-              (effResId != null
-                ? (reservationId != null ? guestNameInitial : pickedGuest?.guest_name) ?? null
-                : null);
-            payCtxRef.current = {
-              orderId: createdOrder.id,
-              propertyId: propertyId!,
-              orderNumber: createdOrder.order_number,
-              totalAmount: createdOrder.total_amount,
-              guestName: effGuestName,
-              roomNumber: effRoomNo,
-              reservationId: effResId,
-            };
-          }
+          // Bangun context identitas pembayaran dari data order tervalidasi
+          // (bukan dari React state/ref yang baru di-set).
+          // Context disimpan ke payCtxRef hanya bila belum ada untuk order ini
+          // (idempotent: retry replay menghasilkan order sama, context milik
+          // pengajuan pertama dipertahankan).
+          const effResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+          // Kamar tamu terpilih HARUS cocok reservasi order:
+          //  - scoped mode → roomNumberInitial (prop dari reservasi)
+          //  - header mode + pickedGuest → room_number dari reservasi picked
+          //  - pelanggan umum (resId null) → null, jangan fallback
+          const effRoomNo =
+            effResId != null
+              ? (reservationId != null ? roomNumberInitial : pickedGuest?.room_number) ?? null
+              : null;
+          const effGuestName =
+            createdOrder.guest_name ??
+            (effResId != null
+              ? (reservationId != null ? guestNameInitial : pickedGuest?.guest_name) ?? null
+              : null);
+          const payContext: PosPayCashOrderContext =
+            (!payCtxRef.current || payCtxRef.current.orderId !== createdOrder.id)
+              ? {
+                  orderId: createdOrder.id,
+                  propertyId: propertyId!,
+                  orderNumber: createdOrder.order_number,
+                  totalAmount: createdOrder.total_amount,
+                  guestName: effGuestName,
+                  roomNumber: effRoomNo,
+                  reservationId: effResId,
+                }
+              : payCtxRef.current;
+          payCtxRef.current = payContext;
           // Sukses nyata: reset draft + snapshot + key + ambigu.
           // Notifikasi unresolved=false LANGSUNG (sinkron, bukan menunggu
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
-           onUnresolvedChange?.(false);
-           setCart([]);
-           setAmbiguous(false);
-           setLocalPaidOrderId(null);
-           appliedPaidOrderIdRef.current = null;
-           idempotencySnapshotRef.current = null;
+          onUnresolvedChange?.(false);
+          setCart([]);
+          setAmbiguous(false);
+          setLocalPaidOrderId(null);
+          appliedPaidOrderIdRef.current = null;
+          idempotencySnapshotRef.current = null;
           // Refresh/callback pasca-sukses TIDAK boleh mengubah hasil:
           // order sudah tervalidasi dari respons POST — kegagalan callback
           // (atau pemanggilan apa pun setelahnya) tidak membuat order jadi
@@ -593,6 +606,7 @@ export default function PosWorkspace({
           } catch (cbErr) {
             console.error('[PosWorkspace] post-success callback failed (order tetap tersimpan):', cbErr);
           }
+          return { ok: true, order: createdOrder, payContext };
         } else {
           // Respons sukses tapi shape MALFORMED → hasil belum diketahui.
           // Snapshot ditandai unresolved: draft, key, dan body dipertahankan
@@ -609,6 +623,7 @@ export default function PosWorkspace({
             message:
               'Server membalas sukses tetapi data order tidak lengkap. Hasil belum diketahui — draft dan idempotency key dipertahankan. Gunakan "Coba Lagi" untuk memverifikasi.',
           });
+          return { ok: false };
         }
       } else if (res.status === 409) {
         // Ditolak definitif: key dipakai untuk payload berbeda (fingerprint
@@ -628,6 +643,7 @@ export default function PosWorkspace({
         if (!unresolvedNow) {
           idempotencySnapshotRef.current = null;
         }
+        return { ok: false };
       } else if (res.status === 400 || res.status === 422) {
         const errData: any = await res.json().catch(() => ({}));
         const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
@@ -642,6 +658,7 @@ export default function PosWorkspace({
         if (!unresolvedNow) {
           idempotencySnapshotRef.current = null;
         }
+        return { ok: false };
       } else if (res.status === 401 || res.status === 403) {
         const errData: any = await res.json().catch(() => ({}));
         const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
@@ -656,6 +673,7 @@ export default function PosWorkspace({
         if (!unresolvedNow) {
           idempotencySnapshotRef.current = null;
         }
+        return { ok: false };
       } else if (res.status >= 500) {
         // 5xx → hasil tak pasti (order mungkin sudah commit di server).
         // Snapshot ditandai unresolved & draft DIPERTAHANKAN.
@@ -673,6 +691,7 @@ export default function PosWorkspace({
             `${errData.message || `Server error (HTTP ${res.status}).`} ` +
             'Hasil penyimpanan belum diketahui — draft dan idempotency key dipertahankan. Gunakan "Coba Lagi".',
         });
+        return { ok: false };
       } else {
         // 4xx lain (mis. 404 menu/meja tidak ditemukan) → ditolak definitif.
         const errData: any = await res.json().catch(() => ({}));
@@ -688,6 +707,7 @@ export default function PosWorkspace({
         if (!unresolvedNow) {
           idempotencySnapshotRef.current = null;
         }
+        return { ok: false };
       }
     } catch (networkErr) {
       // Network error / timeout / abort → hasil tak diketahui.
@@ -706,6 +726,7 @@ export default function PosWorkspace({
           'Hasil penyimpanan belum diketahui. Draft dan idempotency key dipertahankan — gunakan "Coba Lagi" untuk retry.',
       });
       console.error('[PosWorkspace] network/timeout on save order:', networkErr);
+      return { ok: false };
     } finally {
       submittingRef.current = false;
       setSaving(false);
@@ -722,6 +743,48 @@ export default function PosWorkspace({
   const handleRetrySave = useCallback(() => {
     void handleSaveOrder();
   }, [handleSaveOrder]);
+
+  /**
+   * "Simpan & Bayar" — kombinasi: simpan order, lalu (hanya bila sukses
+   * dan order masih OPEN) segera buka modal pembayaran CASH dari dalam
+   * PosWorkspace.
+   *
+   * Alur:
+   *  1. `handleSaveOrder()` → POST /api/pos/orders dengan idempotency key.
+   *     Mengembalikan `PosSaveOrderResult` — hasil sukses membawa
+   *     order tervalidasi + context pembayaran; hasil gagal tidak
+   *     membawa context.
+   *  2. Sukses + order.status === 'OPEN' → `onOpenCashPayment(payContext)`
+   *     → App membuka PosPayCashModal.
+   *  3. Sukses + order.status === 'PAID' (replay order sudah dibayar)
+   *     → tampilkan indikator "sudah dibayar", TIDAK buka modal.
+   *  4. Status terminal lainnya (VOIDED, CANCELLED, dsb.) → TIDAK buka modal.
+   *  5. Gagal (4xx, 5xx, network) → modal pembayaran TIDAK dibuka.
+   *     Draft tetap ada untuk retry.
+   */
+  const handleSaveAndPay = useCallback(async () => {
+    const result = await handleSaveOrder();
+    if (!result.ok) return;
+
+    if (result.order.status === 'OPEN') {
+      if (onOpenCashPayment) {
+        onOpenCashPayment(result.payContext);
+      }
+    } else if (result.order.status === 'PAID') {
+      // Replay: order sudah dibayar sebelumnya. Tampilkan status,
+      // jangan buka modal pembayaran.
+      setSaveResult({
+        ok: true,
+        message: `Order ${result.order.order_number} sudah dibayar (PAID).`,
+        order: result.order,
+      });
+      setLocalPaidOrderId(result.order.id);
+      appliedPaidOrderIdRef.current = result.order.id;
+    }
+    // Status terminal lainnya (VOIDED, CANCELLED, dsb.) → tidak ada aksi
+    // pembayaran; saveResult sudah menampilkan status order dari
+    // handleSaveOrder.
+  }, [handleSaveOrder, onOpenCashPayment]);
 
   return (
     <div className="space-y-6 pb-12">
@@ -1135,14 +1198,34 @@ export default function PosWorkspace({
                         Anda tidak memiliki izin untuk membuat order POS.
                       </p>
                     )}
-                    <button
-                      type="button"
-                      disabled={!canEditPos || cart.length === 0 || saving || busy}
-                      onClick={() => void handleSaveOrder()}
-                      className="w-full py-2.5 rounded-xl bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
-                    >
-                      {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
-                    </button>
+                    {/* Dua tombol: "Simpan Pesanan" (OPEN saja) + "Simpan & Bayar"
+                        (OPEN → langsung CASH payment) bila onOpenCashPayment tersedia.
+                        Kedua tombol disabled saat saving/busy/draft kosong/
+                        tidak ada izin edit. */}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={!canEditPos || cart.length === 0 || saving || busy}
+                        onClick={() => void handleSaveOrder()}
+                        className={`flex-1 py-2.5 rounded-xl ${
+                          onOpenCashPayment
+                            ? 'bg-emerald-700 hover:bg-emerald-600'
+                            : 'bg-emerald-800 hover:bg-emerald-700'
+                        } disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer`}
+                      >
+                        {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
+                      </button>
+                      {onOpenCashPayment && (
+                        <button
+                          type="button"
+                          disabled={!canEditPos || cart.length === 0 || saving || busy}
+                          onClick={() => void handleSaveAndPay()}
+                          className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
+                        >
+                          {saving ? 'Menyimpan…' : 'Simpan & Bayar'}
+                        </button>
+                      )}
+                    </div>
                   {(ambiguous || saveResult) && (
                     <div
                       className={`rounded-lg p-2 text-[11px] font-medium ${
