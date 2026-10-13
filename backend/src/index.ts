@@ -139,6 +139,17 @@ import { createReservationSpecialRequestsRouter } from './domains/reservations/r
 import { createComplimentaryRouter } from './domains/reservations/complimentaryRouter';
 import { normalizeSpecialRequests } from './domains/reservations/reservationSpecialRequests';
 import { releaseReservationInventoryForCheckout } from './domains/reservations/roomMoveService';
+import { createReservationCheckoutHandler } from './domains/reservations/reservationCheckoutHandler';
+import { createPosOrderCreateHandler } from './domains/pos/posOrderCreateHandler';
+import { createPosOrderStatusHandler } from './domains/pos/posOrderStatusHandler';
+import {
+  buildBookingChildStatusSummary,
+  deriveBookingLifecycleStatus,
+  buildBookingCompletionAuditPayload,
+  getCanonicalReservationDto,
+  withReservationHotelDates,
+  BookingChildStatusSummary,
+} from './domains/reservations/reservationLifecycleHelpers';
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { requireAuth, onboardingSecurityGuard } from './domains/auth/authMiddleware';
@@ -730,15 +741,6 @@ async function createBookingRecordForReservation(
   return bookingInsert.rows[0];
 }
 
-function withReservationHotelDates<T extends Record<string, any>>(row: T): T {
-  if (!row) return row;
-  return {
-    ...row,
-    check_in: row.check_in == null ? row.check_in : hotelDateKey(row.check_in),
-    check_out: row.check_out == null ? row.check_out : hotelDateKey(row.check_out)
-  };
-}
-
 function normalizeRoomPhysicalStatus(value: any): string | null {
   const normalized = String(value || '').trim().toUpperCase();
   if (!normalized) return null;
@@ -882,76 +884,6 @@ function availabilityMapKey(ident: RoomTypeIdentity, date: string): string {
   return canonicalAvailabilityKey(requireCanonicalRoomTypeId(ident, `availability on ${date}`), date);
 }
 
-type BookingChildStatusSummary = {
-  total: number;
-  booked: number;
-  checkedIn: number;
-  checkedOut: number;
-  cancelled: number;
-  unsupported: number;
-  statuses: Array<{ reservation_id: number; status: string }>;
-  hasTerminalCheckedOut: boolean;
-  hasActiveChild: boolean;
-  allCancelled: boolean;
-};
-
-function buildBookingChildStatusSummary(children: any[]): BookingChildStatusSummary {
-  const summary: BookingChildStatusSummary = {
-    total: children.length,
-    booked: 0,
-    checkedIn: 0,
-    checkedOut: 0,
-    cancelled: 0,
-    unsupported: 0,
-    statuses: [],
-    hasTerminalCheckedOut: false,
-    hasActiveChild: false,
-    allCancelled: children.length > 0
-  };
-
-  for (const child of children) {
-    const status = String(child.status || '').toUpperCase();
-    summary.statuses.push({ reservation_id: Number(child.id), status });
-
-    if (status === 'BOOKED') {
-      summary.booked += 1;
-      summary.hasActiveChild = true;
-      summary.allCancelled = false;
-      continue;
-    }
-
-    if (status === 'CHECKED_IN') {
-      summary.checkedIn += 1;
-      summary.hasActiveChild = true;
-      summary.allCancelled = false;
-      continue;
-    }
-
-    if (status === 'CHECKED_OUT') {
-      summary.checkedOut += 1;
-      summary.hasTerminalCheckedOut = true;
-      summary.allCancelled = false;
-      continue;
-    }
-
-    if (status === 'CANCELLED') {
-      summary.cancelled += 1;
-      continue;
-    }
-
-    summary.unsupported += 1;
-    summary.hasActiveChild = true;
-    summary.allCancelled = false;
-  }
-
-  if (summary.booked > 0 || summary.checkedIn > 0 || summary.unsupported > 0) {
-    summary.hasActiveChild = true;
-  }
-
-  summary.allCancelled = summary.total > 0 && summary.cancelled === summary.total;
-  return summary;
-}
-
 // Returns a read-only check-in progress snapshot for multi-room bookings.
 // Used by GET /reservations/:id so the frontend can show "X/N kamar check-in"
 // without any persisted booking-level status change.
@@ -985,47 +917,6 @@ function buildCheckinProgressSummary(children: any[]): {
   };
 }
 
-function deriveBookingLifecycleStatus(currentBookingStatus: any, summary: BookingChildStatusSummary): 'ACTIVE' | 'CANCELLED' | 'COMPLETED' {
-  const normalizedCurrent = String(currentBookingStatus || '').toUpperCase();
-  if (normalizedCurrent === 'CANCELLED') {
-    return 'CANCELLED';
-  }
-
-  if (normalizedCurrent === 'COMPLETED') {
-    return 'COMPLETED';
-  }
-
-  if (summary.allCancelled) {
-    return 'CANCELLED';
-  }
-
-  if (summary.hasActiveChild) {
-    return 'ACTIVE';
-  }
-
-  if (summary.hasTerminalCheckedOut) {
-    return 'COMPLETED';
-  }
-
-  return 'ACTIVE';
-}
-
-function buildBookingCompletionAuditPayload(
-  booking: any,
-  previousStatus: string,
-  newStatus: string,
-  summary: BookingChildStatusSummary,
-  triggerReservationId: number
-) {
-  return {
-    booking_id: Number(booking.id),
-    bid: booking.bid,
-    previous_status: previousStatus,
-    new_status: newStatus,
-    child_status_summary: summary,
-    trigger_reservation_id: triggerReservationId
-  };
-}
 
 // RM-1B drift fix: checkout must release reserved_qty for each occupied night.
 // Reconciliation semantics treat CHECKED_OUT stays as non-consuming; releasing here
@@ -3113,48 +3004,6 @@ async function createReservationRecord(req: any, payload: any) {
     canonical: canonicalResult,
     property_id: Number(roomRow.rows[0].property_id)
   };
-}
-
-// Canonical joined reservation DTO helper
-async function getCanonicalReservationDto(clientOrPool: any, reservationId: number) {
-  const result = await clientOrPool.query(`
-    SELECT
-      r.*,
-      r.id AS reservation_id,
-      r.booking_number AS legacy_booking_number,
-      b.bid,
-      b.id AS booking_id_value,
-      b.property_id AS booking_property_id,
-      COALESCE(r.booker_name, b.booker_name) AS booker_name,
-      COALESCE(r.booker_phone, b.booker_phone) AS booker_phone,
-      b.booking_source,
-      COALESCE(b.booking_channel, r.booking_channel) AS booking_channel,
-      ota.name AS ota_source_name,
-      r.rate_plan_id,
-      r.rate_plan_code_snapshot,
-      r.rate_plan_name_snapshot,
-      r.special_requests,
-      r.is_manual_override,
-      ro.room_number,
-      ro.floor,
-      COALESCE(ro.room_type_id, r.booked_room_type_id_snapshot) AS room_type_id,
-      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type,
-      COALESCE(rt_current.name, rt.name, ro.name, 'Standard Room') AS room_type_name,
-      COALESCE(rt_current.code, rt.code) AS room_type_code,
-      r.booked_room_type_id_snapshot AS booked_room_type_id_snapshot,
-      r.booked_room_type_name_snapshot AS booked_room_type_name_snapshot,
-      r.booked_room_type_code_snapshot AS booked_room_type_code_snapshot
-    FROM reservations r
-    LEFT JOIN bookings b ON b.id = r.booking_id
-    LEFT JOIN ota_sources ota ON ota.id = r.ota_source_id
-    LEFT JOIN rooms ro ON ro.id = r.room_id
-    LEFT JOIN room_types rt_current ON rt_current.id = ro.room_type_id
-    LEFT JOIN room_types rt ON rt.id = r.booked_room_type_id_snapshot
-    WHERE r.id = $1
-  `, [reservationId]);
-
-  if (!hasRows(result)) return null;
-  return withReservationHotelDates(result.rows[0]);
 }
 
 // Authoritative property-scoped reservation listing
@@ -6086,298 +5935,13 @@ app.get('/api/pos/orders', async (req, res) => {
   }
 });
 
-app.post('/api/pos/orders', async (req, res) => {
-  const { property_id: propertyIdRaw, reservation_id, table_number, guest_name, items } = req.body;
-
-  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
-    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
-  }
-  const propertyId = Number(propertyIdRaw);
-  if (!Number.isInteger(propertyId) || propertyId <= 0) {
-    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
-  }
-
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'items must not be empty' });
-  }
-
-  // Validasi quantity: setiap item wajib quantity integer > 0.
-  for (let i = 0; i < items.length; i++) {
-    const qty = Number(items[i].quantity ?? 1);
-    if (!Number.isInteger(qty) || qty <= 0) {
-      return res.status(400).json({
-        status: 'ERROR',
-        code: 'VALIDATION_ERROR',
-        message: `items[${i}].quantity must be a positive integer`
-      });
-    }
-  }
-
-  // Property scope: user token properti harus cocok (kecuali super admin platform).
-  try {
-    await assertPropertyScope(req, propertyId);
-  } catch (scopeErr: any) {
-    const sc = scopeErr?.statusCode ?? 403;
-    return res.status(sc).json({
-      status: 'ERROR',
-      code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
-      message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
-    });
-  }
-
-  // ─── Idempotency key (opsional; backward compat: tanpa key = normal insert) ───
-  // Key diambil dari header Idempotency-Key. Validasi: string 1–150 char.
-  const rawKey = String(
-    req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || ''
-  ).trim();
-  let idempotencyKey: string | null = null;
-  if (rawKey.length > 0) {
-    if (rawKey.length > 150 || /\s/.test(rawKey)) {
-      return res.status(400).json({
-        status: 'ERROR',
-        code: 'VALIDATION_ERROR',
-        message: 'Idempotency-Key must be 1–150 non-whitespace characters'
-      });
-    }
-    idempotencyKey = rawKey;
-  }
-
-  // Fingerprint: hash payload bisnis tervalidasi/ternormalisasi.
-  // Mengandung property, reservation, items (menu_item_id + quantity + notes),
-  // meja, nama — TIDAK memakai harga master terkini (harga di-snapshot di DB).
-  const fingerprintPayload = JSON.stringify({
-    property_id: propertyId,
-    reservation_id: reservation_id ?? null,
-    table_number: table_number ?? 'Walk In',
-    guest_name: guest_name ?? 'Guest',
-    items: items.map((it: any) => ({
-      menu_item_id: Number(it.menu_item_id),
-      quantity: Number(it.quantity ?? 1),
-      notes: it.notes ?? null
-    }))
-  });
-  const fingerprint = computeRequestHash('POST', '/api/pos/orders', fingerprintPayload);
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Validate property exists
-    const propCheck = await client.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
-    if ((propCheck.rowCount ?? 0) === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
-    }
-
-    // Validate reservation linkage: reservation must belong to same property
-    if (reservation_id != null) {
-      const resCheck = await client.query(
-        'SELECT b.property_id FROM reservations r JOIN bookings b ON b.id = r.booking_id WHERE r.id = $1',
-        [reservation_id]
-      );
-      if ((resCheck.rowCount ?? 0) === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ status: 'ERROR', code: 'RESERVATION_NOT_FOUND', message: `reservation ${reservation_id} not found` });
-      }
-      if (Number(resCheck.rows[0].property_id) !== propertyId) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_RESERVATION', message: 'reservation belongs to a different property' });
-      }
-    }
-
-    // ─── Replay path: jika idempotency_key ada, cek order existing DULU ───
-    // Dilakukan SEBELUM validasi produk aktif agar replay order committed tidak
-    // bergantung pada status is_active produk (produk bisa nonaktif kemudian).
-    // Fingerprint cocok → 200 replay; fingerprint beda → 409.
-    if (idempotencyKey) {
-      const existingCheck = await client.query(
-        `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
-                po.table_number, po.guest_name, po.status, po.total_amount,
-                po.created_at, po.updated_at,
-                po.request_fingerprint AS stored_fingerprint
-         FROM pos_orders po
-         WHERE po.property_id = $1 AND po.idempotency_key = $2
-         FOR UPDATE`,
-        [propertyId, idempotencyKey]
-      );
-      if (hasRows(existingCheck)) {
-        const existing = existingCheck.rows[0];
-        // Fingerprint cocok → replay (kembalikan order + items tersimpan, TANPA recompute harga).
-        if (existing.stored_fingerprint === fingerprint) {
-          const existingItems = await client.query(
-            `SELECT poi.*, pmi.name, pmi.item_code
-             FROM pos_order_items poi
-             LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
-             WHERE poi.order_id = $1`,
-            [existing.id]
-          );
-          await client.query('COMMIT');
-          res.status(200).json({
-            status: 'REPLAY',
-            code: 'IDEMPOTENT_REPLAY',
-            data: { ...existing, items: existingItems.rows }
-          });
-          return;
-        }
-        // Fingerprint beda → 409: key sama tapi payload berbeda.
-        await client.query('ROLLBACK');
-        res.status(409).json({
-          status: 'CONFLICT',
-          code: 'IDEMPOTENCY_KEY_CONFLICT',
-          message: 'Idempotency-Key sudah dipakai untuk payload berbeda'
-        });
-        return;
-      }
-      // Order belum ada untuk key ini → lanjut validasi produk aktif + INSERT.
-    }
-
-    // Validasi produk aktif: hanya untuk pembuatan order BARU.
-    // Replay (di atas) sudah mengembalikan 200/409 tanpa melewati blok ini.
-    for (const item of items) {
-      const menuItem = await client.query(
-        'SELECT id, price, name, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
-        [item.menu_item_id]
-      );
-      if (!hasRows(menuItem)) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
-      }
-      if (Number(menuItem.rows[0].property_id) !== propertyId) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_MENU_ITEM', message: `Menu item ${item.menu_item_id} belongs to a different property` });
-      }
-    }
-
-    // ─── Insert path (order baru, status DIPAKSA OPEN) ───
-    // Status di-create selalu OPEN — payload tidak boleh memilih status lain.
-    // Ini menjamin tidak ada projection transaksi/folio saat create.
-    const orderStatus = 'OPEN';
-    // order_number: POS-YYYYMMDD-<UUID> (49 char, muat dalam VARCHAR(50)).
-    // crypto.randomUUID() penuh — TIDAK dipotong; unique per request, bebas bentrokan konkuren.
-    // Dipakai kedua path: dengan & tanpa idempotency key. Nomor historis tidak diubah.
-    const posDateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const orderNumber = `POS-${posDateStr}-${crypto.randomUUID()}`;
-
-    let orderInsert: any;
-    if (idempotencyKey) {
-      // INSERT dengan ON CONFLICT untuk concurrent dedup:
-      // Jika request konkuren menang lebih dulu → rowCount = 0, ambil yang existing.
-      orderInsert = await client.query(
-        `INSERT INTO pos_orders
-           (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
-            idempotency_key, request_fingerprint)
-         VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
-          ON CONFLICT (property_id, idempotency_key) WHERE idempotency_key IS NOT NULL
-          DO NOTHING
-          RETURNING *`,
-        [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
-          guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint]
-      );
-      if ((orderInsert.rowCount ?? 0) === 0) {
-        // Konkuren: request lain sudah commit lebih dulu untuk key yang sama.
-        // Ambil order existing + items, validasi fingerprint.
-        const winnerCheck = await client.query(
-          `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
-                  po.table_number, po.guest_name, po.status, po.total_amount,
-                  po.created_at, po.updated_at,
-                  po.request_fingerprint AS stored_fingerprint
-           FROM pos_orders po
-           WHERE po.property_id = $1 AND po.idempotency_key = $2
-           FOR UPDATE`,
-          [propertyId, idempotencyKey]
-        );
-        if (!hasRows(winnerCheck)) {
-          // Tidak mungkin terjadi (rowCount=0 tapi SELECT kosong) — error tak terduga.
-          await client.query('ROLLBACK');
-          return res.status(500).json({ status: 'ERROR', code: 'IDEMPOTENCY_INTERNAL', message: 'Idempotency conflict tidak terduga' });
-        }
-        const winner = winnerCheck.rows[0];
-        if (winner.stored_fingerprint !== fingerprint) {
-          await client.query('ROLLBACK');
-          return res.status(409).json({
-            status: 'CONFLICT',
-            code: 'IDEMPOTENCY_KEY_CONFLICT',
-            message: 'Idempotency-Key sudah dipakai untuk payload berbeda'
-          });
-        }
-        // Fingerprint cocok → replay data tersimpan (tanpa recompute harga).
-        const winnerItems = await client.query(
-          `SELECT poi.*, pmi.name, pmi.item_code
-           FROM pos_order_items poi
-           LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
-           WHERE poi.order_id = $1`,
-          [winner.id]
-        );
-        await client.query('COMMIT');
-        res.status(200).json({
-          status: 'REPLAY',
-          code: 'IDEMPOTENT_REPLAY',
-          data: { ...winner, items: winnerItems.rows }
-        });
-        return;
-      }
-    } else {
-      // Tanpa key (backward compat) → INSERT biasa.
-      orderInsert = await client.query(
-        `INSERT INTO pos_orders
-           (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
-            idempotency_key, request_fingerprint)
-         VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7)
-         RETURNING *`,
-        [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
-         guest_name || 'Guest', orderStatus, fingerprint]
-      );
-    }
-
-    const orderId = orderInsert.rows[0].id;
-    let totalAmount = 0;
-
-    for (const item of items) {
-      const menuItem = await client.query(
-        'SELECT id, price, name FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
-        [item.menu_item_id]
-      );
-      const menu = menuItem.rows[0];
-      const qty = Number(item.quantity || 1);
-      const unitPrice = Number(menu.price);
-      totalAmount += qty * unitPrice;
-
-      await client.query(
-        `INSERT INTO pos_order_items (order_id, menu_item_id, quantity, unit_price, notes)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [orderId, menu.id, qty, unitPrice, item.notes || null]
-      );
-    }
-
-    const updatedOrder = await client.query(
-      'UPDATE pos_orders SET total_amount = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-      [totalAmount, orderId]
-    );
-
-    // Status OPEN → TIDAK ada projection transaksi. Tidak perlu guard status.
-    // (Code lama yang cek PAID/COMPLETED/POSTED/CLOSED dihapus karena status dipaksa OPEN.)
-
-    await client.query('COMMIT');
-    broadcastEvent('PosOrderCreated', {
-      order_id: orderId,
-      order_number: orderNumber,
-      guest_name: guest_name || 'Guest',
-      total_amount: totalAmount,
-      timestamp: new Date().toISOString()
-    }, propertyId);
-
-    res.status(201).json({ status: 'SUCCESS', data: updatedOrder.rows[0] });
-  } catch (err: any) {
-    try {
-      await client.query('ROLLBACK');
-    } catch (_) {
-      // transaksi sudah terminated / sudah commit — abaikan
-    }
-    res.status(500).json({ status: 'ERROR', message: err.message });
-  } finally {
-    client.release();
-  }
-});
+app.post('/api/pos/orders', createPosOrderCreateHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client) => client.release(),
+  assertPropertyScope,
+  broadcastEvent,
+}));
 
 // ─────────────────────────────────────────────────────────────────────────
 // POS CASH SETTLEMENT — POST /api/pos/orders/:id/pay
@@ -6512,80 +6076,23 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
   }
 });
 
-app.patch('/api/pos/orders/:id/status', async (req, res) => {
-  const orderId = Number(req.params.id);
-  const { status, property_id: propertyIdRaw } = req.body;
-
-  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
-    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
-  }
-  const propertyId = Number(propertyIdRaw);
-  if (!Number.isInteger(propertyId) || propertyId <= 0) {
-    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
-  }
-
-  try {
-    const propCheck = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
-    if ((propCheck.rowCount ?? 0) === 0) {
-      return res.status(404).json({ status: 'ERROR', code: 'PROPERTY_NOT_FOUND', message: `property ${propertyId} not found` });
-    }
-
-    const orderCheck = await pool.query('SELECT id, property_id FROM pos_orders WHERE id = $1', [orderId]);
-    if (!hasRows(orderCheck)) {
-      return res.status(404).json({ status: 'ERROR', message: 'order not found' });
-    }
-    if (Number(orderCheck.rows[0].property_id) !== propertyId) {
-      return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_ORDER', message: 'order belongs to a different property' });
-    }
-
-    const targetStatus = (status || 'OPEN').toUpperCase();
-    const result = await pool.query(
-      'UPDATE pos_orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-      [targetStatus, orderId]
-    );
-
-    // Auto-project or reverse canonical transaction based on updated status.
-    // The success flag gates the TransactionUpdated invalidation so a failed
-    // projection/reversal never emits a misleading "sync completed" event.
-    let transactionSyncSucceeded = false;
-    try {
-      await projectPosOrderToTransaction(pool, orderId, {
-        propertyId,
-        actorName: req.body.actor_name || 'Staff POS'
-      });
-      transactionSyncSucceeded = true;
-    } catch (pErr: any) {
-      console.warn('[Transactions] POS order status change projection warning:', pErr.message);
-    }
-
-    // Post-projection realtime invalidation: canonical transaction state (SALE
-    // projection or reversal) has changed AND the sync completed successfully.
-    // The SSE stream is property-scoped, so no entity-id matching is needed.
-    if (transactionSyncSucceeded) {
-      try {
-        broadcastEvent(
-          'TransactionUpdated',
-          {
-            source_type: 'POS_ORDER',
-            source_id: orderId,
-            transaction_type: 'SALE',
-            mutation: 'SYNCED',
-            order_id: orderId,
-            target_status: targetStatus,
-            timestamp: new Date().toISOString()
-          },
-          propertyId
-        );
-      } catch (_e) {
-        // realtime failure must not fail POS status change
-      }
-    }
-
-    res.json({ status: 'SUCCESS', data: result.rows[0] });
-  } catch (err: any) {
-    res.status(500).json({ status: 'ERROR', message: err.message });
-  }
-});
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /api/pos/orders/:id/status — VOIDED bersih
+//
+// Handler diekstrak ke posOrderStatusHandler (factory, tanpa side effect
+// impor-time). Kontrak: target hanya VOIDED; lock FOR UPDATE; deteksi
+// artefak finansial (transaksi POS + settlement); audit void.
+//
+// Auth: onboardingSecurityGuard (global) + createOperationalAccessGuard
+// (global, resource 'POS', action 'edit') sudah berjalan sebelum handler.
+// assertPropertyScope dipanggil SEBELUM transaksi DB di dalam handler.
+// ─────────────────────────────────────────────────────────────────────────
+app.patch('/api/pos/orders/:id/status', createPosOrderStatusHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client, discard) => { if (discard) { client.release(true); } else { client.release(); } },
+  assertPropertyScope
+}));
 
 app.get('/api/accounting/summary', async (req, res) => {
   try {
@@ -7862,268 +7369,27 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
   }
 });
 
-app.post('/api/reservations/:id/checkout', async (req, res) => {
-  const reservationId = Number(req.params.id);
-  const client = await pool.connect();
-
-  try {
-    const propertyId = assertPropertyId(req.body);
-    await assertPropertyExists(pool, propertyId);
-    await assertReservationBelongsToProperty(pool, reservationId, propertyId);
-
-    await client.query('BEGIN');
-    const reservationLookup = await client.query('SELECT id, booking_id FROM reservations WHERE id = $1', [reservationId]);
-    if (!hasRows(reservationLookup)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', message: 'reservation not found' });
-    }
-
-    const targetReservationId = Number(reservationLookup.rows[0].id);
-    const bookingId = Number(reservationLookup.rows[0].booking_id || 0);
-    if (!Number.isFinite(bookingId) || bookingId <= 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: 'reservation is not linked to a booking' });
-    }
-
-    const bookingResult = await client.query(
-      `SELECT *
-       FROM bookings
-       WHERE id = $1
-       FOR UPDATE`,
-      [bookingId]
-    );
-    if (!hasRows(bookingResult)) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'ERROR', message: 'booking not found' });
-    }
-
-    const booking = bookingResult.rows[0];
-    const lockedChildrenResult = await client.query(
-      `SELECT *
-       FROM reservations
-       WHERE booking_id = $1
-       ORDER BY stay_sequence, id
-       FOR UPDATE`,
-      [bookingId]
-    );
-    if (!hasRows(lockedChildrenResult)) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: 'booking has no linked reservations' });
-    }
-
-    const lockedChildren = lockedChildrenResult.rows;
-    const targetReservation = lockedChildren.find((row: any) => Number(row.id) === targetReservationId);
-    if (!targetReservation) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: 'target reservation does not belong to the booking' });
-    }
-
-    const targetStatus = String(targetReservation.status || '').toUpperCase();
-    const bookingStatusBefore = String(booking.booking_status || '').toUpperCase();
-    if (targetStatus === 'CANCELLED') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: 'cancelled reservation cannot be checked out' });
-    }
-    if (targetStatus !== 'BOOKED' && targetStatus !== 'CHECKED_IN' && targetStatus !== 'CHECKED_OUT') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ status: 'ERROR', message: `unsupported reservation status ${targetStatus || 'UNKNOWN'} for checkout` });
-    }
-
-    let checkoutReservation = targetReservation;
-    if (targetStatus !== 'CHECKED_OUT') {
-      if (!targetReservation.room_id) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'ROOM_NOT_ASSIGNED',
-          message: 'Kamar belum ditentukan untuk reservasi ini.'
-        });
-      }
-
-      if (!targetReservation.booked_room_type_id_snapshot) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'ROOM_TYPE_SNAPSHOT_MISSING',
-          message: 'Data tipe kamar reservasi tidak lengkap. Silakan edit reservasi untuk menetapkan tipe kamar.'
-        });
-      }
-
-      // Check mandatory checkout inspection policy
-      const isHkEnabled = await isFeatureEnabled(client, propertyId, 'housekeeping.enabled');
-      const isCheckoutCheckFeature = isHkEnabled && (await isFeatureEnabled(client, propertyId, 'housekeeping.checkout_inspection'));
-      if (isCheckoutCheckFeature && !req.body?.skip_inspection && !req.body?.force) {
-        const hkSettings = await getPropertyHousekeepingSettings(client, propertyId);
-        if (hkSettings.require_checkout_room_check) {
-          const chkTaskRes = await client.query(
-            `SELECT status, inspection_result FROM housekeeping_tasks
-             WHERE reservation_id = $1 AND task_type = 'CHECKOUT_ROOM_CHECK'
-             ORDER BY id DESC LIMIT 1`,
-            [reservationId]
-          );
-          if (!hasRows(chkTaskRes) || chkTaskRes.rows[0].status !== 'DONE') {
-            await client.query('ROLLBACK');
-            return res.status(400).json({
-              status: 'ERROR',
-              code: 'CHECKOUT_INSPECTION_REQUIRED',
-              message: 'Pemeriksaan kamar oleh Housekeeping wajib diselesaikan sebelum proses checkout.'
-            });
-          }
-        }
-      }
-
-      // No property guarantee policy exists yet. Fail closed only when an
-      // explicit physical custody record is still HELD; uploaded KTP/OCR data
-      // is intentionally unrelated to this gate.
-      const heldIdentity = await getHeldIdentityCustodyForCheckout(client, propertyId, reservationId);
-      if (heldIdentity.length > 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'IDENTITY_CUSTODY_NOT_RETURNED',
-          message: 'Dokumen identitas fisik masih ditahan hotel dan harus dikembalikan sebelum checkout.'
-        });
-      }
-
-      // CHECKOUT-FOLIO-GATE-1B: Authoritative folio balance verification.
-      // Must pass before any status mutation. Fail-closed on unverifiable data.
-      const folioFinancial = await recalculateReservationFinancials(client, reservationId, propertyId);
-      const hotelCollectible = await calculateHotelCollectibleBalance(
-        client,
-        reservationId,
-        propertyId,
-        booking.payment_responsibility
-      );
-      const validatedBalance = Number(hotelCollectible?.hotel_collectible_remaining_balance);
-      if (!folioFinancial || !hotelCollectible || !Number.isFinite(validatedBalance)) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'FOLIO_BALANCE_UNVERIFIED',
-          message: 'Data keuangan reservasi tidak dapat diverifikasi. Silakan periksa folio terlebih dahulu sebelum check-out.'
-        });
-      }
-      if (validatedBalance > 0.01) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'FOLIO_BALANCE_OUTSTANDING',
-          message: 'Tagihan reservasi belum lunas. Selesaikan sisa tagihan pada folio sebelum check-out.',
-          remaining_balance: validatedBalance,
-        });
-      }
-
-      const updated = await client.query(
-        `UPDATE reservations
-         SET status = 'CHECKED_OUT', stay_status = 'DEPARTED', checked_out_at = COALESCE(checked_out_at, NOW())
-         WHERE id = $1
-         RETURNING *`,
-        [reservationId]
-      );
-
-      checkoutReservation = updated.rows[0];
-      const currentRoomId = Number(checkoutReservation.room_id || targetReservation.room_id);
-
-      // RM-1B drift fix: release type-night inventory consumed by this stay.
-      // Root cause of Deluxe King 2026-08-23 drift: checkout previously left reserved_qty orphaned.
-      const roomTypeResult = await client.query(
-        `SELECT r.room_type_id, COALESCE(rt.name, r.name) AS room_type
-         FROM rooms r
-         LEFT JOIN room_types rt ON rt.id = r.room_type_id
-         WHERE r.id = $1`,
-        [currentRoomId]
-      );
-      if (!hasRows(roomTypeResult)) {
-        throw new Error(`INVENTORY_INTEGRITY_ERROR: room not found for reservation ${reservationId}`);
-      }
-      if (checkoutReservation.stay_type !== 'DAY_USE') {
-        await releaseReservationInventoryForCheckout(client, {
-          ...checkoutReservation,
-          current_room_type_id: roomTypeResult.rows[0].room_type_id
-        });
-      }
-
-      await client.query(
-        'UPDATE rooms SET status = $1 WHERE id = $2',
-        ['VACANT_DIRTY', currentRoomId]
-      );
-
-      await ensureCheckoutRoomCleaningTask(client, propertyId, currentRoomId, reservationId);
-
-      await client.query(
-        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(checkoutReservation)), req.headers['x-correlation-id'] || null, propertyId]
-      );
-      lockedChildren[lockedChildren.findIndex((row: any) => Number(row.id) === targetReservationId)] = checkoutReservation;
-    }
-
-    const childSummary = buildBookingChildStatusSummary(lockedChildren);
-    const derivedBookingStatus = deriveBookingLifecycleStatus(bookingStatusBefore, childSummary);
-    let bookingRecord = booking;
-    let bookingCompletionAuditPayload: any = null;
-
-    if (derivedBookingStatus !== bookingStatusBefore) {
-      const updatedBooking = await client.query(
-        `UPDATE bookings
-         SET booking_status = $1,
-             updated_at = NOW()
-         WHERE id = $2
-         RETURNING *`,
-        [derivedBookingStatus, booking.id]
-      );
-      bookingRecord = updatedBooking.rows[0];
-
-      if (derivedBookingStatus === 'COMPLETED' && bookingStatusBefore !== 'COMPLETED') {
-        bookingCompletionAuditPayload = buildBookingCompletionAuditPayload(
-          bookingRecord,
-          bookingStatusBefore || 'ACTIVE',
-          derivedBookingStatus,
-          childSummary,
-          reservationId
-        );
-        await client.query(
-          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          ['PMS', 'COMPLETE', 'BOOKING', bookingRecord.id, JSON.stringify(bookingCompletionAuditPayload), req.headers['x-correlation-id'] || null, propertyId]
-        );
-      }
-    }
-
-    await client.query('COMMIT');
-
-    if (targetStatus !== 'CHECKED_OUT') {
-      broadcastEvent('ReservationCheckedOut', {
-        reservation_id: reservationId,
-        room_id: checkoutReservation.room_id,
-        guest_name: checkoutReservation.guest_name,
-        checked_out_at: new Date().toISOString(),
-        timestamp: new Date().toISOString()
-      }, propertyId);
-    }
-
-    if (bookingCompletionAuditPayload) {
-      broadcastEvent('BookingCompleted', {
-        booking_id: bookingRecord.id,
-        bid: bookingRecord.bid,
-        trigger_reservation_id: reservationId,
-        timestamp: new Date().toISOString()
-      }, propertyId);
-    }
-
-    const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
-    return res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(checkoutReservation) });
-  } catch (err: any) {
-    await client.query('ROLLBACK').catch(() => {});
-    if (err?.statusCode) {
-      return res.status(err.statusCode).json({ status: 'ERROR', code: err.code, message: err.message });
-    }
-    const message = String(err?.message || err);
-    res.status(message.includes('INVENTORY_INTEGRITY_ERROR') ? 409 : 500).json({ status: 'ERROR', message });
-  } finally {
-    client.release();
-  }
-});
+app.post('/api/reservations/:id/checkout', createReservationCheckoutHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client) => client.release(),
+  assertPropertyId,
+  assertPropertyExists,
+  assertReservationBelongsToProperty,
+  isFeatureEnabled,
+  getPropertyHousekeepingSettings,
+  ensureCheckoutRoomCleaningTask,
+  getHeldIdentityCustodyForCheckout,
+  recalculateReservationFinancials,
+  calculateHotelCollectibleBalance,
+  releaseReservationInventoryForCheckout,
+  broadcastEvent,
+  getCanonicalReservationDto,
+  buildBookingChildStatusSummary,
+  deriveBookingLifecycleStatus,
+  buildBookingCompletionAuditPayload,
+  withReservationHotelDates,
+}));
 
 app.post('/api/reservations/:id/payments', handlePaymentUpload, async (req: any, res: any) => {
   const reservationId = Number(req.params.id);
