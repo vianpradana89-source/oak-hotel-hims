@@ -441,15 +441,36 @@ function AppContent() {
   // Bila propId berbeda dari properti aktif, menu yang dimuat masih milik properti
   // aktif (App memuat posMenu untuk propertyId aktif) — tolak dengan pesan jelas,
   // jangan switch diam-diam (multi-property belum didukung).
-  // context berisi identitas reservasi (nama tamu, nomor kamar) yang hanya
-  // dipakai untuk menginisialisasi field PosWorkspace saat draft baru —
-  // tidak menyentuh draft/snapshot yang sudah ada.
+  // context berisi identitas reservasi (nama tamu, nomor kamar, status reservasi
+  // terkini) yang hanya dipakai untuk menginisialisasi field PosWorkspace saat
+  // draft baru — tidak menyentuh draft/snapshot yang sudah ada.
+  // Gate "Tambah Order": izin edit POS + status reservasi aktif (BOOKED/CHECKED_IN).
+  // Status di-validasi dari context (data terkini dari view), bukan dari state lama.
+  // Status null/undefined/kosong/tidak dikenal = TOLAK.
   const openPosModalForReservation = (
     propId: number,
     resId: number,
-    context?: { guestName?: string | null; roomNumber?: string | null },
+    context?: {
+      guestName?: string | null;
+      roomNumber?: string | null;
+      reservationStatus?: string | null;
+    },
   ) => {
     if (!posAccess.canViewPos) return;
+    // "Tambah Order" = aksi edit di policy backend (pos.create / pos.edit).
+    // Tolak bila user tidak punya izin edit POS — sama dengan gate di panel.
+    if (!posAccess.canEditPos) return;
+    // Validasi status reservasi terkini dari context (ditransfer dari view).
+    // Hanya reservasi aktif (BOOKED / CHECKED_IN) yang boleh menambah order.
+    // Status null/undefined/kosong/tidak dikenal → tolak.
+    const resStatus = context?.reservationStatus;
+    if (resStatus !== 'BOOKED' && resStatus !== 'CHECKED_IN') {
+      window.alert(
+        `Tambah order tidak tersedia — reservasi berstatus ${resStatus ?? 'tidak diketahui'}. ` +
+        'Hanya reservasi BOOKED atau CHECKED_IN yang dapat menambah order.'
+      );
+      return;
+    }
     if (propId !== propertyId) {
       window.alert(
         `POS untuk reservasi di properti #${propId} belum didukung — properti aktif adalah #${propertyId}. ` +

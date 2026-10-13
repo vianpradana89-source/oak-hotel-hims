@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { safeFetchJson } from '../calendar/calendarApi';
 import type { SafeFetchResult } from '../calendar/calendarApi';
@@ -36,11 +36,17 @@ export interface POSOrderPanelProps {
    * Callback untuk membuka PosModal dengan property_id + reservation_id terikat.
    * `context` berisi identitas reservasi untuk menginisialisasi field POS
    * (nama tamu, nomor kamar) hanya saat draft baru; tidak menyentuh snapshot.
+   * `reservationStatus` ditransfer dari view terkini — App validasi status
+   * sebelum membuka modal (status harus BOOKED atau CHECKED_IN).
    */
   onOpenPosModal: (
     propertyId: number,
     reservationId: number,
-    context?: { guestName?: string | null; roomNumber?: string | null },
+    context?: {
+      guestName?: string | null;
+      roomNumber?: string | null;
+      reservationStatus?: string | null;
+    },
   ) => void;
   /** true saat user boleh melihat panel POS (di-resolve di parent: atomic key + platform super admin) */
   canViewPos?: boolean;
@@ -53,6 +59,14 @@ export interface POSOrderPanelProps {
    * default "Nomor Kamar" (bukan "Nomor Meja"). Hanya dipakai saat draft baru.
    */
   roomNumber?: string | null;
+  /**
+   * Status reservasi terkini (BOOKED, CHECKED_IN, CHECKED_OUT, CANCELLED, …).
+   * Digunakan untuk mengaktifkan/menonaktifkan tombol "Tambah Order":
+   * hanya tersedia saat status === 'BOOKED' atau 'CHECKED_IN' AND pengguna
+   * punya izin edit. Status null/undefined/kosong/tidak dikenal = TOLAK
+   * (tombol disembunyikan).
+   */
+  reservationStatus?: string | null;
   /** Bilah kecil identitas reservasi yang sedang dipesan */
   reservationLabel?: string;
   /**
@@ -148,13 +162,34 @@ export default function POSOrderPanel({
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
   onOpenCashPayment,
+  reservationStatus,
 }: POSOrderPanelProps) {
   const { authFetch } = useAuth();
 
   const [orders, setOrders] = useState<PosOrderRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedOrder, setSelectedOrder] = useState<PosOrderRecord | null>(null);
+  // Simpan ID order yang dipilih, bukan snapshot objek.
+  // selectedOrder diturunkan langsung dari array orders terbaru, sehingga
+  // badge status (OPEN/PAID/DISCOUNTED/VOIDED) di kartu detail selalu
+  // mencerminkan data terkini setelah refetch pasca-pembayaran.
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+
+  // Turunkan selectedOrder dari orders — bila ID sudah tidak ada di daftar,
+  // detail otomatis tertutup.
+  const selectedOrder = useMemo<PosOrderRecord | null>(() => {
+    if (selectedOrderId == null) return null;
+    return orders.find((o) => o.id === selectedOrderId) ?? null;
+  }, [orders, selectedOrderId]);
+
+  // ── Gate "Tambah Order": status reservasi aktif + izin edit POS ─────────
+  // Hanya reservasi yang masih aktif (BOOKED / CHECKED_IN) yang boleh
+  // menambah order baru. CHECKED_OUT, CANCELLED, status null/undefined/
+  // kosong/tidak dikenal — tombol disembunyikan.
+  const canAddOrder = canEditPos && (
+    reservationStatus === 'BOOKED' ||
+    reservationStatus === 'CHECKED_IN'
+  );
 
   // ─── Fetch: satu effect gabungan reset konteks + load ─────────────────────
   // Setiap fetch — initial load, pergantian konteks (propertyId/reservationId),
@@ -216,7 +251,7 @@ export default function POSOrderPanel({
   useEffect(() => {
     // Reset state konteks lama SEBELUM memuat — fetch baru memakai counter yang sama.
     setOrders([]);
-    setSelectedOrder(null);
+    setSelectedOrderId(null);
     setError(null);
     setLoading(true);
     void fetchOrders();
@@ -279,10 +314,10 @@ export default function POSOrderPanel({
             </span>
           )}
         </div>
-        {canEditPos && (
+        {canAddOrder && (
           <button
             type="button"
-            onClick={() => onOpenPosModal(propertyId, reservationId, { guestName, roomNumber })}
+            onClick={() => onOpenPosModal(propertyId, reservationId, { guestName, roomNumber, reservationStatus })}
             className="px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
           >
             + Tambah Order
@@ -325,11 +360,11 @@ export default function POSOrderPanel({
             <div
               key={order.id}
               className={`p-3 rounded-lg border text-xs transition-colors cursor-pointer ${
-                selectedOrder?.id === order.id
+                selectedOrderId === order.id
                   ? 'border-emerald-300 bg-emerald-50'
                   : 'border-stone-200 bg-stone-50 hover:bg-stone-100'
               }`}
-              onClick={() => setSelectedOrder(order)}
+              onClick={() => setSelectedOrderId(order.id)}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="font-mono font-semibold text-stone-800">

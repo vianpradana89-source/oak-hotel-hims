@@ -52,7 +52,11 @@ export interface QuickReservationDetailProps {
   onOpenPosModal?: (
     propertyId: number,
     reservationId: number,
-    context?: { guestName?: string | null; roomNumber?: string | null },
+    context?: {
+      guestName?: string | null;
+      roomNumber?: string | null;
+      reservationStatus?: string | null;
+    },
   ) => void;
   /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
   posOrdersRefreshVersion?: number;
@@ -792,6 +796,7 @@ export default function QuickReservationDetail({
               posOrdersRefreshVersion={posOrdersRefreshVersion}
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
               onOpenCashPayment={onOpenCashPayment}
+              reservationStatus={data?.status}
             />
           )}
 
