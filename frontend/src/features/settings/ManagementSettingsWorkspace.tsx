@@ -5,6 +5,7 @@ import { HousekeepingSettingsTab } from '../housekeeping/HousekeepingSettingsTab
 import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
+import { PaymentInstructionsSettingsTab } from './PaymentInstructionsSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
 import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab';
@@ -314,10 +315,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     {
       key: 'pos',
       label: 'POS & F&B',
-      description: 'Pengaturan outlet restoran, printer kasir, dan integrasi bill-to-room.',
-      status: 'CONFIGURED',
-      badgeLabel: 'Terkonfigurasi',
-      isImplemented: false,
+      description: 'Metode pembayaran POS, QRIS resmi, rekening Transfer, dan terminal Debit / EDC.',
+      status: 'ACTIVE',
+      badgeLabel: 'Pembayaran',
+      isImplemented: true,
       icon: ({ className }) => (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -861,6 +862,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
           )}
 
+          {activeCategory === 'pos' && (
+            <PaymentInstructionsSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+          )}
+
           {activeCategory === 'transactions' && (
             <PurchaseOperationalSettingsTab propertyId={propertyId} />
           )}
@@ -870,7 +875,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
           )}
 
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'users_permissions'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'pos', 'users_permissions'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

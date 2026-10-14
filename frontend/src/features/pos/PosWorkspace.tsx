@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
+import {buildPosOrderDraft, previewPosDraft, type PosCartLine, type PosDiscountType} from './posOrderDraft';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 
 export interface PosMenuItem {
@@ -41,6 +42,7 @@ interface PosCreateOrderResponse {
   status: string;
   data: {
     id: number;
+    property_id: number;
     order_number: string;
     status: string;
     total_amount: number | string;
@@ -112,10 +114,12 @@ interface Props {
   onOrderCreated?: (order: PosOrderItem) => void;
   /** Gate "Simpan Pesanan": hanya true bila user punya izin edit POS. */
   canEditPos?: boolean;
+  /** Separate granular pos.discount.edit grant. */
+  canDiscountPos?: boolean;
   /**
    * Buka modal pembayaran CASH untuk order yang baru dibuat.
    * Dipanggil setelah create-order sukses dari dalam PosWorkspace
-   * (tombol "Bayar CASH" di hasil sukses). `context` berisi data order
+   * (tombol "Bayar" di hasil sukses). `context` berisi data order
    * yang baru dibuat + properti/reservasi aktif.
    */
   onOpenCashPayment?: (ctx: PosPayCashOrderContext) => void;
@@ -129,7 +133,7 @@ interface Props {
   /**
    * Signal pembayaran sukses dari App: propertyId + orderId dari settlement
    * terverifikasi. Bila cocok saveResult.order, status lokal diubah PAID dan
-   * tombol "Bayar CASH" hilang.
+   * tombol "Bayar" hilang.
    */
   paidOrderId?: PosOrderPaidSignal | null;
 }
@@ -182,6 +186,7 @@ export default function PosWorkspace({
   roomNumberInitial,
   onOrderCreated,
   canEditPos = true,
+  canDiscountPos = false,
   canPickGuest = false,
   onOpenCashPayment,
   paidOrderId,
@@ -189,9 +194,14 @@ export default function PosWorkspace({
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [cart, setCart] = useState<{ item: PosMenuItem; qty: number }[]>([]);
+  const [cart, setCart] = useState<PosCartLine[]>([]);
   const [tableNumber, setTableNumber] = useState('Table 1');
   const [guestName, setGuestName] = useState('Walk-in Guest');
+  const [guestPhone, setGuestPhone] = useState('');
+  const [orderNotes, setOrderNotes] = useState('');
+  const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('');
+  const [orderDiscountInput, setOrderDiscountInput] = useState('');
+  const [discountReason, setDiscountReason] = useState('');
 
   // ── GuestPicker state (hanya aktif di mode POS header) ──────────────────
   // pickedGuest: reservasi tamu menginap yang dipilih dari picker.
@@ -235,6 +245,8 @@ export default function PosWorkspace({
    */
   const idempotencySnapshotRef = useRef<{
     key: string;
+    propertyId: number;
+    reservationId: number | null;
     bodyJson: string;
     cartFingerprint: string;
     unresolved: boolean;
@@ -245,7 +257,7 @@ export default function PosWorkspace({
 
   /**
    * Context identitas pembayaran — SIMPAN SEKALI saat create-order sukses.
-   * Dipakai tombol "Bayar CASH": jangan fallback ke pilihan tamu/reservasi
+   * Dipakai tombol "Bayar": jangan fallback ke pilihan tamu/reservasi
    * yang berubah kemudian (guestName draft, pickedGuest, dsb.).
    * reservation_id null (order umum) TIDAK boleh berubah menjadi reservasi
    * yang baru dipilih setelah order dibuat.
@@ -288,23 +300,11 @@ export default function PosWorkspace({
       appliedPaidOrderIdRef.current = sr.order.id;
       setSaveResult({
         ok: true,
-        message: `Order ${sr.order.order_number} LUNAS (pembayaran CASH terverifikasi).`,
+        message: `Order ${sr.order.order_number} LUNAS (pembayaran terverifikasi).`,
         order: { ...sr.order, status: 'PAID' },
       });
     }
   }, [paidOrderId, saveResult, propertyId]);
-
-  /**
-   * Fingerprint draft (urutan item, id menu, qty) + konteks reservasi terpilih.
-   * Konteks reservasi: pickedGuest?.reservation_id (mode header) atau
-   * reservationId (mode scoped). Bila konteks berubah, fingerprint berubah →
-   * snapshot lama tidak terpakai, key baru dibuat.
-   */
-  const fingerprintCart = (
-    lines: { item: { id: number }; qty: number }[],
-    resId: number | null,
-  ): string =>
-    lines.map((l) => `${l.item.id}x${l.qty}`).join('|') + `|res:${resId ?? 'null'}`;
 
   // ── Inisialisasi identitas dari reservasi (hanya saat draft baru) ─────────
   // guestNameInitial mengisi ulang field "Nama Tamu" HANYA saat:
@@ -377,7 +377,7 @@ export default function PosWorkspace({
   const draftLocked = saving || busy || ambiguous;
 
   const addToCart = (item: PosMenuItem) => {
-    if (draftLocked) return;
+    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart((prev) => {
       const idx = prev.findIndex((p) => p.item.id === item.id);
       if (idx >= 0) {
@@ -390,12 +390,12 @@ export default function PosWorkspace({
   };
 
   const removeFromCart = (itemId: number) => {
-    if (draftLocked) return;
+    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart((prev) => prev.filter((p) => p.item.id !== itemId));
   };
 
   const updateCartQty = (itemId: number, delta: number) => {
-    if (draftLocked) return;
+    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart((prev) => {
       return prev
         .map((p) => {
@@ -405,13 +405,22 @@ export default function PosWorkspace({
           }
           return p;
         })
-        .filter(Boolean) as { item: PosMenuItem; qty: number }[];
+        .filter(Boolean) as PosCartLine[];
     });
   };
 
-  const cartSubtotal = useMemo(() => {
-    return cart.reduce((sum, line) => sum + Number(line.item.price) * line.qty, 0);
-  }, [cart]);
+  const draftPreview = useMemo(() => {
+    try {return {value: previewPosDraft(cart, orderDiscountType, orderDiscountInput), error: null};}
+    catch (err) {return {value: null, error: err instanceof Error ? err.message : 'Periksa diskon pesanan.'};}
+  }, [cart, orderDiscountType, orderDiscountInput]);
+  const cartSubtotal = draftPreview.value?.gross || 0;
+  const hasDiscount = !!orderDiscountType || cart.some(line => !!line.discountType);
+  const canSaveDraft = !draftPreview.error && (!hasDiscount || canDiscountPos);
+  const changeLine = (id: number, patch: Partial<Pick<PosCartLine, 'discountType' | 'discountInput' | 'notes'>>) => {
+    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
+    setCart(lines => lines.map(line => line.item.id === id ? {...line, ...patch} : line));
+  };
+  const canMutateDraft = () => !draftLocked && !submittingRef.current && !idempotencySnapshotRef.current?.unresolved;
 
   const totalOrdersAmount = useMemo(() => {
     return posOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
@@ -446,64 +455,37 @@ export default function PosWorkspace({
       return { ok: false };
     }
     if (!authFetch) return { ok: false }; // fallback: no API — should not reach here in modal context
-    // Guard sinkron — dicek sebelum await sehingga submit ganda pada tick
-    // yang sama tidak melewatkan state `saving` yang masih tertinggal.
-    submittingRef.current = true;
-    setSaving(true);
-    // Notifikasi pending LANGSUNG (sinkron, bukan menunggu useEffect) — parent
-    // (App) memakai ref, jadi guard close/switch aktif sebelum await pertama.
-    onRequestPending?.(true);
-
-    // Pilih jalur snapshot:
-    //  - unresolved (pernah ambigu) → key/body tersimpan PERSIS, tanpa
-    //    memeriksa fingerprint draft (draft ter-lock, snapshot tetap valid).
-    //  - snapshot reusable (fingerprint masih cocok) → pakai key lama.
-    //  - selain itu → bahan baru: body fresh + key baru, snapshot DIAMANKAN
-    //    sebelum request pertama.
     const snapshot = idempotencySnapshotRef.current;
-    // Effective reservation_id: scoped mode (prop) > pickedGuest (header mode) > null
     const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
-    const fp = fingerprintCart(cart, effectiveResId);
-    const isRetryUnresolved = snapshot !== null && snapshot.unresolved;
-    const reusable =
-      snapshot !== null && !snapshot.unresolved && snapshot.cartFingerprint === fp;
-
-    let key: string;
-    let bodyJson: string;
-    if (isRetryUnresolved && snapshot) {
-      key = snapshot.key;
-      bodyJson = snapshot.bodyJson;
-    } else if (reusable && snapshot) {
+    let key: string, bodyJson: string;
+    if (snapshot?.unresolved) {
+      if (snapshot.propertyId !== propertyId || snapshot.reservationId !== effectiveResId) {
+        setSaveResult({ok: false, message: 'Konteks pesanan berubah. Selesaikan pengajuan sebelumnya yang hasilnya belum diketahui.'});
+        return {ok: false};
+      }
       key = snapshot.key;
       bodyJson = snapshot.bodyJson;
     } else {
-      // unit_price TIDAK dikirim dari klien — harga adalah otoritas backend
-      // (fingerprint & snapshot harga memakai harga master di server).
-      // guest_name: bila tamu reservasi dipilih, nama dari reservasi;
-      // bila pelanggan manual, nama yang diketik user.
-      const effectiveGuestName = pickedGuest
-        ? (pickedGuest.guest_name ?? '')
-        : guestName;
-      const payload: Record<string, unknown> = {
-        property_id: propertyId,
-        table_number: tableNumber.trim() || null,
-        guest_name: effectiveGuestName.trim() || null,
-        items: cart.map((line) => ({
-          menu_item_id: line.item.id,
-          quantity: line.qty,
-        })),
-      };
-      // reservation_id mengikuti reservasi terpilih (scoped atau pickedGuest);
-      // pelanggan manual (tanpa reservasi) TIDAK membawa reservation_id.
-      if (effectiveResId !== null) {
-        payload.reservation_id = effectiveResId;
+      try {
+        const payload = buildPosOrderDraft(cart, {
+          propertyId, reservationId: effectiveResId, tableNumber,
+          guestName: pickedGuest ? pickedGuest.guest_name || '' : guestName,
+          guestPhone, notes: orderNotes, discountType: orderDiscountType,
+          discountInput: orderDiscountInput, discountReason,
+        }, canDiscountPos);
+        bodyJson = JSON.stringify(payload);
+        const fp = bodyJson;
+        key = snapshot?.cartFingerprint === fp ? snapshot.key : generateUUIDv4();
+        idempotencySnapshotRef.current = {key, propertyId, reservationId: effectiveResId, bodyJson, cartFingerprint: fp, unresolved: false};
+      } catch (err) {
+        setSaveResult({ok: false, message: err instanceof Error ? err.message : 'Periksa data pesanan.'});
+        return {ok: false};
       }
-      bodyJson = JSON.stringify(payload);
-      key = generateUUIDv4();
-      // Snapshot DIAMANKAN sebelum request pertama — retry wajib memakai
-      // pasangan (key, bodyJson) ini persis.
-      idempotencySnapshotRef.current = { key, bodyJson, cartFingerprint: fp, unresolved: false };
     }
+    // Input validation is complete before publishing pending; failures cannot strand the close guard.
+    submittingRef.current = true;
+    setSaving(true);
+    onRequestPending?.(true);
 
     try {
       const res = await authFetch('/api/pos/orders', {
@@ -529,6 +511,9 @@ export default function PosWorkspace({
         const valid =
           raw !== null &&
           typeof raw === 'object' &&
+          ((res.status === 201 && json?.status === 'SUCCESS') || (res.status === 200 && json?.status === 'REPLAY')) &&
+          raw.property_id === propertyId &&
+          (raw.reservation_id ?? null) === effectiveResId &&
           Number.isInteger(Number(raw.id)) &&
           Number(raw.id) > 0 &&
           typeof raw.order_number === 'string' &&
@@ -592,6 +577,8 @@ export default function PosWorkspace({
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
           onUnresolvedChange?.(false);
           setCart([]);
+          setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('');
+          setOrderDiscountInput(''); setDiscountReason('');
           setAmbiguous(false);
           setLocalPaidOrderId(null);
           appliedPaidOrderIdRef.current = null;
@@ -735,7 +722,7 @@ export default function PosWorkspace({
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
       onRequestPending?.(false);
     }
-  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos]);
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason]);
 
   // Retry handler: membaca snapshot (key + body terseri) PERSIS.
   // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
@@ -745,7 +732,7 @@ export default function PosWorkspace({
   }, [handleSaveOrder]);
 
   /**
-   * "Simpan & Bayar" — kombinasi: simpan order, lalu (hanya bila sukses
+   * "Bayar" — kombinasi: simpan order, lalu (hanya bila sukses
    * dan order masih OPEN) segera buka modal pembayaran CASH dari dalam
    * PosWorkspace.
    *
@@ -1013,6 +1000,7 @@ export default function PosWorkspace({
                         // draft ter-lock atau request sedang in-flight.
                         if (draftLocked || submittingRef.current) return;
                         setPickedGuest(g);
+                        setGuestPhone('');
                         // Set guest_name dari reservasi — hanya bila draft masih kosong
                         // (tidak menyentuh draft yang sudah ada).
                         if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
@@ -1030,7 +1018,7 @@ export default function PosWorkspace({
                       <span className="text-[10px] uppercase font-bold text-gray-500">Tamu Terhubung</span>
                       <button
                         type="button"
-                        onClick={() => setPickedGuest(null)}
+                        onClick={() => {if (canMutateDraft()) {setPickedGuest(null); setGuestPhone('');}}}
                         disabled={draftLocked}
                         className="text-[10px] text-gray-400 hover:text-gray-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
@@ -1087,7 +1075,7 @@ export default function PosWorkspace({
                       <input
                         type="text"
                         value={tableNumber}
-                        onChange={(e) => setTableNumber(e.target.value)}
+                        onChange={(e) => {if (canMutateDraft()) setTableNumber(e.target.value);}}
                         disabled={draftLocked}
                         className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                       />
@@ -1112,13 +1100,26 @@ export default function PosWorkspace({
                       <input
                         type="text"
                         value={guestName}
-                        onChange={(e) => setGuestName(e.target.value)}
+                        onChange={(e) => {if (canMutateDraft()) setGuestName(e.target.value);}}
                         disabled={draftLocked}
                         className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                       />
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="space-y-2 mb-3">
+                <label className="block text-xs font-semibold text-gray-600">Nomor WhatsApp untuk struk (opsional)
+                  <input type="tel" maxLength={50} value={guestPhone} disabled={draftLocked}
+                    onChange={e => {if (canMutateDraft()) setGuestPhone(e.target.value);}}
+                    placeholder="08… atau +62…" className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
+                </label>
+                <label className="block text-xs font-semibold text-gray-600">Catatan pesanan (opsional)
+                  <textarea maxLength={1000} rows={2} value={orderNotes} disabled={draftLocked}
+                    onChange={e => {if (canMutateDraft()) setOrderNotes(e.target.value);}}
+                    className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
+                </label>
               </div>
 
               {/* Cart Items */}
@@ -1128,10 +1129,10 @@ export default function PosWorkspace({
                     Klik item menu di samping untuk menambahkan pesanan.
                   </div>
                 ) : (
-                  cart.map(({ item, qty }) => (
+                  cart.map(({ item, qty, discountType = '', discountInput = '', notes = '' }, lineIndex) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
+                      className="flex flex-wrap items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
                     >
                       <div className="min-w-0 flex-1 pr-2">
                         <div className="font-semibold text-gray-800 truncate">{item.name}</div>
@@ -1168,6 +1169,23 @@ export default function PosWorkspace({
                           </svg>
                         </button>
                       </div>
+                      <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
+                        {canDiscountPos && <div className="flex gap-2">
+                          <select aria-label={`Diskon item ${item.name}`} value={discountType} disabled={draftLocked}
+                            onChange={e => {if (canMutateDraft()) changeLine(item.id, {discountType: e.target.value as PosDiscountType, discountInput: ''});}}
+                            className="min-w-0 flex-1 border border-gray-200 rounded p-1">
+                            <option value="">Tanpa diskon</option><option value="NOMINAL">Nominal per baris</option><option value="PERCENT">Persen per baris</option>
+                          </select>
+                          {discountType && <input aria-label={`Nilai diskon ${item.name}`} type="text" inputMode="decimal" value={discountInput}
+                            disabled={draftLocked} onChange={e => changeLine(item.id, {discountInput: e.target.value})}
+                            className="w-24 border border-gray-200 rounded p-1" placeholder={discountType === 'PERCENT' ? '%' : 'Rp'} />}
+                        </div>}
+                        {draftPreview.value && <div className="flex justify-between text-gray-600"><span>Total baris</span>
+                          <span>{formatIDR(draftPreview.value.lines[lineIndex].net)}</span></div>}
+                        <input aria-label={`Catatan ${item.name}`} type="text" maxLength={1000} value={notes} disabled={draftLocked}
+                          onChange={e => changeLine(item.id, {notes: e.target.value})} placeholder="Catatan item (opsional)"
+                          className="w-full border border-gray-200 rounded p-1" />
+                      </div>
                     </div>
                   ))
                 )}
@@ -1180,10 +1198,43 @@ export default function PosWorkspace({
                 <span>Subtotal</span>
                 <span>{formatIDR(cartSubtotal)}</span>
               </div>
+              {canDiscountPos && <div className="space-y-2">
+                <label className="block text-xs font-semibold text-gray-600">Diskon pesanan
+                  <select value={orderDiscountType} disabled={draftLocked}
+                    onChange={e => {if (canMutateDraft()) {setOrderDiscountType(e.target.value as PosDiscountType); setOrderDiscountInput('');}}}
+                    className="block w-full mt-1 border border-gray-200 rounded p-2 text-xs">
+                    <option value="">Tanpa diskon</option><option value="NOMINAL">Nominal</option><option value="PERCENT">Persen</option>
+                  </select>
+                </label>
+                {orderDiscountType && <>
+                  <input aria-label="Nilai diskon pesanan" type="text" inputMode="decimal" value={orderDiscountInput} disabled={draftLocked}
+                    onChange={e => {if (canMutateDraft()) setOrderDiscountInput(e.target.value);}}
+                    placeholder={orderDiscountType === 'PERCENT' ? 'Persen (maks. 100)' : 'Nominal rupiah'}
+                    className="w-full border border-gray-200 rounded p-2 text-xs" />
+                  <input aria-label="Alasan diskon pesanan" type="text" maxLength={100} value={discountReason} disabled={draftLocked}
+                    onChange={e => {if (canMutateDraft()) setDiscountReason(e.target.value);}} placeholder="Alasan diskon (opsional)"
+                    className="w-full border border-gray-200 rounded p-2 text-xs" />
+                </>}
+                <p className="text-[11px] text-gray-500">Diskon pesanan dihitung setelah diskon setiap baris.</p>
+              </div>}
+              {draftPreview.value && <>
+                <div className="flex justify-between text-xs text-gray-500"><span>Diskon item</span><span>{formatIDR(draftPreview.value.itemDiscount)}</span></div>
+                <div className="flex justify-between text-xs text-gray-500"><span>Diskon pesanan</span><span>{formatIDR(draftPreview.value.orderDiscount)}</span></div>
+              </>}
               <div className="flex justify-between items-center text-sm font-black text-gray-900">
-                <span>Grand Total</span>
-                <span>{formatIDR(cartSubtotal)}</span>
+                <span>Total perkiraan</span>
+                <span>{draftPreview.value ? formatIDR(draftPreview.value.total) : '—'}</span>
               </div>
+              {draftPreview.error && <p role="alert" className="text-xs text-red-700">{draftPreview.error}</p>}
+              {!canDiscountPos && hasDiscount && <div className="space-y-1 text-xs text-red-700">
+                <p>Izin diskon tidak tersedia. Hapus diskon untuk menyimpan pesanan biasa.</p>
+                <button type="button" disabled={draftLocked} className="underline font-semibold" onClick={() => {
+                  if (!canMutateDraft()) return;
+                  setCart(lines => lines.map(line => ({...line, discountType: '' as PosDiscountType, discountInput: ''})));
+                  setOrderDiscountType(''); setOrderDiscountInput(''); setDiscountReason('');
+                }}>Hapus semua diskon</button>
+              </div>}
+              {draftPreview.value?.total === 0 && cart.length > 0 && <p className="text-xs text-amber-700">Total nol belum dapat dibayar.</p>}
               {!authFetch && (
                 <div className="flex items-center gap-1.5 text-[11px] text-amber-700">
                   <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 font-semibold">DEMO</span>
@@ -1198,14 +1249,14 @@ export default function PosWorkspace({
                         Anda tidak memiliki izin untuk membuat order POS.
                       </p>
                     )}
-                    {/* Dua tombol: "Simpan Pesanan" (OPEN saja) + "Simpan & Bayar"
+                    {/* Dua tombol: "Simpan Pesanan" (OPEN saja) + "Bayar"
                         (OPEN → langsung CASH payment) bila onOpenCashPayment tersedia.
                         Kedua tombol disabled saat saving/busy/draft kosong/
                         tidak ada izin edit. */}
                     <div className="flex gap-2">
                       <button
                         type="button"
-                        disabled={!canEditPos || cart.length === 0 || saving || busy}
+                        disabled={!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy}
                         onClick={() => void handleSaveOrder()}
                         className={`flex-1 py-2.5 rounded-xl ${
                           onOpenCashPayment
@@ -1218,11 +1269,11 @@ export default function PosWorkspace({
                       {onOpenCashPayment && (
                         <button
                           type="button"
-                          disabled={!canEditPos || cart.length === 0 || saving || busy}
+                          disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy}
                           onClick={() => void handleSaveAndPay()}
                           className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
                         >
-                          {saving ? 'Menyimpan…' : 'Simpan & Bayar'}
+                          {saving ? 'Menyimpan…' : 'Bayar'}
                         </button>
                       )}
                     </div>
@@ -1257,7 +1308,7 @@ export default function PosWorkspace({
                            Coba Lagi
                          </button>
                        )}
-                        {/* Bayar CASH — hanya untuk order sukses + izin edit + callback tersedia */}
+                        {/* Bayar — hanya untuk order sukses + izin edit + callback tersedia */}
                         {saveResult?.ok && saveResult.order && canEditPos && onOpenCashPayment &&
                           propertyId != null &&
                           payCtxRef.current &&
@@ -1273,13 +1324,13 @@ export default function PosWorkspace({
                               }}
                               className="mt-2 px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded text-[11px] font-bold cursor-pointer"
                             >
-                              Bayar CASH
+                              Bayar
                             </button>
                           )}
                         {/* Indikator order sudah LUNAS (lokal atau dari signal App) */}
                         {saveResult?.ok && saveResult.order && localPaidOrderId === saveResult.order.id && (
                           <div className="mt-2 text-[11px] font-semibold text-emerald-700">
-                            ✓ LUNAS — pembayaran CASH terverifikasi
+                            ✓ LUNAS — pembayaran terverifikasi
                           </div>
                         )}
                     </div>
@@ -1294,7 +1345,7 @@ export default function PosWorkspace({
                   }}
                   className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
                 >
-                  [Demo] Simpan &amp; Bayar Order
+                  [Demo] Bayar
                 </button>
               )}
             </div>

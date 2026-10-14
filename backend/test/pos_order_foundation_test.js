@@ -561,8 +561,8 @@ async function setupFixtures() {
     tracked.bookings.push(bkA1.rows[0].id);
 
     const rsA1 = await client.query(
-      `INSERT INTO reservations (booking_id, stay_sequence, guest_name)
-       VALUES ($1, 1, $2) RETURNING id`,
+      `INSERT INTO reservations (booking_id, stay_sequence, guest_name, status)
+       VALUES ($1, 1, $2, 'BOOKED') RETURNING id`,
       [bkA1.rows[0].id, 'Guest A1']
     );
     tracked.reservations.push(rsA1.rows[0].id);
@@ -575,8 +575,8 @@ async function setupFixtures() {
     tracked.bookings.push(bkA2.rows[0].id);
 
     const rsA2 = await client.query(
-      `INSERT INTO reservations (booking_id, stay_sequence, guest_name)
-       VALUES ($1, 1, $2) RETURNING id`,
+      `INSERT INTO reservations (booking_id, stay_sequence, guest_name, status)
+       VALUES ($1, 1, $2, 'BOOKED') RETURNING id`,
       [bkA2.rows[0].id, 'Guest A2']
     );
     tracked.reservations.push(rsA2.rows[0].id);
@@ -590,8 +590,8 @@ async function setupFixtures() {
     tracked.bookings.push(bkB1.rows[0].id);
 
     const rsB1 = await client.query(
-      `INSERT INTO reservations (booking_id, stay_sequence, guest_name)
-       VALUES ($1, 1, $2) RETURNING id`,
+      `INSERT INTO reservations (booking_id, stay_sequence, guest_name, status)
+       VALUES ($1, 1, $2, 'BOOKED') RETURNING id`,
       [bkB1.rows[0].id, 'Guest B1']
     );
     tracked.reservations.push(rsB1.rows[0].id);

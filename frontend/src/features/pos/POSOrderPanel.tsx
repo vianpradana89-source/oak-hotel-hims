@@ -3,6 +3,7 @@ import { useAuth } from '../auth/AuthContext';
 import { safeFetchJson } from '../calendar/calendarApi';
 import type { SafeFetchResult } from '../calendar/calendarApi';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
+import PosThermalReceiptModal from '../thermalReceipt/PosThermalReceiptModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -174,6 +175,11 @@ export default function POSOrderPanel({
   // badge status (OPEN/PAID/DISCOUNTED/VOIDED) di kartu detail selalu
   // mencerminkan data terkini setelah refetch pasca-pembayaran.
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<{
+    orderId: number;
+    propertyId: number;
+    orderNumber: string;
+  } | null>(null);
 
   // Turunkan selectedOrder dari orders — bila ID sudah tidak ada di daftar,
   // detail otomatis tertutup.
@@ -389,7 +395,7 @@ export default function POSOrderPanel({
                 <span className="font-bold text-stone-900">
                   {formatIDR(Number(order.total_amount || 0))}
                 </span>
-                {/* Bayar CASH hanya untuk order OPEN + izin edit POS.
+                {/* Bayar hanya untuk order OPEN + izin edit POS.
                     Hilang saat status berubah (PAID/CANCELLED/CLOSED). */}
                 {canEditPos && order.status === 'OPEN' && onOpenCashPayment && (
                   <button
@@ -408,9 +414,28 @@ export default function POSOrderPanel({
                     }}
                     className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200 transition-colors cursor-pointer whitespace-nowrap"
                   >
-                    Bayar CASH
+                    Bayar
                   </button>
                 )}
+                {/* Cetak Ulang hanya untuk order PAID dengan id/property valid */}
+                {order.status === 'PAID' &&
+                  Number.isInteger(order.id) && order.id > 0 &&
+                  Number.isInteger(propertyId) && propertyId > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedReceiptOrder({
+                          orderId: order.id,
+                          propertyId,
+                          orderNumber: order.order_number,
+                        });
+                      }}
+                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-stone-100 text-stone-700 border border-stone-300 hover:bg-stone-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Cetak Ulang
+                    </button>
+                  )}
               </div>
             </div>
           ))}
@@ -484,6 +509,17 @@ export default function POSOrderPanel({
             )}
           </div>
         </div>
+      )}
+
+      {/* Modal Cetak Ulang — receipt di-fetch sendiri oleh PosThermalReceiptModal */}
+      {selectedReceiptOrder !== null && (
+        <PosThermalReceiptModal
+          isOpen={selectedReceiptOrder !== null}
+          onClose={() => setSelectedReceiptOrder(null)}
+          orderId={selectedReceiptOrder.orderId}
+          propertyId={selectedReceiptOrder.propertyId}
+          authFetch={authFetch}
+        />
       )}
     </div>
   );

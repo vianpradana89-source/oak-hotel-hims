@@ -3,6 +3,7 @@ import type { EffectiveAccessResponse } from '../auth/accessControl';
 export interface PosAccess {
   canViewPos: boolean;
   canEditPos: boolean;
+  canDiscountPos: boolean;
 }
 
 /**
@@ -49,5 +50,6 @@ export function getPosAccess(
   // (postcreate/posedit — sel effective sudah gabungan).
   const canEditPos = allowed('POS', 'edit');
 
-  return { canViewPos, canEditPos };
+  const canDiscountPos = canEditPos && (effective?.is_platform_super_admin === true || hasPermission('pos.discount.edit'));
+  return { canViewPos, canEditPos, canDiscountPos };
 }

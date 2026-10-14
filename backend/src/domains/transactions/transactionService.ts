@@ -682,7 +682,7 @@ export async function projectFolioEntryToTransaction(
 export async function projectPosOrderToTransaction(
   client: PoolClient | Pool,
   orderId: number,
-  options: { propertyId?: number; actorName?: string; actorUserId?: string } = {}
+  options: { propertyId?: number; actorName?: string; actorUserId?: string; paymentMethod?: string; discountAmount?: number } = {}
 ): Promise<TransactionRow | null> {
   const orderRes = await client.query(
     `SELECT po.*,
@@ -830,7 +830,112 @@ export async function projectPosOrderToTransaction(
     return null;
   }
 
-  const netAmount = Math.round(Number(order.total_amount || 0));
+  // ── Computation from DB snapshot (pos_order_items + pos_orders) ──────
+  // itemDiscount = SUM(discount_amount) dari snapshot item
+  // orderDiscount = pos_orders.discount_amount
+  // Jika ada item:
+  //   gross = SUM(quantity * unit_price) dari snapshot
+  //   totalDiscount = itemDiscount + orderDiscount
+  //   net = gross - totalDiscount
+  // Jika tanpa item & tanpa diskon:
+  //   gross = net = pos_orders.total_amount (kompatibilitas fixture)
+  // Jika tanpa item tetapi berdiskon:
+  //   throw — tidak bisa menebak gross
+  // SALE amounts use whole rupiah. Validate raw snapshots before any rounding.
+  const snapshotMoney = (value: unknown, field: string): number => {
+    const amount = Number(value);
+    if (value == null || (typeof value === 'string' && value.trim() === '') ||
+        !Number.isSafeInteger(amount) || amount < 0) {
+      const err: any = new Error(
+        `POS Order #${orderId}: snapshot ${field} harus rupiah bulat non-negatif (${String(value)})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_ITEM_SNAPSHOT_INVALID';
+      throw err;
+    }
+    return amount;
+  };
+  const storedTotal = snapshotMoney(order.total_amount, 'total_amount');
+  const storedOrderDiscount = snapshotMoney(order.discount_amount ?? 0, 'discount_amount');
+
+  let gross: number;
+  let totalDiscount: number;
+  let net: number;
+
+  const itemsRes = await client.query(
+    `SELECT
+       COALESCE(SUM(quantity * unit_price), 0)::numeric AS items_gross,
+       COALESCE(SUM(COALESCE(discount_amount, 0)), 0)::numeric AS items_discount,
+       COUNT(*)::int AS items_count
+     FROM pos_order_items
+     WHERE order_id = $1`,
+    [orderId]
+  );
+  const itemsRow = itemsRes.rows[0];
+  const itemsCount = Number(itemsRow.items_count ?? 0);
+  const itemsGross = snapshotMoney(itemsRow.items_gross, 'items_gross');
+  const itemsDiscount = snapshotMoney(itemsRow.items_discount, 'items_discount');
+
+  if (itemsCount > 0) {
+    // Order dengan item: hitung dari snapshot
+    gross = itemsGross;
+    totalDiscount = itemsDiscount + storedOrderDiscount;
+    net = gross - totalDiscount;
+
+    // Validasi konsistensi dengan total tersimpan
+    if (!Number.isSafeInteger(gross) || gross < 0) {
+      const err: any = new Error(
+        `POS Order #${orderId}: gross dari item snapshot tidak valid (${gross})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_ITEM_SNAPSHOT_INVALID';
+      throw err;
+    }
+    if (!Number.isSafeInteger(totalDiscount) || totalDiscount < 0) {
+      const err: any = new Error(
+        `POS Order #${orderId}: total diskon dari snapshot negatif (${totalDiscount})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_ITEM_SNAPSHOT_INVALID';
+      throw err;
+    }
+    if (!Number.isSafeInteger(net) || net < 0) {
+      const err: any = new Error(
+        `POS Order #${orderId}: net dari snapshot negatif (${net})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_ITEM_SNAPSHOT_INVALID';
+      throw err;
+    }
+    // Konsistensi: total_amount tersimpan harus sama dengan net
+    if (storedTotal !== net) {
+      const err: any = new Error(
+        `POS Order #${orderId}: pos_orders.total_amount (${storedTotal}) tidak konsisten ` +
+        `dengan snapshot item (gross=${gross}, discount=${totalDiscount}, net=${net})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_SNAPSHOT_MISMATCH';
+      throw err;
+    }
+  } else {
+    // Tanpa item: kompatibilitas fixture
+    if (storedOrderDiscount !== 0) {
+      // Tanpa item tetapi berdiskon — jangan menebak gross
+      const err: any = new Error(
+        `POS Order #${orderId}: order tanpa item tetapi memiliki diskon ` +
+        `order (${storedOrderDiscount}); tidak bisa menentukan gross`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_NO_ITEM_BUT_DISCOUNT';
+      throw err;
+    }
+    // Tanpa item & tanpa diskon: total_amount tersimpan = gross = net
+    gross = storedTotal;
+    totalDiscount = 0;
+    net = gross;
+  }
+
+  const paymentMethod = options.paymentMethod || 'CASH';
   const txDate = getHotelDateToday(order.created_at);
   const guestName = order.guest_name || order.res_guest_name || order.booking_guest_name || 'Walk-in Guest';
   const tableLabel = order.table_number ? ` (Meja ${order.table_number})` : '';
@@ -850,20 +955,24 @@ export async function projectPosOrderToTransaction(
     const updated = await client.query(
       `UPDATE transactions SET
          amount = $1,
-         net_amount = $2,
-         description = $3,
-         payment_status = $4,
-         party_name = COALESCE($5, party_name),
-         guest_name_snapshot = COALESCE($5, guest_name_snapshot),
-         room_number_snapshot = COALESCE($6, room_number_snapshot),
+         discount_amount = $2,
+         net_amount = $3,
+         description = $4,
+         payment_status = $5,
+         payment_method = $6,
+         party_name = COALESCE($7, party_name),
+         guest_name_snapshot = COALESCE($7, guest_name_snapshot),
+         room_number_snapshot = COALESCE($8, room_number_snapshot),
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $7
+       WHERE id = $9
        RETURNING *`,
       [
-        netAmount,
-        netAmount,
+        gross,
+        totalDiscount,
+        net,
         description,
         'PAID',
+        paymentMethod,
         guestName,
         order.room_number ? String(order.room_number) : null,
         existingTx.rows[0].id
@@ -888,19 +997,21 @@ export async function projectPosOrderToTransaction(
       $1, $2, $3, CURRENT_TIMESTAMP,
       'SALE', 'POS_ORDER', $4, $5,
       'FNB_SALES', 'Restoran / F&B / POS', 'FNB', $6,
-      $7, 0, 0, 0, $8,
-      'PAID', $9, 'POSTED',
-      $10, $11, $12,
-      $13, $14, null, null, $15,
-      $16, $17
+      $7, $8, 0, 0, $9,
+      'PAID', $10, 'POSTED',
+      $11, $12, $13,
+      $14, $15, null, null, $16,
+      $17, $18
     )
-    ON CONFLICT (property_id, source_type, source_id) 
+    ON CONFLICT (property_id, source_type, source_id)
     WHERE source_id IS NOT NULL AND reversal_of_transaction_id IS NULL
     DO UPDATE SET
       amount = EXCLUDED.amount,
+      discount_amount = EXCLUDED.discount_amount,
       net_amount = EXCLUDED.net_amount,
       description = EXCLUDED.description,
       payment_status = EXCLUDED.payment_status,
+      payment_method = EXCLUDED.payment_method,
       party_name = EXCLUDED.party_name,
       updated_at = CURRENT_TIMESTAMP
     RETURNING *`,
@@ -911,9 +1022,10 @@ export async function projectPosOrderToTransaction(
       String(orderId),
       order.order_number,
       description,
-      netAmount,
-      netAmount,
-      'CASH',
+      gross,
+      totalDiscount,
+      net,
+      paymentMethod,
       order.canonical_guest_id || null,
       guestName,
       order.room_number ? String(order.room_number) : null,
@@ -923,7 +1035,7 @@ export async function projectPosOrderToTransaction(
         pos_order_id: orderId,
         order_number: order.order_number,
         table_number: order.table_number,
-        items_count: order.total_qty || undefined
+        items_count: itemsCount
       }),
       options.actorName || options.actorUserId || 'Staff POS',
       guestName

@@ -85,6 +85,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
 
   { pattern: /^\/api\/access-control/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/settings\/purchases\/categories\/[^/]+\/(activate|deactivate)$/, resources: ['Pengaturan'], action: 'edit' },
+  { pattern: /^\/api\/settings\/property\/payment-instructions\/qris-image$/, resources: ['Pengaturan'], action: 'edit', methods: ['POST', 'DELETE'] },
   { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/settings\/property\/registration-form\/terms/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },

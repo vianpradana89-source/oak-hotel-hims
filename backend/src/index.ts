@@ -36,7 +36,7 @@ import {
 import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
-import { payPosOrderCash, PosSettlementError } from './domains/pos/posSettlementService';
+import { payPosOrderCash, payPosOrder, PosSettlementError, POS_SUPPORTED_METHODS } from './domains/pos/posSettlementService';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
 import {
   listEffectiveArrivalsForDate,
@@ -107,7 +107,7 @@ import { projectFolioEntryToTransaction, projectPosOrderToTransaction } from './
 import { createOtaRouter } from './domains/ota/otaRouter';
 import { createIdentityExtractionRouter } from './domains/identity/identityExtractionRouter';
 import { createDocumentRouter } from './domains/documents/documentRouter';
-import { createPropertyPaymentInstructionsRouter } from './domains/propertyPaymentInstructions/propertyPaymentInstructionsRouter';
+import { createPropertyPaymentInstructionsRouter, createPosPaymentConfigRouter } from './domains/propertyPaymentInstructions/propertyPaymentInstructionsRouter';
 import { createPropertyRegistrationFormTermsRouter } from './domains/registrationFormTerms/registrationFormTermsRouter';
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
@@ -142,6 +142,7 @@ import { releaseReservationInventoryForCheckout } from './domains/reservations/r
 import { createReservationCheckoutHandler } from './domains/reservations/reservationCheckoutHandler';
 import { createPosOrderCreateHandler } from './domains/pos/posOrderCreateHandler';
 import { createPosOrderStatusHandler } from './domains/pos/posOrderStatusHandler';
+import { createPosReceiptHandler } from './domains/pos/posReceiptHandler';
 import {
   buildBookingChildStatusSummary,
   deriveBookingLifecycleStatus,
@@ -153,7 +154,7 @@ import {
 import { createSuppliersRouter } from './domains/suppliers/suppliersRouter';
 import { createAuthRouter } from './domains/auth/authRouter';
 import { requireAuth, onboardingSecurityGuard } from './domains/auth/authMiddleware';
-import { isPlatformSuperAdmin } from './domains/auth/authService';
+import { isPlatformSuperAdmin, getUserEffectivePermissions } from './domains/auth/authService';
 import { seedSuperAdmin } from './domains/auth/authService';
 import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
@@ -5941,6 +5942,15 @@ app.post('/api/pos/orders', createPosOrderCreateHandler({
   release: (client) => client.release(),
   assertPropertyScope,
   broadcastEvent,
+  checkDiscountPermission: async (poolArg, userId, propertyId) => {
+    try {
+      const permKeys = await getUserEffectivePermissions(poolArg, userId);
+      return permKeys.includes('pos.discount.edit');
+    } catch {
+      // Fail-closed: if permission check fails, deny discount.
+      return false;
+    }
+  },
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -5960,7 +5970,7 @@ app.post('/api/pos/orders', createPosOrderCreateHandler({
 // sebagai bagian hashing (bukan path HTTP publik).
 // ─────────────────────────���───────────────────────────────────────────────
 app.post('/api/pos/orders/:id/pay', async (req, res) => {
-  const { property_id: propertyIdRaw, payment_method: paymentMethod } = req.body;
+  const { property_id: propertyIdRaw, payment_method: paymentMethodRaw } = req.body;
 
   // Order ID dari path :id (canonical /api/pos/orders/:id/pay).
   // Validasi: seluruh string harus digit, integer positif, maksimum 2147483647 (INTEGER).
@@ -5985,13 +5995,27 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
     return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
   }
 
-  // Tolak metode selain CASH (metode tunggal di tahap ini).
-  if (paymentMethod !== undefined && paymentMethod !== null && String(paymentMethod).toUpperCase() !== 'CASH') {
+  // Validasi payment_method: CASH | QRIS | TRANSFER | DEBIT (default CASH untuk backward compat).
+  const paymentMethod = paymentMethodRaw
+    ? String(paymentMethodRaw).trim().toUpperCase()
+    : 'CASH';
+  const validMethods = POS_SUPPORTED_METHODS as readonly string[];
+  if (!validMethods.includes(paymentMethod)) {
     return res.status(400).json({
       status: 'ERROR',
       code: 'UNSUPPORTED_PAYMENT_METHOD',
-      message: 'Hanya metode pembayaran CASH yang didukung pada tahap ini'
+      message: `Metode pembayaran tidak valid. Pilihan: ${validMethods.join(', ')}`
     });
+  }
+
+  // Method-specific inputs from body.
+  const methodInput: { cashReceived?: number | string | null; paymentReference?: string | null } = {};
+  if (req.body.cash_received != null) {
+    methodInput.cashReceived = req.body.cash_received;
+  }
+  if (req.body.payment_reference != null) {
+    const ref = String(req.body.payment_reference).trim();
+    methodInput.paymentReference = ref || null;
   }
 
   // Property scope: user token properti harus cocok (kecuali super admin platform).
@@ -6040,13 +6064,15 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
     return;
   }
   try {
-    const result = await payPosOrderCash(client, {
+    const result = await payPosOrder(client, {
       propertyId,
       orderId,
       idempotencyKey,
       actorName: actorName ?? undefined,
       actorUserId: actorUserId ?? undefined,
-      correlationId: undefined
+      correlationId: undefined,
+      paymentMethod,
+      methodInput: Object.keys(methodInput).length > 0 ? methodInput : undefined,
     });
 
     const statusCode = result.created ? 201 : result.replayed ? 200 : 200;
@@ -6091,6 +6117,13 @@ app.patch('/api/pos/orders/:id/status', createPosOrderStatusHandler({
   pool,
   connect: () => pool.connect(),
   release: (client, discard) => { if (discard) { client.release(true); } else { client.release(); } },
+  assertPropertyScope
+}));
+
+app.get('/api/pos/orders/:id/receipt', createPosReceiptHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client) => client.release(),
   assertPropertyScope
 }));
 
@@ -8681,6 +8714,7 @@ app.use('/api/properties', createFeatureRouter(pool));
 app.use('/api/properties', createFrontOfficeSettingsRouter(pool));
 app.use('/api/front-office', createFrontOfficeSettingsRouter(pool));
 app.use('/api/settings/property/payment-instructions', createPropertyPaymentInstructionsRouter(pool));
+app.use('/api/pos/payment-config', createPosPaymentConfigRouter(pool));
 app.use('/api/properties', createPropertyPaymentInstructionsRouter(pool));
 app.use('/api/settings/property/registration-form/terms', createPropertyRegistrationFormTermsRouter(pool));
 app.use('/api/properties', createPropertyRegistrationFormTermsRouter(pool));

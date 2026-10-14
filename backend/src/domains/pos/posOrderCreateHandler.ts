@@ -25,6 +25,17 @@ import { computeRequestHash } from '../../utils/hash';
 const hasRows = (result: { rowCount?: number | null } | null | undefined): boolean =>
   Number(result?.rowCount ?? 0) > 0;
 
+// Numeric input validation without coercing objects/booleans into discounts.
+const isDiscountValue = (raw: unknown, type: unknown): boolean => {
+  if (typeof raw !== 'number' && typeof raw !== 'string') return false;
+  if (typeof raw === 'string' && raw.trim() === '') return false;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return false;
+  if (type === 'NOMINAL') return Number.isSafeInteger(value);
+  // discount_value is NUMERIC(12,2); percentages may use two decimal places.
+  return value <= 100 && Math.abs(value * 100 - Math.round(value * 100)) < 1e-8;
+};
+
 // ── Dependency interface ────────────────────────────────────────────────────
 
 /**
@@ -66,6 +77,17 @@ export interface PosOrderCreateDeps {
    * No-op in tests. Never blocks the caller.
    */
   broadcastEvent: (eventType: string, payload: any, propertyId?: number) => void;
+
+  /**
+   * Check whether the authenticated user holds the `pos.discount.edit` permission.
+   * In production: uses getUserEffectivePermissions(pool, userId).
+   * In tests: may be stubbed to return true/false.
+   * Returns true only when the user is explicitly granted the permission.
+   *
+   * When not provided, the handler denies discount usage (fail-closed) but
+   * allows orders without discount to proceed as before.
+   */
+  checkDiscountPermission?: (pool: Pool, userId: number, propertyId: number) => Promise<boolean>;
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
@@ -80,7 +102,18 @@ export interface PosOrderCreateDeps {
  */
 export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
   return async (req: Request, res: Response) => {
-    const { property_id: propertyIdRaw, reservation_id, table_number, guest_name, items } = req.body;
+    const {
+      property_id: propertyIdRaw,
+      reservation_id,
+      table_number,
+      guest_name,
+      guest_phone,
+      notes,
+      discount_type: orderDiscountTypeRaw,
+      discount_value: orderDiscountValueRaw,
+      discount_reason: orderDiscountReason,
+      items,
+    } = req.body;
 
     if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
@@ -95,15 +128,111 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
     }
 
     // Validasi quantity: setiap item wajib quantity integer > 0.
+    // Diskon per item (opsional): type 'NOMINAL'|'PERCENT', value >= 0,
+    // PERCENT ≤ 100.
     for (let i = 0; i < items.length; i++) {
+      if (!items[i] || typeof items[i] !== 'object' || Array.isArray(items[i])) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: `items[${i}] must be an object` });
+      }
       const qty = Number(items[i].quantity ?? 1);
-      if (!Number.isInteger(qty) || qty <= 0) {
+      if (!Number.isSafeInteger(qty) || qty <= 0) {
         return res.status(400).json({
           status: 'ERROR',
           code: 'VALIDATION_ERROR',
           message: `items[${i}].quantity must be a positive integer`
         });
       }
+      // Validasi diskon per item (opsional)
+      const itDisType = items[i].discount_type ?? null;
+      const itDisVal = items[i].discount_value ?? null;
+      if ((itDisType === null) !== (itDisVal === null)) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: `items[${i}].discount_type and discount_value must be supplied together` });
+      }
+      if (itDisType !== null && itDisType !== undefined) {
+        if (itDisType !== 'NOMINAL' && itDisType !== 'PERCENT') {
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'VALIDATION_ERROR',
+            message: `items[${i}].discount_type must be 'NOMINAL' or 'PERCENT'`
+          });
+        }
+      }
+      if (itDisVal !== null && itDisVal !== undefined) {
+        if (!isDiscountValue(itDisVal, itDisType)) {
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'VALIDATION_ERROR',
+            message: `items[${i}].discount_value must be finite and non-negative; NOMINAL uses whole rupiah, PERCENT uses 0-100 with up to 2 decimals`
+          });
+        }
+      }
+    }
+
+    // Validasi diskon order (opsional)
+    let orderDiscountType: string | null = null;
+    let orderDiscountValue: number | null = null;
+    let orderDiscountReasonNorm: string | null = null;
+    if ((orderDiscountTypeRaw == null) !== (orderDiscountValueRaw == null)) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'discount_type and discount_value must be supplied together' });
+    }
+    if (orderDiscountTypeRaw !== null && orderDiscountTypeRaw !== undefined) {
+      if (orderDiscountTypeRaw !== 'NOMINAL' && orderDiscountTypeRaw !== 'PERCENT') {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: "discount_type must be 'NOMINAL' or 'PERCENT'"
+        });
+      }
+      orderDiscountType = orderDiscountTypeRaw;
+    }
+    if (orderDiscountValueRaw !== null && orderDiscountValueRaw !== undefined) {
+      if (!isDiscountValue(orderDiscountValueRaw, orderDiscountType)) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'discount_value must be finite and non-negative; NOMINAL uses whole rupiah, PERCENT uses 0-100 with up to 2 decimals'
+        });
+      }
+      orderDiscountValue = Number(orderDiscountValueRaw);
+    }
+    if (orderDiscountReason !== null && orderDiscountReason !== undefined) {
+      const s = String(orderDiscountReason).trim();
+      if (s.length > 100) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'discount_reason must be ≤ 100 characters'
+        });
+      }
+      orderDiscountReasonNorm = s || null;
+    }
+
+    // Validasi guest_phone (opsional, snapshot)
+    let normalizedGuestPhone: string | null = null;
+    if (guest_phone !== null && guest_phone !== undefined) {
+      const s = String(guest_phone).trim();
+      if (s.length > 50) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'guest_phone must be ≤ 50 characters'
+        });
+      }
+      normalizedGuestPhone = s || null;
+    }
+
+    // Validasi notes (opsional, snapshot)
+    let normalizedNotes: string | null = null;
+    if (notes !== null && notes !== undefined) {
+      const s = String(notes).trim();
+      if (s.length > 1000) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'notes must be ≤ 1000 characters'
+        });
+      }
+      normalizedNotes = s || null;
     }
 
     // Property scope: user token properti harus cocok (kecuali super admin platform).
@@ -116,6 +245,40 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
         message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
       });
+    }
+
+    // ─── Discount permission gate ─────────────────────────────────────────
+    // Jika request mengandung diskon (item atau order), user wajib memiliki
+    // izin `pos.discount.edit`. Order tanpa diskon tidak terpengaruh.
+    // Fail-closed: jika checkDiscountPermission tidak tersedia, tolak diskon.
+    const hasAnyDiscount =
+      orderDiscountType !== null ||
+      orderDiscountValue !== null ||
+      items.some((it: any) => it.discount_type != null || it.discount_value != null);
+    if (hasAnyDiscount) {
+      if (typeof deps.checkDiscountPermission !== 'function') {
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'DISCOUNT_PERMISSION_DENIED',
+          message: 'Izin diskon tidak tersedia (pos.discount.edit)'
+        });
+      }
+      const userId = Number((req as any).user?.id);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return res.status(401).json({
+          status: 'ERROR',
+          code: 'UNAUTHORIZED',
+          message: 'User tidak terautentikasi'
+        });
+      }
+      const allowed = await deps.checkDiscountPermission(deps.pool, userId, propertyId);
+      if (!allowed) {
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'DISCOUNT_PERMISSION_DENIED',
+          message: 'Anda tidak memiliki izin untuk memberikan diskon (pos.discount.edit)'
+        });
+      }
     }
 
     // ─── Idempotency key (opsional; backward compat: tanpa key = normal insert) ───
@@ -135,10 +298,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       idempotencyKey = rawKey;
     }
 
-    // Fingerprint: hash payload bisnis tervalidasi/ternormalisasi.
-    // Mengandung property, reservation, items (menu_item_id + quantity + notes),
-    // meja, nama — TIDAK memakai harga master terkini (harga di-snapshot di DB).
-    const fingerprintPayload = JSON.stringify({
+    // Preserve the legacy fingerprint when no expansion metadata is supplied.
+    const legacyPayload = {
       property_id: propertyId,
       reservation_id: reservation_id ?? null,
       table_number: table_number ?? 'Walk In',
@@ -148,8 +309,36 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         quantity: Number(it.quantity ?? 1),
         notes: it.notes ?? null
       }))
-    });
-    const fingerprint = computeRequestHash('POST', '/api/pos/orders', fingerprintPayload);
+    };
+    const hasExpandedFields = normalizedGuestPhone !== null || normalizedNotes !== null ||
+      orderDiscountType !== null || orderDiscountValue !== null || orderDiscountReasonNorm !== null ||
+      items.some((it: any) => it.discount_type != null || it.discount_value != null);
+    const expandedPayload = {
+      property_id: propertyId,
+      reservation_id: reservation_id ?? null,
+      table_number: table_number ?? 'Walk In',
+      guest_name: guest_name ?? 'Guest',
+      guest_phone: normalizedGuestPhone,
+      notes: normalizedNotes,
+      discount_type: orderDiscountType,
+      discount_value: orderDiscountValue,
+      discount_reason: orderDiscountReasonNorm,
+      items: items.map((it: any) => ({
+        menu_item_id: Number(it.menu_item_id),
+        quantity: Number(it.quantity ?? 1),
+        notes: it.notes ?? null,
+        discount_type: it.discount_type ?? null,
+        discount_value: it.discount_value == null ? null : Number(it.discount_value)
+      }))
+    };
+    const expandedFingerprint = computeRequestHash('POST', '/api/pos/orders', JSON.stringify(expandedPayload));
+    const fingerprint = hasExpandedFields
+      ? expandedFingerprint
+      : computeRequestHash('POST', '/api/pos/orders', JSON.stringify(legacyPayload));
+    // Also accept empty-expansion hashes produced by the earlier local version.
+    // Never accept a legacy hash when the request contains expansion metadata.
+    const matchesFingerprint = (stored: unknown): boolean => stored === fingerprint ||
+      (!hasExpandedFields && stored === expandedFingerprint);
 
     const client = await deps.connect();
     try {
@@ -189,6 +378,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
           `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
                   po.table_number, po.guest_name, po.status, po.total_amount,
                   po.created_at, po.updated_at,
+                  po.guest_phone, po.notes,
+                  po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
                   po.request_fingerprint AS stored_fingerprint
            FROM pos_orders po
            WHERE po.property_id = $1 AND po.idempotency_key = $2
@@ -198,7 +389,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         if (hasRows(existingCheck)) {
           const existing = existingCheck.rows[0];
           // Fingerprint cocok → replay (kembalikan order + items tersimpan, TANPA recompute harga).
-          if (existing.stored_fingerprint === fingerprint) {
+          if (matchesFingerprint(existing.stored_fingerprint)) {
             const existingItems = await client.query(
               `SELECT poi.*, pmi.name, pmi.item_code
                FROM pos_order_items poi
@@ -296,6 +487,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
             `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
                     po.table_number, po.guest_name, po.status, po.total_amount,
                     po.created_at, po.updated_at,
+                    po.guest_phone, po.notes,
+                    po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
                     po.request_fingerprint AS stored_fingerprint
              FROM pos_orders po
              WHERE po.property_id = $1 AND po.idempotency_key = $2`,
@@ -303,7 +496,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
           );
           if (hasRows(recheckResult)) {
             const recheck = recheckResult.rows[0];
-            if (recheck.stored_fingerprint === fingerprint) {
+            if (matchesFingerprint(recheck.stored_fingerprint)) {
               // Fingerprint cocok → replay data tersimpan (tanpa recompute harga).
               const recheckItems = await client.query(
                 `SELECT poi.*, pmi.name, pmi.item_code
@@ -393,13 +586,18 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         orderInsert = await client.query(
           `INSERT INTO pos_orders
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
-              idempotency_key, request_fingerprint)
-           VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
+              idempotency_key, request_fingerprint,
+              guest_phone, notes,
+              discount_type, discount_value, discount_reason, discount_amount)
+           VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8,
+                  $9, $10, $11, $12, $13, 0)
             ON CONFLICT (property_id, idempotency_key) WHERE idempotency_key IS NOT NULL
             DO NOTHING
             RETURNING *`,
           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
-            guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint]
+            guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint,
+            normalizedGuestPhone, normalizedNotes,
+            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
         );
         if ((orderInsert.rowCount ?? 0) === 0) {
           // ─── Step 7: Winner lookup (plain SELECT, TANPA FOR UPDATE) ───
@@ -410,6 +608,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
             `SELECT po.id, po.property_id, po.reservation_id, po.order_number,
                     po.table_number, po.guest_name, po.status, po.total_amount,
                     po.created_at, po.updated_at,
+                    po.guest_phone, po.notes,
+                    po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
                     po.request_fingerprint AS stored_fingerprint
              FROM pos_orders po
              WHERE po.property_id = $1 AND po.idempotency_key = $2`,
@@ -421,7 +621,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
             return res.status(500).json({ status: 'ERROR', code: 'IDEMPOTENCY_INTERNAL', message: 'Idempotency conflict tidak terduga' });
           }
           const winner = winnerCheck.rows[0];
-          if (winner.stored_fingerprint !== fingerprint) {
+          if (!matchesFingerprint(winner.stored_fingerprint)) {
             await client.query('ROLLBACK');
             return res.status(409).json({
               status: 'CONFLICT',
@@ -450,48 +650,175 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         orderInsert = await client.query(
           `INSERT INTO pos_orders
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
-              idempotency_key, request_fingerprint)
-           VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7)
+              idempotency_key, request_fingerprint,
+              guest_phone, notes,
+              discount_type, discount_value, discount_reason, discount_amount)
+           VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7,
+                  $8, $9, $10, $11, $12, 0)
            RETURNING *`,
           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
-            guest_name || 'Guest', orderStatus, fingerprint]
+            guest_name || 'Guest', orderStatus, fingerprint,
+            normalizedGuestPhone, normalizedNotes,
+            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
         );
       }
 
       const orderId = orderInsert.rows[0].id;
       let totalAmount = 0;
+      let orderSubtotalAfterItemDiscounts = 0;
+      // Collect per-item discount details for audit (only items with discount).
+      const itemDiscountAudit: Array<{
+        menu_item_id: number; quantity: number; item_gross: number;
+        discount_type: string; discount_value: number; discount_amount: number; item_net: number;
+      }> = [];
 
       for (const item of items) {
         const menuItem = await client.query(
-          'SELECT id, price, name FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
-          [item.menu_item_id]
+          'SELECT id, price, name, item_code FROM pos_menu_items WHERE id = $1 AND property_id = $2 AND is_active = TRUE',
+          [item.menu_item_id, propertyId]
         );
         const menu = menuItem.rows[0];
-        const qty = Number(item.quantity || 1);
+        if (!menu) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
+        }
+        const qty = Number(item.quantity ?? 1);
         const unitPrice = Number(menu.price);
-        totalAmount += qty * unitPrice;
+        const itemGross = qty * unitPrice;
+        if (menu.price == null || !Number.isSafeInteger(unitPrice) || unitPrice < 0 || !Number.isSafeInteger(itemGross)) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ status: 'ERROR', code: 'INVALID_MENU_PRICE', message: 'Menu price and item subtotal must use valid whole rupiah' });
+        }
+
+        // ── Diskon per item (per baris) ──────────────────────────────────
+        // NOMINAL: potongan per baris (bukan per unit).
+        // PERCENT: potongan persentase dari itemGross.
+        // NOMINAL must not exceed the line subtotal; invalid input is rejected.
+        // PERCENT is rounded from itemGross * discount_value / 100.
+        let itemDiscountAmount = 0;
+        const itDisType = item.discount_type ?? null;
+        const itDisVal = item.discount_value ?? null;
+        if (itDisType === 'NOMINAL' && itDisVal !== null && itDisVal !== undefined) {
+          const raw = Number(itDisVal);
+          if (raw > itemGross) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({ status: 'ERROR', code: 'DISCOUNT_EXCEEDS_SUBTOTAL', message: `Item discount exceeds subtotal for menu item ${menu.id}` });
+          }
+          itemDiscountAmount = raw;
+        } else if (itDisType === 'PERCENT' && itDisVal !== null && itDisVal !== undefined) {
+          const raw = Number(itDisVal);
+          itemDiscountAmount = Math.round(itemGross * raw / 100);
+        }
+        itemDiscountAmount = Math.round(itemDiscountAmount);
+        const itemNet = itemGross - itemDiscountAmount;
+        totalAmount += itemNet;
+        orderSubtotalAfterItemDiscounts += itemNet;
 
         await client.query(
-          `INSERT INTO pos_order_items (order_id, menu_item_id, quantity, unit_price, notes)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [orderId, menu.id, qty, unitPrice, item.notes || null]
+          `INSERT INTO pos_order_items
+             (order_id, menu_item_id, quantity, unit_price, notes,
+              discount_type, discount_value, discount_amount,
+              item_name_snapshot, item_code_snapshot)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [orderId, menu.id, qty, unitPrice, item.notes || null,
+            itDisType,
+            (itDisVal !== null && itDisVal !== undefined) ? Number(itDisVal) : null,
+            itemDiscountAmount,
+            menu.name,
+            menu.item_code ?? null]
         );
+
+        // Record item discount for audit
+        if (itemDiscountAmount > 0) {
+          itemDiscountAudit.push({
+            menu_item_id: Number(item.menu_item_id),
+            quantity: qty,
+            item_gross: itemGross,
+            discount_type: itDisType!,
+            discount_value: Number(itDisVal),
+            discount_amount: itemDiscountAmount,
+            item_net: itemNet,
+          });
+        }
       }
 
+      // ── Diskon order (di atas subtotal setelah diskon item) ──────────
+      if (!Number.isSafeInteger(orderSubtotalAfterItemDiscounts)) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ status: 'ERROR', code: 'INVALID_ORDER_AMOUNT', message: 'Order subtotal exceeds the supported range' });
+      }
+      let orderDiscountAmount = 0;
+      if (orderDiscountType === 'NOMINAL' && orderDiscountValue !== null) {
+        const raw = Number(orderDiscountValue);
+        if (raw > orderSubtotalAfterItemDiscounts) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ status: 'ERROR', code: 'DISCOUNT_EXCEEDS_SUBTOTAL', message: 'Order discount exceeds subtotal after item discounts' });
+        }
+        orderDiscountAmount = raw;
+      } else if (orderDiscountType === 'PERCENT' && orderDiscountValue !== null) {
+        const raw = Number(orderDiscountValue);
+        orderDiscountAmount = Math.round(orderSubtotalAfterItemDiscounts * raw / 100);
+      }
+      orderDiscountAmount = Math.round(orderDiscountAmount);
+      const finalTotal = orderSubtotalAfterItemDiscounts - orderDiscountAmount;
+
       const updatedOrder = await client.query(
-        'UPDATE pos_orders SET total_amount = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
-        [totalAmount, orderId]
+        `UPDATE pos_orders
+         SET total_amount = $1,
+             discount_amount = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING *`,
+        [finalTotal, orderDiscountAmount, orderId]
       );
 
       // Status OPEN → TIDAK ada projection transaksi. Tidak perlu guard status.
       // (Code lama yang cek PAID/COMPLETED/POSTED/CLOSED dihapus karena status dipaksa OPEN.)
+
+      // ── Audit log diskon (hanya jika ada diskon yang diterapkan) ──────
+      if (itemDiscountAudit.length > 0 || orderDiscountAmount > 0) {
+        const actorId = Number((req as any).user?.id) || null;
+        const actorName = String((req as any).user?.username || (req as any).user?.full_name || null);
+        const itemDiscountTotal = itemDiscountAudit.reduce((s, d) => s + d.discount_amount, 0);
+        const discountAuditPayload: Record<string, any> = {
+          property_id: propertyId,
+          pos_order_id: orderId,
+          order_number: orderNumber,
+          item_discounts: itemDiscountAudit,
+          order_discount: orderDiscountAmount > 0 ? {
+            discount_type: orderDiscountType,
+            discount_value: orderDiscountValue,
+            discount_amount: orderDiscountAmount,
+            basis: 'subtotal_after_item_discounts',
+            basis_amount: orderSubtotalAfterItemDiscounts,
+            reason: orderDiscountReasonNorm,
+          } : null,
+          total_discount: itemDiscountTotal + orderDiscountAmount,
+          actor_user_id: actorId,
+          actor_name: actorName,
+        };
+        await client.query(
+          `INSERT INTO audit_logs (
+             module, action, entity, record_id, new_value,
+             property_id, actor_user_id, correlation_id
+           ) VALUES ('POS', $1, 'pos_orders', $2, $3, $4, $5, $6)`,
+          [
+            'ORDER_DISCOUNT_APPLIED',
+            String(orderId),
+            JSON.stringify(discountAuditPayload),
+            propertyId,
+            String(actorId || null),
+            null,
+          ]
+        );
+      }
 
       await client.query('COMMIT');
       deps.broadcastEvent('PosOrderCreated', {
         order_id: orderId,
         order_number: orderNumber,
         guest_name: guest_name || 'Guest',
-        total_amount: totalAmount,
+        total_amount: finalTotal,
         timestamp: new Date().toISOString()
       }, propertyId);
 

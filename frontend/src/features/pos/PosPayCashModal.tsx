@@ -12,60 +12,15 @@ export interface PosPayCashOrderContext {
   reservationId?: number | null;
 }
 
-/**
- * Shape respons `data.settlement` dari POST /api/pos/orders/:id/pay
- * (kontrak backend: posSettlementService.PayPosOrderCashResult.settlement).
- * BIGINT (transaction_id) tetap string; jangan konversi ke Number.
- */
-export interface SettlementRecord {
-  /** INTEGER (4-byte) → number di pg (bukan BIGINT). */
-  id: number;
-  /** INTEGER → number. */
-  property_id: number;
-  /** INTEGER → number. */
-  pos_order_id: number;
-  /** BIGINT → string. Tidak dikonversi ke Number. */
-  transaction_id: string;
-  /** Decimal → string dari pg. Valid: bentuk decimal numerik, finite, positif. */
-  amount: string;
-  /** Selalu 'CASH' di tahap ini. */
-  payment_method: string;
-  /** Selalu 'SUCCESS' bila settlement valid. */
-  status: string;
-  idempotency_key: string;
-  request_fingerprint: string;
-  /** Aktor pencatat (operator POS), bukan "dibayar oleh". */
-  created_by: string | null;
-}
-
-/** Shape `data.sale` dari respons yang sama (baris transactions). */
-export interface SaleRecord {
-  /** BIGINT → string. Valid: digit positif, tolak "000". */
-  id: string;
-  transaction_no: string;
-  /** Selalu 'PAID' untuk SALE POS_ORDER. */
-  payment_status: string;
-  /** Selalu 'CASH' di tahap ini. */
-  payment_method: string;
-  /** Selalu 'POS_ORDER'. */
-  source_type: string;
-  /** String(orderId) — BIGINT sebagai string. Wajib non-null (source_id dari sale POS_ORDER selalu diisi). */
-  source_id: string;
-}
-
-/**
- * Snapshot immutable — dibuat SEBELUM request pertama.
- * Retry wajib memakai key, path, dan bodyJson yang sama persis.
- * TIDAK diubah setelah dibuat; state unresolved dipisahkan ke ref tersendiri.
- */
-interface PaySnapshot {
-  readonly orderId: number;
-  readonly propertyId: number;
-  /** UUID baru untuk pembayaran ini — terpisah dari key create-order. */
-  readonly key: string;
-  /** JSON.stringify({property_id, payment_method:'CASH'}). */
-  readonly bodyJson: string;
-}
+import {
+  POS_PAYMENT_METHODS, createPaySnapshot, isMethodAvailable, parseCashInput,
+  readPosPaymentConfig, validatePayResponse,
+  type PosPaymentMethod, type PosPaymentConfig, type PaySnapshot,
+  type PayResponseShape, type SettlementRecord, type SaleRecord,
+} from './posPaymentContract';
+import PosThermalReceiptModal from '../thermalReceipt/PosThermalReceiptModal';
+export { validatePayResponse } from './posPaymentContract';
+export type { SettlementRecord, SaleRecord } from './posPaymentContract';
 
 interface Props {
   /** Konteks order yang akan dibayar. */
@@ -121,128 +76,9 @@ function isOrderContextValid(ctx: PosPayCashOrderContext): boolean {
   return (
     Number.isInteger(ctx.orderId) && ctx.orderId > 0 &&
     Number.isInteger(ctx.propertyId) && ctx.propertyId > 0 &&
-    Number.isFinite(Number(ctx.totalAmount)) && Number(ctx.totalAmount) >= 0 &&
+    Number.isFinite(Number(ctx.totalAmount)) && Number(ctx.totalAmount) > 0 &&
     typeof ctx.orderNumber === 'string' && ctx.orderNumber.trim() !== ''
   );
-}
-
-// ─── Validator Respons ───────────────────────────────────────────────────────
-
-/**
- * Struktur respons POST /api/pos/orders/:id/pay (hanya field yang benar-benar
- * dikembalikan endpoint — jangan menambah field yang tidak ada).
- */
-interface PayResponseShape {
-  status?: string;
-  data?: {
-    settlement?: SettlementRecord;
-    sale?: SaleRecord;
-    created?: boolean;
-    replayed?: boolean;
-  };
-}
-
-/**
- * Validasi respons 200/201 sesuai kontrak aktual.
- *
- * @param httpStatus  200 (REPLAY) atau 201 (SUCCESS/created)
- * @param json        Parsed JSON dari body respons (bisa null/undefined)
- * @param snap        Snapshot immutable — orderId & propertyId dari sini
- *
- * @returns `true` bila seluruh invariant terpenuhi; `false` bila ada
- *          field yang tidak valid atau tidak konsisten.
- *
- * Aturan ketat (sesuai kontrak source):
- *  - amount: typeof === 'string', bentuk decimal valid, finite, positif
- *  - transaction_id & sale.id: typeof === 'string', digit positif
- *  - digit positif: tolak semua bentuk zero seperti "000", "0", "0.0"
- *  - JANGAN konversi BIGINT ke Number; JANGAN terima number lewat String()
- *  - 201 → json.status === 'SUCCESS'; 200 → json.status === 'REPLAY'
- *  - property_id & pos_order_id: number integer positif sesuai snapshot
- */
-
-/** Cek bentuk decimal string: /^[+-]?\d+(\.\d+)?$/ — finite, bukan NaN. */
-function isValidDecimalString(v: unknown): v is string {
-  return typeof v === 'string' && /^[+-]?\d+(\.\d+)?$/.test(v);
-}
-
-/** Cek digit positif: tidak kosong, semua char digit, nilai > 0 (tolak "000", "0"). */
-function isPositiveDigitString(v: unknown): v is string {
-  if (typeof v !== 'string' || v.length === 0) return false;
-  if (!/^\d+$/.test(v)) return false;
-  // Hapus leading zeros untuk cek nilai; "000" → "0" → tolak
-  const trimmed = v.replace(/^0+/, '') || '0';
-  return trimmed !== '0';
-}
-
-export function validatePayResponse(
-  httpStatus: number,
-  json: PayResponseShape | null,
-  snap: Pick<PaySnapshot, 'orderId' | 'propertyId'>,
-): boolean {
-  if (!json || typeof json !== 'object') return false;
-  const data = json.data;
-  if (!data || typeof data !== 'object') return false;
-
-  const s = data.settlement;
-  const sale = data.sale;
-  if (!s || typeof s !== 'object') return false;
-  if (!sale || typeof sale !== 'object') return false;
-
-  // ── settlement ────────────────────────────────────────────────────────────
-  // id: INTEGER positif (pg 4-byte → number)
-  if (typeof s.id !== 'number' || !Number.isInteger(s.id) || s.id <= 0) return false;
-  // property_id: INTEGER positif, cocok snapshot
-  if (typeof s.property_id !== 'number' || !Number.isInteger(s.property_id)
-      || s.property_id <= 0 || s.property_id !== snap.propertyId) return false;
-  // pos_order_id: INTEGER positif, cocok snapshot
-  if (typeof s.pos_order_id !== 'number' || !Number.isInteger(s.pos_order_id)
-      || s.pos_order_id <= 0 || s.pos_order_id !== snap.orderId) return false;
-  // amount: string decimal valid, finite, positif
-  if (!isValidDecimalString(s.amount)) return false;
-  const amt = Number(s.amount);
-  if (!Number.isFinite(amt) || amt <= 0) return false;
-  // payment_method & status
-  if (typeof s.payment_method !== 'string' || s.payment_method !== 'CASH') return false;
-  if (typeof s.status !== 'string' || s.status !== 'SUCCESS') return false;
-  // transaction_id: BIGINT → string, digit positif (tolak "000")
-  if (!isPositiveDigitString(s.transaction_id)) return false;
-  const txId = s.transaction_id;
-
-  // ── sale ──────────────────────────────────────────────────────────────────
-  // sale.id: BIGINT → string, digit positif, HARMONIS dengan settlement.transaction_id
-  if (!isPositiveDigitString(sale.id)) return false;
-  if (sale.id !== txId) return false;
-  // source_type & source_id
-  if (typeof sale.source_type !== 'string' || sale.source_type !== 'POS_ORDER') return false;
-  // source_id: WAJIB string (bukan null/undefined), equals String(snap.orderId).
-  // Jangan konversi lewat Number — bandingkan sebagai string langsung.
-  if (typeof sale.source_id !== 'string' || sale.source_id !== String(snap.orderId)) return false;
-  // payment_status & payment_method
-  if (typeof sale.payment_status !== 'string' || sale.payment_status !== 'PAID') return false;
-  if (typeof sale.payment_method !== 'string' || sale.payment_method !== 'CASH') return false;
-  // transaction_no: string tidak kosong
-  if (typeof sale.transaction_no !== 'string' || sale.transaction_no.trim() === '') return false;
-
-  // ── status top-level vs HTTP status ───────────────────────────────────────
-  if (httpStatus === 201) {
-    // SUCCESS: status top-level 'SUCCESS', created=true, replayed=false
-    if (typeof json.status !== 'string' || json.status !== 'SUCCESS') return false;
-    if (data.created !== true) return false;
-    if (data.replayed !== false) return false;
-  } else if (httpStatus === 200) {
-    // REPLAY: status top-level 'REPLAY', created=false, replayed=true
-    if (typeof json.status !== 'string' || json.status !== 'REPLAY') return false;
-    if (data.created !== false) return false;
-    if (data.replayed !== true) return false;
-  } else {
-    return false; // HTTP status lain tidak valid untuk success path
-  }
-
-  // created dan replayed tidak boleh keduanya true
-  if (data.created === true && data.replayed === true) return false;
-
-  return true;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -269,6 +105,22 @@ export default function PosPayCashModal({
   } | null>(null);
   const [failMessage, setFailMessage] = useState<string | null>(null);
   const [alreadyPaid, setAlreadyPaid] = useState(false);
+  const [method, setMethod] = useState<PosPaymentMethod>('CASH');
+  const [cashInput, setCashInput] = useState(String(order.totalAmount));
+  const [reference, setReference] = useState('');
+  const [verified, setVerified] = useState(false);
+  const [config, setConfig] = useState<PosPaymentConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+  const [reloadConfig, setReloadConfig] = useState(0);
+  const [qrisImage, setQrisImage] = useState<{propertyId: number; url: string} | null>(null);
+  const [qrisLoadedUrl, setQrisLoadedUrl] = useState<string | null>(null);
+  const [qrisError, setQrisError] = useState<string | null>(null);
+  const [receiptOpen, setReceiptOpen] = useState(false);
+  const activeConfig = config?.property_id === order.propertyId ? config : null;
+  const activeQrisUrl = qrisImage?.propertyId === order.propertyId ? qrisImage.url : null;
+  const qrisImageLoaded = !!activeQrisUrl && qrisLoadedUrl === activeQrisUrl;
+
 
   // ── Refs sinkron (tidak menunggu render) ─────────────────────────────────
   /** Cegah double-submit: true saat request in-flight. */
@@ -304,6 +156,42 @@ export default function PosPayCashModal({
       previouslyFocused.current = null;
     };
   }, []);
+
+  // Authenticated config/QR reads; cancel obsolete results and revoke every blob URL.
+  useEffect(() => {
+    let cancelled = false;
+    let blobUrl: string | null = null;
+    const controller = new AbortController();
+    const propertyId = order.propertyId;
+    setConfig(null); setConfigError(null); setConfigLoading(true);
+    setQrisImage(null); setQrisLoadedUrl(null); setQrisError(null); setVerified(false);
+    void (async () => {
+      try {
+        const res = await authFetch(`/api/pos/payment-config?property_id=${propertyId}`, {signal: controller.signal});
+        const json = await res.json().catch(() => null);
+        if (cancelled) return;
+        const cfg = res.ok && json?.status === 'OK' ? readPosPaymentConfig(json.data, propertyId) : null;
+        if (!cfg) throw new Error(json?.message || 'Pengaturan pembayaran belum dapat dimuat.');
+        setConfig(cfg); setConfigLoading(false);
+        if (!isMethodAvailable('QRIS', cfg)) return;
+        try {
+          const image = await authFetch(`/api/pos/payment-config/qris-image?property_id=${propertyId}`, {signal: controller.signal});
+          if (!image.ok) throw new Error('Gambar QRIS resmi belum dapat dimuat.');
+          const blob = await image.blob();
+          if (!['image/png', 'image/jpeg', 'image/webp'].includes(blob.type) || blob.size === 0 || blob.size > 2 * 1024 * 1024)
+            throw new Error('Gambar QRIS resmi tidak valid.');
+          if (cancelled) return;
+          blobUrl = URL.createObjectURL(blob);
+          setQrisImage({propertyId, url: blobUrl});
+        } catch (err) {
+          if (!cancelled) setQrisError(err instanceof Error ? err.message : 'Gambar QRIS belum dapat dimuat.');
+        }
+      } catch (err) {
+        if (!cancelled) {setConfigError(err instanceof Error ? err.message : 'Pengaturan belum dapat dimuat.'); setConfigLoading(false);}
+      }
+    })();
+    return () => {cancelled = true; controller.abort(); if (blobUrl) URL.revokeObjectURL(blobUrl);};
+  }, [authFetch, order.propertyId, reloadConfig]);
 
   // ── Payment flow ──────────────────────────────────────────────────────────
 
@@ -361,14 +249,16 @@ export default function PosPayCashModal({
     } else {
       // Pengajuan baru (atau context berubah tanpa unresolved): buat key baru.
       key = generateKey();
-      bodyJson = JSON.stringify({ property_id: propertyId, payment_method: 'CASH' });
-      // Snapshot DIAMANKAN sebelum request pertama (immutable).
-      snapshotRef.current = {
-        orderId,
-        propertyId,
-        key,
-        bodyJson,
-      };
+      try {
+        const created = createPaySnapshot({orderId, propertyId, key, amount: order.totalAmount,
+          method, cashInput, reference, config: activeConfig, qrisImageLoaded, verified});
+        snapshotRef.current = created;
+        bodyJson = created.bodyJson;
+      } catch (err) {
+        setFailMessage(err instanceof Error ? err.message : 'Periksa data pembayaran.');
+        setPhase('failed');
+        return;
+      }
       // Pengajuan baru: unresolved di-reset.
       unresolvedRef.current = false;
       onUnresolvedChange?.(false);
@@ -553,6 +443,7 @@ export default function PosPayCashModal({
     onRefresh,
     onRequestPending,
     onUnresolvedChange,
+    method, cashInput, reference, activeConfig, qrisImageLoaded, verified,
   ]);
 
   // Konfirmasi (tombol): sinkron sebelum await.
@@ -571,6 +462,7 @@ export default function PosPayCashModal({
   // Refs dipakai agar tidak menunggu render.
   const handleRequestClose = useCallback(() => {
     if (pendingRef.current || unresolvedRef.current) return;
+    setReceiptOpen(false);
     onRequestClose();
   }, [onRequestClose]);
 
@@ -621,7 +513,12 @@ export default function PosPayCashModal({
   const totalValue = Number(order.totalAmount || 0);
   const isPending = phase === 'pending';
   const isAmbiguous = phase === 'ambiguous';
-  const canConfirm = canEditPos && contextValid && !isPending && !isAmbiguous && phase === 'confirming';
+  const editable = (phase === 'confirming' || phase === 'failed') && !alreadyPaid;
+  const cashReceived = parseCashInput(cashInput);
+  const ready = method === 'CASH' ? cashReceived !== null && cashReceived >= totalValue
+    : isMethodAvailable(method, activeConfig) && verified && reference.trim().length <= 100
+      && (method !== 'QRIS' || qrisImageLoaded);
+  const canConfirm = canEditPos && contextValid && editable && ready;
   const canRetry = canEditPos && isAmbiguous && !isPending;
 
   return (
@@ -642,14 +539,14 @@ export default function PosPayCashModal({
         tabIndex={-1}
         role="dialog"
         aria-modal="true"
-        aria-label="Pembayaran CASH"
-        className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden focus:outline-none"
+        aria-label="Bayar pesanan POS"
+        className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto focus:outline-none"
       >
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-stone-50 border-b border-stone-200">
           <div className="flex items-center gap-2 min-w-0">
             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase">
-              Pembayaran CASH
+              Bayar
             </span>
             <h3 className="text-sm font-black text-stone-900 truncate">
               {order.orderNumber}
@@ -700,7 +597,7 @@ export default function PosPayCashModal({
             <div className="flex items-center justify-between">
               <span className="text-stone-500">Metode</span>
               <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                CASH
+                {result?.settlement.payment_method || snapshotRef.current?.paymentMethod || method}
               </span>
             </div>
 
@@ -713,6 +610,69 @@ export default function PosPayCashModal({
             </div>
           </div>
 
+          {phase !== 'success' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-4 gap-2" role="group" aria-label="Metode pembayaran">
+                {POS_PAYMENT_METHODS.map((choice) => (
+                  <button key={choice} type="button" aria-pressed={method === choice}
+                    disabled={!editable || !canEditPos || !isMethodAvailable(choice, activeConfig)}
+                    onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setMethod(choice); setVerified(false); setFailMessage(null);}}
+                    className={`px-2 py-2 text-xs font-bold rounded-lg border disabled:opacity-40 disabled:cursor-not-allowed ${method === choice ? 'bg-emerald-100 border-emerald-500 text-emerald-900' : 'border-stone-200 text-stone-700'}`}>
+                    {choice === 'TRANSFER' ? 'Transfer' : choice === 'DEBIT' ? 'Debit' : choice}
+                  </button>
+                ))}
+              </div>
+              {configLoading && <p className="text-xs text-stone-500">Memuat metode pembayaran…</p>}
+              {configError && <p role="alert" className="text-xs text-amber-800">{configError} CASH tetap tersedia.</p>}
+              {editable && <button type="button" disabled={configLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
+                className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40">Muat ulang metode</button>}
+              {method === 'CASH' ? (
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-stone-700">Uang diterima (Rp)
+                    <input type="text" inputMode="decimal" value={cashInput} disabled={!editable || !canEditPos}
+                      onChange={e => {if (!pendingRef.current && !unresolvedRef.current) setCashInput(e.target.value);}}
+                      className="mt-1 block w-full border border-stone-300 rounded-lg px-3 py-2 text-sm disabled:bg-stone-100" />
+                  </label>
+                  <div className="flex justify-between text-xs"><span>Kembalian</span>
+                    <strong>{cashReceived !== null && cashReceived >= totalValue ? formatIDR(cashReceived - totalValue) : '—'}</strong></div>
+                  {cashReceived === null || cashReceived < totalValue ? <p className="text-xs text-red-700">Uang diterima harus sama atau lebih besar dari tagihan.</p> : null}
+                </div>
+              ) : (
+                <div className="space-y-3 rounded-xl border border-stone-200 p-3">
+                  {method === 'QRIS' && <div className="space-y-2 text-xs text-center">
+                    {activeConfig?.qris_terminal_name && <p className="font-semibold">{activeConfig.qris_terminal_name}</p>}
+                    {activeConfig?.qris_merchant_id && <p>Merchant ID: {activeConfig.qris_merchant_id}</p>}
+                    {activeQrisUrl && <img key={activeQrisUrl} src={activeQrisUrl} alt="QRIS resmi properti"
+                      onLoad={() => setQrisLoadedUrl(activeQrisUrl)}
+                      onError={() => {setQrisLoadedUrl(null); setQrisError('Gambar QRIS gagal ditampilkan. Muat ulang metode.');}}
+                      className="mx-auto max-w-full max-h-64 object-contain" />}
+                    {!qrisImageLoaded && <p className="text-amber-800">{qrisError || 'Menunggu gambar QRIS resmi…'}</p>}
+                  </div>}
+                  {method === 'TRANSFER' && <div className="space-y-1 text-xs">
+                    {activeConfig?.bank_name && <p className="font-semibold">{activeConfig.bank_name}</p>}
+                    <p className="font-mono text-lg font-bold">{activeConfig?.bank_account_number || 'Rekening belum tersedia'}</p>
+                    {activeConfig?.bank_account_name && <p>Atas nama: {activeConfig.bank_account_name}</p>}
+                    {activeConfig?.transfer_ref_note && <p className="whitespace-pre-wrap">{activeConfig.transfer_ref_note}</p>}
+                  </div>}
+                  {method === 'DEBIT' && <div className="text-xs"><p>Terminal EDC</p>
+                    <p className="font-semibold">{activeConfig?.debit_edc_terminal || 'Terminal belum tersedia'}</p></div>}
+                  <label className="block text-xs font-semibold text-stone-700">Referensi pembayaran (opsional)
+                    <input type="text" maxLength={100} value={reference} disabled={!editable || !canEditPos}
+                      onChange={e => {if (!pendingRef.current && !unresolvedRef.current) {setReference(e.target.value); setVerified(false);}}}
+                      className="mt-1 block w-full border border-stone-300 rounded-lg px-3 py-2 disabled:bg-stone-100" />
+                  </label>
+                  <label className="flex items-start gap-2 text-xs text-stone-700">
+                    <input type="checkbox" checked={verified} disabled={!editable || !canEditPos || (method === 'QRIS' && !qrisImageLoaded)}
+                      onChange={e => {if (!pendingRef.current && !unresolvedRef.current) setVerified(e.target.checked);}} />
+                    <span>Saya sudah memeriksa bahwa pembayaran {formatIDR(totalValue)} berhasil diterima pada
+                      {method === 'QRIS' ? ' merchant QRIS resmi.' : method === 'TRANSFER' ? ' rekening resmi.' : ' terminal EDC.'}</span>
+                  </label>
+                </div>
+              )}
+              {!contextValid && <p className="text-xs text-red-700">Pesanan belum dapat dibayar. Nominal harus lebih dari nol.</p>}
+            </div>
+          )}
+
           {/* Success state */}
           {phase === 'success' && result && (
             <div className="rounded-lg p-3 bg-emerald-50 border border-emerald-300 space-y-2">
@@ -721,18 +681,13 @@ export default function PosPayCashModal({
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                 </svg>
                 <span className="text-sm font-bold text-emerald-900">
-                  {result.replayed ? 'Pembayaran terkonfirmasi (replay)' : 'Pembayaran Lunas'}
+                  {result.replayed ? 'Pembayaran terkonfirmasi' : 'Pembayaran Lunas'}
                 </span>
               </div>
               {/* Bukti Pembayaran dari settlement respons */}
               <div>
                 <h4 className="text-xs font-bold text-emerald-900 mb-1.5">Bukti Pembayaran</h4>
                 <div className="text-[11px] text-emerald-800 space-y-0.5">
-                  <div>
-                    Settlement <span className="font-mono font-semibold">#{result.settlement.id}</span>
-                    {' · '}
-                    SALE <span className="font-mono font-semibold">#{result.sale.id}</span>
-                  </div>
                   <div>
                     No. Transaksi <span className="font-mono">{result.sale.transaction_no}</span>
                   </div>
@@ -741,6 +696,10 @@ export default function PosPayCashModal({
                     {' · '}
                     {result.settlement.payment_method}
                   </div>
+                  {result.settlement.cash_received !== null && <div>Uang diterima: {formatIDR(Number(result.settlement.cash_received))}
+                    {' · '}Kembalian: {formatIDR(Number(result.settlement.change_due))}</div>}
+                  {result.settlement.payment_reference && <div>Referensi: {result.settlement.payment_reference}</div>}
+                  {result.settlement.verified_by && <div>Diperiksa oleh: {result.settlement.verified_by}</div>}
                   {result.settlement.created_by && (
                     <div>Dicatat oleh: {result.settlement.created_by}</div>
                   )}
@@ -775,6 +734,15 @@ export default function PosPayCashModal({
 
         {/* Footer — tombol aksi */}
         <div className="shrink-0 px-4 py-3 bg-stone-50 border-t border-stone-200 flex items-center justify-end gap-2">
+          {phase === 'success' && result !== null && contextValid && receiptOrderIdRef.current === order.orderId && (
+            <button
+              type="button"
+              onClick={() => setReceiptOpen(true)}
+              className="px-4 py-2 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 transition-colors cursor-pointer"
+            >
+              Cetak Struk
+            </button>
+          )}
           <button
             type="button"
             onClick={handleRequestClose}
@@ -806,6 +774,15 @@ export default function PosPayCashModal({
           )}
         </div>
       </div>
+
+      {/* Thermal receipt modal — read-only, fetches authoritative receipt sendiri */}
+      <PosThermalReceiptModal
+        isOpen={receiptOpen}
+        onClose={() => setReceiptOpen(false)}
+        orderId={order.orderId}
+        propertyId={order.propertyId}
+        authFetch={authFetch}
+      />
     </div>
   );
 }

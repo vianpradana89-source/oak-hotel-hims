@@ -43,6 +43,7 @@ interface PosModalProps {
   roomNumberInitial?: string | null;
   /** Gate "Simpan Pesanan" — dari getPosAccess. */
   canEditPos?: boolean;
+  canDiscountPos?: boolean;
   /**
    * Tampilkan GuestPicker di mode POS header (tanpa reservation scoped).
    * Hanya bila `reservationId === null` dan ini `true`.
@@ -93,6 +94,7 @@ export default function PosModal({
   guestNameInitial,
   roomNumberInitial,
   canEditPos = true,
+  canDiscountPos = false,
   canPickGuest = false,
   onOrderCreated,
   onOpenCashPayment,
@@ -271,6 +273,7 @@ export default function PosModal({
             guestNameInitial={guestNameInitial}
             roomNumberInitial={roomNumberInitial}
             canEditPos={canEditPos}
+            canDiscountPos={canDiscountPos}
             canPickGuest={canPickGuest}
             onOrderCreated={onOrderCreated}
             onOpenCashPayment={onOpenCashPayment}

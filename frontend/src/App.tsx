@@ -4787,6 +4787,7 @@ function AppContent() {
           posModalReservationId != null ? `Reservasi #${posModalReservationId}` : undefined
         }
         canEditPos={posAccess.canEditPos}
+        canDiscountPos={posAccess.canDiscountPos}
         guestNameInitial={posModalGuestName}
         roomNumberInitial={posModalRoomNumber}
         onOrderCreated={(order) => {
