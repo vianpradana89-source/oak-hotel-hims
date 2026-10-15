@@ -192,6 +192,9 @@ async function cleanup() {
     ['users', 'DELETE FROM users WHERE id = $1', tracked.users],
     ['role_permissions', 'DELETE FROM role_permissions WHERE role_id = $1', tracked.roles],
     ['roles', 'DELETE FROM roles WHERE id = $1', tracked.roles],
+    // property_pricing_settings: FK ke properties.id — wajib dihapus sebelum properties
+    // (getPropertyPricingSettings auto-creates row saat handler POS dijalankan)
+    ['property_pricing_settings', 'DELETE FROM property_pricing_settings WHERE property_id = $1', tracked.properties],
     ['properties', 'DELETE FROM properties WHERE id = $1', tracked.properties],
   ];
   try {

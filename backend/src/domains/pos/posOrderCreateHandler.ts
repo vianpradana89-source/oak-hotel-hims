@@ -19,6 +19,7 @@ import crypto from 'crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { Request, Response } from 'express';
 import { computeRequestHash } from '../../utils/hash';
+import { getPropertyPricingSettings } from '../pricing/pricingService';
 
 // ── Simple helper (no external dependency) ─────────────────────────────────
 
@@ -112,6 +113,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       discount_type: orderDiscountTypeRaw,
       discount_value: orderDiscountValueRaw,
       discount_reason: orderDiscountReason,
+      tax_enabled: taxEnabledRaw,
+      service_charge_enabled: serviceChargeEnabledRaw,
       items,
     } = req.body;
 
@@ -235,6 +238,13 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       normalizedNotes = s || null;
     }
 
+    // ─── Validasi toggle tax / service charge (opsional, default false) ───
+    // Client hanya mengirim enabled flag. Rate selalu diambil dari
+    // property_pricing_settings di backend — client tidak mengirim rate.
+    // Nilai selain true/false → default false (fail-closed ke OFF).
+    const taxEnabled = taxEnabledRaw === true;
+    const serviceChargeEnabled = serviceChargeEnabledRaw === true;
+
     // Property scope: user token properti harus cocok (kecuali super admin platform).
     try {
       await deps.assertPropertyScope(req, propertyId);
@@ -299,6 +309,16 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
     }
 
     // Preserve the legacy fingerprint when no expansion metadata is supplied.
+    // Tax/service toggles are treated as expanded fields (they affect total_amount).
+    //
+    // CRITICAL: hasTaxServiceToggles menggunakan PRESENCE CHECK terhadap raw
+    // request fields (taxEnabledRaw / serviceChargeEnabledRaw), BUKAN nilai
+    // boolean hasil normalisasi. Alasannya:
+    //   - tax_enabled=false vs tax_enabled=true  → fingerprint BERBEDA
+    //   - request legacy tanpa field sama sekali → tetap backward-compatible
+    //     (fingerprint legacy tanpa field tax/service)
+    // Ini menjamin bahwa perubahan toggle menghasilkan fingerprint berbeda
+    // sehingga replay idempotent tidak akan salah-match.
     const legacyPayload = {
       property_id: propertyId,
       reservation_id: reservation_id ?? null,
@@ -310,8 +330,12 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         notes: it.notes ?? null
       }))
     };
+    // Presence check: field ada di body request (baik true maupun false).
+    const hasTaxServiceToggles = (taxEnabledRaw !== undefined && taxEnabledRaw !== null) ||
+      (serviceChargeEnabledRaw !== undefined && serviceChargeEnabledRaw !== null);
     const hasExpandedFields = normalizedGuestPhone !== null || normalizedNotes !== null ||
       orderDiscountType !== null || orderDiscountValue !== null || orderDiscountReasonNorm !== null ||
+      hasTaxServiceToggles ||
       items.some((it: any) => it.discount_type != null || it.discount_value != null);
     const expandedPayload = {
       property_id: propertyId,
@@ -323,6 +347,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       discount_type: orderDiscountType,
       discount_value: orderDiscountValue,
       discount_reason: orderDiscountReasonNorm,
+      tax_enabled: taxEnabled,
+      service_charge_enabled: serviceChargeEnabled,
       items: items.map((it: any) => ({
         menu_item_id: Number(it.menu_item_id),
         quantity: Number(it.quantity ?? 1),
@@ -380,6 +406,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
                   po.created_at, po.updated_at,
                   po.guest_phone, po.notes,
                   po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
+                  po.tax_enabled, po.tax_rate, po.tax_amount,
+                  po.service_charge_enabled, po.service_charge_rate, po.service_charge_amount,
                   po.request_fingerprint AS stored_fingerprint
            FROM pos_orders po
            WHERE po.property_id = $1 AND po.idempotency_key = $2
@@ -489,6 +517,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
                     po.created_at, po.updated_at,
                     po.guest_phone, po.notes,
                     po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
+                    po.tax_enabled, po.tax_rate, po.tax_amount,
+                    po.service_charge_enabled, po.service_charge_rate, po.service_charge_amount,
                     po.request_fingerprint AS stored_fingerprint
              FROM pos_orders po
              WHERE po.property_id = $1 AND po.idempotency_key = $2`,
@@ -579,6 +609,19 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       const posDateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const orderNumber = `POS-${posDateStr}-${crypto.randomUUID()}`;
 
+      // ── Ambil snapshot rate dari property_pricing_settings (di dalam transaksi) ──
+      // Rate dari property_pricing_settings adalah authoritative untuk order ini.
+      // Snapshot disimpan selamanya pada pos_orders — replay tidak recompute
+      // dari pricing settings current (yang bisa berubah).
+      //
+      // Gunakan canonical accessor getPropertyPricingSettings():
+      //  - auto-creates default row bila belum ada (tax_percent=10.00, service_charge_percent=0.00)
+      //  - POS tidak mendefinisikan fallback rate sendiri
+      //  - helper menerima PoolClient, aman di dalam transaksi
+      const pricingSettings = await getPropertyPricingSettings(client, propertyId);
+      const snapshotTaxRate = pricingSettings.tax_percent;
+      const snapshotServiceChargeRate = pricingSettings.service_charge_percent;
+
       let orderInsert: any;
       if (idempotencyKey) {
         // INSERT dengan ON CONFLICT untuk concurrent dedup:
@@ -588,16 +631,22 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
               idempotency_key, request_fingerprint,
               guest_phone, notes,
-              discount_type, discount_value, discount_reason, discount_amount)
+              discount_type, discount_value, discount_reason, discount_amount,
+              tax_enabled, tax_rate, tax_amount,
+              service_charge_enabled, service_charge_rate, service_charge_amount)
            VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8,
-                  $9, $10, $11, $12, $13, 0)
+                  $9, $10, $11, $12, $13, 0,
+                  $14, $15, 0,
+                  $16, $17, 0)
             ON CONFLICT (property_id, idempotency_key) WHERE idempotency_key IS NOT NULL
             DO NOTHING
             RETURNING *`,
           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
             guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint,
             normalizedGuestPhone, normalizedNotes,
-            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
+            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm,
+            taxEnabled, snapshotTaxRate,
+            serviceChargeEnabled, snapshotServiceChargeRate]
         );
         if ((orderInsert.rowCount ?? 0) === 0) {
           // ─── Step 7: Winner lookup (plain SELECT, TANPA FOR UPDATE) ───
@@ -610,6 +659,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
                     po.created_at, po.updated_at,
                     po.guest_phone, po.notes,
                     po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
+                    po.tax_enabled, po.tax_rate, po.tax_amount,
+                    po.service_charge_enabled, po.service_charge_rate, po.service_charge_amount,
                     po.request_fingerprint AS stored_fingerprint
              FROM pos_orders po
              WHERE po.property_id = $1 AND po.idempotency_key = $2`,
@@ -652,14 +703,20 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
               idempotency_key, request_fingerprint,
               guest_phone, notes,
-              discount_type, discount_value, discount_reason, discount_amount)
+              discount_type, discount_value, discount_reason, discount_amount,
+              tax_enabled, tax_rate, tax_amount,
+              service_charge_enabled, service_charge_rate, service_charge_amount)
            VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7,
-                  $8, $9, $10, $11, $12, 0)
-           RETURNING *`,
-          [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
-            guest_name || 'Guest', orderStatus, fingerprint,
-            normalizedGuestPhone, normalizedNotes,
-            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
+                  $8, $9, $10, $11, $12, 0,
+                  $13, $14, 0,
+                  $15, $16, 0)
+            RETURNING *`,
+           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
+             guest_name || 'Guest', orderStatus, fingerprint,
+             normalizedGuestPhone, normalizedNotes,
+             orderDiscountType, orderDiscountValue, orderDiscountReasonNorm,
+             taxEnabled, snapshotTaxRate,
+             serviceChargeEnabled, snapshotServiceChargeRate]
         );
       }
 
@@ -760,16 +817,49 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         orderDiscountAmount = Math.round(orderSubtotalAfterItemDiscounts * raw / 100);
       }
       orderDiscountAmount = Math.round(orderDiscountAmount);
-      const finalTotal = orderSubtotalAfterItemDiscounts - orderDiscountAmount;
+      const netAfterDiscount = orderSubtotalAfterItemDiscounts - orderDiscountAmount;
+
+      // ── Service charge & tax canonical calculation ─────────────────────
+      // Urutan: service charge → tax atas (net + service charge)
+      // Rate dari snapshot property_pricing_settings (di atas), bukan live.
+      // Whole-rupiah: semua hasil Math.round ke integer.
+      let serviceChargeAmount = 0;
+      let taxAmount = 0;
+
+      if (serviceChargeEnabled) {
+        serviceChargeAmount = Math.round(netAfterDiscount * snapshotServiceChargeRate / 100);
+        if (!Number.isSafeInteger(serviceChargeAmount) || serviceChargeAmount < 0) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ status: 'ERROR', code: 'INVALID_ORDER_AMOUNT', message: 'Service charge calculation overflow' });
+        }
+      }
+
+      const taxBase = netAfterDiscount + serviceChargeAmount;
+
+      if (taxEnabled) {
+        taxAmount = Math.round(taxBase * snapshotTaxRate / 100);
+        if (!Number.isSafeInteger(taxAmount) || taxAmount < 0) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ status: 'ERROR', code: 'INVALID_ORDER_AMOUNT', message: 'Tax calculation overflow' });
+        }
+      }
+
+      const finalTotal = netAfterDiscount + serviceChargeAmount + taxAmount;
+      if (!Number.isSafeInteger(finalTotal) || finalTotal < 0) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ status: 'ERROR', code: 'INVALID_ORDER_AMOUNT', message: 'Order final total exceeds the supported range' });
+      }
 
       const updatedOrder = await client.query(
         `UPDATE pos_orders
          SET total_amount = $1,
              discount_amount = $2,
+             tax_amount = $3,
+             service_charge_amount = $4,
              updated_at = NOW()
-         WHERE id = $3
+         WHERE id = $5
          RETURNING *`,
-        [finalTotal, orderDiscountAmount, orderId]
+        [finalTotal, orderDiscountAmount, taxAmount, serviceChargeAmount, orderId]
       );
 
       // Status OPEN → TIDAK ada projection transaksi. Tidak perlu guard status.
@@ -806,6 +896,48 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
             'ORDER_DISCOUNT_APPLIED',
             String(orderId),
             JSON.stringify(discountAuditPayload),
+            propertyId,
+            String(actorId || null),
+            null,
+          ]
+        );
+      }
+
+      // ── Audit log tax/service charge (hanya jika ada yang diterapkan) ──
+      if (serviceChargeAmount > 0 || taxAmount > 0) {
+        const actorId = Number((req as any).user?.id) || null;
+        const actorName = String((req as any).user?.username || (req as any).user?.full_name || null);
+        const taxServiceAuditPayload: Record<string, any> = {
+          property_id: propertyId,
+          pos_order_id: orderId,
+          order_number: orderNumber,
+          service_charge: serviceChargeAmount > 0 ? {
+            enabled: serviceChargeEnabled,
+            rate: snapshotServiceChargeRate,
+            basis: 'net_after_discount',
+            basis_amount: netAfterDiscount,
+            amount: serviceChargeAmount,
+          } : null,
+          tax: taxAmount > 0 ? {
+            enabled: taxEnabled,
+            rate: snapshotTaxRate,
+            basis: 'net_after_discount_plus_service_charge',
+            basis_amount: netAfterDiscount + serviceChargeAmount,
+            amount: taxAmount,
+          } : null,
+          total_amount: finalTotal,
+          actor_user_id: actorId,
+          actor_name: actorName,
+        };
+        await client.query(
+          `INSERT INTO audit_logs (
+             module, action, entity, record_id, new_value,
+             property_id, actor_user_id, correlation_id
+           ) VALUES ('POS', $1, 'pos_orders', $2, $3, $4, $5, $6)`,
+          [
+            'ORDER_TAX_SERVICE_APPLIED',
+            String(orderId),
+            JSON.stringify(taxServiceAuditPayload),
             propertyId,
             String(actorId || null),
             null,

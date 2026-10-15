@@ -132,6 +132,8 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
                 status, total_amount,
                 notes,
                 discount_type, discount_value, discount_reason, discount_amount,
+                tax_enabled, tax_rate, tax_amount,
+                service_charge_enabled, service_charge_rate, service_charge_amount,
                 created_at, updated_at
          FROM pos_orders
          WHERE id = $1 AND property_id = $2`,
@@ -379,6 +381,12 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
           discount_value: order.discount_value !== null ? String(order.discount_value) : null,
           discount_reason: String(order.discount_reason ?? '') || null,
           discount_amount: String(order.discount_amount ?? '0'),
+          tax_enabled: Boolean(order.tax_enabled ?? false),
+          tax_rate: order.tax_rate !== null ? String(order.tax_rate) : '0',
+          tax_amount: String(order.tax_amount ?? '0'),
+          service_charge_enabled: Boolean(order.service_charge_enabled ?? false),
+          service_charge_rate: order.service_charge_rate !== null ? String(order.service_charge_rate) : '0',
+          service_charge_amount: String(order.service_charge_amount ?? '0'),
           created_at: order.created_at ? String(order.created_at) : null,
           updated_at: order.updated_at ? String(order.updated_at) : null,
         },

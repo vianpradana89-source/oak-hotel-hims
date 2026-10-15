@@ -857,6 +857,35 @@ export async function projectPosOrderToTransaction(
   };
   const storedTotal = snapshotMoney(order.total_amount, 'total_amount');
   const storedOrderDiscount = snapshotMoney(order.discount_amount ?? 0, 'discount_amount');
+  // Phase 2A: total_amount now includes tax + service charge.
+  // These columns have NOT NULL DEFAULT 0, so legacy rows (before migration)
+  // will have tax_amount=0 and service_charge_amount=0.
+  // tax_amount / service_charge_amount are NUMERIC(12,2) — use a lighter validator
+  // that allows decimal rupiah values (e.g. 5000.00) from pg.
+  const snapNum = (v: unknown, f: string): number => {
+    const n = Number(v);
+    if (v == null || (typeof v === 'string' && v.trim() === '') ||
+        !Number.isFinite(n) || n < 0) {
+      const err: any = new Error(
+        `POS Order #${orderId}: snapshot ${f} tidak valid (${String(v)})`
+      );
+      err.statusCode = 422;
+      err.code = 'POS_ITEM_SNAPSHOT_INVALID';
+      throw err;
+    }
+    return n;
+  };
+  const storedTaxAmount = snapNum(order.tax_amount ?? 0, 'tax_amount');
+  const storedServiceAmount = snapNum(order.service_charge_amount ?? 0, 'service_charge_amount');
+  // Total that should be compared to item snapshot:
+  // - Legacy (tax/service not applied): total_amount = net (gross - allDiscounts)
+  // - Phase 2A (tax/service applied): total_amount = net + tax + service
+  // Effective net (for snapshot check) = total_amount - tax - service
+  const effectiveTotalForSnapshotCheck = storedTotal - storedTaxAmount - storedServiceAmount;
+  // The amount to store as net_amount in transactions:
+  // Must equal pos_orders.total_amount (which is the authoritative total)
+  // to maintain the invariant: total_amount === settlement.amount === transactions.net_amount
+  const transactionNetAmount = storedTotal;
 
   let gross: number;
   let totalDiscount: number;
@@ -907,11 +936,12 @@ export async function projectPosOrderToTransaction(
       err.code = 'POS_ITEM_SNAPSHOT_INVALID';
       throw err;
     }
-    // Konsistensi: total_amount tersimpan harus sama dengan net
-    if (storedTotal !== net) {
+    // Konsistensi: effective total (total_amount - tax - service) harus sama dengan net
+    if (effectiveTotalForSnapshotCheck !== net) {
       const err: any = new Error(
-        `POS Order #${orderId}: pos_orders.total_amount (${storedTotal}) tidak konsisten ` +
-        `dengan snapshot item (gross=${gross}, discount=${totalDiscount}, net=${net})`
+        `POS Order #${orderId}: pos_orders.total_amount (${storedTotal}) minus tax (${storedTaxAmount}) ` +
+        `minus service (${storedServiceAmount}) tidak konsisten dengan snapshot item ` +
+        `(gross=${gross}, discount=${totalDiscount}, net=${net})`
       );
       err.statusCode = 422;
       err.code = 'POS_SNAPSHOT_MISMATCH';
@@ -956,20 +986,24 @@ export async function projectPosOrderToTransaction(
       `UPDATE transactions SET
          amount = $1,
          discount_amount = $2,
-         net_amount = $3,
-         description = $4,
-         payment_status = $5,
-         payment_method = $6,
-         party_name = COALESCE($7, party_name),
-         guest_name_snapshot = COALESCE($7, guest_name_snapshot),
-         room_number_snapshot = COALESCE($8, room_number_snapshot),
+         tax_amount = $3,
+         service_amount = $4,
+         net_amount = $5,
+         description = $6,
+         payment_status = $7,
+         payment_method = $8,
+         party_name = COALESCE($9, party_name),
+         guest_name_snapshot = COALESCE($9, guest_name_snapshot),
+         room_number_snapshot = COALESCE($10, room_number_snapshot),
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $9
+       WHERE id = $11
        RETURNING *`,
       [
         gross,
         totalDiscount,
-        net,
+        storedTaxAmount,
+        storedServiceAmount,
+        transactionNetAmount,
         description,
         'PAID',
         paymentMethod,
@@ -997,17 +1031,19 @@ export async function projectPosOrderToTransaction(
       $1, $2, $3, CURRENT_TIMESTAMP,
       'SALE', 'POS_ORDER', $4, $5,
       'FNB_SALES', 'Restoran / F&B / POS', 'FNB', $6,
-      $7, $8, 0, 0, $9,
-      'PAID', $10, 'POSTED',
-      $11, $12, $13,
-      $14, $15, null, null, $16,
-      $17, $18
+      $7, $8, $9, $10, $11,
+      'PAID', $12, 'POSTED',
+      $13, $14, $15,
+      $16, $17, null, null, $18,
+      $19, $20
     )
     ON CONFLICT (property_id, source_type, source_id)
     WHERE source_id IS NOT NULL AND reversal_of_transaction_id IS NULL
     DO UPDATE SET
       amount = EXCLUDED.amount,
       discount_amount = EXCLUDED.discount_amount,
+      tax_amount = EXCLUDED.tax_amount,
+      service_amount = EXCLUDED.service_amount,
       net_amount = EXCLUDED.net_amount,
       description = EXCLUDED.description,
       payment_status = EXCLUDED.payment_status,
@@ -1024,7 +1060,9 @@ export async function projectPosOrderToTransaction(
       description,
       gross,
       totalDiscount,
-      net,
+      storedServiceAmount,
+      storedTaxAmount,
+      transactionNetAmount,
       paymentMethod,
       order.canonical_guest_id || null,
       guestName,
