@@ -43,7 +43,8 @@ function response(snap, status = 201) {
       request_fingerprint: 'fp', created_by: 'cashier', cash_received: snap.cashReceived,
       change_due: snap.paymentMethod === 'CASH' ? (Number(snap.cashReceived) - 54900).toFixed(2) : null,
       payment_reference: snap.paymentReference, verified_by: snap.paymentMethod === 'CASH' ? null : 'cashier',
-      verified_at: snap.paymentMethod === 'CASH' ? null : '2026-10-14T08:00:00.000Z'},
+      verified_at: snap.paymentMethod === 'CASH' ? null : '2026-10-14T08:00:00.000Z',
+      created_at: '2026-10-15T10:30:00.000Z'},
     sale: {id: '9007199254740993123', transaction_no: 'POS-7', payment_status: 'PAID',
       payment_method: snap.paymentMethod, source_type: 'POS_ORDER', source_id: '9'}}};
 }
@@ -117,6 +118,54 @@ for (const [name, mutate] of [
 ]) check('Non-CASH response: ' + name, () => {
   const snap = make('QRIS'), r = response(snap); mutate(r); assert.equal(C.validatePayResponse(201, r, snap), false);
 });
+// ── created_at fail-closed validation ──────────────────────────────────────
+check('valid created_at accepted for CASH', () => {
+  const snap = make('CASH'), r = response(snap);
+  assert.equal(r.data.settlement.created_at, '2026-10-15T10:30:00.000Z');
+  assert.equal(C.validatePayResponse(201, r, snap), true);
+});
+check('valid created_at accepted for non-CASH', () => {
+  const snap = make('QRIS'), r = response(snap);
+  assert.equal(C.validatePayResponse(201, r, snap), true);
+});
+check('missing created_at rejected', () => {
+  const snap = make('CASH'), r = response(snap);
+  delete r.data.settlement.created_at;
+  assert.equal(C.validatePayResponse(201, r, snap), false);
+});
+check('null created_at rejected', () => {
+  const snap = make('CASH'), r = response(snap);
+  r.data.settlement.created_at = null;
+  assert.equal(C.validatePayResponse(201, r, snap), false);
+});
+check('invalid created_at rejected', () => {
+  const snap = make('CASH'), r = response(snap);
+  r.data.settlement.created_at = 'not-a-date';
+  assert.equal(C.validatePayResponse(201, r, snap), false);
+});
+check('empty string created_at rejected', () => {
+  const snap = make('CASH'), r = response(snap);
+  r.data.settlement.created_at = '';
+  assert.equal(C.validatePayResponse(201, r, snap), false);
+});
+check('replay with valid created_at still valid', () => {
+  const snap = make('QRIS'), r = response(snap, 200);
+  assert.equal(r.data.settlement.created_at, '2026-10-15T10:30:00.000Z');
+  assert.equal(C.validatePayResponse(200, r, snap), true);
+});
+check('CASH success uses created_at as payment time source', () => {
+  const snap = make('CASH'), r = response(snap);
+  // CASH: verified_at is null, created_at is valid → created_at wins
+  assert.equal(r.data.settlement.verified_at, null);
+  assert.equal(typeof r.data.settlement.created_at, 'string');
+  assert.ok(Number.isFinite(Date.parse(r.data.settlement.created_at)));
+});
+check('non-CASH success prefers verified_at over created_at', () => {
+  const snap = make('TRANSFER'), r = response(snap);
+  assert.equal(typeof r.data.settlement.verified_at, 'string');
+  assert.equal(typeof r.data.settlement.created_at, 'string');
+  assert.notEqual(r.data.settlement.verified_at, r.data.settlement.created_at);
+});
 
 function harness(authFetch, overrides = {}) {
   const slots = []; let cursor = 0, queued = [], tree, props;
@@ -173,12 +222,12 @@ async function lifecycle() {
     t = transport(async (_url, init) => serverResponse(init)); h = harness(t.fetch); await h.settle();
     if (method === 'CASH') h.input('text', '60000'); else {
       h.click(method === 'TRANSFER' ? 'Transfer' : method === 'DEBIT' ? 'Debit' : method);
-      if (method === 'QRIS') {assert.equal(h.button('Konfirmasi Pembayaran').props.disabled, true);
+      if (method === 'QRIS') {assert.equal(h.button('Bayar Sekarang').props.disabled, true);
         const image = h.nodes().find(n => n.type === 'img'); assert.ok(image); image.props.onLoad(); h.render();}
-      assert.equal(h.button('Konfirmasi Pembayaran').props.disabled, true);
+      assert.equal(h.button('Bayar Sekarang').props.disabled, true);
       h.input('checkbox', true);
     }
-    h.click('Konfirmasi Pembayaran'); await h.settle();
+    h.click('Bayar Sekarang'); await h.settle();
     check('Component ' + method + ': correct POST, verified success callback and close', () => {
       assert.equal(t.requests.length, 1); assert.equal(JSON.parse(t.requests[0].init.body).payment_method, method);
       assert.equal(h.signals.paid.length, 1); assert.equal(h.signals.paid[0].settlement.payment_method, method);
@@ -187,7 +236,7 @@ async function lifecycle() {
   }
   let release;
   t = transport((_url, init) => new Promise(resolve => {release = () => resolve(serverResponse(init));})); h = harness(t.fetch); await h.settle();
-  h.input('text', '60000'); const confirm = h.button('Konfirmasi Pembayaran'); confirm.props.onClick(); confirm.props.onClick(); h.render();
+  h.input('text', '60000'); const confirm = h.button('Bayar Sekarang'); confirm.props.onClick(); confirm.props.onClick(); h.render();
   check('Component double click creates one request and pending blocks close', () => {
     assert.equal(t.requests.length, 1); assert.equal(h.button('Batal').props.disabled, true);
     h.button('Batal').props.onClick(); assert.equal(h.signals.closes, 0);
@@ -195,10 +244,10 @@ async function lifecycle() {
   let attempt = 0;
   t = transport(async (_url, init) => {if (++attempt === 1) throw new Error('network'); return serverResponse(init, 200);});
   h = harness(t.fetch); await h.settle(); h.click('Transfer'); h.input('text', 'REF-7'); h.input('checkbox', true);
-  h.click('Konfirmasi Pembayaran'); await h.settle();
+  h.click('Bayar Sekarang'); await h.settle();
   check('Component network failure locks method/reference/close, not paid', () => {
     assert.equal(h.signals.paid.length, 0); assert.equal(h.signals.unresolved.at(-1), true);
-    assert.equal(h.button('CASH').props.disabled, true); assert.equal(h.button('Batal').props.disabled, true);
+    assert.equal(h.button('Tunai').props.disabled, true); assert.equal(h.button('Batal').props.disabled, true);
     h.button('Batal').props.onClick(); assert.equal(h.signals.closes, 0);
   }); h.click('Coba Lagi'); await h.settle();
   check('Component retry uses byte-identical body/key/path and validates replay', () => {
@@ -217,7 +266,7 @@ async function lifecycle() {
         throw new Error('timeout');
       }
       return kind === 'retry-already-paid' ? json({code:'ALREADY_PAID'},409) : json({code:'FORBIDDEN'},403);
-    }); h = harness(t.fetch); await h.settle(); h.click('Konfirmasi Pembayaran'); await h.settle();
+    }); h = harness(t.fetch); await h.settle(); h.click('Bayar Sekarang'); await h.settle();
     if (kind === 'context-change') h.changeOrder({orderId: 10, propertyId: 7, orderNumber: 'POS-10', totalAmount: '54900.00'});
     h.click('Coba Lagi'); await h.settle();
     check('Component ' + kind + ' preserves unresolved and never claims paid', () => {
@@ -231,17 +280,17 @@ async function lifecycle() {
   }
   attempt = 0;
   t = transport(async (_url, init) => ++attempt === 1 ? json({code: 'CASH_RECEIVED_INSUFFICIENT'},422) : serverResponse(init));
-  h = harness(t.fetch); await h.settle(); h.input('text','60000'); h.click('Konfirmasi Pembayaran'); await h.settle();
+  h = harness(t.fetch); await h.settle(); h.input('text','60000'); h.click('Bayar Sekarang'); await h.settle();
   check('Component definitive rejection permits editing and releases unresolved', () => {
     assert.equal(h.signals.paid.length, 0); assert.equal(h.signals.unresolved.at(-1), false);
     assert.equal(h.button('Batal').props.disabled, false);
-  }); h.input('text','60000'); h.click('Konfirmasi Pembayaran'); await h.settle();
+  }); h.input('text','60000'); h.click('Bayar Sekarang'); await h.settle();
   check('Component corrected fresh request has a new key and valid success', () => {
     assert.notEqual(t.requests[1].init.headers['Idempotency-Key'], t.requests[0].init.headers['Idempotency-Key']);
     assert.equal(h.signals.paid.length, 1);
   }); h.cleanup();
   t = transport(async (_url, init) => serverResponse(init));
-  h = harness(t.fetch, {onPaid() {throw new Error('consumer failure');}}); await h.settle(); h.click('Konfirmasi Pembayaran'); await h.settle();
+  h = harness(t.fetch, {onPaid() {throw new Error('consumer failure');}}); await h.settle(); h.click('Bayar Sekarang'); await h.settle();
   check('Component callback failure leaves payment successful, refresh and close usable', () => {
     assert.equal(h.signals.unresolved.at(-1), false); assert.equal(h.signals.refreshes, 1);
     h.click('Tutup'); assert.equal(h.signals.closes, 1);
@@ -249,10 +298,87 @@ async function lifecycle() {
   h = harness(async () => {throw new Error('config unavailable');}); await h.settle();
   check('Component config unavailable disables non-CASH and keeps CASH available', () => {
     assert.equal(h.button('Transfer').props.disabled, true); assert.equal(h.button('QRIS').props.disabled, true);
-    assert.equal(h.button('Konfirmasi Pembayaran').props.disabled, false);
+    assert.equal(h.button('Bayar Sekarang').props.disabled, false);
   }); h.cleanup();
   h = harness(t.fetch, {canEditPos: false}); await h.settle();
-  check('Component POS View without edit cannot submit', () => assert.equal(h.button('Konfirmasi Pembayaran').props.disabled,true)); h.cleanup();
+  check('Component POS View without edit cannot submit', () => assert.equal(h.button('Bayar Sekarang').props.disabled,true)); h.cleanup();
+
+  // ── Uang Pas test ──────────────────────────────────────────────────────────
+  t = transport(async (_url, init) => serverResponse(init));
+  h = harness(t.fetch); await h.settle();
+  h.input('text', '60000');
+  const uangPasBtn = h.nodes().find(n => n.type === 'button' && (n.props.children === 'Uang Pas' ||
+    Array.isArray(n.props.children) && n.props.children.join('') === 'Uang Pas'));
+  assert.ok(uangPasBtn, 'Uang Pas button must exist in CASH panel');
+  // Click Uang Pas: sets cashInput to totalValue (54900), no payment request
+  uangPasBtn.props.onClick(); h.render();
+  check('Uang Pas button exists in CASH panel', () => {
+    assert.equal(uangPasBtn.props.disabled, false);
+  });
+  check('Click Uang Pas sets cash input to exact total, no payment request', () => {
+    assert.equal(t.requests.length, 0);
+    // Verify cashInput was set to String(totalValue) = '54900'
+    const input = h.nodes().find(n => n.type === 'input' && n.props.type === 'text');
+    assert.equal(input.props.value, '54900');
+  });
+  // Now proceed to success
+  h.click('Bayar Sekarang'); await h.settle();
+  check('CASH success state: no method buttons, no payment input, no checkbox, no Bayar Sekarang/Batal; only Cetak Struk + Tutup', () => {
+    const allText = JSON.stringify(h.nodes());
+    // No method buttons
+    for (const m of ['Tunai', 'QRIS', 'Transfer', 'Debit']) {
+      const btn = h.nodes().find(n => n.type === 'button' && (n.props.children === m || (Array.isArray(n.props.children) && n.props.children.join('') === m)));
+      assert.equal(btn, undefined, 'Method button ' + m + ' should not exist in success state');
+    }
+    // No payment text input
+    const textInput = h.nodes().find(n => n.type === 'input' && n.props.type === 'text');
+    assert.equal(textInput, undefined, 'Payment text input should not exist in success state');
+    // No checkbox
+    const checkbox = h.nodes().find(n => n.type === 'input' && n.props.type === 'checkbox');
+    assert.equal(checkbox, undefined, 'Checkbox should not exist in success state');
+    // No "Bayar Sekarang" or "Batal" buttons
+    for (const label of ['Bayar Sekarang', 'Batal']) {
+      const btn = h.nodes().find(n => n.type === 'button' && n.props.children === label);
+      assert.equal(btn, undefined, 'Button ' + label + ' should not exist in success state');
+    }
+    // Cetak Struk present
+    const strukBtn = h.nodes().find(n => n.type === 'button' && n.props.children === 'Cetak Struk');
+    assert.ok(strukBtn, 'Cetak Struk button must exist in success footer');
+    // Tutup present
+    const tutupBtn = h.nodes().find(n => n.type === 'button' && n.props.children === 'Tutup');
+    assert.ok(tutupBtn, 'Tutup button must exist in success footer');
+  });
+  h.cleanup();
+
+  // ── Non-CASH success state test (QRIS) ─────────────────────────────────────
+  t = transport(async (_url, init) => serverResponse(init));
+  h = harness(t.fetch); await h.settle();
+  h.click('QRIS');
+  const img = h.nodes().find(n => n.type === 'img');
+  if (img) { img.props.onLoad(); h.render(); }
+  h.input('checkbox', true);
+  h.click('Bayar Sekarang'); await h.settle();
+  check('Non-CASH (QRIS) success state: no method buttons, no payment input, no checkbox; shows Ref/Diverifikasi bila ada', () => {
+    for (const m of ['Tunai', 'QRIS', 'Transfer', 'Debit']) {
+      const btn = h.nodes().find(n => n.type === 'button' && (n.props.children === m || (Array.isArray(n.props.children) && n.props.children.join('') === m)));
+      assert.equal(btn, undefined, 'Method button ' + m + ' should not exist in success state');
+    }
+    const textInput = h.nodes().find(n => n.type === 'input' && n.props.type === 'text');
+    assert.equal(textInput, undefined, 'Payment text input should not exist in success state');
+    const checkbox = h.nodes().find(n => n.type === 'input' && n.props.type === 'checkbox');
+    assert.equal(checkbox, undefined, 'Checkbox should not exist in success state');
+    // Cetak Struk + Tutup present
+    const strukBtn = h.nodes().find(n => n.type === 'button' && n.props.children === 'Cetak Struk');
+    assert.ok(strukBtn, 'Cetak Struk button must exist in success footer');
+    const tutupBtn = h.nodes().find(n => n.type === 'button' && n.props.children === 'Tutup');
+    assert.ok(tutupBtn, 'Tutup button must exist in success footer');
+    // No "Bayar Sekarang" or "Batal"
+    for (const label of ['Bayar Sekarang', 'Batal']) {
+      const btn = h.nodes().find(n => n.type === 'button' && n.props.children === label);
+      assert.equal(btn, undefined, 'Button ' + label + ' should not exist in success state');
+    }
+  });
+  h.cleanup();
 }
 (async () => {
   if (!contractOnly) await lifecycle();

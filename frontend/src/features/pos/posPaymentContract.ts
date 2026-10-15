@@ -31,6 +31,7 @@ export interface SettlementRecord {
   payment_reference: string | null;
   verified_by: string | null;
   verified_at: string | null;
+  created_at: string | null;
 }
 export interface SaleRecord {
   id: string;
@@ -132,6 +133,7 @@ export function validatePayResponse(httpStatus: number, json: PayResponseShape |
   if (sale.id !== s.transaction_id || sale.source_type !== 'POS_ORDER' || sale.source_id !== String(snap.orderId)) return false;
   if (sale.payment_status !== 'PAID' || sale.payment_method !== snap.paymentMethod || !text(sale.transaction_no)) return false;
   if (s.created_by !== null && !text(s.created_by)) return false;
+  if (typeof s.created_at !== 'string' || s.created_at === '' || !Number.isFinite(Date.parse(s.created_at))) return false;
   if (snap.paymentMethod === 'CASH') {
     const tendered = cents(s.cash_received), requested = cents(snap.cashReceived), change = cents(s.change_due);
     if (tendered === null || requested === null || change === null || tendered !== requested || change !== tendered - amount) return false;

@@ -57,6 +57,42 @@ function formatIDR(amount: number): string {
 }
 
 /**
+ * Short display order reference untuk header modal.
+ * Canonical: POS-YYYYMMDD-...
+ * Display: POS-YYMMDD-<orderId padded 4>
+ * Fallback ke orderNumber asli bila pattern/orderId invalid.
+ */
+function shortOrderDisplay(orderNumber: string, orderId: number): string {
+  const m = /^POS-(\d{8})-(.+)$/.exec(orderNumber);
+  if (!m || !Number.isInteger(orderId) || orderId <= 0) return orderNumber;
+  const date = m[1];
+  const yy = date.slice(2, 4);
+  const mm = date.slice(4, 6);
+  const dd = date.slice(6, 8);
+  return `POS-${yy}${mm}${dd}-${String(orderId).padStart(4, '0')}`;
+}
+
+const GUEST_PLACEHOLDERS = new Set(['guest', 'walk-in guest', 'walk in guest']);
+const ROOM_PLACEHOLDERS = new Set(['walk in', 'walk-in', 'walk in guest', 'walk-in guest']);
+
+function isMeaningfulGuest(g: string | null | undefined): g is string {
+  if (!g || !g.trim()) return false;
+  return !GUEST_PLACEHOLDERS.has(g.trim().toLowerCase());
+}
+
+function isMeaningfulRoom(r: string | null | undefined): r is string {
+  if (!r || !r.trim()) return false;
+  return !ROOM_PLACEHOLDERS.has(r.trim().toLowerCase());
+}
+
+const METHOD_LABELS: Record<PosPaymentMethod, string> = {
+  CASH: 'Tunai',
+  QRIS: 'QRIS',
+  TRANSFER: 'Transfer',
+  DEBIT: 'Debit',
+};
+
+/**
  * Generate UUID v4 untuk Idempotency-Key pembayaran.
  * Terpisah dari key create-order — setiap pengajuan pembayaran punya key sendiri.
  */
@@ -545,12 +581,12 @@ export default function PosPayCashModal({
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-stone-50 border-b border-stone-200">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase">
-              Bayar
-            </span>
             <h3 className="text-sm font-black text-stone-900 truncate">
-              {order.orderNumber}
+              Detail Pembayaran
             </h3>
+            <span className="font-mono text-xs font-semibold text-stone-600 truncate">
+              {shortOrderDisplay(order.orderNumber, order.orderId)}
+            </span>
           </div>
           <button
             type="button"
@@ -573,68 +609,64 @@ export default function PosPayCashModal({
 
         {/* Body — detail konfirmasi */}
         <div className="p-4 space-y-3">
-          <div className="space-y-1.5 text-xs">
-            {/* Nomor order */}
+          <div className="rounded-lg bg-stone-50 border border-stone-200 p-3 space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-stone-500">Nomor Order</span>
-              <span className="font-mono font-semibold text-stone-900">
-                {order.orderNumber}
+              <span className="text-[11px] font-semibold tracking-wider text-stone-500 uppercase">
+                Total Tagihan
               </span>
-            </div>
-
-            {/* Tamu / Kamar (bila ada) */}
-            {(order.guestName || order.roomNumber) && (
-              <div className="flex items-center justify-between">
-                <span className="text-stone-500">Tamu / Kamar</span>
-                <span className="font-medium text-stone-900">
-                  {order.guestName || '—'}
-                  {order.roomNumber ? ` · Kamar ${order.roomNumber}` : ''}
-                </span>
-              </div>
-            )}
-
-            {/* Metode */}
-            <div className="flex items-center justify-between">
-              <span className="text-stone-500">Metode</span>
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                {result?.settlement.payment_method || snapshotRef.current?.paymentMethod || method}
-              </span>
-            </div>
-
-            {/* Nominal — readonly */}
-            <div className="flex items-center justify-between border-t border-stone-100 pt-2">
-              <span className="text-stone-500 font-medium">Nominal</span>
-              <span className="text-sm font-black text-stone-900">
+              <span className="text-lg font-black text-stone-900">
                 {formatIDR(totalValue)}
               </span>
             </div>
+            {(() => {
+              const g = isMeaningfulGuest(order.guestName);
+              const r = isMeaningfulRoom(order.roomNumber);
+              if (!g && !r) return null;
+              return (
+                <p className="text-[11px] text-stone-500">
+                  {[g, r ? `Kamar ${r}` : null].filter(Boolean).join(' · ')}
+                </p>
+              );
+            })()}
           </div>
 
           {phase !== 'success' && (
             <div className="space-y-3">
-              <div className="grid grid-cols-4 gap-2" role="group" aria-label="Metode pembayaran">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2" role="group" aria-label="Metode pembayaran">
                 {POS_PAYMENT_METHODS.map((choice) => (
                   <button key={choice} type="button" aria-pressed={method === choice}
                     disabled={!editable || !canEditPos || !isMethodAvailable(choice, activeConfig)}
                     onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setMethod(choice); setVerified(false); setFailMessage(null);}}
                     className={`px-2 py-2 text-xs font-bold rounded-lg border disabled:opacity-40 disabled:cursor-not-allowed ${method === choice ? 'bg-emerald-100 border-emerald-500 text-emerald-900' : 'border-stone-200 text-stone-700'}`}>
-                    {choice === 'TRANSFER' ? 'Transfer' : choice === 'DEBIT' ? 'Debit' : choice}
+                    {METHOD_LABELS[choice]}
                   </button>
                 ))}
               </div>
               {configLoading && <p className="text-xs text-stone-500">Memuat metode pembayaran…</p>}
-              {configError && <p role="alert" className="text-xs text-amber-800">{configError} CASH tetap tersedia.</p>}
+              {configError && <p role="alert" className="text-xs text-amber-800">{configError} Tunai tetap tersedia.</p>}
               {editable && <button type="button" disabled={configLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
                 className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40">Muat ulang metode</button>}
               {method === 'CASH' ? (
                 <div className="space-y-2">
-                  <label className="block text-xs font-semibold text-stone-700">Uang diterima (Rp)
+                  <label className="block text-xs font-semibold text-stone-700">Jumlah Uang Diterima (Rp)
                     <input type="text" inputMode="decimal" value={cashInput} disabled={!editable || !canEditPos}
                       onChange={e => {if (!pendingRef.current && !unresolvedRef.current) setCashInput(e.target.value);}}
                       className="mt-1 block w-full border border-stone-300 rounded-lg px-3 py-2 text-sm disabled:bg-stone-100" />
                   </label>
-                  <div className="flex justify-between text-xs"><span>Kembalian</span>
-                    <strong>{cashReceived !== null && cashReceived >= totalValue ? formatIDR(cashReceived - totalValue) : '—'}</strong></div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={!editable || !canEditPos}
+                      onClick={() => { if (!pendingRef.current && !unresolvedRef.current) setCashInput(String(totalValue)); }}
+                      className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40"
+                    >
+                      Uang Pas
+                    </button>
+                    <div className="flex items-center gap-1 text-xs">
+                      <span>Kembalian</span>
+                      <strong>{cashReceived !== null && cashReceived >= totalValue ? formatIDR(cashReceived - totalValue) : '—'}</strong>
+                    </div>
+                  </div>
                   {cashReceived === null || cashReceived < totalValue ? <p className="text-xs text-red-700">Uang diterima harus sama atau lebih besar dari tagihan.</p> : null}
                 </div>
               ) : (
@@ -674,39 +706,54 @@ export default function PosPayCashModal({
           )}
 
           {/* Success state */}
-          {phase === 'success' && result && (
-            <div className="rounded-lg p-3 bg-emerald-50 border border-emerald-300 space-y-2">
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 text-emerald-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span className="text-sm font-bold text-emerald-900">
-                  {result.replayed ? 'Pembayaran terkonfirmasi' : 'Pembayaran Lunas'}
-                </span>
-              </div>
-              {/* Bukti Pembayaran dari settlement respons */}
-              <div>
-                <h4 className="text-xs font-bold text-emerald-900 mb-1.5">Bukti Pembayaran</h4>
+          {phase === 'success' && result && (() => {
+            const sm = result.settlement.payment_method as PosPaymentMethod;
+            const methodLabel = METHOD_LABELS[sm] ?? sm;
+            const validTs = (v: string | null) => (v !== null && v !== '' && Number.isFinite(Date.parse(v)) ? v : null);
+            const verifiedAt = validTs(result.settlement.verified_at);
+            const createdAt = validTs(result.settlement.created_at);
+            const paymentTimeSource = verifiedAt ?? createdAt;
+            const payTime = paymentTimeSource
+              ? new Intl.DateTimeFormat('id-ID', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Jakarta' }).format(new Date(paymentTimeSource))
+              : '—';
+            return (
+              <div className="rounded-lg p-3 bg-emerald-50 border border-emerald-300 space-y-2">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5 text-emerald-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span className="text-sm font-bold text-emerald-900">
+                    {result.replayed ? 'Pembayaran terkonfirmasi' : 'Pembayaran Lunas'}
+                  </span>
+                </div>
                 <div className="text-[11px] text-emerald-800 space-y-0.5">
-                  <div>
-                    No. Transaksi <span className="font-mono">{result.sale.transaction_no}</span>
-                  </div>
-                  <div>
-                    Nominal {formatIDR(Number(result.settlement.amount))}
-                    {' · '}
-                    {result.settlement.payment_method}
-                  </div>
-                  {result.settlement.cash_received !== null && <div>Uang diterima: {formatIDR(Number(result.settlement.cash_received))}
-                    {' · '}Kembalian: {formatIDR(Number(result.settlement.change_due))}</div>}
-                  {result.settlement.payment_reference && <div>Referensi: {result.settlement.payment_reference}</div>}
-                  {result.settlement.verified_by && <div>Diperiksa oleh: {result.settlement.verified_by}</div>}
-                  {result.settlement.created_by && (
-                    <div>Dicatat oleh: {result.settlement.created_by}</div>
+                  <div>No. Transaksi <span className="font-mono">{result.sale.transaction_no}</span></div>
+                  <div>Metode {methodLabel}</div>
+                  <div>Nominal {formatIDR(Number(result.settlement.amount))}</div>
+                  {result.settlement.payment_method === 'CASH' ? (
+                    <>
+                      {result.settlement.cash_received !== null && (
+                        <div>
+                          Uang Diterima {formatIDR(Number(result.settlement.cash_received))}
+                          {' · '}Kembalian {formatIDR(Number(result.settlement.change_due))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {result.settlement.payment_reference && (
+                        <div>Referensi {result.settlement.payment_reference}</div>
+                      )}
+                      {result.settlement.verified_by && (
+                        <div>Diverifikasi oleh {result.settlement.verified_by}</div>
+                      )}
+                    </>
                   )}
+                  <div>Waktu Pembayaran {payTime}</div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Ambiguous state */}
           {isAmbiguous && failMessage && (
@@ -751,26 +798,26 @@ export default function PosPayCashModal({
           >
             {phase === 'success' || alreadyPaid ? 'Tutup' : 'Batal'}
           </button>
-          {/*
-            Tahap 2B: Konfirmasi aktif hanya bila gate terpenuhi & phase confirming.
-            Retry ("Coba Lagi") aktif saat ambiguous.
-          */}
-          <button
-            type="button"
-            onClick={isAmbiguous ? handleRetry : handleConfirm}
-            disabled={!canConfirm && !canRetry}
-            className="px-4 py-2 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
-          >
-            {isAmbiguous ? 'Coba Lagi' : 'Konfirmasi Pembayaran'}
-          </button>
-          {isPending && (
-            <button
-              type="button"
-              disabled
-              className="px-4 py-2 rounded-lg text-xs font-bold text-white bg-emerald-700 opacity-70 cursor-not-allowed"
-            >
-              Memproses…
-            </button>
+          {phase !== 'success' && (
+            <>
+              <button
+                type="button"
+                onClick={isAmbiguous ? handleRetry : handleConfirm}
+                disabled={!canConfirm && !canRetry}
+                className="px-4 py-2 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              >
+                {isAmbiguous ? 'Coba Lagi' : 'Bayar Sekarang'}
+              </button>
+              {isPending && (
+                <button
+                  type="button"
+                  disabled
+                  className="px-4 py-2 rounded-lg text-xs font-bold text-white bg-emerald-700 opacity-70 cursor-not-allowed"
+                >
+                  Memproses…
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>

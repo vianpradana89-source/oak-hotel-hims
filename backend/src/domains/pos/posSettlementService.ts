@@ -143,6 +143,7 @@ export interface PayPosOrderCashResult {
     payment_reference: string | null;
     verified_by: string | null;
     verified_at: string | null;
+    created_at: string | null;
   };
   /** true bila jalur ini yang membuat settlement (bukan replay). */
   created: boolean;
@@ -598,7 +599,7 @@ export async function payPosOrder(
               amount, payment_method, status,
               idempotency_key, request_fingerprint, created_by,
               cash_received, change_due, payment_reference,
-              verified_by, verified_at
+              verified_by, verified_at, created_at
        FROM pos_settlements
        WHERE property_id = $1 AND pos_order_id = $2 AND idempotency_key = $3
        LIMIT 1`,
@@ -651,6 +652,7 @@ export async function payPosOrder(
             payment_reference: existing.payment_reference == null ? null : String(existing.payment_reference),
             verified_by: existing.verified_by == null ? null : String(existing.verified_by),
             verified_at: normalizeSettlementVerifiedAt(existing.verified_at),
+            created_at: normalizeSettlementVerifiedAt(existing.created_at),
           },
           created: false,
           replayed: true,
@@ -793,6 +795,7 @@ export async function payPosOrder(
       payment_reference: string | null;
       verified_by: string | null;
       verified_at: Date | string | null;
+      created_at: Date | string | null;
     };
     try {
       const insQ = await poolClient.query(
@@ -813,7 +816,7 @@ export async function payPosOrder(
                     amount, payment_method, status,
                     idempotency_key, request_fingerprint, created_by,
                     cash_received, change_due, payment_reference,
-                    verified_by, verified_at`,
+                    verified_by, verified_at, created_at`,
         [
           propertyId,
           orderId,
@@ -903,6 +906,7 @@ export async function payPosOrder(
         payment_reference: insRow.payment_reference == null ? null : String(insRow.payment_reference),
         verified_by: insRow.verified_by == null ? null : String(insRow.verified_by),
         verified_at: normalizeSettlementVerifiedAt(insRow.verified_at),
+        created_at: normalizeSettlementVerifiedAt(insRow.created_at),
       },
       created: true,
       replayed: false,
