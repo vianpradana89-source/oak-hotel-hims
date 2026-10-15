@@ -72,6 +72,8 @@ if (argv.length === 1 && argv[0] === '--check') {
   mode = 'check';
 } else if (argv.length === 1 && argv[0] === '--apply') {
   mode = 'apply';
+} else if (argv.length === 1 && argv[0] === '--diagnose') {
+  mode = 'diagnose';
 }
 
 if (!mode) {
@@ -80,6 +82,7 @@ if (!mode) {
     '  WAJIB PERSIS SATU flag:\n' +
     '    node run_property_payment_instructions_migration_staging.js --check\n' +
     '    node run_property_payment_instructions_migration_staging.js --apply\n' +
+    '    node run_property_payment_instructions_migration_staging.js --diagnose\n' +
     '  Argumen diterima: ' + JSON.stringify(argv)
   );
   process.exit(1);
@@ -683,6 +686,104 @@ async function runApply() {
   }
 }
 
+// ── 10b. Mode: --diagnose (read-only, diagnostik katalog PG authoritative) ──
+// Hanya SELECT. Tidak pernah menjalankan source SQL / migration / DDL.
+// Digunakan untuk mendiagnosis anomali staging di mana informasi_schema.tables
+// mengatakan tabel TIDAK ADA tetapi pg_indexes/index katalog mengatakan index ada.
+async function runDiagnose() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET TRANSACTION READ ONLY');
+
+    // ── A. to_regclass ──
+    const regRes = await client.query(
+      `SELECT
+         to_regclass('public.property_payment_instructions')::text AS table_regclass,
+         to_regclass('public.idx_property_payment_instructions_property')::text AS index_regclass`
+    );
+    console.log(LOG_PREFIX + ' [DIAGNOSE A: to_regclass]');
+    console.log(JSON.stringify(regRes.rows));
+
+    // ── B. pg_class untuk nama tabel ──
+    const clsRes = await client.query(
+      `SELECT
+         c.oid,
+         n.nspname AS schema_name,
+         c.relname,
+         c.relkind,
+         c.relpersistence,
+         pg_get_userbyid(c.relowner) AS owner
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = 'property_payment_instructions'`
+    );
+    console.log(LOG_PREFIX + ' [DIAGNOSE B: pg_class tabel property_payment_instructions]');
+    console.log(JSON.stringify(clsRes.rows));
+
+    // ── C. information_schema.tables exact ──
+    const isRes = await client.query(
+      `SELECT table_schema, table_name, table_type
+       FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name   = 'property_payment_instructions'`
+    );
+    console.log(LOG_PREFIX + ' [DIAGNOSE C: information_schema.tables]');
+    console.log(JSON.stringify(isRes.rows));
+
+    // ── D. index relation authoritative ──
+    const idxRes = await client.query(
+      `SELECT
+         idx.oid AS index_oid,
+         ns.nspname AS index_schema,
+         idx.relname AS index_name,
+         idx.relkind AS index_relkind,
+         tbl.oid AS table_oid,
+         tns.nspname AS table_schema,
+         tbl.relname AS table_name,
+         tbl.relkind AS table_relkind,
+         i.indisvalid,
+         i.indisready,
+         i.indislive,
+         pg_get_indexdef(idx.oid) AS indexdef
+       FROM pg_class idx
+       JOIN pg_namespace ns ON ns.oid = idx.relnamespace
+       JOIN pg_index i ON i.indexrelid = idx.oid
+       JOIN pg_class tbl ON tbl.oid = i.indrelid
+       JOIN pg_namespace tns ON tns.oid = tbl.relnamespace
+       WHERE ns.nspname = 'public'
+         AND idx.relname = 'idx_property_payment_instructions_property'`
+    );
+    console.log(LOG_PREFIX + ' [DIAGNOSE D: index relation authoritative]');
+    console.log(JSON.stringify(idxRes.rows));
+
+    // ── E. inheritance / partition relation ──
+    const inhRes = await client.query(
+      `SELECT
+         child.oid AS child_oid,
+         child.relname AS child_name,
+         parent.oid AS parent_oid,
+         parent.relname AS parent_name
+       FROM pg_inherits inh
+       JOIN pg_class child ON child.oid = inh.inhrelid
+       JOIN pg_class parent ON parent.oid = inh.inhparent
+       WHERE child.relname = 'property_payment_instructions'
+          OR parent.relname = 'property_payment_instructions'`
+    );
+    console.log(LOG_PREFIX + ' [DIAGNOSE E: inheritance/partition relation]');
+    console.log(JSON.stringify(inhRes.rows));
+
+    await client.query('COMMIT');
+    console.log(LOG_PREFIX + ' [DIAGNOSE] Selesai - semua query read-only.');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* transaksi sudah berakhir */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ── 11. Main: semua kegagalan di-throw; penutupan pool terpusat ────────────
 async function run() {
   verifyPoolOptions();
@@ -691,6 +792,11 @@ async function run() {
   if (mode === 'check') {
     const state = await runCheck();
     console.log(LOG_PREFIX + ' --check selesai: ' + state + '.');
+    return;
+  }
+
+  if (mode === 'diagnose') {
+    await runDiagnose();
     return;
   }
 
