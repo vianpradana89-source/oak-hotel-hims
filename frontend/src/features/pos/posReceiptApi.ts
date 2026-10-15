@@ -13,16 +13,58 @@ const isPositiveInt = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v > 0;
 
 /**
- * Returns true when the value is a string that represents a positive
- * whole-rupiah amount (digits only, value > 0).
- * Accepts "30000" but rejects "30000.00", "0", "", null, undefined.
+ * Canonical whole-rupiah monetary string validator.
+ *
+ * Kembalikan canonical string (digits integer, tanpa leading zero, tanpa
+ * trailing decimal) atau `null` bila input tidak valid.
+ *
+ * Accept:  "25000" → "25000"  |  "25000.00" → "25000"  |  "25000.000" → "25000"
+ * Reject:  "", "0", "0.00", "-1000", "1000.50", "1000.01", "abc",
+ *          "007", "001000", "1e5", " 100 ", null, undefined, non-string
+ *
+ * Deterministic, TIDAK memakai Number() / parseFloat() / arithmetic
+ * floating point. Perbandingan antar field dilakukan pada canonical
+ * string, bukan raw string.
  */
-function isPositiveWholeRupiahString(v: unknown): boolean {
-  if (typeof v !== 'string') return false;
-  if (!/^\d+$/.test(v)) return false;
-  // Reject leading-zero forms like "007" (not canonical whole-rupiah).
-  if (v.length > 1 && v[0] === '0') return false;
-  return v !== '0';
+export function canonicalWholeRupiah(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw.length === 0) return null;
+
+  // Satu titik desimal maksimum; reject multiple dots
+  const dotIdx = raw.indexOf('.');
+  let intPart: string;
+  let fracPart: string;
+
+  if (dotIdx === -1) {
+    intPart = raw;
+    fracPart = '';
+  } else {
+    intPart = raw.slice(0, dotIdx);
+    fracPart = raw.slice(dotIdx + 1);
+    // Reject second dot (i.e. "1.2.3")
+    if (fracPart.indexOf('.') !== -1) return null;
+    // Reject trailing dot with empty frac ("123.")
+    if (fracPart.length === 0) return null;
+  }
+
+  // Integer part must be all digits
+  if (!/^\d+$/.test(intPart)) return null;
+
+  // Fractional part (if present) must be all digits
+  if (fracPart.length > 0 && !/^\d+$/.test(fracPart)) return null;
+
+  // No leading zero unless intPart is exactly "0"
+  if (intPart.length > 1 && intPart[0] === '0') return null;
+
+  // Value must be strictly positive: "0" and "0.00" are rejected
+  if (intPart === '0') return null;
+
+  // All fractional digits must be '0'
+  for (let i = 0; i < fracPart.length; i++) {
+    if (fracPart[i] !== '0') return null;
+  }
+
+  return intPart;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -32,7 +74,9 @@ function isPositiveWholeRupiahString(v: unknown): boolean {
  *
  * Validation is fail-closed: any structural deviation from the expected
  * shape throws.  Monetary fields are validated as positive whole-rupiah
- * strings and checked for EXACT equality across the three sources.
+ * representations; textual scale may differ across sources (e.g.
+ * "25000.00" vs "25000").  Equality is checked AFTER canonicalization
+ * via canonicalWholeRupiah().
  *
  * @param orderId   – POS order id (positive integer).
  * @param propertyId – property scope id (positive integer).
@@ -164,17 +208,20 @@ export async function fetchPosReceipt(
     throw new Error('Data struk POS tidak valid.');
   }
 
-  // ── Amount EXACT equality (all three: positive whole-rupiah string) ─
-  const totalAmount = order.total_amount;
-  const settlementAmount = settlement.amount;
-  const saleNetAmount = sale.net_amount;
+  // ── Amount integrity (canonical whole-rupiah; TIDAK floating point) ───
+  // Backend staging mengirim PostgreSQL NUMERIC string ("25000.00") sedangkan
+  // sumber lain dapat mengirim "25000". Canonical string digunakan untuk
+  // perbandingan — bukan raw string.
+  const canonicalOrder    = canonicalWholeRupiah(order.total_amount);
+  const canonicalSettle   = canonicalWholeRupiah(settlement.amount);
+  const canonicalSale     = canonicalWholeRupiah(sale.net_amount);
 
   if (
-    !isPositiveWholeRupiahString(totalAmount) ||
-    !isPositiveWholeRupiahString(settlementAmount) ||
-    !isPositiveWholeRupiahString(saleNetAmount) ||
-    totalAmount !== settlementAmount ||
-    totalAmount !== saleNetAmount
+    canonicalOrder === null ||
+    canonicalSettle === null ||
+    canonicalSale === null ||
+    canonicalOrder !== canonicalSettle ||
+    canonicalOrder !== canonicalSale
   ) {
     throw new Error('Data struk POS tidak valid.');
   }

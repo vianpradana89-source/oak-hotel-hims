@@ -2,10 +2,13 @@
  * POS receipt authoritative types — frontend contract layer.
  *
  * These types mirror the backend receipt response shape.  Monetary values
- * are kept as the exact string the backend emits (whole-rupiah string),
- * never coerced to number.  BIGINT identifiers (sale.id, settlement.
- * transaction_id) are strings.  Item names/codes come exclusively from
- * the immutable snapshot columns, never from the live menu.
+ * are kept as strings, never coerced to number.  PostgreSQL NUMERIC columns
+ * can emit different textual scales ("25000.00" vs "25000") while
+ * representing the same positive whole-rupiah amount; validation uses
+ * canonicalWholeRupiah() (posReceiptApi.ts) to normalize before comparison.
+ * BIGINT identifiers (sale.id, settlement.transaction_id) are strings.
+ * Item names/codes come exclusively from the immutable snapshot columns,
+ * never from the live menu.
  */
 
 // ---------------------------------------------------------------------------
@@ -65,8 +68,10 @@ export interface PosReceiptOrder {
   table_number: string | null;
   notes: string | null;
   /**
-   * Authoritative whole-rupiah string (e.g. "30000").
-   * Must be EXACT-equal to settlement.amount and sale.net_amount.
+   * Positive whole-rupiah amount.  PostgreSQL NUMERIC can emit
+   * "25000.00" (scale 2) or "25000" (scale 0) — both represent the
+   * same value.  Validation normalizes via canonicalWholeRupiah()
+   * before comparing with settlement.amount and sale.net_amount.
    */
   total_amount: string;
   discount_type: PosReceiptDiscountType;
@@ -104,7 +109,11 @@ export type PosReceiptPaymentMethod = 'CASH' | 'QRIS' | 'TRANSFER' | 'DEBIT';
 
 export interface PosReceiptSettlement {
   id: number;
-  /** Authoritative whole-rupiah string; must EXACT-match order.total_amount. */
+  /**
+   * Positive whole-rupiah amount (same value as order.total_amount).
+   * Textual scale may differ (e.g. "25000.00" vs "25000").
+   * Normalized via canonicalWholeRupiah() before comparison.
+   */
   amount: string;
   payment_method: string;
   /** Always 'SUCCESS' in a successful receipt response. */
@@ -140,7 +149,11 @@ export interface PosReceiptSale {
   /** Always 'PAID' in a successful receipt response. */
   payment_status: string;
   payment_method: string;
-  /** Authoritative whole-rupiah string; must EXACT-match order.total_amount. */
+  /**
+   * Positive whole-rupiah amount (same value as order.total_amount).
+   * Textual scale may differ (e.g. "25000" vs "25000.00").
+   * Normalized via canonicalWholeRupiah() before comparison.
+   */
   net_amount: string;
   created_at: string | null;
 }
