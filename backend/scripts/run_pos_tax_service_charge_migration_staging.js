@@ -224,7 +224,7 @@ async function checkStructuralPresence(client) {
        WHERE n.nspname = 'public'
          AND t.relname = 'pos_orders'
          AND c.contype = 'c'
-         AND c.conname IN ($1::text[])`,
+         AND c.conname = ANY($1::text[])`,
     [TAX_SERVICE_CONSTRAINTS]
   );
   const foundCons = new Set(consResult.rows.map((r) => r.conname));
