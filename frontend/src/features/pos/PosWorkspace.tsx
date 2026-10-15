@@ -195,8 +195,8 @@ export default function PosWorkspace({
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [cart, setCart] = useState<PosCartLine[]>([]);
-  const [tableNumber, setTableNumber] = useState('Table 1');
-  const [guestName, setGuestName] = useState('Walk-in Guest');
+  const [tableNumber, setTableNumber] = useState('');
+  const [guestName, setGuestName] = useState('');
   const [guestPhone, setGuestPhone] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
   const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('');
@@ -577,6 +577,7 @@ export default function PosWorkspace({
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
           onUnresolvedChange?.(false);
           setCart([]);
+          setTableNumber(''); setGuestName('');
           setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('');
           setOrderDiscountInput(''); setDiscountReason('');
           setAmbiguous(false);
@@ -1004,7 +1005,7 @@ export default function PosWorkspace({
                         // Set guest_name dari reservasi — hanya bila draft masih kosong
                         // (tidak menyentuh draft yang sudah ada).
                         if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
-                          setGuestName(g.guest_name || 'Walk-in Guest');
+                          setGuestName(g.guest_name || '');
                         }
                       }}
                     />
