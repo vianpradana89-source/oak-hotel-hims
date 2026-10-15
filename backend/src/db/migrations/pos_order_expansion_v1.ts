@@ -37,10 +37,15 @@ const MARKER = 'pos_order_expansion_v1';
 // =============================================================================
 // Prerequisite check
 // =============================================================================
+// NOTE: information_schema / pg_tables sengaja tidak dipakai sebagai authority
+// karena visibility filtering dapat memberi false-negative pada role runner staging.
+// Semua structural checks memakai pg_catalog (pg_class, pg_namespace) secara langsung.
 
 /**
  * Verifikasi bahwa tabel prerequisite tersedia SEBELUM menjalankan DDL.
  * Jika tabel tidak ada, migration gagal eksplisit tanpa membuat schema tebakan.
+ *
+ * Otoritas: pg_class + pg_namespace — relkind 'r' (table) atau 'p' (partitioned table).
  */
 export async function checkPrerequisites(
   client: PoolClient
@@ -60,13 +65,16 @@ export async function checkPrerequisites(
 
   for (const t of tables) {
     const r = await client.query(
-      `SELECT 1 FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name = $1`,
+      `SELECT c.oid FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')`,
       [t]
     );
     if ((r.rowCount ?? 0) === 0) {
       errors.push(
-        `Tabel prerequisite '${t}' tidak ditemukan. ` +
+        `Tabel prerequisite '${t}' tidak ditemukan (pg_class, relkind r/p). ` +
         `Jalankan migrasi dasar terlebih dahulu.`
       );
     }
@@ -259,6 +267,13 @@ export type MigrationRunStatus =
  * Verifikasi kolom, CHECK constraints, index, dan default values
  * yang ditambahkan oleh migration ini.
  *
+ * Otoritas: pg_catalog (pg_attribute, pg_class, pg_namespace, pg_type,
+ * pg_attrdef, pg_constraint, pg_index).
+ *
+ * information_schema sengaja tidak digunakan sebagai authority structural
+ * checks karena visibility filtering dapat memberi false-negative pada
+ * role runner staging.
+ *
  * CHECK constraint diverifikasi via pg_constraint:
  *   - convalidated = TRUE
  *   - conrelid merujuk tabel yang benar
@@ -277,14 +292,22 @@ export async function verifyPosOrderExpansionSchema(
     expectedNullable: boolean,
   ): Promise<void> {
     const r = await client.query(
-      `SELECT character_maximum_length AS max_len,
-              is_nullable            AS nullable,
-              data_type,
-              udt_name
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name   = $1
-         AND column_name  = $2`,
+      `SELECT a.attname AS column_name,
+              t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable,
+              CASE WHEN t.typname = 'varchar' AND a.atttypmod > 4
+                   THEN a.atttypmod - 4 ELSE NULL
+              END AS max_len
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')
+         AND a.attname = $2
+         AND a.attnum > 0
+         AND NOT a.attisdropped`,
       [table, colName]
     );
     if ((r.rowCount ?? 0) === 0) {
@@ -292,10 +315,10 @@ export async function verifyPosOrderExpansionSchema(
       return;
     }
     const row = r.rows[0];
-    if (row.data_type !== 'character varying') {
-      errors.push(`Kolom ${table}.${colName}: data_type=${row.data_type}, ekspektasi 'character varying'`);
+    if (row.udt_name !== 'varchar') {
+      errors.push(`Kolom ${table}.${colName}: udt_name=${row.udt_name}, ekspektasi 'varchar' (bpchar/CHAR tidak diterima)`);
     }
-    if (row.max_len !== expectedMaxLen) {
+    if (Number(row.max_len) !== expectedMaxLen) {
       errors.push(`Kolom ${table}.${colName}: max_len=${row.max_len}, ekspektasi ${expectedMaxLen}`);
     }
     if (row.nullable !== (expectedNullable ? 'YES' : 'NO')) {
@@ -311,11 +334,22 @@ export async function verifyPosOrderExpansionSchema(
     expectedDefault?: string,
   ): Promise<void> {
     const r = await client.query(
-      `SELECT is_nullable AS nullable, data_type, udt_name, numeric_precision, numeric_scale, column_default
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name   = $1
-         AND column_name  = $2`,
+      `SELECT a.attname AS column_name,
+              t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable,
+              a.atttypmod AS numeric_typmod,
+              pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')
+         AND a.attname = $2
+         AND a.attnum > 0
+         AND NOT a.attisdropped`,
       [table, colName]
     );
     if ((r.rowCount ?? 0) === 0) {
@@ -323,11 +357,22 @@ export async function verifyPosOrderExpansionSchema(
       return;
     }
     const row = r.rows[0];
-    if (row.data_type !== 'numeric' && row.udt_name !== 'numeric') {
-      errors.push(`Kolom ${table}.${colName}: data_type=${row.data_type}, ekspektasi numeric`);
+    if (row.udt_name !== 'numeric') {
+      errors.push(`Kolom ${table}.${colName}: udt_name=${row.udt_name}, ekspektasi numeric`);
     }
-    if (row.numeric_precision !== 12 || row.numeric_scale !== 2) {
-      errors.push(`Kolom ${table}.${colName}: precision=${row.numeric_precision}, scale=${row.numeric_scale}, ekspektasi 12,2`);
+    // PostgreSQL: atttypmod untuk numeric(p,s) = ((p << 16) | s) + VARHDRSZ (VARHDRSZ=4).
+    // Contoh: NUMERIC(12,2) → atttypmod = ((12 << 16) | 2) + 4 = 786438.
+    // Decode: kurangi 4 (VARHDRSZ) terlebih dahulu, lalu decode bits.
+    const rawTypmod = Number(row.numeric_typmod ?? 0);
+    if (!Number.isInteger(rawTypmod) || rawTypmod < 4) {
+      errors.push(`Kolom ${table}.${colName}: atttypmod=${rawTypmod} tidak valid/unconstrained, ekspektasi NUMERIC(12,2)`);
+    } else {
+      const numericTypmod = rawTypmod - 4;
+      const precision = (numericTypmod >> 16) & 0xffff;
+      const scale = numericTypmod & 0x7ff;
+      if (precision !== 12 || scale !== 2) {
+        errors.push(`Kolom ${table}.${colName}: precision=${precision}, scale=${scale}, ekspektasi 12,2`);
+      }
     }
     if (row.nullable !== (expectedNullable ? 'YES' : 'NO')) {
       errors.push(`Kolom ${table}.${colName}: nullable=${row.nullable}, ekspektasi ${expectedNullable ? 'YES' : 'NO'}`);
@@ -347,11 +392,19 @@ export async function verifyPosOrderExpansionSchema(
     expectedNullable: boolean,
   ): Promise<void> {
     const r = await client.query(
-      `SELECT is_nullable AS nullable, udt_name
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name   = $1
-         AND column_name  = $2`,
+      `SELECT a.attname AS column_name,
+              t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')
+         AND a.attname = $2
+         AND a.attnum > 0
+         AND NOT a.attisdropped`,
       [table, colName]
     );
     if ((r.rowCount ?? 0) === 0) {
@@ -374,11 +427,21 @@ export async function verifyPosOrderExpansionSchema(
     expectedDefault: string,
   ): Promise<void> {
     const r = await client.query(
-      `SELECT is_nullable AS nullable, column_default, udt_name
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name   = $1
-         AND column_name  = $2`,
+      `SELECT a.attname AS column_name,
+              t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable,
+              pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')
+         AND a.attname = $2
+         AND a.attnum > 0
+         AND NOT a.attisdropped`,
       [table, colName]
     );
     if ((r.rowCount ?? 0) === 0) {
@@ -392,7 +455,7 @@ export async function verifyPosOrderExpansionSchema(
     if (row.nullable !== 'NO') {
       errors.push(`Kolom ${table}.${colName}: nullable=${row.nullable}, ekspektasi NOT NULL`);
     }
-    if (row.column_default !== expectedDefault) {
+    if (String(row.column_default ?? '') !== expectedDefault) {
       errors.push(`Kolom ${table}.${colName}: default=${row.column_default}, ekspektasi ${expectedDefault}`);
     }
   }
@@ -526,21 +589,31 @@ export async function verifyPosOrderExpansionSchema(
   // pos_settlements.verified_at: nullable TIMESTAMP (tanpa timezone)
   {
     const r = await client.query(
-      `SELECT udt_name, is_nullable FROM information_schema.columns
-       WHERE table_schema = 'public' AND table_name = 'pos_settlements' AND column_name = 'verified_at'`
+      `SELECT t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       WHERE n.nspname = 'public'
+         AND c.relname = 'pos_settlements'
+         AND c.relkind IN ('r','p')
+         AND a.attname = 'verified_at'
+         AND a.attnum > 0
+         AND NOT a.attisdropped`
     );
     if ((r.rowCount ?? 0) === 0) {
       errors.push('Kolom pos_settlements.verified_at tidak ditemukan');
     } else {
       const row = r.rows[0];
       const udt = String(row.udt_name || '');
-      if (udt !== 'timestamp' && udt !== 'timestamp without time zone') {
-        errors.push(`pos_settlements.verified_at: udt_name='${udt}', ekspektasi timestamp`);
+      if (udt !== 'timestamp') {
+        errors.push(`pos_settlements.verified_at: udt_name='${udt}', ekspektasi 'timestamp'`);
       }
-      // nullable sesuai DDL: TIMESTAMP NULL → is_nullable = 'YES'
-      if (row.is_nullable !== 'YES') {
+      // nullable sesuai DDL: TIMESTAMP NULL → nullable = 'YES'
+      if (row.nullable !== 'YES') {
         errors.push(
-          `pos_settlements.verified_at: is_nullable='${row.is_nullable}', ekspektasi 'YES'`
+          `pos_settlements.verified_at: nullable='${row.nullable}', ekspektasi 'YES'`
         );
       }
     }

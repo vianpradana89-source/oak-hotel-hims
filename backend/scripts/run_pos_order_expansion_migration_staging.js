@@ -171,8 +171,13 @@ function loadMigrationModule() {
 
 // ── 7. Cek keberadaan struktur eksplisit (read-only, bukan parse error) ────
 // Daftar struktur yang menjadi milik migration ini.
-// Semua pengecekan via katalog PostgreSQL (information_schema, pg_constraint,
-// pg_indexes, permissions). Tidak ada DDL, tidak ada parse teks error.
+// Authority: pg_catalog (pg_attribute, pg_class, pg_namespace, pg_type,
+// pg_constraint, pg_index, permissions).
+//
+// information_schema / pg_indexes view sengaja tidak digunakan sebagai
+// authority structural checks karena visibility filtering dapat memberi
+// false-negative pada role runner staging.
+// Tidak ada DDL, tidak ada parse teks error.
 
 const STRUCTURAL_COLUMNS = [
   // pos_orders
@@ -223,16 +228,24 @@ const STRUCTURAL_INDEXES = [
 const STRUCTURAL_PERMISSION = 'pos.discount.edit';
 
 async function checkStructuralPresence(client) {
-  // 1) Kolom: cek semua sekaligus via information_schema
+  // 1) Kolom: cek semua sekaligus via pg_catalog (pg_attribute + pg_class + pg_namespace)
+  //    information_schema sengaja tidak dipakai — visibility filtering dapat memberi
+  //    false-negative pada role runner staging.
   const colResult = await client.query(
-    `SELECT table_name, column_name
-     FROM information_schema.columns
-     WHERE table_schema = 'public'
+    `SELECT c.relname AS table_name,
+            a.attname AS column_name
+     FROM pg_attribute a
+     JOIN pg_class c     ON c.oid = a.attrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relkind IN ('r','p')
+       AND a.attnum > 0
+       AND NOT a.attisdropped
        AND (
-         (table_name = 'pos_orders'                 AND column_name = ANY($1::text[]))
-         OR (table_name = 'pos_order_items'          AND column_name = ANY($2::text[]))
-         OR (table_name = 'pos_settlements'          AND column_name = ANY($3::text[]))
-         OR (table_name = 'property_payment_instructions' AND column_name = ANY($4::text[]))
+         (c.relname = 'pos_orders'                 AND a.attname = ANY($1::text[]))
+         OR (c.relname = 'pos_order_items'          AND a.attname = ANY($2::text[]))
+         OR (c.relname = 'pos_settlements'          AND a.attname = ANY($3::text[]))
+         OR (c.relname = 'property_payment_instructions' AND a.attname = ANY($4::text[]))
        )`,
     [
       ['guest_phone', 'notes', 'discount_type', 'discount_value', 'discount_reason', 'discount_amount'],
@@ -267,11 +280,17 @@ async function checkStructuralPresence(client) {
   const constraintsPresent = STRUCTURAL_CONSTRAINTS.filter((n) => foundConstraints.has(n));
   const constraintsMissing = STRUCTURAL_CONSTRAINTS.filter((n) => !foundConstraints.has(n));
 
-  // 3) Index: cek via pg_indexes
+  // 3) Index: cek via pg_catalog (pg_class + pg_index + pg_namespace)
+  //    Otoritas lebih authoritative daripada view pg_indexes.
   const idxResult = await client.query(
-    `SELECT indexname, tablename FROM pg_indexes
-     WHERE schemaname = 'public'
-       AND indexname = ANY($1::text[])`,
+    `SELECT ic.relname AS indexname,
+            tc.relname AS tablename
+     FROM pg_class ic
+     JOIN pg_namespace ins ON ins.oid = ic.relnamespace
+     JOIN pg_index ix ON ix.indexrelid = ic.oid
+     JOIN pg_class tc ON tc.oid = ix.indrelid
+     WHERE ins.nspname = 'public'
+       AND ic.relname = ANY($1::text[])`,
     [STRUCTURAL_INDEXES]
   );
   const foundIndexes = new Set(idxResult.rows.map((r) => r.indexname));
@@ -327,9 +346,13 @@ async function runCheck(pool, migration) {
     }
     console.log('[CHECK] Prerequisites: LULUS.');
 
-    // 2) Tabel schema_migrations harus ada
+    // 2) Tabel schema_migrations harus ada (pg_catalog authoritative)
     const hasTable = await client.query(
-      "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'schema_migrations'"
+      `SELECT c.oid FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = 'schema_migrations'
+         AND c.relkind IN ('r','p')`
     );
     if ((hasTable.rowCount ?? 0) === 0) {
       throw new Error('Tabel public.schema_migrations tidak ditemukan.');
