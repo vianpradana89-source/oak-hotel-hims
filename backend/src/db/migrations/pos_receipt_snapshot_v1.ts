@@ -42,10 +42,15 @@ const MARKER = 'pos_receipt_snapshot_v1';
 // =============================================================================
 // Prerequisite check
 // =============================================================================
+// NOTE: information_schema / pg_tables sengaja tidak dipakai sebagai authority
+// karena visibility filtering dapat memberi false-negative pada role runner staging.
+// Semua structural checks memakai pg_catalog (pg_class, pg_namespace) secara langsung.
 
 /**
  * Verifikasi bahwa tabel prerequisite tersedia SEBELUM menjalankan DDL.
  * Jika tabel tidak ada, migration gagal eksplisit tanpa membuat schema tebakan.
+ *
+ * Otoritas: pg_class + pg_namespace — relkind 'r' (table) atau 'p' (partitioned table).
  */
 export async function checkPrerequisites(
   client: PoolClient
@@ -60,13 +65,16 @@ export async function checkPrerequisites(
 
   for (const t of tables) {
     const r = await client.query(
-      `SELECT 1 FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name = $1`,
+      `SELECT c.oid FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')`,
       [t]
     );
     if ((r.rowCount ?? 0) === 0) {
       errors.push(
-        `Tabel prerequisite '${t}' tidak ditemukan. ` +
+        `Tabel prerequisite '${t}' tidak ditemukan (pg_class, relkind r/p). ` +
         `Jalankan migrasi dasar terlebih dahulu.`
       );
     }
@@ -134,9 +142,14 @@ export type MigrationRunStatus =
  * Verifikasi kolom item_name_snapshot & item_code_snapshot
  * pada pos_order_items.
  *
+ * Otoritas: pg_catalog (pg_attribute, pg_class, pg_namespace, pg_type).
+ * information_schema sengaja tidak digunakan sebagai authority structural
+ * checks karena visibility filtering dapat memberi false-negative pada
+ * role runner staging.
+ *
  * Ekspektasi final:
- *   - item_name_snapshot: data_type='character varying', max_len=100, NOT NULL
- *   - item_code_snapshot: data_type='character varying', max_len=50, nullable
+ *   - item_name_snapshot: udt_name='varchar', max_len=100, NOT NULL
+ *   - item_code_snapshot: udt_name='varchar', max_len=50, nullable
  *
  * Untuk jalur "applied" (marker belum ada), setelah backfill, item_name_snapshot
  * akan di-ALTER SET NOT NULL sehingga verifikasi memeriksa NOT NULL.
@@ -148,6 +161,9 @@ export async function verifyPosReceiptSnapshotSchema(
 ): Promise<VerificationResult> {
   const errors: string[] = [];
 
+  // Otoritas: pg_catalog (pg_attribute + pg_class + pg_namespace + pg_type).
+  // information_schema sengaja tidak dipakai — visibility filtering dapat memberi
+  // false-negative pada role runner staging.
   async function checkVarcharColumn(
     table: string,
     colName: string,
@@ -155,14 +171,22 @@ export async function verifyPosReceiptSnapshotSchema(
     expectedNullable: boolean,
   ): Promise<void> {
     const r = await client.query(
-      `SELECT character_maximum_length AS max_len,
-              is_nullable            AS nullable,
-              data_type,
-              udt_name
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name   = $1
-         AND column_name  = $2`,
+      `SELECT a.attname AS column_name,
+              t.typname AS udt_name,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS nullable,
+              CASE WHEN t.typname = 'varchar' AND a.atttypmod > 4
+                   THEN a.atttypmod - 4 ELSE NULL
+              END AS max_len
+       FROM pg_attribute a
+       JOIN pg_class c     ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_type t      ON t.oid = a.atttypid
+       WHERE n.nspname = 'public'
+         AND c.relname = $1
+         AND c.relkind IN ('r','p')
+         AND a.attname = $2
+         AND a.attnum > 0
+         AND NOT a.attisdropped`,
       [table, colName]
     );
     if ((r.rowCount ?? 0) === 0) {
@@ -170,13 +194,13 @@ export async function verifyPosReceiptSnapshotSchema(
       return;
     }
     const row = r.rows[0];
-    if (row.data_type !== 'character varying') {
+    if (row.udt_name !== 'varchar') {
       errors.push(
-        `Kolom ${table}.${colName}: data_type=${row.data_type}, ` +
-        `ekspektasi 'character varying'`
+        `Kolom ${table}.${colName}: udt_name=${row.udt_name}, ` +
+        `ekspektasi 'varchar' (bpchar/CHAR tidak diterima)`
       );
     }
-    if (row.max_len !== expectedMaxLen) {
+    if (Number(row.max_len) !== expectedMaxLen) {
       errors.push(
         `Kolom ${table}.${colName}: max_len=${row.max_len}, ` +
         `ekspektasi ${expectedMaxLen}`
