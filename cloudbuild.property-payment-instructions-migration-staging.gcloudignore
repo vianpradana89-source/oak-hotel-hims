@@ -1,0 +1,7 @@
+.gcloudignore
+.git
+.gitignore
+
+#!include:.gitignore
+
+!backend/src/db/migrations/doc_1b_2a_property_payment_instructions.sql
