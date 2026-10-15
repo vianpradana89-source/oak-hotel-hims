@@ -11,6 +11,7 @@ import {
   formatPosReceiptOrderReference,
   normalizeOptionalGuestName,
   normalizeOptionalTableNumber,
+  extractReceiptDateYmd,
 } from '../src/features/thermalReceipt/posReceiptPresentation.ts';
 import { getLogoServeUrl } from '../src/features/propertySettings/propertyBrandingLogoUrl.ts';
 import type { PosReceiptBranding } from '../src/features/pos/posReceiptTypes.ts';
@@ -213,5 +214,125 @@ check(normalizeOptionalTableNumber('') === null, '4.3 empty -> hidden');
 check(normalizeOptionalTableNumber('   ') === null, '4.4 whitespace -> hidden');
 check(normalizeOptionalTableNumber('12') === '12', '4.5 "12" -> shown');
 check(normalizeOptionalTableNumber('Table 1') === 'Table 1', '4.6 "Table 1" (actual value) -> shown');
+
+// ============================================================================
+// Test 4b: TABLE WALK-IN PLACEHOLDERS
+// ============================================================================
+console.log('\n--- Test 4b: table walk-in placeholders ---');
+
+check(normalizeOptionalTableNumber('Walk In') === null, '4b.1 "Walk In" -> hidden');
+check(normalizeOptionalTableNumber(' walk in ') === null, '4b.2 " walk in " -> hidden');
+check(normalizeOptionalTableNumber('WALK IN') === null, '4b.3 "WALK IN" -> hidden');
+check(normalizeOptionalTableNumber('Walk-in') === null, '4b.4 "Walk-in" -> hidden');
+check(normalizeOptionalTableNumber('Walk In Guest') === null, '4b.5 "Walk In Guest" -> hidden');
+check(normalizeOptionalTableNumber('A-03') === 'A-03', '4b.6 "A-03" (actual value) -> shown');
+
+// ============================================================================
+// Test 5: DATE NORMALIZATION (extractReceiptDateYmd)
+// ============================================================================
+console.log('\n--- Test 5: date normalization (extractReceiptDateYmd) ---');
+
+check(
+  extractReceiptDateYmd(
+    'Thu Oct 15 2026 05:43:38 GMT+0000 (Coordinated Universal Time)',
+  ) === '2026-10-15',
+  '5.1 actual backend JS-Date string -> 2026-10-15',
+);
+check(
+  extractReceiptDateYmd('2026-10-15T03:50:00.000Z') === '2026-10-15',
+  '5.2 ISO -> 2026-10-15',
+);
+check(extractReceiptDateYmd('2026-10-15') === '2026-10-15', '5.3 date-only -> 2026-10-15');
+check(extractReceiptDateYmd('garbage') === null, '5.4 unparseable -> null');
+check(extractReceiptDateYmd(null) === null, '5.5 null -> null');
+check(extractReceiptDateYmd('') === null, '5.6 empty -> null');
+
+// ============================================================================
+// Test 6: SHORT ORDER WITH ACTUAL BACKEND DATE STRINGS
+// ============================================================================
+console.log('\n--- Test 6: short order with actual backend date strings ---');
+
+// 6.1: actual staging shape — order.id=42, created_at JS-Date string
+check(
+  formatPosReceiptOrderReference({
+    id: 42,
+    order_number: 'POS-20261015-e491ddd9',
+    created_at: 'Thu Oct 15 2026 05:43:38 GMT+0000 (Coordinated Universal Time)',
+  }) === 'POS-261015-0042',
+  '6.1 actual backend Date string -> POS-261015-0042',
+);
+
+// 6.2: order date is the JS-Date string but sale/settlement missing -> use order
+// (covered by 6.1; explicit no-fallback case)
+check(
+  formatPosReceiptOrderReference(
+    {
+      id: 42,
+      order_number: 'POS-20261015-full-uuid',
+      created_at: 'Thu Oct 15 2026 05:43:38 GMT+0000 (Coordinated Universal Time)',
+    },
+    null,
+    null,
+  ) === 'POS-261015-0042',
+  '6.2 JS-Date order string, no sale/settlement -> POS-261015-0042',
+);
+
+// 6.3: order date unparseable, sale date is a valid JS-Date string -> use sale
+check(
+  formatPosReceiptOrderReference(
+    { id: 42, order_number: 'x', created_at: 'garbage' },
+    'Thu Oct 15 2026 05:43:43 GMT+0000 (Coordinated Universal Time)',
+    null,
+  ) === 'POS-261015-0042',
+  '6.3 order invalid -> valid sale JS-Date string used',
+);
+
+// 6.4: existing ISO behavior still passes
+check(
+  formatPosReceiptOrderReference(
+    { id: 29, order_number: 'x', created_at: '2026-10-15T03:50:00.000Z' },
+  ) === 'POS-261015-0029',
+  '6.4 ISO -> POS-261015-0029 (existing behavior intact)',
+);
+
+// 6.5: all three dates invalid / missing -> canonical order_number
+check(
+  formatPosReceiptOrderReference(
+    { id: 42, order_number: 'POS-20261015-full-uuid', created_at: 'garbage' },
+    'also-garbage',
+    'still-garbage',
+  ) === 'POS-20261015-full-uuid',
+  '6.5 all invalid -> canonical order_number',
+);
+
+// ============================================================================
+// Test 7: MALFORMED CALENDAR DATE REJECTED (regression — fail-closed)
+// ============================================================================
+console.log('\n--- Test 7: malformed calendar date rejection ---');
+
+// Valid calendar dates
+check(extractReceiptDateYmd('2026-02-28') === '2026-02-28', '7.1 2026-02-28 (valid) -> 2026-02-28');
+check(extractReceiptDateYmd('2024-02-29') === '2024-02-29', '7.2 2024-02-29 (leap year, valid) -> 2024-02-29');
+// Malformed — must be rejected (fail-closed)
+check(extractReceiptDateYmd('2026-02-29') === null, '7.3 2026-02-29 (not a leap year) -> null');
+check(extractReceiptDateYmd('2026-13-01') === null, '7.4 2026-13-01 (month 13) -> null');
+check(extractReceiptDateYmd('2026-00-10') === null, '7.5 2026-00-10 (month 0) -> null');
+check(extractReceiptDateYmd('2026-04-31') === null, '7.6 2026-04-31 (April has 30 days) -> null');
+check(extractReceiptDateYmd('2026-99-99') === null, '7.7 2026-99-99 -> null');
+check(extractReceiptDateYmd('2026-99-99T00:00:00Z') === null, '7.8 2026-99-99T00:00:00Z (malformed ISO) -> null');
+
+// Malformed order date must fall through to a valid sale date
+check(
+  formatPosReceiptOrderReference(
+    {
+      id: 42,
+      order_number: 'POS-20261015-full-uuid',
+      created_at: '2026-99-99T00:00:00Z',
+    },
+    'Thu Oct 15 2026 05:43:43 GMT+0000 (Coordinated Universal Time)',
+    null,
+  ) === 'POS-261015-0042',
+  '7.9 malformed order date falls through to valid sale JS-Date string',
+);
 
 console.log(`\n=== All ${assertions} assertions passed ===`);
