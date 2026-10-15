@@ -4,6 +4,12 @@ import {
   formatHotelDateTimeIndonesian,
   formatHotelCurrency,
 } from './thermalReceiptFormatters';
+import {
+  resolveReceiptLogoUrl,
+  formatPosReceiptOrderReference,
+  normalizeOptionalGuestName,
+  normalizeOptionalTableNumber,
+} from './posReceiptPresentation';
 
 interface PosThermalReceiptContentProps {
   receipt: PosReceiptData;
@@ -23,9 +29,23 @@ export default function PosThermalReceiptContent({
 
   const hotelName = b?.display_name || property.name;
   const tagline = b?.tagline || null;
-  const logoUrl = b?.logo_url || null;
+  // Resolve the managed branding logo key into a browser-servable URL.
+  // null when there is no logo → no <img>, no broken image, no placeholder.
+  const logoUrl = resolveReceiptLogoUrl(property.branding, property.id);
   const address = property.address;
   const phone = property.phone;
+
+  // Compact display reference (POS-YYMMDD-<id>) — canonical order_number is
+  // NOT mutated; this is presentation-only for the thermal receipt.
+  const orderRef = formatPosReceiptOrderReference(
+    order,
+    sale.created_at,
+    settlement.created_at,
+  );
+
+  // Optional identity rows: hidden when there is no real value.
+  const guestName = normalizeOptionalGuestName(order.guest_name);
+  const tableNumber = normalizeOptionalTableNumber(order.table_number);
 
   // Transaction date: use sale.created_at, fallback to settlement/order
   const txDate =
@@ -80,11 +100,11 @@ export default function PosThermalReceiptContent({
 
       {/* 3. IDENTITAS TRANSAKSI */}
       <div className="thermal-section">
-        <Row label="No. Order" value={order.order_number} mono />
+        <Row label="No. Order" value={orderRef} mono />
         <Row label="No. Transaksi" value={sale.transaction_no} mono />
         {txDate && <Row label="Tanggal" value={formatHotelDateTimeIndonesian(txDate)} />}
-        {order.guest_name && <Row label="Tamu" value={order.guest_name} />}
-        {order.table_number && <Row label="Meja" value={order.table_number} />}
+        {guestName && <Row label="Tamu" value={guestName} />}
+        {tableNumber && <Row label="Meja" value={tableNumber} />}
         {order.notes && <Row label="Catatan" value={order.notes} />}
       </div>
 
