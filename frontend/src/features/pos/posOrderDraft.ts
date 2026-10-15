@@ -16,13 +16,23 @@ export interface PosDraftDetails {
   discountType: PosDiscountType;
   discountInput: string;
   discountReason: string;
+  /** Phase 2B — frontend hanya mengirim boolean; rate diambil dari backend */
+  taxEnabled: boolean;
+  serviceChargeEnabled: boolean;
 }
 export interface PosDraftPreview {
   gross: number;
   itemDiscount: number;
   subtotal: number;
   orderDiscount: number;
+  /** net = subtotal − orderDiscount */
   total: number;
+  /** Service charge (dalam rupiah) — 0 jika serviceChargeEnabled=false */
+  serviceCharge: number;
+  /** PPN (dalam rupiah) — 0 jika taxEnabled=false */
+  tax: number;
+  /** total + serviceCharge + tax (final payable preview) */
+  totalWithCharges: number;
   lines: {gross: number; discount: number; net: number}[];
 }
 function discount(type: PosDiscountType, input: string, basis: number): {value: number | null; amount: number} {
@@ -39,7 +49,17 @@ function discount(type: PosDiscountType, input: string, basis: number): {value: 
   if (amount > basis) throw new Error('Diskon melebihi subtotal.');
   return {value, amount};
 }
-export function previewPosDraft(lines: PosCartLine[], type: PosDiscountType, input: string): PosDraftPreview {
+export function previewPosDraft(
+  lines: PosCartLine[],
+  type: PosDiscountType,
+  input: string,
+  opts?: {
+    taxRate?: number;
+    serviceChargeRate?: number;
+    taxEnabled?: boolean;
+    serviceChargeEnabled?: boolean;
+  },
+): PosDraftPreview {
   const values = lines.map(line => {
     const price = Number(line.item.price), gross = price * line.qty;
     if (!Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(line.qty) || line.qty <= 0 || !Number.isSafeInteger(gross))
@@ -51,14 +71,27 @@ export function previewPosDraft(lines: PosCartLine[], type: PosDiscountType, inp
   const subtotal = values.reduce((sum, v) => sum + v.net, 0);
   if (!Number.isSafeInteger(gross) || !Number.isSafeInteger(subtotal)) throw new Error('Total pesanan melebihi batas.');
   const orderDiscount = discount(type, input, subtotal).amount;
-  return {gross, itemDiscount: gross - subtotal, subtotal, orderDiscount, total: subtotal - orderDiscount, lines: values};
+  const total = subtotal - orderDiscount; // net
+  const taxRate = Math.max(0, Number(opts?.taxRate) || 0);
+  const svcRate = Math.max(0, Number(opts?.serviceChargeRate) || 0);
+  const serviceCharge = opts?.serviceChargeEnabled ? Math.round(total * svcRate / 100) : 0;
+  const tax = opts?.taxEnabled ? Math.round((total + serviceCharge) * taxRate / 100) : 0;
+  return {
+    gross, itemDiscount: gross - subtotal, subtotal, orderDiscount,
+    total, serviceCharge, tax, totalWithCharges: total + serviceCharge + tax,
+    lines: values,
+  };
 }
 function optional(value: string, max: number, name: string): string | null {
   const v = value.trim();
   if (v.length > max) throw new Error(`${name} maksimal ${max} karakter.`);
   return v || null;
 }
-export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetails, canDiscount: boolean): Record<string, unknown> {
+export function buildPosOrderDraft(
+  lines: PosCartLine[],
+  details: PosDraftDetails,
+  canDiscount: boolean,
+): Record<string, unknown> {
   if (!Number.isInteger(details.propertyId) || details.propertyId <= 0 || details.propertyId > 2147483647 || lines.length === 0)
     throw new Error('Properti dan item pesanan harus valid.');
   if (details.reservationId !== null && (!Number.isInteger(details.reservationId) || details.reservationId <= 0 || details.reservationId > 2147483647))
@@ -66,12 +99,16 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
   const usesDiscount = !!details.discountType || lines.some(line => !!line.discountType);
   if (usesDiscount && !canDiscount) throw new Error('Anda tidak memiliki izin diskon POS. Hapus diskon untuk menyimpan pesanan biasa.');
   const preview = previewPosDraft(lines, details.discountType, details.discountInput);
+  // Payload create-order: hanya boolean — rate TIDAK dikirim dari frontend.
+  // Backend mengambil rate authoritative dari property_pricing_settings.
   const payload: Record<string, unknown> = {
     property_id: details.propertyId,
     table_number: optional(details.tableNumber, 50, 'Nomor meja'),
     guest_name: optional(details.guestName, 150, 'Nama pelanggan'),
     guest_phone: optional(details.guestPhone, 50, 'Nomor WhatsApp'),
     notes: optional(details.notes, 1000, 'Catatan pesanan'),
+    tax_enabled: details.taxEnabled,
+    service_charge_enabled: details.serviceChargeEnabled,
     items: lines.map(line => {
       if (!Number.isInteger(line.item.id) || line.item.id <= 0 || line.item.id > 2147483647) throw new Error('Item menu tidak valid.');
       const item: Record<string, unknown> = {menu_item_id: line.item.id, quantity: line.qty};

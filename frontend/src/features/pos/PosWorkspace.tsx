@@ -2,6 +2,8 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
 import {buildPosOrderDraft, previewPosDraft, type PosCartLine, type PosDiscountType} from './posOrderDraft';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
+import { pricingApi } from '../roomMaster/pricingApi';
+import type { PropertyPricingSettings } from '../roomMaster/pricingApi';
 
 export interface PosMenuItem {
   id: number;
@@ -202,6 +204,18 @@ export default function PosWorkspace({
   const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('');
   const [orderDiscountInput, setOrderDiscountInput] = useState('');
   const [discountReason, setDiscountReason] = useState('');
+  // Phase 2B — toggle PPN & Service Charge (default false; rate dari backend)
+  const [taxEnabled, setTaxEnabled] = useState(false);
+  const [serviceChargeEnabled, setServiceChargeEnabled] = useState(false);
+  // Rate read-only dari property_pricing_settings (untuk preview frontend saja).
+  // pricingPropertyId mengidentifikasi property yang rate-nya berhasil dimuat —
+  // rate dianggap canonical HANYA jika pricingPropertyId === propertyId aktif.
+  const [pricingRates, setPricingRates] = useState<{ tax_percent: number; service_charge_percent: number } | null>(null);
+  const [pricingPropertyId, setPricingPropertyId] = useState<number | null>(null);
+  const [pricingState, setPricingState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  // Token per-fetch untuk membatalkan hasil request lama saat propertyId berganti
+  // termasuk jalur propertyId → null (setiap perubahan propertyId meng-invalidasi request sebelumnya).
+  const pricingFetchTokenRef = useRef(0);
 
   // ── GuestPicker state (hanya aktif di mode POS header) ──────────────────
   // pickedGuest: reservasi tamu menginap yang dipilih dari picker.
@@ -356,6 +370,84 @@ export default function PosWorkspace({
     return Array.from(set);
   }, [posMenu]);
 
+  // Phase 2B — fetch rate property (read-only, untuk preview frontend).
+  //
+  // Fail-closed (3 lapisan):
+  // 1. STALE REQUEST: token increment setiap kali effect berjalan
+  //    (termasuk propertyId → null). Hasil request lama tidak boleh
+  //    menulis state apa pun setelah property sudah berganti.
+  // 2. PROPERTY IDENTITY: pricingPropertyId menyimpan propertyId yang
+  //    menghasilkan rate. Rate dianggap canonical HANYA bila
+  //    pricingPropertyId === propertyId aktif — bukan cukup pricingState='ready'.
+  //    Saat propertyId berubah, pricingRates & pricingPropertyId di-clear
+  //    SEKARANG (satu render pun tidak boleh memakai rate property A
+  //    untuk property B).
+  // 3. MALFORMED RESPONSE: tax_percent / service_charge_percent harus
+  //    finite dan >= 0. Nilai NaN, Infinity, atau negatif → pricingState
+  //    = 'error', pricingRates = null, pricingPropertyId = null.
+  //    Backend yang benar mengirim 0 tetap valid (0 adalah rate yang sah).
+  useEffect(() => {
+    // Invalidation token: jalankan di semua jalur, termasuk null.
+    const token = ++pricingFetchTokenRef.current;
+
+    if (propertyId === null || !authFetch) {
+      // propertyId hilang → batalkan rate property lama sepenuhnya
+      setPricingRates(null);
+      setPricingPropertyId(null);
+      setPricingState('idle');
+      return;
+    }
+
+    // Clear rate lama SEBELUM fetch — mencegah satu render rate A
+    // di-terapkan ke property B.
+    setPricingRates(null);
+    setPricingPropertyId(null);
+    setPricingState('loading');
+
+    pricingApi.getSettings(propertyId)
+      .then((s: PropertyPricingSettings) => {
+        // Token check: propertyId bisa sudah berganti (atau jadi null)
+        // sebelum response tiba.
+        if (token !== pricingFetchTokenRef.current) return;
+
+        // Validasi fail-closed: rate harus finite dan >= 0.
+        // Number(value) || 0 DILARANG — 0 dari response backend valid,
+        // tetapi NaN/Infinity/negatif tidak boleh di-coerce jadi 0.
+        const taxRate = Number(s.tax_percent);
+        const svcRate = Number(s.service_charge_percent);
+        if (!Number.isFinite(taxRate) || !Number.isFinite(svcRate) || taxRate < 0 || svcRate < 0) {
+          setPricingRates(null);
+          setPricingPropertyId(null);
+          setPricingState('error');
+          return;
+        }
+        setPricingRates({ tax_percent: taxRate, service_charge_percent: svcRate });
+        setPricingPropertyId(propertyId); // identitas property yang rate-nya dimuat
+        setPricingState('ready');
+      })
+      .catch(() => {
+        if (token !== pricingFetchTokenRef.current) return;
+        setPricingRates(null);
+        setPricingPropertyId(null);
+        setPricingState('error');
+      });
+  }, [propertyId, authFetch]);
+
+  // Rate dianggap canonical-ready HANYA bila ketiga syarat terpenuhi:
+  //   pricingState === 'ready'
+  //   AND pricingPropertyId === propertyId   (bukan property lama)
+  //   AND pricingRates !== null
+  const pricingReady =
+    pricingState === 'ready' &&
+    pricingPropertyId === propertyId &&
+    pricingRates !== null &&
+    propertyId !== null;
+
+  // Fail-closed: toggle ON + rate belum canonical-ready → block Simpan & Bayar
+  // untuk NEW SUBMISSION. Unresolved replay TIDAK terpengaruh (lihat handleSaveOrder).
+  const pricingNotReady =
+    (taxEnabled || serviceChargeEnabled) && !pricingReady;
+
   const filteredMenu = useMemo(() => {
     return posMenu.filter((item) => {
       const matchSearch =
@@ -410,12 +502,28 @@ export default function PosWorkspace({
   };
 
   const draftPreview = useMemo(() => {
-    try {return {value: previewPosDraft(cart, orderDiscountType, orderDiscountInput), error: null};}
-    catch (err) {return {value: null, error: err instanceof Error ? err.message : 'Periksa diskon pesanan.'};}
-  }, [cart, orderDiscountType, orderDiscountInput]);
+    try {
+      // Rate hanya dipakai untuk preview kalau canonical-ready (property cocok).
+      // Kalau belum ready, toggle tetap ditampilkan tapi charge = 0 dan
+      // totalWithCharges hanya net (tidak memberi kesan rate 0 valid).
+      const effTaxRate = pricingReady ? pricingRates!.tax_percent : 0;
+      const effSvcRate = pricingReady ? pricingRates!.service_charge_percent : 0;
+      return {
+        value: previewPosDraft(cart, orderDiscountType, orderDiscountInput, {
+          taxRate: effTaxRate,
+          serviceChargeRate: effSvcRate,
+          taxEnabled: pricingReady ? taxEnabled : false,
+          serviceChargeEnabled: pricingReady ? serviceChargeEnabled : false,
+        }),
+        error: null,
+      };
+    } catch (err) {
+      return { value: null, error: err instanceof Error ? err.message : 'Periksa diskon pesanan.' };
+    }
+  }, [cart, orderDiscountType, orderDiscountInput, taxEnabled, serviceChargeEnabled, pricingRates, pricingReady]);
   const cartSubtotal = draftPreview.value?.gross || 0;
   const hasDiscount = !!orderDiscountType || cart.some(line => !!line.discountType);
-  const canSaveDraft = !draftPreview.error && (!hasDiscount || canDiscountPos);
+  const canSaveDraft = !draftPreview.error && (!hasDiscount || canDiscountPos) && !pricingNotReady;
   const changeLine = (id: number, patch: Partial<Pick<PosCartLine, 'discountType' | 'discountInput' | 'notes'>>) => {
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart(lines => lines.map(line => line.item.id === id ? {...line, ...patch} : line));
@@ -459,6 +567,11 @@ export default function PosWorkspace({
     const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
     let key: string, bodyJson: string;
     if (snapshot?.unresolved) {
+      // UNRESOLVED RETRY: replay key + bodyJson snapshot PERSIS.
+      // JANGAN blokir karena pricing loading/error — snapshot body sudah
+      // memuat tax_enabled / service_charge_enabled yang benar saat
+      // pengajuan pertama dibuat. Jangan rebuild, jangan baca state toggle
+      // atau rate saat ini.
       if (snapshot.propertyId !== propertyId || snapshot.reservationId !== effectiveResId) {
         setSaveResult({ok: false, message: 'Konteks pesanan berubah. Selesaikan pengajuan sebelumnya yang hasilnya belum diketahui.'});
         return {ok: false};
@@ -466,12 +579,23 @@ export default function PosWorkspace({
       key = snapshot.key;
       bodyJson = snapshot.bodyJson;
     } else {
+      // NEW SUBMISSION: pricing readiness hanya wajib bila toggle ON.
+      // Unresolved replay (di atas) tidak pernah sampai di sini karena
+      // snapshot?.unresolved sudah menangkap.
+      if (pricingNotReady) {
+        setSaveResult({
+          ok: false,
+          message: 'Rate pajak/service belum berhasil dimuat untuk properti ini. Matikan PPN/Service Charge atau tunggu pengaturan properti dimuat ulang.',
+        });
+        return { ok: false };
+      }
       try {
         const payload = buildPosOrderDraft(cart, {
           propertyId, reservationId: effectiveResId, tableNumber,
           guestName: pickedGuest ? pickedGuest.guest_name || '' : guestName,
           guestPhone, notes: orderNotes, discountType: orderDiscountType,
           discountInput: orderDiscountInput, discountReason,
+          taxEnabled, serviceChargeEnabled,
         }, canDiscountPos);
         bodyJson = JSON.stringify(payload);
         const fp = bodyJson;
@@ -580,6 +704,11 @@ export default function PosWorkspace({
           setTableNumber(''); setGuestName('');
           setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('');
           setOrderDiscountInput(''); setDiscountReason('');
+          // Reset toggle ke default false untuk siklus order baru.
+          // Hanya dilakukan SETELAH create benar-benar terverifikasi sukses —
+          // saat unresolved/retry, snapshot body masih dipertahankan.
+          setTaxEnabled(false);
+          setServiceChargeEnabled(false);
           setAmbiguous(false);
           setLocalPaidOrderId(null);
           appliedPaidOrderIdRef.current = null;
@@ -723,7 +852,7 @@ export default function PosWorkspace({
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
       onRequestPending?.(false);
     }
-  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason]);
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason, taxEnabled, serviceChargeEnabled, pricingNotReady]);
 
   // Retry handler: membaca snapshot (key + body terseri) PERSIS.
   // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
@@ -1190,9 +1319,55 @@ export default function PosWorkspace({
                 <div className="flex justify-between text-xs text-gray-500"><span>Diskon item</span><span>{formatIDR(draftPreview.value.itemDiscount)}</span></div>
                 <div className="flex justify-between text-xs text-gray-500"><span>Diskon pesanan</span><span>{formatIDR(draftPreview.value.orderDiscount)}</span></div>
               </>}
+              {/* Phase 2B — Toggle PPN & Service Charge */}
+              {draftPreview.value && cart.length > 0 && (
+                <div className="space-y-1.5 py-1">
+                  <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={serviceChargeEnabled}
+                      disabled={draftLocked}
+                      onChange={(e) => {
+                        if (canMutateDraft()) setServiceChargeEnabled(e.target.checked);
+                      }}
+                      className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-700 focus:ring-emerald-500"
+                    />
+                    <span className="flex-1">
+                      Service Charge{pricingReady && pricingRates ? ` (${pricingRates.service_charge_percent}%)` : (pricingState === 'loading' ? ' (memuat…)' : pricingState === 'error' ? ' (gagal muat)' : '')}
+                    </span>
+                    <span className="tabular-nums font-medium">
+                      {serviceChargeEnabled && pricingReady ? formatIDR(draftPreview.value.serviceCharge) : '—'}
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={taxEnabled}
+                      disabled={draftLocked}
+                      onChange={(e) => {
+                        if (canMutateDraft()) setTaxEnabled(e.target.checked);
+                      }}
+                      className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-700 focus:ring-emerald-500"
+                    />
+                    <span className="flex-1">
+                      PPN{pricingReady && pricingRates ? ` (${pricingRates.tax_percent}%)` : (pricingState === 'loading' ? ' (memuat…)' : pricingState === 'error' ? ' (gagal muat)' : '')}
+                    </span>
+                    <span className="tabular-nums font-medium">
+                      {taxEnabled && pricingReady ? formatIDR(draftPreview.value.tax) : '—'}
+                    </span>
+                  </label>
+                  {pricingNotReady && (
+                    <p className="text-[11px] text-amber-700">
+                      {pricingState === 'error'
+                        ? 'Pengaturan pajak properti gagal dimuat. Matikan PPN/Service Charge atau perbarui halaman untuk mencoba lagi.'
+                        : 'Pengaturan pajak sedang dimuat. PPN/Service Charge belum dapat disimpan sampai rate berhasil dimuat.'}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="flex justify-between items-center text-sm font-black text-gray-900">
                 <span>Total perkiraan</span>
-                <span>{draftPreview.value ? formatIDR(draftPreview.value.total) : '—'}</span>
+                <span>{draftPreview.value ? formatIDR(draftPreview.value.totalWithCharges) : '—'}</span>
               </div>
               {draftPreview.error && <p role="alert" className="text-xs text-red-700">{draftPreview.error}</p>}
               {!canDiscountPos && hasDiscount && <div className="space-y-1 text-xs text-red-700">
@@ -1203,7 +1378,7 @@ export default function PosWorkspace({
                   setOrderDiscountType(''); setOrderDiscountInput(''); setDiscountReason('');
                 }}>Hapus semua diskon</button>
               </div>}
-              {draftPreview.value?.total === 0 && cart.length > 0 && <p className="text-xs text-amber-700">Total nol belum dapat dibayar.</p>}
+              {draftPreview.value?.totalWithCharges === 0 && cart.length > 0 && <p className="text-xs text-amber-700">Total nol belum dapat dibayar.</p>}
               {!authFetch && (
                 <div className="flex items-center gap-1.5 text-[11px] text-amber-700">
                   <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 font-semibold">DEMO</span>
@@ -1238,7 +1413,7 @@ export default function PosWorkspace({
                       {onOpenCashPayment && (
                         <button
                           type="button"
-                          disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy}
+                          disabled={!canEditPos || !canSaveDraft || draftPreview.value?.totalWithCharges === 0 || cart.length === 0 || saving || busy}
                           onClick={() => void handleSaveAndPay()}
                           className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
                         >
