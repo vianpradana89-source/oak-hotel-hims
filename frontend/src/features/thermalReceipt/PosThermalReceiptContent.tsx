@@ -1,5 +1,6 @@
 import type { ThermalWidth } from './thermalReceiptTypes';
 import type { PosReceiptData } from '../pos/posReceiptTypes';
+import { parseSnapshotWholeRupiah, parseSnapshotRateLabel } from '../pos/posReceiptTypes';
 import {
   formatHotelDateTimeIndonesian,
   formatHotelCurrency,
@@ -72,6 +73,29 @@ export default function PosThermalReceiptContent({
 
   const orderDiscount = safeNum(order.discount_amount);
   const grandTotal = safeNum(order.total_amount);
+
+  // Phase 2C snapshot: tax & service charge (display-only, no recompute).
+  // parseSnapshotWholeRupiah distinguishes valid zero from invalid values.
+  // Policy (consistent with WhatsApp):
+  //   enabled=true  + valid 0   -> show row with "Rp 0"
+  //   enabled=true  + valid >0  -> show row with formatted amount
+  //   enabled=true  + invalid   -> show row with "Rp --" (flag it, no fake number)
+  //   enabled=false + valid 0   -> hide row (legacy / toggle off)
+  //   enabled=false + valid >0  -> show row (data anomaly: amount present while flag off)
+  //   enabled=false + invalid   -> hide row (no meaningful data to show)
+  const svcSnap = parseSnapshotWholeRupiah(order.service_charge_amount);
+  const taxSnap = parseSnapshotWholeRupiah(order.tax_amount);
+  const svcRateLabel = parseSnapshotRateLabel(order.service_charge_rate);
+  const taxRateLabel = parseSnapshotRateLabel(order.tax_rate);
+
+  const showSvcRow =
+    order.service_charge_enabled === true ? true : svcSnap.valid ? svcSnap.value > 0 : false;
+  const showTaxRow =
+    order.tax_enabled === true ? true : taxSnap.valid ? taxSnap.value > 0 : false;
+
+  // Display value: "Rp 0" for valid zero, "Rp --" for invalid, formatted otherwise
+  const svcDisplay = !svcSnap.valid ? 'Rp --' : formatHotelCurrency(svcSnap.value);
+  const taxDisplay = !taxSnap.valid ? 'Rp --' : formatHotelCurrency(taxSnap.value);
 
   // CASH vs non-CASH sections
   const isCash = settlement.payment_method === 'CASH';
@@ -160,6 +184,20 @@ export default function PosThermalReceiptContent({
             )}
           </>
         )}
+        {showSvcRow && (
+          <Row
+            label={svcRateLabel ? `Service Charge (${svcRateLabel}%)` : 'Service Charge'}
+            value={`+ ${svcDisplay}`}
+            mono
+          />
+        )}
+        {showTaxRow && (
+          <Row
+            label={taxRateLabel ? `PPN (${taxRateLabel}%)` : 'PPN'}
+            value={`+ ${taxDisplay}`}
+            mono
+          />
+        )}
         <div className="thermal-row thermal-row--total">
           <span className="thermal-label">Total</span>
           <span className="thermal-value thermal-value--total">
@@ -218,7 +256,7 @@ export default function PosThermalReceiptContent({
   );
 }
 
-/* ── Internal helpers ────────────────────────────────────────────────── */
+/* Internal helpers */
 
 function safeNum(value: string | null | undefined): number {
   if (value == null || value === '') return 0;

@@ -12,6 +12,7 @@
  */
 
 import type { PosReceiptData } from './posReceiptTypes';
+import { parseSnapshotWholeRupiah, parseSnapshotRateLabel } from './posReceiptTypes';
 
 /**
  * Normalisasi nomor telepon Indonesia untuk format WhatsApp.
@@ -65,18 +66,34 @@ export function normalizeWhatsAppPhone(
 }
 
 /**
- * Parse strict: hanya menerima string murni digit penuh (^\d+$).
- * Menolak: whitespace, decimal, huruf, exponent, tanda +/-, karakter apa pun
- * selain digit. Mengembalikan 0 bila gagal — TIDAK pernah menghasilkan NaN
- * atau nilai parsial (mis. "10000abc" → 0, bukan 10000).
+ * Parse strict: menerima string digit penuh (^\d+$) ATAU PostgreSQL
+ * NUMERIC scale (mis. "6300.00", "10.50").  Menolak: whitespace, huruf,
+ * exponent, tanda +/-, karakter apa pun selain digit dan titik desimal tunggal.
+ *
+ * Mengembalikan 0 bila gagal — TIDAK pernah menghasilkan NaN atau nilai
+ * parsial (mis. "10000abc" → 0, bukan 10000).
+ *
+ * Nilai fractional harus sama dengan 0 (whole-rupiah invariant).
+ * Jika fractional > 0, ditolak (mengembalikan 0) karena snapshot
+ * tax/service POS adalah whole-rupiah.
  */
 function parseRupiahStringStrict(raw: string | null | undefined): number {
-  if (typeof raw !== 'string') return 0;
-  if (!/^\d+$/.test(raw)) return 0;
-  // TIDAK boleh ada leading-zero panjang yang mengubah magnitudo — regex ^\d+$
-  // sudah menolak whitespace/+/-. Nilai panjang > 15 digit (beyond
-  // Number.MAX_SAFE_INTEGER) juga harus ditolak:
-  const parsed = Number(raw);
+  if (typeof raw !== 'string' || raw.length === 0) return 0;
+  // Accept: digits, optionally with a single '.' followed by fractional digits
+  if (!/^\d+(\.\d+)?$/.test(raw)) return 0;
+  const dotIdx = raw.indexOf('.');
+  const intPart = dotIdx === -1 ? raw : raw.slice(0, dotIdx);
+  const fracPart = dotIdx === -1 ? '' : raw.slice(dotIdx + 1);
+
+  // No leading zero unless intPart is exactly "0"
+  if (intPart.length > 1 && intPart[0] === '0') return 0;
+
+  // All fractional digits must be '0' (whole-rupiah invariant)
+  for (let i = 0; i < fracPart.length; i++) {
+    if (fracPart[i] !== '0') return 0;
+  }
+
+  const parsed = Number(intPart);
   if (!Number.isFinite(parsed) || !Number.isSafeInteger(parsed) || parsed < 0) {
     return 0;
   }
@@ -166,6 +183,42 @@ export function buildPosReceiptWhatsAppMessage(receipt: PosReceiptData): string 
       }`
     );
     lines.push('');
+  }
+
+  // Phase 2C snapshot: tax & service charge (display-only, no recompute)
+  // Policy (identical to thermal receipt):
+  //   enabled=true  + valid 0   -> "Service Charge: Rp 0"
+  //   enabled=true  + valid >0  -> "Service Charge (10%): Rp 6,300"
+  //   enabled=true  + invalid   -> "Service Charge: Rp --"
+  //   enabled=false + valid 0   -> omitted
+  //   enabled=false + valid >0  -> shown (data anomaly)
+  //   enabled=false + invalid   -> omitted
+  const svcSnap = parseSnapshotWholeRupiah(order.service_charge_amount);
+  const taxSnap = parseSnapshotWholeRupiah(order.tax_amount);
+  const svcRateLabel = parseSnapshotRateLabel(order.service_charge_rate);
+  const taxRateLabel = parseSnapshotRateLabel(order.tax_rate);
+
+  const showSvc =
+    order.service_charge_enabled === true ? true : svcSnap.valid ? svcSnap.value > 0 : false;
+  const showTax =
+    order.tax_enabled === true ? true : taxSnap.valid ? taxSnap.value > 0 : false;
+
+  const svcValDisplay = !svcSnap.valid ? 'Rp --' : formatRupiah(String(svcSnap.value));
+  const taxValDisplay = !taxSnap.valid ? 'Rp --' : formatRupiah(String(taxSnap.value));
+
+  if (showSvc) {
+    lines.push(
+      svcRateLabel
+        ? `Service Charge (${svcRateLabel}%): ${svcValDisplay}`
+        : `Service Charge: ${svcValDisplay}`,
+    );
+  }
+  if (showTax) {
+    lines.push(
+      taxRateLabel
+        ? `PPN (${taxRateLabel}%): ${taxValDisplay}`
+        : `PPN: ${taxValDisplay}`,
+    );
   }
 
   // Total
