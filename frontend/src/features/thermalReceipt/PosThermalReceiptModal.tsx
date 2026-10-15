@@ -168,15 +168,19 @@ export default function PosThermalReceiptModal({
       >
         Tutup
       </button>
-      {canWhatsApp && (
-        <button
-          type="button"
-          onClick={handleWhatsApp}
-          className="three-btn-secondary"
-        >
-          WhatsApp
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={handleWhatsApp}
+        className="three-btn-secondary"
+        disabled={!canWhatsApp}
+        title={
+          canWhatsApp
+            ? 'Kirim struk ke WhatsApp tamu'
+            : 'Nomor WhatsApp pelanggan tidak tersedia atau tidak valid'
+        }
+      >
+        WhatsApp
+      </button>
       <button
         type="button"
         onClick={handlePrint}
