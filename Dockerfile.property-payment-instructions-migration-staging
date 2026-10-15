@@ -1,0 +1,49 @@
+# Migration Property Payment Instructions - Staging Runner
+# 2-stage build: TypeScript source - dist, lalu runtime node:20-slim.
+#
+# Catatan:
+#   - Runner membaca DDL authoritative dari backend/src/db/migrations/
+#   - File DDL SQL di-copy ke path yang SAMA relatif terhadap /app
+#   - Tidak ada dotenv, credential, gcloud, atau eksekusi migration saat build.
+
+# ===========================================================================
+# Stage 1: Build backend TypeScript
+# ===========================================================================
+FROM node:20-slim AS backend-builder
+
+WORKDIR /app
+
+COPY backend/package.json backend/package-lock.json ./backend/
+
+RUN npm --prefix backend ci --include=optional
+
+COPY backend/ ./backend/
+
+RUN npm --prefix backend run build
+
+
+# ===========================================================================
+# Stage 2: Runtime
+# ===========================================================================
+FROM node:20-slim AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Production-only dependencies
+COPY backend/package.json backend/package-lock.json ./backend/
+RUN npm --prefix backend ci --omit=dev --include=optional \
+    && npm cache clean --force
+
+# DDL source authoritative (runner mem-baca file ini)
+COPY backend/src/db/migrations/doc_1b_2a_property_payment_instructions.sql \
+     ./backend/src/db/migrations/
+
+# Runner script
+COPY backend/scripts/run_property_payment_instructions_migration_staging.js \
+     ./backend/scripts/
+
+# Default: --check; override via --entrypoint atau --args
+ENTRYPOINT ["node", "backend/scripts/run_property_payment_instructions_migration_staging.js"]
+CMD ["--check"]
