@@ -505,15 +505,25 @@ async function checkBasicStructuralState(client) {
   );
   const tableExists = (tblRes.rowCount ?? 0) > 0;
 
-  // Index ada?
+  // Index: ambil indexname + tablename untuk membedakan target vs foreign.
   const idxRes = await client.query(
-    `SELECT 1 FROM pg_indexes
+    `SELECT indexname, tablename
+     FROM pg_indexes
      WHERE schemaname = 'public'
        AND indexname  = 'idx_property_payment_instructions_property'`
   );
-  const indexExists = (idxRes.rowCount ?? 0) > 0;
 
-  return { tableExists, indexExists };
+  // targetIndexExists: index dengan nama exact DAN tablename = 'property_payment_instructions'
+  const targetIndexExists = idxRes.rows.some(
+    (r) => r.tablename === 'property_payment_instructions'
+  );
+
+  // foreignIndexConflicts: row dengan nama index exact tetapi tablename BUKAN target
+  const foreignIndexConflicts = idxRes.rows
+    .filter((r) => r.tablename !== 'property_payment_instructions')
+    .map((r) => r.tablename);
+
+  return { tableExists, targetIndexExists, foreignIndexConflicts };
 }
 
 // ── 9. Mode: --check (read-only) ────────────────────────────────────────────
@@ -537,23 +547,39 @@ async function runCheck() {
     // State dasar
     const state = await checkBasicStructuralState(client);
 
-    // State 1: tabel TIDAK ADA + index TIDAK ADA → READY_TO_APPLY
-    if (!state.tableExists && !state.indexExists) {
+    // FOREIGN_INDEX_NAME_CONFLICT: index nama exact dimiliki tabel lain → fail
+    if (state.foreignIndexConflicts.length > 0) {
+      console.error(
+        LOG_PREFIX + ' [CHECK] FOREIGN_INDEX_NAME_CONFLICT - index ' +
+        'idx_property_payment_instructions_property ditemukan pada tabel: ' +
+        JSON.stringify(state.foreignIndexConflicts) +
+        '. TIDAK AMAN untuk apply.'
+      );
+      throw new Error(
+        'FOREIGN_INDEX_NAME_CONFLICT - index idx_property_payment_instructions_property ' +
+        'dimiliki oleh tabel lain: ' + JSON.stringify(state.foreignIndexConflicts) +
+        '. Tidak boleh apply. Diagnosis manual diperlukan.'
+      );
+    }
+
+    // State A: tabel TIDAK ADA + targetIndex TIDAK ADA + foreign kosong → READY_TO_APPLY
+    if (!state.tableExists && !state.targetIndexExists) {
       console.log(LOG_PREFIX + ' [CHECK] State: READY_TO_APPLY.');
       await client.query('COMMIT');
       return 'READY_TO_APPLY';
     }
 
-    // State 2: tabel TIDAK ADA tetapi index ADA → PARTIAL_OR_MISMATCHED
-    if (!state.tableExists && state.indexExists) {
-      console.error(LOG_PREFIX + ' [CHECK] State: index ada tetapi tabel TIDAK ada.');
+    // State C: tabel TIDAK ADA tetapi targetIndex ADA → PARTIAL (fail-closed)
+    if (!state.tableExists && state.targetIndexExists) {
+      console.error(LOG_PREFIX + ' [CHECK] State: index target ada tetapi tabel TIDAK ada.');
       throw new Error(
         'PARTIAL_OR_MISMATCHED_SCHEMA - index idx_property_payment_instructions_property ada ' +
-        'tetapi tabel property_payment_instructions tidak ada. TIDAK AMAN untuk apply.'
+        'pada tabel property_payment_instructions tetapi tabel tidak ada di katalog. ' +
+        'Kondisi anomali - TIDAK AMAN untuk apply. Diagnosis manual diperlukan.'
       );
     }
 
-    // State 3: tabel ADA → jalankan verifier struktur lengkap
+    // State D: tabel ADA → jalankan verifier struktur lengkap
     const verify = await verifyPpiStructure(client);
     if (verify.ok) {
       console.log(LOG_PREFIX + ' [CHECK] State: ALREADY_APPLIED - seluruh struktur lengkap.');
@@ -589,6 +615,15 @@ async function runApply() {
     // 2) Cek state dasar SEBELUM mutasi
     const state = await checkBasicStructuralState(client);
 
+    // FOREIGN_INDEX_NAME_CONFLICT: fail-closed, jangan eksekusi DDL
+    if (state.foreignIndexConflicts.length > 0) {
+      throw new Error(
+        'FOREIGN_INDEX_NAME_CONFLICT - index idx_property_payment_instructions_property ' +
+        'dimiliki oleh tabel lain: ' + JSON.stringify(state.foreignIndexConflicts) +
+        '. TIDAK AMAN untuk apply DDL. Diagnosis manual diperlukan.'
+      );
+    }
+
     if (state.tableExists) {
       // Tabel ada: jalankan verifier
       const verify = await verifyPpiStructure(client);
@@ -603,10 +638,11 @@ async function runApply() {
       );
     }
 
-    if (state.indexExists && !state.tableExists) {
+    // Tabel tidak ada + targetIndex ada → anomali, fail-closed
+    if (state.targetIndexExists && !state.tableExists) {
       throw new Error(
-        'PARTIAL_OR_MISMATCHED_SCHEMA - index ada tetapi tabel tidak ada. ' +
-        'TIDAK AMAN untuk apply.'
+        'PARTIAL_OR_MISMATCHED_SCHEMA - index target ada pada property_payment_instructions ' +
+        'tetapi tabel tidak ada di katalog. TIDAK AMAN untuk apply. Diagnosis manual diperlukan.'
       );
     }
 
