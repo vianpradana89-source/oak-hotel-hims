@@ -253,8 +253,12 @@ function loadSourceSql() {
 }
 
 // ── 7. Verifier struktur lengkap property_payment_instructions ─────────────
-// Semua pengecekan via katalog PostgreSQL (information_schema, pg_constraint,
-// pg_indexes). READ ONLY. Tidak ada DDL.
+// Authority: pg_catalog (pg_class, pg_namespace, pg_attribute, pg_type,
+// pg_attrdef, pg_constraint, pg_index).
+//
+// information_schema TIDAK digunakan untuk authority structural checks karena
+// visibility filtering dapat memberi false-negative pada role runner staging.
+// READ ONLY. Tidak ada DDL.
 
 const EXPECTED_COLUMNS = [
   { name: 'id',                 udt: 'int4',    nullable: false, check: 'serialDefault' },
@@ -273,23 +277,59 @@ const EXPECTED_COLUMNS = [
 async function verifyPpiStructure(client) {
   const errors = [];
 
-  // ── 7a. Tabel harus ada
+  // ── 7a. Tabel harus ada (pg_catalog authoritative; relkind r=table, p=partitioned table)
   const tblRes = await client.query(
-    `SELECT 1 FROM information_schema.tables
-     WHERE table_schema = 'public' AND table_name = 'property_payment_instructions'`
+    `SELECT c.oid, c.relkind
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relname = 'property_payment_instructions'`
   );
   if ((tblRes.rowCount ?? 0) === 0) {
-    return { ok: false, tableExists: false, errors: ['Tabel public.property_payment_instructions tidak ditemukan.'], };
+    return { ok: false, tableExists: false, errors: ['Tabel public.property_payment_instructions tidak ditemukan (pg_class).'], };
+  }
+  // Nama relation ada tetapi relkind bukan r/p → bukan tabel biasa/partitioned
+  const relkind = String(tblRes.rows[0].relkind);
+  if (relkind !== 'r' && relkind !== 'p') {
+    return {
+      ok: false,
+      tableExists: true,
+      errors: [
+        'Relation "property_payment_instructions" ada tetapi relkind="' + relkind +
+        '" - bukan tabel (relkind harap \'r\' table atau \'p\' partitioned). ' +
+        'Verifier TIDAK melanjutkan. Diagnosis manual diperlukan.'
+      ],
+    };
   }
 
-  // ── 7b. Kolom: periksa semua sekaligus
+  // ── 7b. Kolom: periksa semua sekaligus (pg_attribute + pg_type + pg_attrdef)
   const colRes = await client.query(
-    `SELECT column_name, data_type, character_maximum_length,
-            is_nullable, column_default, udt_name
-     FROM information_schema.columns
-     WHERE table_schema = 'public'
-       AND table_name   = 'property_payment_instructions'
-     ORDER BY ordinal_position`
+    `SELECT a.attname AS column_name,
+            t.typname AS udt_name,
+            CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+            CASE WHEN t.typname IN ('varchar','bpchar') AND a.atttypmod > 4
+                 THEN a.atttypmod - 4 ELSE NULL
+            END AS character_maximum_length,
+            CASE t.typname
+              WHEN 'int4'      THEN 'integer'
+              WHEN 'varchar'   THEN 'character varying'
+              WHEN 'text'      THEN 'text'
+              WHEN 'bool'      THEN 'boolean'
+              WHEN 'timestamp' THEN 'timestamp without time zone'
+              ELSE t.typname
+            END AS data_type,
+            pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
+            a.attnum AS ordinal_position
+     FROM pg_attribute a
+     JOIN pg_class c     ON c.oid = a.attrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_type t     ON t.oid = a.atttypid
+     LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+     WHERE n.nspname = 'public'
+       AND c.relname = 'property_payment_instructions'
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+     ORDER BY a.attnum`
   );
   const colMap = {};
   for (const r of colRes.rows) {
@@ -498,22 +538,33 @@ async function verifyPpiStructure(client) {
   return { ok: errors.length === 0, tableExists: true, errors };
 }
 
-// ── 8. Cek keberadaan struktur dasar (read-only, via katalog PG) ───────────
+// ── 8. Cek keberadaan struktur dasar (read-only, via pg_catalog authoritative)
 // Dipakai untuk membedakan READY_TO_APPLY vs PARTIAL sebelum verifier penuh.
+// information_schema sengaja tidak digunakan karena visibility filtering dapat
+// memberi false-negative pada role runner staging.
 async function checkBasicStructuralState(client) {
-  // Tabel ada?
+  // Tabel ada? (pg_class authoritative; hanya relkind r/p dianggap tabel)
   const tblRes = await client.query(
-    `SELECT 1 FROM information_schema.tables
-     WHERE table_schema = 'public' AND table_name = 'property_payment_instructions'`
+    `SELECT c.oid FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relname = 'property_payment_instructions'
+       AND c.relkind IN ('r','p')`
   );
   const tableExists = (tblRes.rowCount ?? 0) > 0;
 
-  // Index: ambil indexname + tablename untuk membedakan target vs foreign.
+  // Index: pakai pg_class + pg_index + pg_namespace (semantic sama dengan pg_indexes,
+  // tetapi lebih authoritative dan konsisten dengan pg_catalog authority).
+  // Ambil indexname + tablename untuk membedakan target vs foreign.
   const idxRes = await client.query(
-    `SELECT indexname, tablename
-     FROM pg_indexes
-     WHERE schemaname = 'public'
-       AND indexname  = 'idx_property_payment_instructions_property'`
+    `SELECT ic.relname AS indexname,
+            tc.relname AS tablename
+     FROM pg_class ic
+     JOIN pg_namespace ins ON ins.oid = ic.relnamespace
+     JOIN pg_index ix ON ix.indexrelid = ic.oid
+     JOIN pg_class tc ON tc.oid = ix.indrelid
+     WHERE ins.nspname = 'public'
+       AND ic.relname  = 'idx_property_payment_instructions_property'`
   );
 
   // targetIndexExists: index dengan nama exact DAN tablename = 'property_payment_instructions'
@@ -537,10 +588,13 @@ async function runCheck() {
     await client.query('BEGIN');
     await client.query('SET TRANSACTION READ ONLY');
 
-    // Prerequisite: public.properties harus ada
+    // Prerequisite: public.properties harus ada (pg_catalog authoritative)
     const propRes = await client.query(
-      `SELECT 1 FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name = 'properties'`
+      `SELECT c.oid FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = 'properties'
+         AND c.relkind IN ('r','p')`
     );
     if ((propRes.rowCount ?? 0) === 0) {
       throw new Error('Prerequisite: tabel public.properties tidak ditemukan.');
