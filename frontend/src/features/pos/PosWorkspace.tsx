@@ -776,20 +776,11 @@ export default function PosWorkspace({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-gray-200/80 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider bg-purple-50 text-purple-800 border border-purple-200/60 uppercase">
-              Departemen Operasional POS
-            </span>
-            <span className="text-xs text-gray-400">•</span>
-            <span className="text-xs text-gray-500">Property #{propertyId || 1}</span>
-          </div>
-
-          {/* Konteks reservasi — hanya tampil bila POS dibuka dari reservasi */}
+      {/* Konteks reservasi + tombol demo — ringkas, hanya tampil bila ada yang perlu ditunjukkan */}
+      {(reservationId != null || onCreateDemoOrder) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-4 py-2 rounded-xl border border-gray-200/80 shadow-xs">
           {reservationId != null && (
-            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
                 {reservationLabel || `Reservasi #${reservationId}`}
               </span>
@@ -805,43 +796,20 @@ export default function PosWorkspace({
               )}
             </div>
           )}
-
-          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Point of Sale (POS) &amp; F&amp;B</h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Workspace operasional kasir restoran, pesanan meja tamu hotel, dan penjualan langsung.
-          </p>
+          {onCreateDemoOrder && !busy && (
+            <button
+              type="button"
+              onClick={onCreateDemoOrder}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+              </svg>
+              [Demo] Buat Order Contoh
+            </button>
+          )}
         </div>
-
-          <div className="flex items-center gap-2">
-            {onRefresh && (
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={busy}
-                className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Refresh Data"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
-            )}
-            {/* Tombol demo order hanya muncul bila parent menyediakan aksi (halaman penuh).
-                Di modal, onCreateDemoOrder tidak diteruskan → tidak menghasilkan transaksi nyata. */}
-            {onCreateDemoOrder && !busy && (
-              <button
-                type="button"
-                onClick={onCreateDemoOrder}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                [Demo] Buat Order Contoh
-              </button>
-            )}
-          </div>
-      </div>
+      )}
 
       {/* KPI Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
