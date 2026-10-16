@@ -3,6 +3,7 @@ import {
   normalizeWhatsAppPhone,
   buildPosReceiptWhatsAppMessage,
   buildPosReceiptWhatsAppUrl,
+  type PosWhatsAppMessageOptions,
 } from '../src/features/pos/posReceiptWhatsApp';
 import type { PosReceiptData } from '../src/features/pos/posReceiptTypes';
 
@@ -338,5 +339,83 @@ const m7 = buildPosReceiptWhatsAppMessage(
   makeReceiptWithMalformedAmounts('50000', '0', '50000', '50000')
 );
 check(!m7.includes('Diskon:'), '4.16 discount "0" does NOT show discount line');
+
+// ============================================================================
+// Test 5: intro/closing options — focused assertions
+// ============================================================================
+console.log('\n--- Test 5: intro/closing options ---');
+
+// 5.1 intro muncul SEBELUM hotel name
+const msgWithIntro = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  intro: 'Selamat datang di OAK Hotel!',
+});
+const introIdx = msgWithIntro.indexOf('Selamat datang di OAK Hotel!');
+const hotelIdx = msgWithIntro.indexOf('*OAK by Lawang*');
+check(introIdx >= 0, '5.1a intro text present in message');
+check(hotelIdx > introIdx, '5.1b intro appears before hotel name');
+
+// 5.2 closing muncul SEBELUM hardcoded thank-you
+const msgWithClosing = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  closing: 'Kami tunggu kunjungan Anda lagi!',
+});
+const closingIdx = msgWithClosing.indexOf('Kami tunggu kunjungan Anda lagi!');
+const thankYouIdx = msgWithClosing.indexOf('Terima kasih telah berbelanja di');
+check(closingIdx >= 0, '5.2a custom closing text present in message');
+check(thankYouIdx > closingIdx, '5.2b custom closing appears before hardcoded thank-you');
+// hardcoded thank-you tetap ada
+check(msgWithClosing.includes('Terima kasih'), '5.2c hardcoded thank-you still present');
+
+// 5.3 whitespace-only intro/closing → diabaikan
+const msgWsIntro = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  intro: '   ',
+});
+const noWs = msgWsIntro.indexOf('   ') === -1; // baris kosong-only tidak muncul sebagai konten
+// Lebih teliti: intro yang whitespace-only tidak menambah baris baru sebelum hotel name
+const lines53 = msgWsIntro.split('\n');
+check(lines53[0] === '*OAK by Lawang*', '5.3a whitespace-only intro: hotel name is still first line');
+
+const msgWsClosing = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  closing: '\t  ',
+});
+const lines53b = msgWsClosing.split('\n');
+// hardcoded thank-you tetap ada dan tidak ada baris "  " sebagai closing
+check(lines53b[lines53b.length - 2] === 'Terima kasih telah berbelanja di OAK by Lawang!', '5.3b whitespace-only closing: hardcoded thank-you is second-to-last line');
+
+// 5.4 existing call tanpa options tetap identik (backward-compatible)
+const msgNoOpts = buildPosReceiptWhatsAppMessage(mockReceipt);
+const msgEmptyOpts = buildPosReceiptWhatsAppMessage(mockReceipt, {});
+check(msgNoOpts === msgEmptyOpts, '5.4 empty options object produces identical output to no options');
+
+// 5.5 URL builder meneruskan options
+const urlNoOpts = buildPosReceiptWhatsAppUrl(mockReceipt);
+const urlWithIntro = buildPosReceiptWhatsAppUrl(mockReceipt, {
+  intro: 'Khusus WhatsApp',
+});
+check(urlNoOpts !== null && urlNoOpts !== undefined, '5.5a URL without options is valid');
+check(urlWithIntro !== null, '5.5b URL with intro is valid');
+// decode the text param and check intro is inside
+const decodedUrlWith = decodeURIComponent(urlWithIntro!);
+const decodedUrlNo = decodeURIComponent(urlNoOpts!);
+check(decodedUrlWith.includes('Khusus WhatsApp'), '5.5c URL with intro contains intro text in encoded message');
+check(!decodedUrlNo.includes('Khusus WhatsApp'), '5.5d URL without options does NOT contain intro text');
+
+// 5.6 intro + closing combined
+const msgBoth = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  intro: 'Pesan pembuka',
+  closing: 'Pesan penutup',
+});
+const iIdx = msgBoth.indexOf('Pesan pembuka');
+const cIdx = msgBoth.indexOf('Pesan penutup');
+const tIdx = msgBoth.indexOf('Terima kasih');
+check(iIdx >= 0 && cIdx >= 0, '5.6a both intro and closing present');
+check(iIdx < cIdx, '5.6b intro before closing');
+check(cIdx < tIdx, '5.6c closing before hardcoded thank-you');
+
+// 5.7 intro/closing null → tidak muncul
+const msgNullOpts = buildPosReceiptWhatsAppMessage(mockReceipt, {
+  intro: null,
+  closing: null,
+});
+check(msgNullOpts === msgNoOpts, '5.7 null intro/closing produces identical output to no options');
 
 console.log(`\n=== All ${assertions} assertions passed ===`);

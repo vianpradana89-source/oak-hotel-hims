@@ -56,6 +56,15 @@ export default function PosThermalReceiptModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Communication settings (runtime config for WhatsApp intro/closing).
+  // Default: enabled, no custom intro/closing — mirrors the backend default
+  // when no row exists in property_pos_communication_settings.
+  const [commSettingsState, setCommSettings] = useState({
+    whatsapp_enabled: true,
+    whatsapp_intro_message: null as string | null,
+    whatsapp_closing_message: null as string | null,
+  });
+
   // ── Stale-request guard ─────────────────────────────────────────────
   // Monotonically increasing sequence. Each fetch captures the current seq;
   // when the promise resolves, only apply state if seq still matches.
@@ -80,6 +89,11 @@ export default function PosThermalReceiptModal({
       setPrintedAt(null);
       setError(null);
       setLoading(false);
+      setCommSettings({
+        whatsapp_enabled: true,
+        whatsapp_intro_message: null,
+        whatsapp_closing_message: null,
+      });
       fetchedKeyRef.current = null;
       seqRef.current += 1; // invalidate any in-flight requests
       document.documentElement.style.removeProperty('--thermal-width');
@@ -117,6 +131,72 @@ export default function PosThermalReceiptModal({
       });
   }, [isOpen, orderId, propertyId, authFetch]);
 
+  // ── Communication settings fetch (independent of receipt fetch) ──────────
+  // Fires in parallel with the receipt fetch on open / propertyId change.
+  // Failure (403/404/500/network/invalid payload) → keep default
+  // whatsapp_enabled=true so the button stays functional (fail-open).
+  // Only a valid 200 with whatsapp_enabled=false disables the button.
+  const commSeqRef = useRef(0);
+  useEffect(() => {
+    if (!isOpen || !propertyId) {
+      commSeqRef.current += 1; // invalidate
+      return;
+    }
+
+    const mySeq = ++commSeqRef.current;
+    let cancelled = false;
+
+    authFetch(`/api/pos/communication-settings?property_id=${propertyId}`)
+      .then((res) => {
+        if (cancelled || mySeq !== commSeqRef.current) return;
+        if (!res.ok) {
+          // 401: auth layer handles; 403/404/500: log + fallback default
+          console.warn(
+            '[PosThermalReceiptModal] comm settings fetch failed:',
+            res.status,
+          );
+          return;
+        }
+        return res.json().then((json: Record<string, unknown>) => {
+          if (cancelled || mySeq !== commSeqRef.current) return;
+          // Validate shape: only apply if all three fields have correct types
+          const data = json?.data as Record<string, unknown> | null | undefined;
+          if (data === null || data === undefined || typeof data !== 'object') return;
+          const enabled = data.whatsapp_enabled;
+          const intro = data.whatsapp_intro_message;
+          const closing = data.whatsapp_closing_message;
+          const validShape =
+            typeof enabled === 'boolean' &&
+            (intro === null || typeof intro === 'string') &&
+            (closing === null || typeof closing === 'string');
+          if (validShape) {
+            setCommSettings({
+              whatsapp_enabled: enabled,
+              whatsapp_intro_message: intro,
+              whatsapp_closing_message: closing,
+            });
+          } else {
+            console.warn(
+              '[PosThermalReceiptModal] comm settings payload invalid, using defaults',
+            );
+          }
+        });
+      })
+      .catch((err: unknown) => {
+        // Network error — fail-open: keep whatsapp_enabled=true
+        if (cancelled || mySeq !== commSeqRef.current) return;
+        console.warn(
+          '[PosThermalReceiptModal] comm settings network error:',
+          err instanceof Error ? err.message : err,
+        );
+      });
+
+    return () => {
+      cancelled = true;
+      commSeqRef.current += 1;
+    };
+  }, [isOpen, propertyId, authFetch]);
+
   // ── Handlers ──────────────────────────────────────────────────────────
 
   const handlePrint = useCallback(() => {
@@ -134,17 +214,33 @@ export default function PosThermalReceiptModal({
 
   // WhatsApp: nomor HANYA dari receipt.order.guest_phone (via helper).
   // URL dihitung saat receipt valid; null jika nomor tidak ada/tidak valid.
+  //
+  // Intro/closing custom diambil dari communication settings (GET runtime
+  // config). Bila fetch gagal (403/404/500/network), fallback ke default
+  // runtime: whatsapp_enabled=true, intro=null, closing=null (fail-open).
+  // Hanya respons valid dengan whatsapp_enabled=false yang me-disable tombol.
+  const commSettings = commSettingsState;
+  const whatsappOptions = {
+    intro: commSettings.whatsapp_intro_message,
+    closing: commSettings.whatsapp_closing_message,
+  };
   const whatsappUrl =
     receipt !== null && !loading && !error
-      ? buildPosReceiptWhatsAppUrl(receipt)
+      ? buildPosReceiptWhatsAppUrl(receipt, whatsappOptions)
       : null;
-  const canWhatsApp = whatsappUrl !== null;
+  const canWhatsApp = whatsappUrl !== null && commSettings.whatsapp_enabled;
+
+  const whatsappTooltip = !canWhatsApp
+    ? !commSettings.whatsapp_enabled
+      ? 'Pengiriman WhatsApp dinonaktifkan dari Pengaturan POS'
+      : 'Nomor WhatsApp pelanggan tidak tersedia atau tidak valid'
+    : 'Kirim struk ke WhatsApp tamu';
 
   const handleWhatsApp = useCallback(() => {
-    if (whatsappUrl) {
+    if (whatsappUrl && canWhatsApp) {
       window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
     }
-  }, [whatsappUrl]);
+  }, [whatsappUrl, canWhatsApp]);
 
   // ── Render ───────────────────────────────────────────────────────────
 
@@ -163,15 +259,15 @@ export default function PosThermalReceiptModal({
       >
         Tutup
       </button>
-      {canWhatsApp && (
-        <button
-          type="button"
-          onClick={handleWhatsApp}
-          className="three-btn-secondary"
-        >
-          WhatsApp
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={handleWhatsApp}
+        className="three-btn-secondary"
+        disabled={!canWhatsApp}
+        title={whatsappTooltip}
+      >
+        WhatsApp
+      </button>
       <button
         type="button"
         onClick={handlePrint}
