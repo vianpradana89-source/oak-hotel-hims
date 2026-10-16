@@ -38,6 +38,29 @@ function integrityError(res: Response, detail: string): void {
 }
 
 /**
+ * Canonical whole-rupiah serialization for receipt monetary fields.
+ *
+ * PostgreSQL numeric(p,s) columns are returned by the pg driver as raw
+ * decimal strings (e.g. "45000.00"); the receipt contract, however, is a
+ * canonical whole-rupiah string ("45000"). This helper validates that the
+ * raw value represents a non-negative safe integer, then serializes it
+ * canonically.
+ *
+ * Returns null for null/undefined inputs (caller decides how to render).
+ * Throws an Error (message prefixed with the column label) when the value
+ * is not a non-negative safe integer — callers must convert this to
+ * RECEIPT_INTEGRITY_ERROR (fail-closed).
+ */
+function toWholeRupiahNumber(raw: unknown, label: string): number | null {
+  if (raw === null || raw === undefined) return null;
+  const n = Number(String(raw));
+  if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n < 0) {
+    throw new Error(`${label} non-canonical whole-rupiah value: ${String(raw)}`);
+  }
+  return n;
+}
+
+/**
  * Read-only: query tunggal, kembalikan row atau null.
  * Client di-release di finally.
  */
@@ -352,6 +375,42 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
     }
 
     // â”€â”€ 11. Build response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Canonical whole-rupiah serialization:
+    // The triple authoritative amounts above are validated finite,
+    // safe-integer, > 0 and numerically equal. Serialize them from the
+    // validated numbers (NOT from the raw driver strings — numeric(12,2)
+    // columns come back as "45000.00").
+    const totalCanonical = String(orderTotalNum);
+
+    // Secondary monetary fields are normalized to canonical whole-rupiah
+    // strings as well (fail-closed: non-whole-rupiah value → integrity
+    // error).  discount_value is intentionally NOT normalized: when
+    // discount_type='PERCENT' it is a decimal percentage, not an amount.
+    let orderDiscountNum: number;
+    let cashReceivedNum: number | null;
+    let changeDueNum: number | null;
+    let canonicalItems: Array<Record<string, unknown>>;
+    try {
+      orderDiscountNum = toWholeRupiahNumber(order.discount_amount ?? '0', 'pos_orders.discount_amount') ?? 0;
+      cashReceivedNum = toWholeRupiahNumber(settlement.cash_received, 'pos_settlements.cash_received');
+      changeDueNum = toWholeRupiahNumber(settlement.change_due, 'pos_settlements.change_due');
+      canonicalItems = items.map((item) => {
+        const unitPrice = toWholeRupiahNumber(item.unit_price, 'pos_order_items.unit_price');
+        if (unitPrice === null) {
+          throw new Error('pos_order_items.unit_price NULL (kolom NOT NULL; keadaan tidak normal)');
+        }
+        const itemDiscount = toWholeRupiahNumber(item.discount_amount ?? '0', 'pos_order_items.discount_amount') ?? 0;
+        return {
+          ...item,
+          unit_price: String(unitPrice),
+          discount_amount: String(itemDiscount),
+        };
+      });
+    } catch (canonErr) {
+      integrityError(res, canonErr instanceof Error ? canonErr.message : String(canonErr));
+      return;
+    }
+
     res.status(200).json({
       status: 'SUCCESS',
       data: {
@@ -374,22 +433,22 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
           guest_phone: String(order.guest_phone ?? '') || null,
           table_number: String(order.table_number ?? '') || null,
           notes: String(order.notes ?? '') || null,
-          total_amount: String(order.total_amount ?? '0'),
+          total_amount: totalCanonical,
           discount_type: String(order.discount_type ?? '') || null,
           discount_value: order.discount_value !== null ? String(order.discount_value) : null,
           discount_reason: String(order.discount_reason ?? '') || null,
-          discount_amount: String(order.discount_amount ?? '0'),
+          discount_amount: String(orderDiscountNum),
           created_at: order.created_at ? String(order.created_at) : null,
           updated_at: order.updated_at ? String(order.updated_at) : null,
         },
-        items: items,
+        items: canonicalItems,
         settlement: {
           id: Number(settlement.id),
-          amount: String(settlement.amount ?? '0'),
+          amount: totalCanonical,
           payment_method: String(settlement.payment_method ?? ''),
           status: String(settlement.status ?? ''),
-          cash_received: settlement.cash_received !== null ? String(settlement.cash_received) : null,
-          change_due: settlement.change_due !== null ? String(settlement.change_due) : null,
+          cash_received: cashReceivedNum !== null ? String(cashReceivedNum) : null,
+          change_due: changeDueNum !== null ? String(changeDueNum) : null,
           payment_reference: String(settlement.payment_reference ?? '') || null,
           created_by: String(settlement.created_by ?? '') || null,
           created_at: settlement.created_at ? String(settlement.created_at) : null,
@@ -405,7 +464,7 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
           source_id: saleSourceId,
           payment_status: salePaymentStatus,
           payment_method: salePaymentMethod,
-          net_amount: String(sale.net_amount ?? '0'),
+          net_amount: totalCanonical,
           created_at: sale.created_at ? String(sale.created_at) : null,
         },
       },

@@ -274,8 +274,7 @@ export default function PosThermalReceiptModal({
         className="three-btn-primary"
         disabled={!canPrint}
       >
-        \ud83d\ud
-        \ud83d\udda8\ufe0f Cetak
+        Cetak
       </button>
     </div>
   );
@@ -378,7 +377,7 @@ export default function PosThermalReceiptModal({
                   });
               }}
             >
-              \ud83d\udd04 Coba Lagi
+              Coba Lagi
             </button>
           </div>
         )}
