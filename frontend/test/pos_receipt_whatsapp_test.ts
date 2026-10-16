@@ -3,8 +3,10 @@ import {
   normalizeWhatsAppPhone,
   buildPosReceiptWhatsAppMessage,
   buildPosReceiptWhatsAppUrl,
-} from '../src/features/pos/posReceiptWhatsApp';
-import type { PosReceiptData } from '../src/features/pos/posReceiptTypes';
+  type PosWhatsAppMessageOptions,
+} from '../src/features/pos/posReceiptWhatsApp.ts';
+import type { PosReceiptData } from '../src/features/pos/posReceiptTypes.ts';
+import { formatPosReceiptOrderReference } from '../src/features/thermalReceipt/posReceiptPresentation.ts';
 
 let assertions = 0;
 const check = (condition: unknown, message: string) => {
@@ -143,7 +145,16 @@ const mockReceipt: PosReceiptData = {
 
 const msg = buildPosReceiptWhatsAppMessage(mockReceipt);
 check(msg.includes('OAK by Lawang'), '2.1 hotel name from branding display_name');
-check(msg.includes('ORD-20260115-001'), '2.2 order number present');
+// order reference is now POS-YYMMDD-xxxx (from formatPosReceiptOrderReference),
+// NOT the raw canonical order_number.
+const expectedRef = formatPosReceiptOrderReference(
+  mockReceipt.order,
+  mockReceipt.sale.created_at,
+  mockReceipt.settlement.created_at,
+);
+check(expectedRef === 'POS-260115-0101', '2.2a expected order ref is POS-260115-0101');
+check(msg.includes('No. Order: POS-260115-0101'), '2.2 order reference uses POS-YYMMDD-xxxx format');
+check(!msg.includes('ORD-20260115-001'), '2.2b raw order_number no longer appears in message');
 check(msg.includes('TRX-20260115-001'), '2.3 transaction number present');
 check(msg.includes('Nasi Goreng Spesial'), '2.4 item name snapshot present');
 check(msg.includes('Es Teh Manis'), '2.5 second item present');
@@ -338,5 +349,81 @@ const m7 = buildPosReceiptWhatsAppMessage(
   makeReceiptWithMalformedAmounts('50000', '0', '50000', '50000')
 );
 check(!m7.includes('Diskon:'), '4.16 discount "0" does NOT show discount line');
+
+// ============================================================================
+// Test 5: intro/closing custom message (additive)
+// ============================================================================
+console.log('\n--- Test 5: intro/closing custom message ---');
+
+// 5.1 — intro null: tidak menambah baris placeholder apa pun
+const msgNoIntro = buildPosReceiptWhatsAppMessage(mockReceipt, { intro: null, closing: null });
+check(msgNoIntro === buildPosReceiptWhatsAppMessage(mockReceipt), '5.1 null intro/closing === no options (backward compat)');
+
+// 5.2 — intro ada: muncul SEBELUM nama hotel
+const intro = 'Selamat siang, silakan struk pesanan Anda:';
+const msgWithIntro = buildPosReceiptWhatsAppMessage(mockReceipt, { intro });
+check(msgWithIntro.startsWith(intro + '\n\n'), '5.2 intro appears as first line before hotel name');
+check(msgWithIntro.includes('OAK by Lawang'), '5.2a hotel name still present when intro set');
+check(
+  msgWithIntro.indexOf(intro) < msgWithIntro.indexOf('*OAK by Lawang*'),
+  '5.2b intro is positioned BEFORE hotel name header',
+);
+
+// 5.3 — closing ada: muncul SETELAH payment info, SEBELUM hardcoded closing
+const closing = 'Jangan lupa kasih bintang 5 ya!';
+const msgWithClosing = buildPosReceiptWhatsAppMessage(mockReceipt, { closing });
+check(
+  msgWithClosing.includes(closing),
+  '5.3 custom closing appears in message',
+);
+const hardcodedClosing = 'Terima kasih telah berbelanja di';
+check(
+  msgWithClosing.indexOf(closing) < msgWithClosing.indexOf(hardcodedClosing),
+  '5.3a custom closing appears BEFORE hardcoded thank-you',
+);
+// payment info (CASH) must still be before custom closing
+check(
+  msgWithClosing.indexOf('Metode: CASH') < msgWithClosing.indexOf(closing),
+  '5.3b payment method info appears before custom closing',
+);
+
+// 5.4 — intro + closing keduanya ada
+const msgBoth = buildPosReceiptWhatsAppMessage(mockReceipt, { intro, closing });
+check(
+  msgBoth.indexOf(intro) < msgBoth.indexOf('*OAK by Lawang*') &&
+  msgBoth.indexOf(closing) < msgBoth.indexOf(hardcodedClosing),
+  '5.4 intro before hotel AND closing before hardcoded thank-you',
+);
+check(msgBoth.includes('Terima kasih'), '5.4a hardcoded closing still present when custom closing set');
+
+// 5.5 — intro/closing whitespace-only di-normalisasi ke null (tidak menambah baris)
+const msgWs = buildPosReceiptWhatsAppMessage(mockReceipt, { intro: '   ', closing: '  ' });
+check(msgWs === buildPosReceiptWhatsAppMessage(mockReceipt), '5.5 whitespace-only intro/closing treated as null');
+
+// 5.6 — financial lines tidak berubah setelah C2
+const msgNoOpts = buildPosReceiptWhatsAppMessage(mockReceipt);
+check(msgNoOpts.includes('Rp 150.000'), '5.6 total amount intact');
+check(msgNoOpts.includes('Rp 10.000'), '5.6a discount amount intact');
+check(msgNoOpts.includes('2x Nasi Goreng Spesial'), '5.6b item line intact');
+check(msgNoOpts.includes('Metode: CASH'), '5.6c payment method intact');
+
+// ============================================================================
+// Test 6: buildPosReceiptWhatsAppUrl with options (backward compat + new)
+// ============================================================================
+console.log('\n--- Test 6: buildPosReceiptWhatsAppUrl with options ---');
+
+const urlNoOpts = buildPosReceiptWhatsAppUrl(mockReceipt);
+check(urlNoOpts !== null, '6.1 URL without options still works');
+
+const urlWithOpts = buildPosReceiptWhatsAppUrl(mockReceipt, { intro, closing });
+check(urlWithOpts !== null, '6.2 URL with options returns URL');
+check(urlWithOpts!.includes(encodeURIComponent(intro)), '6.2a encoded intro present in URL');
+check(urlWithOpts!.includes(encodeURIComponent(closing)), '6.2b encoded closing present in URL');
+
+// URL lama vs baru — prefix harus identik (nomor tidak berubah)
+check(
+  urlNoOpts!.split('?')[0] === urlWithOpts!.split('?')[0],
+  '6.3 wa.me phone prefix unchanged when adding options',
+);
 
 console.log(`\n=== All ${assertions} assertions passed ===`);

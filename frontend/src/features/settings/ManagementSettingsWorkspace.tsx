@@ -6,6 +6,7 @@ import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
 import { PaymentInstructionsSettingsTab } from './PaymentInstructionsSettingsTab';
+import { PosCommunicationSettingsTab } from './PosCommunicationSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
 import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab';
@@ -863,7 +864,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
           )}
 
           {activeCategory === 'pos' && (
-            <PaymentInstructionsSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+            <>
+              <PaymentInstructionsSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+              <PosCommunicationSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+            </>
           )}
 
           {activeCategory === 'transactions' && (

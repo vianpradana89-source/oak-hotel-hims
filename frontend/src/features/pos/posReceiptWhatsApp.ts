@@ -13,6 +13,7 @@
 
 import type { PosReceiptData } from './posReceiptTypes';
 import { parseSnapshotWholeRupiah, parseSnapshotRateLabel } from './posReceiptTypes';
+import { formatPosReceiptOrderReference } from '../thermalReceipt/posReceiptPresentation';
 
 /**
  * Normalisasi nomor telepon Indonesia untuk format WhatsApp.
@@ -119,20 +120,42 @@ function isPositiveAmount(amount: string | null | undefined): boolean {
 }
 
 /**
+ * Opsi opsional untuk `buildPosReceiptWhatsAppMessage`.
+ *
+ * - `intro`:   custom intro message (diambil dari `whatsapp_intro_message` di
+ *             `property_pos_communication_settings`). Bila ada, tampil SEBELUM
+ *             nama hotel sebagai baris tambahan. Tidak menggantikan nama hotel
+ *             atau informasi authoritative lain.
+ * - `closing`: custom closing message (diambil dari `whatsapp_closing_message`
+ *             di `property_pos_communication_settings`). Bila ada, tampil
+ *             SETELAH info pembayaran dan SEBELUM hardcoded closing existing.
+ *             Tidak menggantikan hardcoded closing existing.
+ */
+export interface PosWhatsAppMessageOptions {
+  intro?: string | null;
+  closing?: string | null;
+}
+
+/**
  * Bangun pesan WhatsApp dari data receipt authoritative.
  *
  * Format:
+ * - [intro custom — opsional, additive]
  * - Nama hotel/property
- * - No. Order & No. Transaksi
+ * - No. Order (format POS-YYMMDD-xxxx) & No. Transaksi
  * - Daftar item (quantity x harga)
  * - Diskon (item/penawaran) bila ada
  * - Total
  * - Metode pembayaran
  * - Info CASH: uang diterima + kembalian
  * - Non-CASH: referensi pembayaran
+ * - [closing custom — opsional, additive]
  * - Ucapan terima kasih
  */
-export function buildPosReceiptWhatsAppMessage(receipt: PosReceiptData): string {
+export function buildPosReceiptWhatsAppMessage(
+  receipt: PosReceiptData,
+  options?: PosWhatsAppMessageOptions,
+): string {
   const { property, order, items, settlement, sale } = receipt;
 
   // Nama hotel
@@ -141,10 +164,22 @@ export function buildPosReceiptWhatsAppMessage(receipt: PosReceiptData): string 
 
   const lines: string[] = [];
 
+  // Intro custom (additive — tidak menggantikan header hotel)
+  const intro = options?.intro?.trim();
+  if (intro) {
+    lines.push(intro);
+    lines.push('');
+  }
+
   // Header
   lines.push(`*${hotelName}*`);
   lines.push('');
-  lines.push(`No. Order: ${order.order_number}`);
+  const orderRef = formatPosReceiptOrderReference(
+    order,
+    sale.created_at,
+    settlement.created_at,
+  );
+  lines.push(`No. Order: ${orderRef}`);
   lines.push(`No. Transaksi: ${sale.transaction_no}`);
   lines.push('');
 
@@ -243,6 +278,14 @@ export function buildPosReceiptWhatsAppMessage(receipt: PosReceiptData): string 
   }
 
   lines.push('');
+
+  // Closing custom (additive — tidak menggantikan hardcoded closing)
+  const customClosing = options?.closing?.trim();
+  if (customClosing) {
+    lines.push(customClosing);
+    lines.push('');
+  }
+
   lines.push('Terima kasih telah berbelanja di ' + hotelName + '!');
   lines.push('Semoga berkenan. Sampai jumpa.');
 
@@ -256,14 +299,18 @@ export function buildPosReceiptWhatsAppMessage(receipt: PosReceiptData): string 
  * - Nomor HANYA dari receipt.order.guest_phone
  * - Normalize dengan normalizeWhatsAppPhone
  * - Jika tidak valid/null → return null
- * - Message dari buildPosReceiptWhatsAppMessage(receipt)
+ * - Message dari buildPosReceiptWhatsAppMessage(receipt, options)
  * - Format: https://wa.me/<normalized>?text=<encodeURIComponent(message)>
+ *
+ * `options` (opsional): intro/closing custom dari communication settings.
+ * Caller lama yang tidak memberi options tetap bekerja (default undefined).
  *
  * Tidak menerima phone sebagai parameter agar caller tidak bisa
  * memakai nomor draft secara tidak sengaja.
  */
 export function buildPosReceiptWhatsAppUrl(
-  receipt: PosReceiptData
+  receipt: PosReceiptData,
+  options?: PosWhatsAppMessageOptions,
 ): string | null {
   const phone = receipt.order.guest_phone;
   const normalized = normalizeWhatsAppPhone(phone);
@@ -272,6 +319,6 @@ export function buildPosReceiptWhatsAppUrl(
     return null;
   }
 
-  const message = buildPosReceiptWhatsAppMessage(receipt);
+  const message = buildPosReceiptWhatsAppMessage(receipt, options);
   return `https://wa.me/${normalized}?text=${encodeURIComponent(message)}`;
 }
