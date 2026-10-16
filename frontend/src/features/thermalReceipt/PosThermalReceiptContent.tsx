@@ -1,5 +1,6 @@
 import type { ThermalWidth } from './thermalReceiptTypes';
 import type { PosReceiptData } from '../pos/posReceiptTypes';
+import { getLogoServeUrl } from '../propertySettings/propertyBrandingApi';
 import {
   formatHotelDateTimeIndonesian,
   formatHotelCurrency,
@@ -23,7 +24,21 @@ export default function PosThermalReceiptContent({
 
   const hotelName = b?.display_name || property.name;
   const tagline = b?.tagline || null;
-  const logoUrl = b?.logo_url || null;
+  // Resolve managed branding storage key to the backend serve endpoint.
+  // - Managed key ("branding/..."): MUST go through getLogoServeUrl.
+  //   If the resolver returns null (malformed, property scope mismatch,
+  //   invalid key), the final result is null — the raw storage key is
+  //   NEVER used as an <img src> (it would hit the SPA fallback).
+  // - Legacy/non-managed URL (does not start with "branding/"): the raw
+  //   value is kept as a compatibility fallback.
+  const logoUrl = (() => {
+    const raw = b?.logo_url || null;
+    if (!raw) return null;
+    if (raw.startsWith('branding/')) {
+      return getLogoServeUrl(raw, property.id);
+    }
+    return raw;
+  })();
   const address = property.address;
   const phone = property.phone;
 
