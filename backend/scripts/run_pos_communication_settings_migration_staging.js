@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * RUNNER MIGRASI POS COMMUNICATION SETTINGS v1 - STAGING (TERPISAH DARI RUNNER DISPOSABLE)
  *

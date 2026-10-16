@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * RUNNER MIGRASI POS COMMUNICATION SETTINGS v1 ΓÇö CLI eksplisit
  * (Fondasi tabel property_pos_communication_settings untuk pesan WhatsApp POS)
