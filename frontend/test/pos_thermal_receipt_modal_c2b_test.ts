@@ -42,6 +42,13 @@ const receiptValidPhone: PosReceiptData = {
     total_amount: '50000',
     discount_type: null, discount_value: null, discount_reason: null,
     discount_amount: '0',
+    // B4.1 — legacy zero snapshots
+    service_amount: '0',
+    tax_amount: '0',
+    service_charge_percent_snapshot: '0',
+    tax_percent_snapshot: '0',
+    service_charge_enabled_snapshot: false,
+    tax_enabled_snapshot: false,
     created_at: '2026-10-16T10:00:00Z', updated_at: '2026-10-16T10:00:00Z',
   },
   items: [

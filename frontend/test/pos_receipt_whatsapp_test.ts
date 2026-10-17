@@ -4,7 +4,7 @@ import {
   buildPosReceiptWhatsAppMessage,
   buildPosReceiptWhatsAppUrl,
   type PosWhatsAppMessageOptions,
-} from '../src/features/pos/posReceiptWhatsApp';
+} from '../src/features/pos/posReceiptWhatsApp.ts';
 import type { PosReceiptData } from '../src/features/pos/posReceiptTypes';
 
 let assertions = 0;
@@ -87,6 +87,13 @@ const mockReceipt: PosReceiptData = {
     discount_value: '10000',
     discount_reason: 'Member discount',
     discount_amount: '10000',
+    // B4.1 snapshot fields (legacy zero — no service charge / tax)
+    service_amount: '0',
+    tax_amount: '0',
+    service_charge_percent_snapshot: '0',
+    tax_percent_snapshot: '0',
+    service_charge_enabled_snapshot: false,
+    tax_enabled_snapshot: false,
     created_at: '2026-01-15T10:00:00Z',
     updated_at: '2026-01-15T10:00:00Z',
   },
@@ -245,6 +252,13 @@ function makeReceiptWithMalformedAmounts(
       discount_value: null,
       discount_reason: 'test',
       discount_amount: discountAmount,
+      // B4.1 — legacy zero snapshots
+      service_amount: '0',
+      tax_amount: '0',
+      service_charge_percent_snapshot: '0',
+      tax_percent_snapshot: '0',
+      service_charge_enabled_snapshot: false,
+      tax_enabled_snapshot: false,
       created_at: null,
       updated_at: null,
     },
@@ -417,5 +431,83 @@ const msgNullOpts = buildPosReceiptWhatsAppMessage(mockReceipt, {
   closing: null,
 });
 check(msgNullOpts === msgNoOpts, '5.7 null intro/closing produces identical output to no options');
+
+// ============================================================================
+// Test 6: B4.1 service charge & PPN in WhatsApp message
+// ============================================================================
+console.log('\n--- Test 6: B4.1 service charge & PPN in WhatsApp message ---');
+
+// 6.1: receipt with service charge + PPN → both lines shown
+{
+  const receiptSvcTax: PosReceiptData = {
+    ...mockReceipt,
+    order: {
+      ...mockReceipt.order,
+      service_amount: '15000',
+      tax_amount: '14500',
+      service_charge_percent_snapshot: '10',
+      tax_percent_snapshot: '11',
+      service_charge_enabled_snapshot: true,
+      tax_enabled_snapshot: true,
+    },
+  };
+  const msgSvcTax = buildPosReceiptWhatsAppMessage(receiptSvcTax);
+  check(msgSvcTax.includes('Service Charge: Rp 15.000'), '6.1a service charge line present');
+  check(msgSvcTax.includes('(10%)'), '6.1b service percent shown as (10%)');
+  check(msgSvcTax.includes('PPN: Rp 14.500'), '6.1c PPN line present');
+  check(msgSvcTax.includes('(11%)'), '6.1d tax percent shown as (11%)');
+  // Service charge appears BEFORE total
+  const svcIdx = msgSvcTax.indexOf('Service Charge');
+  const totalIdx = msgSvcTax.indexOf('*Total:');
+  check(svcIdx >= 0 && totalIdx >= 0 && svcIdx < totalIdx, '6.1e service charge appears before total');
+  const ppnIdx = msgSvcTax.indexOf('PPN:');
+  check(ppnIdx >= 0 && ppnIdx < totalIdx, '6.1f PPN appears before total');
+}
+
+// 6.2: receipt with service charge only (tax = 0) → PPN line absent
+{
+  const receiptSvcOnly: PosReceiptData = {
+    ...mockReceipt,
+    order: {
+      ...mockReceipt.order,
+      service_amount: '15000',
+      tax_amount: '0',
+      service_charge_percent_snapshot: '10',
+      tax_percent_snapshot: '0',
+      service_charge_enabled_snapshot: true,
+      tax_enabled_snapshot: false,
+    },
+  };
+  const msgSvcOnly = buildPosReceiptWhatsAppMessage(receiptSvcOnly);
+  check(msgSvcOnly.includes('Service Charge: Rp 15.000'), '6.2a service charge shown');
+  check(!msgSvcOnly.includes('PPN:'), '6.2b PPN line absent when tax_amount="0"');
+}
+
+// 6.3: receipt with tax only (service = 0) → service line absent
+{
+  const receiptTaxOnly: PosReceiptData = {
+    ...mockReceipt,
+    order: {
+      ...mockReceipt.order,
+      service_amount: '0',
+      tax_amount: '14500',
+      service_charge_percent_snapshot: '0',
+      tax_percent_snapshot: '11',
+      service_charge_enabled_snapshot: false,
+      tax_enabled_snapshot: true,
+    },
+  };
+  const msgTaxOnly = buildPosReceiptWhatsAppMessage(receiptTaxOnly);
+  check(!msgTaxOnly.includes('Service Charge:'), '6.3a service line absent when service_amount="0"');
+  check(msgTaxOnly.includes('PPN: Rp 14.500'), '6.3b PPN shown when tax_amount > 0');
+}
+
+// 6.4: legacy receipt (no B4.1 fields) → no service/PPN lines at all
+{
+  // mockReceipt has service_amount="0", tax_amount="0" → no lines
+  const msgLegacy = buildPosReceiptWhatsAppMessage(mockReceipt);
+  check(!msgLegacy.includes('Service Charge:'), '6.4a no service charge line for legacy receipt');
+  check(!msgLegacy.includes('PPN:'), '6.4b no PPN line for legacy receipt');
+}
 
 console.log(`\n=== All ${assertions} assertions passed ===`);

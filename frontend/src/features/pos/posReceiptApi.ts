@@ -25,6 +25,96 @@ function isPositiveWholeRupiahString(v: unknown): boolean {
   return v !== '0';
 }
 
+// ── B4.1 snapshot-field validators ───────────────────────────────────────
+
+/**
+ * Returns true when the value is a string representing a non-negative
+ * whole-rupiah amount (digits only, value >= 0).
+ * Accepts "0" and "30000"; rejects "0.00", "", null, undefined, negative,
+ * leading-zero multi-digit forms like "007", and any non-string.
+ */
+function isNonNegativeWholeRupiahString(v: unknown): boolean {
+  if (typeof v !== 'string') return false;
+  if (!/^\d+$/.test(v)) return false;
+  if (v.length > 1 && v[0] === '0') return false; // "007" → reject
+  return true; // "0" and "30000" are valid
+}
+
+/**
+ * Returns true when the value is a string representing a finite percentage
+ * snapshot in the closed range [0, 100], using the exact format the
+ * backend emits: decimal digits with an optional fractional part.
+ *
+ * Accepted: "0", "10", "10.5", "11", "100"
+ * Rejected:  "" (empty), " " (whitespace-only), "10 " (trailing space),
+ *            "10\t" (tab), "1e2" (exponent), "+10" (sign), "-10" (neg),
+ *            "Infinity", "NaN", "0.0.1" (multi-dot), null, undefined,
+ *            non-string, any value outside [0, 100].
+ */
+function isPercentSnapshotString(v: unknown): boolean {
+  if (typeof v !== 'string') return false;
+  // Strict decimal format: one or more digits, optionally followed by
+  // a dot and one or more digits. No leading/trailing whitespace,
+  // no exponent, no sign, no multi-dot forms.
+  if (!/^\d+(\.\d+)?$/.test(v)) return false;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return false;
+  return n >= 0 && n <= 100;
+}
+
+/**
+ * Returns true when the value is a strict boolean (true or false).
+ * Rejects 0, 1, "true", null, undefined, and any other type.
+ */
+function isStrictBoolean(v: unknown): boolean {
+  return v === true || v === false;
+}
+
+/**
+ * Validate all six B4.1 snapshot fields on a PosReceiptOrder object.
+ * ALL SIX FIELDS ARE REQUIRED — the backend B4.1+ always emits them.
+ *
+ * Each field must be present AND pass its type guard.  A missing key
+ * (undefined), null, wrong-type, or malformed value all cause a throw.
+ * This is fail-closed: the receipt is rejected rather than silently
+ * falling back to zero or false.
+ *
+ * Thrown when any field is absent or malformed.
+ */
+function validateB41SnapshotFields(order: Record<string, unknown>): void {
+  const svcAmtKey = 'service_amount';
+  const taxAmtKey = 'tax_amount';
+  const svcPctKey = 'service_charge_percent_snapshot';
+  const taxPctKey = 'tax_percent_snapshot';
+  const svcOnKey = 'service_charge_enabled_snapshot';
+  const taxOnKey = 'tax_enabled_snapshot';
+
+  // ── service_amount: required, non-negative whole-rupiah string ──────
+  if (!isNonNegativeWholeRupiahString(order[svcAmtKey])) {
+    throw new Error('Data struk POS tidak valid: service_amount wajib hadir dan valid.');
+  }
+  // ── tax_amount: required, non-negative whole-rupiah string ──────────
+  if (!isNonNegativeWholeRupiahString(order[taxAmtKey])) {
+    throw new Error('Data struk POS tidak valid: tax_amount wajib hadir dan valid.');
+  }
+  // ── service_charge_percent_snapshot: required, strict decimal 0–100 ─
+  if (!isPercentSnapshotString(order[svcPctKey])) {
+    throw new Error('Data struk POS tidak valid: service_charge_percent_snapshot wajib hadir dan valid.');
+  }
+  // ── tax_percent_snapshot: required, strict decimal 0–100 ────────────
+  if (!isPercentSnapshotString(order[taxPctKey])) {
+    throw new Error('Data struk POS tidak valid: tax_percent_snapshot wajib hadir dan valid.');
+  }
+  // ── service_charge_enabled_snapshot: required, strict boolean ───────
+  if (!isStrictBoolean(order[svcOnKey])) {
+    throw new Error('Data struk POS tidak valid: service_charge_enabled_snapshot wajib hadir dan valid.');
+  }
+  // ── tax_enabled_snapshot: required, strict boolean ───────────────────
+  if (!isStrictBoolean(order[taxOnKey])) {
+    throw new Error('Data struk POS tidak valid: tax_enabled_snapshot wajib hadir dan valid.');
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────────────
 
 /**
@@ -180,5 +270,10 @@ export async function fetchPosReceipt(
   }
 
   // ── Return validated data ──────────────────────────────────────────
+
+  // B4.1 snapshot field validation (fail-closed)
+  // ALL SIX snapshot fields are REQUIRED.  The backend B4.1+ always
+  // emits them; missing or malformed values reject the receipt.
+  validateB41SnapshotFields(order);
   return data as PosReceiptData;
 }

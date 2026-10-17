@@ -68,6 +68,11 @@ export default function PosThermalReceiptContent({
   const orderDiscount = safeNum(order.discount_amount);
   const grandTotal = safeNum(order.total_amount);
 
+  // B4.1 — service charge & tax amounts (canonical whole-rupiah strings from backend).
+  // Displayed as separate line items when > 0; omitted otherwise.
+  const serviceCharge = safeNum(order.service_amount);
+  const taxAmount = safeNum(order.tax_amount);
+
   // CASH vs non-CASH sections
   const isCash = settlement.payment_method === 'CASH';
 
@@ -154,6 +159,29 @@ export default function PosThermalReceiptContent({
               <Row label="Alasan" value={order.discount_reason} />
             )}
           </>
+        )}
+        {/* B4.1 — Service charge & PPN lines (shown only when amount > 0) */}
+        {serviceCharge > 0 && (
+          <Row
+            label="Service Charge"
+            value={
+              order.service_charge_percent_snapshot != null
+                ? `${formatHotelCurrency(serviceCharge)} (${order.service_charge_percent_snapshot}%)`
+                : formatHotelCurrency(serviceCharge)
+            }
+            mono
+          />
+        )}
+        {taxAmount > 0 && (
+          <Row
+            label="PPN"
+            value={
+              order.tax_percent_snapshot != null
+                ? `${formatHotelCurrency(taxAmount)} (${order.tax_percent_snapshot}%)`
+                : formatHotelCurrency(taxAmount)
+            }
+            mono
+          />
         )}
         <div className="thermal-row thermal-row--total">
           <span className="thermal-label">Total</span>

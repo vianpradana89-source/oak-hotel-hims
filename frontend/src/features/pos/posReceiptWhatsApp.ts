@@ -197,6 +197,38 @@ export function buildPosReceiptWhatsAppMessage(
     lines.push('');
   }
 
+  // Service Charge (B4.1) — shown only when service_amount is a positive
+  // whole-rupiah string; never recomputed on the frontend.
+  const svcPositive = order.service_amount !== undefined && isPositiveAmount(order.service_amount);
+  const taxPositive = order.tax_amount !== undefined && isPositiveAmount(order.tax_amount);
+
+  if (svcPositive) {
+    const svcPct =
+      order.service_charge_percent_snapshot != null
+        ? ` (${order.service_charge_percent_snapshot}%)`
+        : '';
+    lines.push(
+      `Service Charge: ${formatRupiah(order.service_amount)}${svcPct}`,
+    );
+  }
+
+  // PPN / Tax (B4.1) — shown only when tax_amount is a positive
+  // whole-rupiah string; never recomputed on the frontend.
+  if (taxPositive) {
+    const taxPct =
+      order.tax_percent_snapshot != null
+        ? ` (${order.tax_percent_snapshot}%)`
+        : '';
+    lines.push(`PPN: ${formatRupiah(order.tax_amount)}${taxPct}`);
+  }
+
+  // Blank line before Total: only when at least one of service/tax was
+  // actually rendered.  For legacy / zero-cost transactions the layout
+  // remains identical to the pre-B4.1 format.
+  if (svcPositive || taxPositive) {
+    lines.push('');
+  }
+
   // Total
   lines.push(`*Total: ${formatRupiah(order.total_amount)}*`);
   lines.push('');

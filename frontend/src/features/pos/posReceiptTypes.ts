@@ -73,6 +73,44 @@ export interface PosReceiptOrder {
   discount_value: string | null;
   discount_reason: string | null;
   discount_amount: string;
+  /**
+   * B4.1 — canonical whole-rupiah string for service charge amount.
+   * "0" means no service charge. Non-negative, digits only.
+   * Required in receipt response (backend B4.1+ always emits it).
+   */
+  service_amount: string;
+  /**
+   * B4.1 — canonical whole-rupiah string for PPN (tax) amount.
+   * "0" means no tax. Non-negative, digits only.
+   * Required in receipt response (backend B4.1+ always emits it).
+   */
+  tax_amount: string;
+  /**
+   * B4.1 — snapshot of service charge percentage as a string.
+   * E.g. "10" for 10%. Must be a finite decimal in [0, 100].
+   * Format: digits with optional decimal fraction (no exponent, no sign).
+   * Required in receipt response.
+   */
+  service_charge_percent_snapshot: string;
+  /**
+   * B4.1 — snapshot of tax percentage as a string.
+   * E.g. "11" for 11%. Must be a finite decimal in [0, 100].
+   * Format: digits with optional decimal fraction (no exponent, no sign).
+   * Required in receipt response.
+   */
+  tax_percent_snapshot: string;
+  /**
+   * B4.1 — snapshot flag: was service charge enabled when order was created.
+   * Strict boolean; no 0/1/"true" substitutions.
+   * Required in receipt response.
+   */
+  service_charge_enabled_snapshot: boolean;
+  /**
+   * B4.1 — snapshot flag: was tax enabled when order was created.
+   * Strict boolean; no 0/1/"true" substitutions.
+   * Required in receipt response.
+   */
+  tax_enabled_snapshot: boolean;
   created_at: string | null;
   updated_at: string | null;
 }

@@ -64,6 +64,12 @@ function validPayload(): Record<string, any> {
         discount_value: null,
         discount_reason: null,
         discount_amount: '0',
+        service_amount: '0',
+        tax_amount: '0',
+        service_charge_percent_snapshot: '0',
+        tax_percent_snapshot: '0',
+        service_charge_enabled_snapshot: false,
+        tax_enabled_snapshot: false,
         created_at: '2026-10-16T08:00:00.000Z',
         updated_at: '2026-10-16T08:05:00.000Z',
       },
@@ -276,6 +282,274 @@ console.log('\n--- P9: order.property_id mismatch rejected ---');
     threw = true;
   }
   check(threw, 'P9 order.property_id=999 vs propertyId=7 ditolak');
+}
+
+// ── P10: B4.1 valid snapshot fields are accepted ─────────────────────────
+console.log('\n--- P10: B4.1 valid service_amount/tax_amount/snapshots accepted ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_amount = '5000';
+  (payload.data.order as any).tax_amount = '4950';
+  (payload.data.order as any).service_charge_percent_snapshot = '10';
+  (payload.data.order as any).tax_percent_snapshot = '11';
+  (payload.data.order as any).service_charge_enabled_snapshot = true;
+  (payload.data.order as any).tax_enabled_snapshot = true;
+  const receipt = await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  check(
+    receipt.order.service_amount === '5000',
+    'P10 order.service_amount="5000"',
+  );
+  check(
+    receipt.order.tax_amount === '4950',
+    'P10 order.tax_amount="4950"',
+  );
+  check(
+    receipt.order.service_charge_percent_snapshot === '10',
+    'P10 service_charge_percent_snapshot="10"',
+  );
+  check(
+    receipt.order.tax_percent_snapshot === '11',
+    'P10 tax_percent_snapshot="11"',
+  );
+  check(
+    receipt.order.service_charge_enabled_snapshot === true,
+    'P10 service_charge_enabled_snapshot=true',
+  );
+  check(
+    receipt.order.tax_enabled_snapshot === true,
+    'P10 tax_enabled_snapshot=true',
+  );
+}
+
+// ── P11: B4.1 zero snapshots (legacy) are accepted ──────────────────────
+console.log('\n--- P11: B4.1 all-zero legacy snapshots accepted ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_amount = '0';
+  (payload.data.order as any).tax_amount = '0';
+  (payload.data.order as any).service_charge_percent_snapshot = '0';
+  (payload.data.order as any).tax_percent_snapshot = '0';
+  (payload.data.order as any).service_charge_enabled_snapshot = false;
+  (payload.data.order as any).tax_enabled_snapshot = false;
+  const receipt = await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  check(receipt.order.service_amount === '0', 'P11 legacy service_amount="0" accepted');
+  check(receipt.order.tax_amount === '0', 'P11 legacy tax_amount="0" accepted');
+  check(receipt.order.service_charge_enabled_snapshot === false, 'P11 legacy svc=false accepted');
+  check(receipt.order.tax_enabled_snapshot === false, 'P11 legacy tax=false accepted');
+}
+
+// ── P12: missing B4.1 snapshots must be rejected ────────────────────────
+console.log('\n--- P12: missing B4.1 snapshots rejected ---');
+{
+  const payload = validPayload();
+  const keys = [
+    'service_amount',
+    'tax_amount',
+    'service_charge_percent_snapshot',
+    'tax_percent_snapshot',
+    'service_charge_enabled_snapshot',
+    'tax_enabled_snapshot',
+  ];
+  for (const key of keys) delete payload.data.order[key];
+
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P12 missing all six snapshot fields rejected');
+}
+// ── P13: B4.1 service_amount null is REJECTED ──────────────────────────
+console.log('\n--- P13: B4.1 service_amount=null rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_amount = null;
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P13 service_amount=null ditolak (field present tapi nilai null)');
+}
+
+// ── P14: B4.1 service_amount="5000.00" (non-canonical) is REJECTED ─────
+console.log('\n--- P14: B4.1 service_amount="5000.00" rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_amount = '5000.00';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P14 service_amount="5000.00" ditolak (non-kanonik)');
+}
+
+// ── P15: B4.1 percent_snapshot > 100 is REJECTED ───────────────────────
+console.log('\n--- P15: B4.1 service_charge_percent_snapshot="150" rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_percent_snapshot = '150';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P15 service_charge_percent_snapshot="150" ditolak (> 100)');
+}
+
+// ── P16: B4.1 enabled_snapshot as non-boolean is REJECTED ───────────────
+console.log('\n--- P16: B4.1 service_charge_enabled_snapshot="true" (string) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_enabled_snapshot = 'true'; // string, not boolean
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P16 service_charge_enabled_snapshot="true" (string) ditolak');
+}
+
+// ── P17: B4.1 negative service_amount is REJECTED ──────────────────────
+console.log('\n--- P17: B4.1 service_amount="-100" rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_amount = '-100';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P17 service_amount="-100" ditolak (negatif)');
+}
+
+// ── P18: each of the six B4.1 fields missing individually is REJECTED ─
+console.log('\n--- P18: each B4.1 snapshot field missing one-by-one rejected ---');
+{
+  const fieldKeys: Array<{ key: string; label: string }> = [
+    { key: 'service_amount', label: 'P18a service_amount missing' },
+    { key: 'tax_amount', label: 'P18b tax_amount missing' },
+    { key: 'service_charge_percent_snapshot', label: 'P18c service_charge_percent_snapshot missing' },
+    { key: 'tax_percent_snapshot', label: 'P18d tax_percent_snapshot missing' },
+    { key: 'service_charge_enabled_snapshot', label: 'P18e service_charge_enabled_snapshot missing' },
+    { key: 'tax_enabled_snapshot', label: 'P18f tax_enabled_snapshot missing' },
+  ];
+  for (const { key, label } of fieldKeys) {
+    const payload = validPayload();
+    delete (payload.data.order as Record<string, unknown>)[key];
+    let threw = false;
+    try {
+      await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+    } catch {
+      threw = true;
+    }
+    check(threw, label + ' → ditolak');
+  }
+}
+
+// ── P19: percent snapshot with leading whitespace is REJECTED ─────────
+console.log('\n--- P19: B4.1 percent snapshot " 10" (leading whitespace) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_percent_snapshot = ' 10';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P19 service_charge_percent_snapshot=" 10" (leading whitespace) ditolak');
+}
+
+// ── P20: percent snapshot with trailing whitespace is REJECTED ───────
+console.log('\n--- P20: B4.1 percent snapshot "10 " (trailing whitespace) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).tax_percent_snapshot = '10 ';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P20 tax_percent_snapshot="10 " (trailing whitespace) ditolak');
+}
+
+// ── P21: percent snapshot whitespace-only is REJECTED ────────────────
+console.log('\n--- P21: B4.1 percent snapshot "   " (whitespace-only) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_percent_snapshot = '   ';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P21 service_charge_percent_snapshot="   " (whitespace-only) ditolak');
+}
+
+// ── P22: percent snapshot exponent form is REJECTED ──────────────────
+console.log('\n--- P22: B4.1 percent snapshot "1e2" (exponent) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_percent_snapshot = '1e2';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P22 service_charge_percent_snapshot="1e2" (exponent) ditolak');
+}
+
+// ── P23: percent snapshot NaN string is REJECTED ─────────────────────
+console.log('\n--- P23: B4.1 percent snapshot "NaN" rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).tax_percent_snapshot = 'NaN';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P23 tax_percent_snapshot="NaN" ditolak');
+}
+
+// ── P24: percent snapshot Infinity string is REJECTED ────────────────
+console.log('\n--- P24: B4.1 percent snapshot "Infinity" rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_percent_snapshot = 'Infinity';
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P24 service_charge_percent_snapshot="Infinity" ditolak');
+}
+
+// ── P25: enabled snapshot as 0/1 number is REJECTED ──────────────────
+console.log('\n--- P25: B4.1 enabled snapshot=1 (number, bukan boolean) rejected ---');
+{
+  const payload = validPayload();
+  (payload.data.order as any).service_charge_enabled_snapshot = 1; // number, not boolean
+  let threw = false;
+  try {
+    await fetchPosReceipt(ORDER_ID, PROPERTY_ID, fakeFetch(payload));
+  } catch {
+    threw = true;
+  }
+  check(threw, 'P25 service_charge_enabled_snapshot=1 (number) ditolak');
 }
 
 console.log(
