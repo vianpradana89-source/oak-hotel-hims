@@ -80,7 +80,7 @@ export interface PosReceiptOrder {
    */
   service_amount: string;
   /**
-   * B4.1 — canonical whole-rupiah string for PPN (tax) amount.
+   * B4.1 — canonical whole-rupiah string for PBJT (tax) amount.
    * "0" means no tax. Non-negative, digits only.
    * Required in receipt response (backend B4.1+ always emits it).
    */

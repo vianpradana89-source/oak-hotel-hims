@@ -104,7 +104,30 @@ function harness(authFetch, overrides = {}) {
       });},
   };
   const jsx = (type, p, key) => ({type, props: p || {}, key});
-  const component = load(compile('PosWorkspace.tsx'), {react, 'react/jsx-runtime': {jsx, jsxs: jsx}, './posOrderDraft': D, './GuestPicker': {default: () => null}}).default;
+  // Mock authenticatedFetch: return pricing-settings response immediately
+  // so PosWorkspace's useEffect fetches without real network.
+  // overrides.pricingData lets tests control the returned pricing settings.
+  // overrides.pricingQueue (array of objects|null) = sequential pricing
+  //   responses per fetch call; null entry → throw (simulate network fail).
+  // overrides.onPricingFetch() → hook called on every pricing fetch.
+  const _pricingData = overrides.pricingData || {
+    service_charge_enabled: false, service_charge_percent: 0,
+    tax_enabled: false, tax_percent: 0,
+  };
+  let _pricingFetchIdx = 0;
+  const PRICING_FETCH_FAIL = "__FAIL__";
+  const mockAuthenticatedFetch = async (_url, _init) => {
+    overrides.onPricingFetch?.();
+    // If a pricing queue is provided, consume it sequentially.
+    // Entry === PRICING_FETCH_FAIL → simulate network failure (throw).
+    if (overrides.pricingQueue) {
+      const entry = overrides.pricingQueue[_pricingFetchIdx++] ?? _pricingData;
+      if (entry === PRICING_FETCH_FAIL) { throw new Error('pricing fetch network error'); }
+      return new Response(JSON.stringify({ status: 'OK', data: entry }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ status: 'OK', data: _pricingData }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+    const component = load(compile('PosWorkspace.tsx'), {react, 'react/jsx-runtime': {jsx, jsxs: jsx}, './posOrderDraft': D, './GuestPicker': {default: () => null}, '../../lib/authenticatedFetch': { authenticatedFetch: mockAuthenticatedFetch }}).default;
   const signals = {created: [], pending: [], unresolved: [], pay: [], refreshes: 0};
   props = {propertyId:7,posMenu:[plain[0].item],posOrders:[],reservationId:null,authFetch,canEditPos:true,canDiscountPos:true,
     onOrderCreated(order) {signals.created.push(order);},onRequestPending(v) {signals.pending.push(v);},
@@ -116,6 +139,12 @@ function harness(authFetch, overrides = {}) {
   function label(n) {const flatten = v => Array.isArray(v) ? v.map(flatten).join('') : v && typeof v === 'object' ? flatten(v.props?.children) : v == null ? '' : String(v); return flatten(n.props.children);}
   function button(text) {const n = nodes().find(n => n.type === 'button' && label(n) === text); assert.ok(n, 'Missing button ' + text); return n;}
   function click(text) {const n = button(text); assert.equal(!!n.props.disabled, false, 'Disabled button ' + text); n.props.onClick(); render();}
+  // Like click but does NOT assert enabled — used to test buttons that are
+  // intentionally disabled (e.g. during pricing loading/error).
+  function clickIfEnabled(text) {const n = button(text); if (!n.props.disabled) {n.props.onClick(); render();}}
+  // Call onClick DIRECTLY even when the button is disabled — bypasses the
+  // disabled guard so handler-level safeguards can be regression-tested.
+  function forceClick(text) {const n = button(text); n.props.onClick(); render();}
   function byAria(name,value) {const n=nodes().find(n=>n.props['aria-label']===name && (n.type==='input'||n.type==='select'));
     assert.ok(n,'Missing input '+name);assert.equal(!!n.props.disabled,false);n.props.onChange({target:{value}});render();}
   function labelled(name,value) {const l=nodes().find(n=>n.type==='label'&&label(n).includes(name));assert.ok(l,'Missing label '+name);
@@ -123,7 +152,7 @@ function harness(authFetch, overrides = {}) {
     assert.ok(n);assert.equal(!!n.props.disabled,false);n.props.onChange({target:{value}});render();}
   function addItem() {const n=nodes().find(n=>n.type==='div'&&typeof n.props.onClick==='function'&&label(n).includes('Coffee'));assert.ok(n,'Missing menu Coffee');assert.equal(!!n.props.disabled,false);n.props.onClick();render();}
   async function settle() {await new Promise(resolve => setImmediate(resolve)); render(); await new Promise(resolve => setImmediate(resolve)); render();}
-  render(); return {render,nodes,button,click,byAria,labelled,addItem,settle,signals,
+  render(); return {render,nodes,button,click,clickIfEnabled,forceClick,byAria,labelled,addItem,settle,signals,
     changeProps(patch) {props={...props,...patch};render();},
     cleanup() {slots.forEach(s=>s?.cleanup?.());}};
 }
@@ -135,16 +164,17 @@ async function lifecycle() {
   let requests=[],h;
   h=harness(async(_url,init)=>{const body=JSON.parse(init.body);requests.push({body,init});return created(body);},{canDiscountPos:false});
   h.addItem();h.labelled('Nomor WhatsApp','+628123456789');h.labelled('Catatan pesanan','Order note');h.byAria('Catatan Coffee','hot');
-  h.click('Bayar');await h.settle();
+  await h.settle();h.click('Bayar');await h.settle();
   check('Workspace ordinary Bayar sends snapshots with no discounts/prices; payment uses server amount',()=>{
     assert.equal(requests.length,1);const b=requests[0].body;assert.equal(b.guest_phone,'+628123456789');assert.equal(b.notes,'Order note');assert.equal(b.items[0].notes,'hot');
     assert.equal('unit_price' in b.items[0],false);assert.equal('discount_type' in b,false);
+    assert.equal(b.service_charge_enabled,false);assert.equal(b.tax_enabled,false);
     assert.equal(h.signals.created.length,1);assert.equal(h.signals.pay.length,1);assert.equal(h.signals.pay[0].totalAmount,'10000');
     assert.equal(h.nodes().some(n=>n.props['aria-label']==='Diskon item Coffee'),false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(JSON.parse(init.body));return created(requests.at(-1));});h.addItem();
   h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.labelled('Diskon pesanan','PERCENT');
-  h.byAria('Nilai diskon pesanan','10');h.byAria('Alasan diskon pesanan','member');h.click('Simpan Pesanan');await h.settle();
+  h.byAria('Nilai diskon pesanan','10');h.byAria('Alasan diskon pesanan','member');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace granted discount emits LINE then order fields; save alone never opens pay',()=>{
     assert.equal(requests[0].items[0].discount_type,'NOMINAL');assert.equal(requests[0].items[0].discount_value,1000);
     assert.equal(requests[0].discount_type,'PERCENT');assert.equal(requests[0].discount_value,10);assert.equal(requests[0].discount_reason,'member');
@@ -154,7 +184,7 @@ async function lifecycle() {
   h=harness(async(_url,init)=>{requests.push({body:init.body,key:init.headers['Idempotency-Key']});
     if(++attempt===1)throw new Error('network');if(attempt===2)return json({code:'DISCOUNT_PERMISSION_DENIED'},403);return created(JSON.parse(init.body),200);});
   h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.labelled('Nomor WhatsApp','+628123');
-  h.labelled('Catatan pesanan','same order');h.click('Simpan Pesanan');await h.settle();
+  h.labelled('Catatan pesanan','same order');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace ambiguous locks phone/note/discount drafts and keeps result unresolved',()=>{
     assert.equal(h.signals.created.length,0);assert.equal(h.signals.unresolved.at(-1),true);
     assert.equal(h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee').props.disabled,true);
@@ -169,35 +199,282 @@ async function lifecycle() {
     assert.equal(h.signals.created.length,1);assert.equal(h.signals.unresolved.at(-1),false);
   });h.cleanup();
   for(const scope of ['property','reservation']){
-    requests=[];h=harness(async(_url,init)=>{requests.push(init.body);throw new Error('network');});h.addItem();h.click('Simpan Pesanan');await h.settle();
-    h.changeProps(scope==='property'?{propertyId:8}:{reservationId:99});h.click('Coba Lagi');await h.settle();
+    requests=[];h=harness(async(_url,init)=>{requests.push(init.body);throw new Error('network');});h.addItem();await h.settle();h.click('Simpan Pesanan');await h.settle();
+    h.changeProps(scope==='property'?{propertyId:8}:{reservationId:99});if(scope==='property')await h.settle();h.click('Coba Lagi');await h.settle();
     check('Workspace '+scope+' change cannot retarget unresolved create',()=>{
       assert.equal(requests.length,1);assert.equal(h.signals.unresolved.at(-1),true);assert.equal(h.signals.created.length,0);
     });h.cleanup();
   }
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
   h.byAria('Diskon item Coffee','PERCENT');h.byAria('Nilai diskon Coffee','100');
+  await h.settle();
   check('Workspace zero-total Bayar disabled; ordinary save still separate',()=>{
     assert.equal(h.button('Bayar').props.disabled,true);assert.equal(h.button('Simpan Pesanan').props.disabled,false);assert.equal(requests.length,0);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return json({status:'SUCCESS',data:{id:9,property_id:8,order_number:'FOREIGN',status:'OPEN',total_amount:'13000'}},201);});
-  h.addItem();h.click('Bayar');await h.settle();
+  h.addItem();await h.settle();h.click('Bayar');await h.settle();
   check('Workspace malformed scope in success stays unresolved and does not open payment',()=>{
     assert.equal(h.signals.created.length,0);assert.equal(h.signals.pay.length,0);assert.equal(h.signals.unresolved.at(-1),true);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
-  h.labelled('Nomor WhatsApp','x'.repeat(51));h.click('Simpan Pesanan');await h.settle();
+  h.labelled('Nomor WhatsApp','x'.repeat(51));await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace invalid input fails before pending/POST; draft remains editable',()=>{
     assert.equal(requests.length,0);assert.equal(h.signals.pending.includes(true),false);
     assert.equal(h.nodes().find(n=>n.type==='textarea').props.disabled,false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
   h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.changeProps({canDiscountPos:false});
+  await h.settle();
   check('Workspace permission lost retains draft and offers explicit removal',()=>assert.equal(h.button('Simpan Pesanan').props.disabled,true));
   h.click('Hapus semua diskon');h.click('Simpan Pesanan');await h.settle();
   check('Workspace explicit removal preserves items and sends ordinary order',()=>{
     assert.equal(requests.length,1);assert.equal(JSON.parse(requests[0]).items.length,1);assert.equal('discount_type' in JSON.parse(requests[0]).items[0],false);
   });h.cleanup();
+  // ── Regression: pricing loading guard ─────────────────────────────────────
+  // Saat pricing settings masih 'loading', tombol submit harus disabled.
+  // Setelah settle (pricing ready), tombol enabled kembali.
+  requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});
+  h.addItem();
+  check('Pricing loading guard blocks submit while settings load',()=>{
+    assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled while pricing loads');
+    assert.equal(requests.length,0);
+  });
+  await h.settle();
+  check('Pricing loading guard lifts after settings load',()=>{
+    assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled after pricing ready');
+  });
+  h.cleanup();
+  // ── Regression: payload svc/tax consistency (property OFF → false) ────────
+  // Saat properti svc/tax OFF, payload WAJIB mengirim false eksplisit,
+  // bukan omit (backward compat) atau true (stale).
+  requests=[];h=harness(async(_url,init)=>{requests.push(JSON.parse(init.body));return created(requests.at(-1));});
+  h.addItem();
+  await h.settle();
+  h.click('Simpan Pesanan');await h.settle();
+  check('Payload svc/tax fields explicit false when property OFF',()=>{
+    assert.equal(requests.length,1);
+    assert.equal(requests[0].service_charge_enabled,false,'svc must be false when property OFF');
+    assert.equal(requests[0].tax_enabled,false,'tax must be false when property OFF');
+    assert.equal(h.signals.created.length,1);
+  });
+  h.cleanup();
+  // ── Regression: toggle reset setelah order sukses ─────────────────────────
+  // Properti svc ON & tax ON: setelah order sukses, toggle di-reset ke nilai
+  // properti (ON), bukan ke OFF paksa. Draft baru → toggle ON sesuai properti.
+  requests=[];h=harness(async(_url,init)=>{requests.push(JSON.parse(init.body));return created(requests.at(-1));},
+    {pricingData:{service_charge_enabled:true,service_charge_percent:10,tax_enabled:true,tax_percent:11}});
+  h.addItem();await h.settle();
+  h.click('Simpan Pesanan');await h.settle();
+  check('Toggle reset to property default (ON) after successful order — first payload',()=>{
+    assert.equal(requests.length,1);
+    // Payload pertama: svc & tax ON (toggle ON + properti ON → effective ON)
+    assert.equal(requests[0].service_charge_enabled,true,'svc ON when property ON and toggle ON');
+    assert.equal(requests[0].tax_enabled,true,'tax ON when property ON and toggle ON');
+    assert.equal(h.signals.created.length,1);
+  });
+  // Tambah item kedua: draft baru, toggle harus ON (reset ke default properti)
+  h.addItem();await h.settle();
+  h.click('Simpan Pesanan');await h.settle();
+  check('Toggle reset to property default (ON) — second payload after reset',()=>{
+    assert.equal(requests.length,2);
+    assert.equal(requests[1].service_charge_enabled,true,'svc stays ON after reset (property default)');
+    assert.equal(requests[1].tax_enabled,true,'tax stays ON after reset (property default)');
+  });
+  h.cleanup();
+  // ── Regression: HTTP 400 pricing — draft dipertahankan, tidak auto-retry ─
+  // authFetch pertama return 400 SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY.
+  // Diharapkan: cart & diskon TIDAP dihapus, snapshot dibuang, tidak ada
+  // request kedua otomatis (tidak auto-retry), message error tampil.
+  requests=[];let attempt400=0;
+  h=harness(async(_url,init)=>{
+    attempt400++;requests.push(JSON.parse(init.body));
+    if(attempt400===1) return json({status:'ERROR',code:'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY',message:'Service charge di properti ini dimatikan.'},400);
+    return created(requests.at(-1));
+  },{pricingData:{service_charge_enabled:false,service_charge_percent:0,tax_enabled:false,tax_percent:0}});
+  h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','500');
+  await h.settle();
+  h.click('Simpan Pesanan');await h.settle();
+  check('HTTP 400 pricing: draft preserved, no auto-retry, error message shown',()=>{
+    assert.equal(attempt400,1,'Hanya 1 request — tidak ada auto-retry');
+    // Cart masih ada (draft dipertahankan)
+    assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),true,'Diskon item masih ada');
+    // Error message tampil — saveResult.message di-render sebagai <p>
+    const errNodes=h.nodes().filter(n=>n.type==='p'&&typeof n.props.children==='string'&&n.props.children.includes('Service charge'));
+    assert.ok(errNodes.length>0,'Pesan error pricing 400 tampil');
+    // Snapshot dibuang → tombol Simpan Pesanan enabled lagi (bukan terkunci)
+    assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Tombol Simpan enabled setelah 400 pricing definitif');
+  });
+  h.cleanup();
+
+  // ── Regression TEMUAN 1: PRICING_TOTAL_CHANGED + snapshot unresolved ──────
+  // Alur: network error pertama → snapshot unresolved/locked → "Coba Lagi"
+  // dipaksa backend return 409 PRICING_TOTAL_CHANGED. Diharapkan:
+  // - snapshot TIDAK dibuang (idempotency key + payload asli dipertahankan)
+  // - status unresolved/locked dipertahankan (onUnresolvedChange tetap true)
+  // - retry berikutnya ("Coba Lagi" lagi) memakai KEY & BODY yang sama
+  //   (tidak membuat key baru sebelum hasil pengajuan lama dipastikan)
+  // - tidak ada submit otomatis, cart & diskon tetap ada
+  requests=[];let attemptPtc=0;
+  h=harness(async(_url,init)=>{
+    attemptPtc++;
+    const key=init.headers['Idempotency-Key'];
+    requests.push({body:init.body,key});
+    if(attemptPtc===1) throw new Error('network'); // → unresolved
+    if(attemptPtc===2) return json({status:'ERROR',code:'PRICING_TOTAL_CHANGED',message:'Total berubah',data:{computed_total:45000,expected_total:40000,service_charge_percent:10,tax_percent:11}},409);
+    return created(JSON.parse(init.body));
+  },{pricingData:{service_charge_enabled:true,service_charge_percent:10,tax_enabled:true,tax_percent:11}});
+  h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','500');
+  await h.settle();
+  h.click('Simpan Pesanan');await h.settle(); // attempt 1 → network → unresolved
+  h.click('Coba Lagi');await h.settle();       // attempt 2 → 409 PTC (unresolved)
+  check('PTC + unresolved: snapshot & key dipertahankan, status locked',()=>{
+    assert.equal(attemptPtc,2,'Tidak ada auto-retry setelah 409 PTC');
+    assert.equal(h.signals.unresolved.at(-1),true,'Snapshot tetap unresolved/locked setelah 409 PTC');
+    // Cart & diskon masih ada
+    assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),true,'Diskon item masih ada');
+  });
+  // Retry ketiga: karena snapshot masih unresolved, harus memakai KEY & BODY
+  // yang sama (replay snapshot), TIDAK membuat key baru.
+  h.click('Coba Lagi');await h.settle(); // attempt 3 → created (replay sukses)
+  check('PTC + unresolved: retry berikutnya memakai key & body snapshot lama',()=>{
+    assert.equal(attemptPtc,3);
+    assert.equal(requests[2].key,requests[1].key,'Key idempotensi sama — snapshot dipertahankan, bukan key baru');
+    assert.equal(requests[2].body,requests[1].body,'Body payload sama — payload asli dipertahankan');
+    assert.equal(h.signals.created.length,1,'Replay setelah resolusi menghasilkan order');
+    assert.equal(h.signals.unresolved.at(-1),false,'Unresolved dilepas setelah sukses');
+  });
+  h.cleanup();
+
+  // ── Regression TEMUAN 2: HTTP 400 pricing re-fetch berhasil ──────────────
+  // Alur: authFetch return 400 SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY →
+  // pricing settings di-set 'loading' (blokir Simpan) → re-fetch via
+  // authenticatedFetch return svc ON 15% / tax ON 10% → sinkronkan
+  // master flag, persentase & toggle → Simpan enabled kembali dengan
+  // nilai properti TERBARU (bukan nilai lama yang memicu 400).
+  // Menggunakan mutable pricingMock: pricing fetch pertama = lama (svc ON),
+  // pricing fetch re-fetch = baru (svc OFF 0% / tax OFF 0%).
+  {
+    const pricingQueue=[
+      {service_charge_enabled:true,service_charge_percent:15,tax_enabled:true,tax_percent:10},
+      {service_charge_enabled:false,service_charge_percent:0,tax_enabled:true,tax_percent:10},
+    ];
+    let pricingFetches=0;
+    requests=[];let attemptRf=0;
+    h=harness(async(_url,init)=>{
+      attemptRf++;requests.push(JSON.parse(init.body));
+      if(attemptRf===1) return json({status:'ERROR',code:'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY',message:'Service charge di properti ini dimatikan.'},400);
+      return created(requests.at(-1));
+    },{
+      pricingData:{service_charge_enabled:true,service_charge_percent:15,tax_enabled:true,tax_percent:10},
+      // Override mockAuthenticatedFetch via closure: sequential pricing queue.
+      pricingQueue,
+      onPricingFetch() {pricingFetches++;},
+    });
+    h.addItem();
+    await h.settle(); // pricing fetch #1 (queue[0]: svc ON 15%)
+    // Simpan saat ini: svc ON (toggle ON + properti ON) → payload svc ON
+    // → backend 400 (properti svc OFF sekarang).
+    h.click('Simpan Pesanan');await h.settle(); // 400 → re-fetch selesai (queue[1])
+    // Re-fetch selesai: pricing ready dengan nilai queue[1]
+    // (svc OFF 0% / tax ON 10%) — Simpan kembali enabled.
+    check('400 re-fetch berhasil: Simpan enabled, re-fetch dipanggil, tidak auto-retry',()=>{
+      assert.equal(attemptRf,1,'Tidak ada auto-retry setelah 400');
+      assert.equal(pricingFetches,2,'Re-fetch pricing dipanggil 1x tambahan (initial + refetch)');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled setelah re-fetch ready');
+      // Cart masih ada
+      assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee')===false,true,'Tidak ada diskon di draft ini');
+    });
+    // Submit lagi: toggle svc sekarang OFF (sinkron ke properti baru)
+    // → payload svc OFF → backend accept.
+    h.click('Simpan Pesanan');await h.settle();
+    check('400 re-fetch: payload berikutnya memakai flag properti terbaru',()=>{
+      assert.equal(attemptRf,2,'Hanya 1 request kedua manual (tanpa auto-submit)');
+      assert.equal(requests[1].service_charge_enabled,false,'svc OFF sesuai properti terbaru');
+      assert.equal(requests[1].tax_enabled,true,'tax ON sesuai properti terbaru');
+      assert.equal(h.signals.created.length,1);
+    });
+    h.cleanup();
+  }
+
+  // ── Regression TEMUAN 2b: HTTP 400 pricing re-fetch GAGAL → Muat Ulang ───
+  // Alur: 400 TAX_NOT_ENABLED_AT_PROPERTY → re-fetch via authenticatedFetch
+  // GAGAL (network) → pricing status 'error' → Simpan TETAP BLOCKED.
+  // Tombol "Muat Ulang" muncul untuk re-trigger fetch secara manual.
+  // Setelah Muat Ulang sukses, pricing ready, Simpan enabled, payload
+  // berikutnya memakai flag properti terbaru.
+  // Cart, diskon & input kasir dipertahankan sepanjang proses.
+  {
+    const pricingQueue=[
+      {service_charge_enabled:true,service_charge_percent:15,tax_enabled:true,tax_percent:10},
+      "__FAIL__", // fetch kedua (auto re-fetch setelah 400) → throw
+      {service_charge_enabled:false,service_charge_percent:0,tax_enabled:false,tax_percent:0},
+    ];
+    let pricingFetches=0;
+    requests=[];let attemptRf2=0;
+    h=harness(async(_url,init)=>{
+      attemptRf2++;requests.push(JSON.parse(init.body));
+      if(attemptRf2===1) return json({status:'ERROR',code:'TAX_NOT_ENABLED_AT_PROPERTY',message:'Pajak di properti ini dimatikan.'},400);
+      return created(requests.at(-1));
+    },{
+      pricingData:{service_charge_enabled:true,service_charge_percent:15,tax_enabled:true,tax_percent:10},
+      pricingQueue,
+      onPricingFetch() {pricingFetches++;},
+    });
+    h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','700');
+    h.labelled('Catatan pesanan','catatan penting');
+    await h.settle();
+    h.click('Simpan Pesanan');await h.settle(); // 400 → auto re-fetch gagal (queue[1]="__FAIL__")
+    // Wait async pricing refresh: settle hingga React state stabil
+    // (loading → error). 2x setImmediate + 2x render per settle.
+    await h.settle();
+    check('400 re-fetch gagal: pricing error, Simpan & Bayar benar-benar disabled',()=>{
+      assert.equal(attemptRf2,1,'Tidak ada auto-retry / auto-submit');
+      assert.equal(pricingFetches,2,'Fetch awal + auto re-fetch (gagal)');
+      // Assertion wajib: Simpan disabled saat pricing berstatus error.
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled saat pricing error');
+      // Bayar juga diblokir (guard yang sama: canSaveDraft memblokir keduanya).
+      assert.equal(h.button('Bayar').props.disabled,true,'Bayar disabled saat pricing error');
+      // Cart & input kasir dipertahankan
+      assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),true,'Diskon item dipertahankan');
+      assert.ok(h.nodes().find(n=>n.type==='textarea'),'Input catatan masih ada');
+    });
+    // Klik paksa Simpan (bypass tombol disabled) saat pricing error:
+    // handler guard WAJIB menolak — tidak ada POST order baru.
+    // Targetkan tombol dengan label persis "Simpan Pesanan" (bukan tombol
+    // disabled pertama yang kebetulan ditemukan), lalu panggil onClick
+    // secara langsung tanpa if yang bisa melewatkan simulasi.
+    const simpanNode = h.button('Simpan Pesanan');
+    check('Klik paksa: tombol Simpan Pesanan ditemukan, disabled, onClick function',()=>{
+      assert.ok(simpanNode,'Tombol Simpan Pesanan ditemukan');
+      assert.equal(simpanNode.props.disabled,true,'Simpan Pesanan disabled saat pricing error');
+      assert.equal(typeof simpanNode.props.onClick,'function','Simpan Pesanan onClick adalah function');
+    });
+    h.forceClick('Simpan Pesanan'); // panggil handler langsung — bypass disabled
+    await h.settle();
+    check('Klik paksa Simpan saat pricing error TIDAK menghasilkan POST order baru',()=>{
+      assert.equal(attemptRf2,1,'Tidak ada request POST baru (guard handler pricing aktif)');
+      assert.equal(h.signals.created.length,0,'Tidak ada order dibuat saat pricing error');
+    });
+    // Klik "Muat Ulang" → fetch ketiga (queue[2]: svc OFF / tax OFF)
+    const muatUlangBtn=h.nodes().find(n=>n.type==='button' && (n.props.children?.includes?.('Muat Ulang') || (typeof n.props.children==='string' && n.props.children.includes('Muat Ulang'))));
+    check('Tombol Muat Ulang tampil saat pricing error',()=>{
+      assert.ok(muatUlangBtn,'Tombol Muat Ulang ada di UI');
+    });
+    muatUlangBtn.props.onClick();await h.settle();
+    check('Muat Ulang berhasil: pricing ready, Simpan enabled',()=>{
+      assert.equal(pricingFetches,3,'Fetch ketiga via Muat Ulang');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled setelah Muat Ulang sukses');
+    });
+    // Submit lagi: toggle svc/tax sinkron ke properti baru (OFF/OFF)
+    h.click('Simpan Pesanan');await h.settle();
+    check('Muat Ulang: payload berikutnya memakai flag properti terbaru',()=>{
+      assert.equal(attemptRf2,2,'Hanya 1 request kedua manual');
+      assert.equal(requests[1].service_charge_enabled,false,'svc OFF sesuai properti terbaru');
+      assert.equal(requests[1].tax_enabled,false,'tax OFF sesuai properti terbaru');
+      assert.equal(h.signals.created.length,1);
+    });
+    h.cleanup();
+  }
 }
 (async()=>{if(!contractOnly)await lifecycle();console.log(`\n[RESULT] ${pass} PASS, 0 FAIL${contractOnly?' (contract only; component lifecycle not run)':''}`);})()
  .catch(error=>{console.error('[FAIL]',error);process.exitCode=1;});

@@ -1,12 +1,12 @@
 /**
- * B4.1 — POS Thermal Receipt Content: service charge & PPN rendering tests.
+ * B4.1 — POS Thermal Receipt Content: service charge & PBJT rendering tests.
  *
  * Uses react-dom/server renderToString to verify:
- *  T1: receipt with service + PPN → both lines shown with correct amounts
- *  T2: service-only → PPN line absent
+ *  T1: receipt with service + PBJT → both lines shown with correct amounts
+ *  T2: service-only → PBJT line absent
  *  T3: tax-only → service line absent
- *  T4: legacy zero / no B4.1 fields → no service/PPN lines
- *  T5: percent snapshots shown alongside amount when present
+ *  T4: legacy zero / no B4.1 fields → no service/PBJT lines
+ *  T5: percent snapshots shown in label when present
  *
  * Run: cd frontend && npx tsx test/pos_thermal_b41_content_test.ts
  */
@@ -109,8 +109,8 @@ function render(receipt: PosReceiptData): string {
   );
 }
 
-// ── T1: service + PPN both active ────────────────────────────────────
-console.log('--- T1: service + PPN both active ---');
+// ── T1: service + PBJT both active ────────────────────────────────────
+console.log('--- T1: service + PBJT both active ---');
 {
   const receipt: PosReceiptData = {
     ...baseReceipt,
@@ -127,13 +127,13 @@ console.log('--- T1: service + PPN both active ---');
   const html = render(receipt);
   check(html.includes('Service Charge'), 'T1a "Service Charge" label present');
   check(html.includes('15.000'), 'T1b service amount 15.000 formatted');
-  check(html.includes('(10%)'), 'T1c service percent "(10%)" shown');
-  check(html.includes('PPN'), 'T1d "PPN" label present');
+  check(html.includes('Service Charge (10%)'), 'T1c service percent in label "Service Charge (10%)"');
+  check(html.includes('PBJT'), 'T1d "PBJT" label present');
   check(html.includes('14.850'), 'T1e tax amount 14.850 formatted');
-  check(html.includes('(11%)'), 'T1f tax percent "(11%)" shown');
+  check(html.includes('PBJT (11%)'), 'T1f tax percent in label "PBJT (11%)"');
 }
 
-// ── T2: service-only (tax = 0) → PPN line absent ────────────────────
+// ── T2: service-only (tax = 0) → PBJT line absent ────────────────────
 console.log('\n--- T2: service-only (tax=0) ---');
 {
   const receipt: PosReceiptData = {
@@ -150,7 +150,7 @@ console.log('\n--- T2: service-only (tax=0) ---');
   };
   const html = render(receipt);
   check(html.includes('Service Charge'), 'T2a service line shown');
-  check(!html.includes('PPN'), 'T2b PPN line absent when tax_amount="0"');
+  check(!html.includes('PBJT'), 'T2b PBJT line absent when tax_amount="0"');
 }
 
 // ── T3: tax-only (service = 0) → service line absent ────────────────
@@ -170,7 +170,7 @@ console.log('\n--- T3: tax-only (service=0) ---');
   };
   const html = render(receipt);
   check(!html.includes('Service Charge'), 'T3a service line absent when service_amount="0"');
-  check(html.includes('PPN'), 'T3b PPN line shown when tax_amount>0');
+  check(html.includes('PBJT'), 'T3b PBJT line shown when tax_amount>0');
 }
 
 // ── T4: legacy receipt (all zero / no B4.1 fields) ──────────────────
@@ -184,7 +184,7 @@ console.log('\n--- T4: legacy receipt (all-zero / absent B4.1 fields) ---');
   // baseReceipt has service_amount="0", tax_amount="0" → no lines
   const html = render(baseReceipt);
   check(!html.includes('Service Charge'), 'T4a no service line for legacy zero');
-  check(!html.includes('PPN'), 'T4b no PPN line for legacy zero');
+  check(!html.includes('PBJT'), 'T4b no PBJT line for legacy zero');
 
   // Defensive variant: B4.1 fields stripped at runtime to simulate crash safety.
   // This is NOT a valid API payload — PosReceiptOrder requires all six fields.
@@ -199,7 +199,7 @@ console.log('\n--- T4: legacy receipt (all-zero / absent B4.1 fields) ---');
   (receiptLegacyNoFields.order as any).tax_enabled_snapshot = undefined;
   const htmlNoFields = render(receiptLegacyNoFields);
   check(!htmlNoFields.includes('Service Charge'), 'T4c no service line when field absent (defensive)');
-  check(!htmlNoFields.includes('PPN'), 'T4d no PPN line when field absent (defensive)');
+  check(!htmlNoFields.includes('PBJT'), 'T4d no PBJT line when field absent (defensive)');
 }
 
 // ── T5: percent not shown when percent field is undefined ───────────

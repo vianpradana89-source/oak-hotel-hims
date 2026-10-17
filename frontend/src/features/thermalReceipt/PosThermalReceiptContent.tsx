@@ -160,26 +160,27 @@ export default function PosThermalReceiptContent({
             )}
           </>
         )}
-        {/* B4.1 — Service charge & PPN lines (shown only when amount > 0) */}
+        {/* B4.1 — Service charge & PBJT lines (shown only when amount > 0).
+            Persentase tampil di label kiri; nominal rata kanan. */}
         {serviceCharge > 0 && (
           <Row
-            label="Service Charge"
-            value={
-              order.service_charge_percent_snapshot != null
-                ? `${formatHotelCurrency(serviceCharge)} (${order.service_charge_percent_snapshot}%)`
-                : formatHotelCurrency(serviceCharge)
-            }
+            label={`Service Charge${
+              order.service_charge_percent_snapshot != null && Number(order.service_charge_percent_snapshot) > 0
+                ? ` (${order.service_charge_percent_snapshot}%)`
+                : ''
+            }`}
+            value={formatHotelCurrency(serviceCharge)}
             mono
           />
         )}
         {taxAmount > 0 && (
           <Row
-            label="PPN"
-            value={
-              order.tax_percent_snapshot != null
-                ? `${formatHotelCurrency(taxAmount)} (${order.tax_percent_snapshot}%)`
-                : formatHotelCurrency(taxAmount)
-            }
+            label={`PBJT${
+              order.tax_percent_snapshot != null && Number(order.tax_percent_snapshot) > 0
+                ? ` (${order.tax_percent_snapshot}%)`
+                : ''
+            }`}
+            value={formatHotelCurrency(taxAmount)}
             mono
           />
         )}

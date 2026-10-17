@@ -199,27 +199,28 @@ export function buildPosReceiptWhatsAppMessage(
 
   // Service Charge (B4.1) — shown only when service_amount is a positive
   // whole-rupiah string; never recomputed on the frontend.
+  // Persentase di label kiri: "Service Charge (5%): Rp 5.000"
   const svcPositive = order.service_amount !== undefined && isPositiveAmount(order.service_amount);
   const taxPositive = order.tax_amount !== undefined && isPositiveAmount(order.tax_amount);
 
   if (svcPositive) {
-    const svcPct =
-      order.service_charge_percent_snapshot != null
+    const svcPctLabel =
+      order.service_charge_percent_snapshot != null && Number(order.service_charge_percent_snapshot) > 0
         ? ` (${order.service_charge_percent_snapshot}%)`
         : '';
     lines.push(
-      `Service Charge: ${formatRupiah(order.service_amount)}${svcPct}`,
+      `Service Charge${svcPctLabel}: ${formatRupiah(order.service_amount)}`,
     );
   }
 
-  // PPN / Tax (B4.1) — shown only when tax_amount is a positive
+  // PBJT / Tax (B4.1) — shown only when tax_amount is a positive
   // whole-rupiah string; never recomputed on the frontend.
   if (taxPositive) {
-    const taxPct =
-      order.tax_percent_snapshot != null
+    const taxPctLabel =
+      order.tax_percent_snapshot != null && Number(order.tax_percent_snapshot) > 0
         ? ` (${order.tax_percent_snapshot}%)`
         : '';
-    lines.push(`PPN: ${formatRupiah(order.tax_amount)}${taxPct}`);
+    lines.push(`PBJT${taxPctLabel}: ${formatRupiah(order.tax_amount)}`);
   }
 
   // Blank line before Total: only when at least one of service/tax was

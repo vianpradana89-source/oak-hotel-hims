@@ -16,14 +16,46 @@ export interface PosDraftDetails {
   discountType: PosDiscountType;
   discountInput: string;
   discountReason: string;
+  /**
+   * Per-order Service Charge override (strict boolean).
+   *   - true  = kasir ON-eksplisit (hanya valid bila properti mengizinkan)
+   *   - false = kasir OFF-eksplisit
+   *   - absent = mengikuti properti (backward compat)
+   */
+  serviceChargeEnabled?: boolean;
+  /** Per-order PBJT override (strict boolean). Semantik sama dengan serviceChargeEnabled. */
+  taxEnabled?: boolean;
+  /**
+   * Nominal total yang ditampilkan kasir sebelum submit (whole rupiah ≥ 0).
+   * Backend bandingkan dengan computed total; mismatch → 409 PRICING_TOTAL_CHANGED.
+   * opsional — bila ada, dikirim sebagai integer.
+   */
+  expectedTotal?: number;
 }
 export interface PosDraftPreview {
   gross: number;
   itemDiscount: number;
   subtotal: number;
   orderDiscount: number;
+  /** Nominal Service Charge (whole rupiah). 0 bila disabled. */
+  serviceCharge: number;
+  /** Nominal PBJT (whole rupiah). 0 bila disabled. */
+  tax: number;
+  /** Total = subtotal − orderDiscount + serviceCharge + tax (semua whole rupiah). */
   total: number;
   lines: {gross: number; discount: number; net: number}[];
+}
+
+/**
+ * Parametrisasi estimasi Service Charge & PBJT per draft.
+ * Persentase selalu berasal dari pengaturan properti (backend authority).
+ * `serviceChargePercent` / `taxPercent` bersifat 0..100, maks. 2 desimal.
+ */
+export interface PosPricingPreviewParams {
+  serviceChargeEnabled?: boolean;
+  serviceChargePercent?: number;
+  taxEnabled?: boolean;
+  taxPercent?: number;
 }
 function discount(type: PosDiscountType, input: string, basis: number): {value: number | null; amount: number} {
   if (type === '') return {value: null, amount: 0};
@@ -39,7 +71,12 @@ function discount(type: PosDiscountType, input: string, basis: number): {value: 
   if (amount > basis) throw new Error('Diskon melebihi subtotal.');
   return {value, amount};
 }
-export function previewPosDraft(lines: PosCartLine[], type: PosDiscountType, input: string): PosDraftPreview {
+export function previewPosDraft(
+  lines: PosCartLine[],
+  type: PosDiscountType,
+  input: string,
+  pricing?: PosPricingPreviewParams,
+): PosDraftPreview {
   const values = lines.map(line => {
     const price = Number(line.item.price), gross = price * line.qty;
     if (!Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(line.qty) || line.qty <= 0 || !Number.isSafeInteger(gross))
@@ -51,7 +88,25 @@ export function previewPosDraft(lines: PosCartLine[], type: PosDiscountType, inp
   const subtotal = values.reduce((sum, v) => sum + v.net, 0);
   if (!Number.isSafeInteger(gross) || !Number.isSafeInteger(subtotal)) throw new Error('Total pesanan melebihi batas.');
   const orderDiscount = discount(type, input, subtotal).amount;
-  return {gross, itemDiscount: gross - subtotal, subtotal, orderDiscount, total: subtotal - orderDiscount, lines: values};
+  // ── Canonical POS formula (identik dengan computePosPricing backend): ─────
+  // 1. base     = subtotal − orderDiscount   (= afterItemDiscount di backend)
+  // 2. svc      = svcEnabled ? round(base × svcPct / 100) : 0
+  // 3. tax      = taxEnabled ? round((base + svc) × taxPct / 100) : 0
+  // 4. total    = base + svc + tax
+  const base = subtotal - orderDiscount;
+  const svcEnabled = pricing?.serviceChargeEnabled ?? false;
+  const svcPct = pricing?.serviceChargePercent ?? 0;
+  const serviceCharge = svcEnabled
+    ? Math.round(base * svcPct / 100)
+    : 0;
+  const taxEnabled = pricing?.taxEnabled ?? false;
+  const taxPct = pricing?.taxPercent ?? 0;
+  const tax = taxEnabled
+    ? Math.round((base + serviceCharge) * taxPct / 100)
+    : 0;
+  const total = base + serviceCharge + tax;
+  if (!Number.isSafeInteger(total)) throw new Error('Total pesanan melebihi batas.');
+  return {gross, itemDiscount: gross - subtotal, subtotal, orderDiscount, serviceCharge, tax, total, lines: values};
 }
 function optional(value: string, max: number, name: string): string | null {
   const v = value.trim();
@@ -89,6 +144,27 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
     payload.discount_type = details.discountType;
     payload.discount_value = discount(details.discountType, details.discountInput, preview.subtotal).value;
     payload.discount_reason = optional(details.discountReason, 100, 'Alasan diskon');
+  }
+  // ── Per-order Service Charge & PBJT override ──────────────────────────────────
+  // Klien baru WAJIB mengirim true/false eksplisit.
+  // absent = mengikuti properti (backward compat, hanya untuk klien lama).
+  // Backend menolak null/string/number dengan 400 VALIDATION_ERROR.
+  if (details.serviceChargeEnabled !== undefined) {
+    if (typeof details.serviceChargeEnabled !== 'boolean')
+      throw new Error('serviceChargeEnabled harus boolean strict.');
+    payload.service_charge_enabled = details.serviceChargeEnabled;
+  }
+  if (details.taxEnabled !== undefined) {
+    if (typeof details.taxEnabled !== 'boolean')
+      throw new Error('taxEnabled harus boolean strict.');
+    payload.tax_enabled = details.taxEnabled;
+  }
+  // expected_total: whole-rupiah integer ≥ 0 (opsional, klien baru).
+  // Dibandingkan dengan computed total di backend; mismatch → 409 PRICING_TOTAL_CHANGED.
+  if (details.expectedTotal !== undefined) {
+    if (!Number.isSafeInteger(details.expectedTotal) || details.expectedTotal < 0)
+      throw new Error('expectedTotal harus whole-rupiah integer ≥ 0.');
+    payload.expected_total = details.expectedTotal;
   }
   return payload;
 }

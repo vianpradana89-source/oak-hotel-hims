@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
-import {buildPosOrderDraft, previewPosDraft, type PosCartLine, type PosDiscountType} from './posOrderDraft';
+import {buildPosOrderDraft, previewPosDraft, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams} from './posOrderDraft';
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 
 export interface PosMenuItem {
@@ -138,6 +139,23 @@ interface Props {
   paidOrderId?: PosOrderPaidSignal | null;
 }
 
+/**
+ * Pengaturan pricing properti (sumber dari GET /api/pos/pricing-settings).
+ * Persentase selalu berasal dari sini — backend adalah pricing authority.
+ */
+interface PosPricingSettings {
+  service_charge_enabled: boolean;
+  service_charge_percent: number;
+  tax_enabled: boolean;
+  tax_percent: number;
+}
+
+/** Status muat pricing settings. */
+type PricingSettingsState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: PosPricingSettings };
+
 function formatIDR(amount: number): string {
   return new Intl.NumberFormat('id-ID', {
     style: 'currency',
@@ -202,6 +220,22 @@ export default function PosWorkspace({
   const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('');
   const [orderDiscountInput, setOrderDiscountInput] = useState('');
   const [discountReason, setDiscountReason] = useState('');
+
+  // ── Per-order Service Charge & PBJT toggle state ─────────────────────────
+  // Default: mengikuti pengaturan properti (di-set setelah pricing settings
+  // dimuat). Bila properti OFF, toggle terlihat abu-abu & disabled.
+  // Terkunci saat draftLocked / pending / ambiguous.
+  const [svcToggleOn, setSvcToggleOn] = useState<boolean>(false);
+  const [taxToggleOn, setTaxToggleOn] = useState<boolean>(false);
+
+  // ── Pricing settings (GET /api/pos/pricing-settings) ─────────────────────
+  // Dimuat saat propertyId berubah / draft baru di-reset.
+  // status 'error' → jangan asumsikan OFF permanen; cegah submit dengan
+  // expected_total yang tidak dapat dipercaya.
+  const [pricingSettings, setPricingSettings] = useState<PricingSettingsState>({ status: 'loading' });
+
+  // Ref untuk mencegah stale request bila propertyId berubah cepat.
+  const pricingFetchEpochRef = useRef(0);
 
   // ── GuestPicker state (hanya aktif di mode POS header) ──────────────────
   // pickedGuest: reservasi tamu menginap yang dipilih dari picker.
@@ -321,15 +355,91 @@ export default function PosWorkspace({
     }
   }, [guestNameInitial]);
 
+  // ── Load pricing settings saat propertyId tersedia ─────────────────────────
+  // 1. Fetch GET /api/pos/pricing-settings?property_id=<id>.
+  // 2. Default svcToggleOn / taxToggleOn mengikuti properti.
+  // 3. Bila fetch gagal → status 'error', jangan asumsikan OFF permanen;
+  //    cegah submit dengan expected_total (tidak dapat dipercaya).
+  // 4. Epoch guard: discard response bila propertyId sudah berubah.
+  // fetchPricingSettings dipanggil dari useEffect (propertyId berubah) DAN
+  // dari tombol "Muat Ulang" saat pricing status 'error' — logika sama,
+  // hanya pemicu berbeda.
+  const fetchPricingSettings = useCallback(async (isRefetch = false) => {
+    if (propertyId === null) {
+      setPricingSettings({ status: 'ready', data: { service_charge_enabled: false, service_charge_percent: 0, tax_enabled: false, tax_percent: 0 } });
+      return;
+    }
+    const epoch = ++pricingFetchEpochRef.current;
+    setPricingSettings({ status: 'loading' });
+    try {
+      const res = await authenticatedFetch(
+        `/api/pos/pricing-settings?property_id=${propertyId}`,
+      );
+      if (epoch !== pricingFetchEpochRef.current) return;
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        setPricingSettings({
+          status: 'error',
+          message: errJson.message || `Gagal memuat pengaturan pricing (HTTP ${res.status})`,
+        });
+        return;
+      }
+      const json = await res.json();
+      if (epoch !== pricingFetchEpochRef.current) return;
+      const data = json?.data;
+      const settings: PosPricingSettings = {
+        service_charge_enabled: typeof data?.service_charge_enabled === 'boolean' ? data.service_charge_enabled : false,
+        service_charge_percent: Number(data?.service_charge_percent) || 0,
+        tax_enabled: typeof data?.tax_enabled === 'boolean' ? data.tax_enabled : false,
+        tax_percent: Number(data?.tax_percent) || 0,
+      };
+      setPricingSettings({ status: 'ready', data: settings });
+      // Sinkronkan toggle ke master flag properti:
+      // - isRefetch=true (setelah 400 pricing / tombol Muat Ulang) →
+      //   SELALU sinkronkan, bahkan saat cart berisi — nilai toggle lama
+      //   bisa stale (properti svc/tax ON→OFF di tengah draft aktif).
+      // - Initial load (isRefetch=false) → sinkronkan HANYA saat draft kosong.
+      const shouldSyncToggles = isRefetch
+        ? (!draftLocked && !submittingRef.current && !idempotencySnapshotRef.current?.unresolved)
+        : (cart.length === 0 && !idempotencySnapshotRef.current && !saving);
+      if (shouldSyncToggles) {
+        setSvcToggleOn(settings.service_charge_enabled);
+        setTaxToggleOn(settings.tax_enabled);
+      }
+    } catch (err: unknown) {
+      if (epoch !== pricingFetchEpochRef.current) return;
+      setPricingSettings({
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Gagal memuat pengaturan pricing.',
+      });
+    }
+  }, [propertyId, authenticatedFetch]);
+  useEffect(() => {
+    if (propertyId === null) {
+      setPricingSettings({ status: 'ready', data: { service_charge_enabled: false, service_charge_percent: 0, tax_enabled: false, tax_percent: 0 } });
+      return;
+    }
+    if (authFetch) {
+      // Initial load (isRefetch=false): toggle hanya sinkron saat draft kosong.
+      void fetchPricingSettings(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId]);
+
   // Draft baru (cart dikosongkan setelah sukses, lalu user mulai memilih lagi)
   // → siklus pengajuan baru: snapshot/ambiguitas lama tidak berlaku lagi.
+  // Reset toggle ke default properti saat draft baru dimulai.
   useEffect(() => {
     if (cart.length > 0 && saveResult?.ok) {
       setSaveResult(null);
       setAmbiguous(false);
       idempotencySnapshotRef.current = null;
+      if (pricingSettings.status === 'ready') {
+        setSvcToggleOn(pricingSettings.data.service_charge_enabled);
+        setTaxToggleOn(pricingSettings.data.tax_enabled);
+      }
     }
-  }, [cart.length]);
+  }, [cart.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Notifikasi parent saat isi cart berubah (untuk guard close modal).
   useEffect(() => {
@@ -410,12 +520,36 @@ export default function PosWorkspace({
   };
 
   const draftPreview = useMemo(() => {
-    try {return {value: previewPosDraft(cart, orderDiscountType, orderDiscountInput), error: null};}
-    catch (err) {return {value: null, error: err instanceof Error ? err.message : 'Periksa diskon pesanan.'};}
-  }, [cart, orderDiscountType, orderDiscountInput]);
+    // Harga & persen selalu diambil dari pengaturan properti (backend authority).
+    // Toggle svc/tax di draft menentukan apakah svc/tax diaktifkan untuk pesanan ini.
+    const pricing: PosPricingPreviewParams = {
+      serviceChargeEnabled: svcToggleOn,
+      serviceChargePercent: pricingSettings.status === 'ready' ? pricingSettings.data.service_charge_percent : 0,
+      taxEnabled: taxToggleOn,
+      taxPercent: pricingSettings.status === 'ready' ? pricingSettings.data.tax_percent : 0,
+    };
+    try {
+      return { value: previewPosDraft(cart, orderDiscountType, orderDiscountInput, pricing), error: null };
+    } catch (err) {
+      return { value: null, error: err instanceof Error ? err.message : 'Periksa diskon pesanan.' };
+    }
+  }, [cart, orderDiscountType, orderDiscountInput, svcToggleOn, taxToggleOn, pricingSettings]);
   const cartSubtotal = draftPreview.value?.gross || 0;
   const hasDiscount = !!orderDiscountType || cart.some(line => !!line.discountType);
-  const canSaveDraft = !draftPreview.error && (!hasDiscount || canDiscountPos);
+  // ── Guard pricing: blokir submit bila pricing settings belum ready ───────
+  //  - 'loading'  → persentase belum diketahui; expected_total tidak valid.
+  //  - 'error'    → konfigurasi tidak dapat dipercaya; submit tanpa expected_total
+  //                  menghasilkan order dengan total yang kasir tidak ketahui.
+  //  - 'ready'    → submit diizinkan.
+  // Jika propertyId === null (tanpa API/properti) → pricingSettings default
+  // dibuat 'ready' dengan semua flag OFF (backward compat), submit tetap valid.
+  const pricingSettingsBlocked =
+    propertyId !== null && authFetch !== undefined &&
+    pricingSettings.status !== 'ready';
+  const canSaveDraft =
+    !draftPreview.error &&
+    (!hasDiscount || canDiscountPos) &&
+    !pricingSettingsBlocked;
   const changeLine = (id: number, patch: Partial<Pick<PosCartLine, 'discountType' | 'discountInput' | 'notes'>>) => {
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart(lines => lines.map(line => line.item.id === id ? {...line, ...patch} : line));
@@ -455,6 +589,20 @@ export default function PosWorkspace({
       return { ok: false };
     }
     if (!authFetch) return { ok: false }; // fallback: no API — should not reach here in modal context
+    // Gate pricing: submit (order baru) diblokir saat pricing settings belum
+    // 'ready' (loading/error) — expected_total tidak dapat dipercaya.
+    // Retry snapshot unresolved TIDAK diblokir: payload & key sudah terkunci
+    // sebelum pricing error, hasil pengajuan sebelumnya yang belum diketahui
+    // tetap harus bisa di-replay.
+    if (pricingSettingsBlocked && !idempotencySnapshotRef.current?.unresolved) {
+      setSaveResult({
+        ok: false,
+        message:
+          'Pengaturan pricing properti belum siap — submit diblokir. ' +
+          'Muat ulang pengaturan pricing lalu simpan ulang.',
+      });
+      return { ok: false };
+    }
     const snapshot = idempotencySnapshotRef.current;
     const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
     let key: string, bodyJson: string;
@@ -467,11 +615,32 @@ export default function PosWorkspace({
       bodyJson = snapshot.bodyJson;
     } else {
       try {
+        const estimatedTotal = draftPreview.value?.total;
+        // ── State efektif toggle: sinkronkan dengan properti ──────────────────
+        // Jika properti OFF, payload WAJIB mengirim false eksplisit — bukan
+        // nilai stale dari svcToggleOn/taxToggleOn yang mungkin masih true
+        // dari siklus sebelumnya (mis. admin mengubah setting ON→OFF tanpa
+        // re-fetch otomatis). Draft terkunci (unresolved) → snapshot dipertahankan,
+        // branch ini hanya berjalan di draft baru (snapshot?.unresolved === false).
+        const psSvcOn = pricingSettings.status === 'ready' ? pricingSettings.data.service_charge_enabled : false;
+        const psTaxOn = pricingSettings.status === 'ready' ? pricingSettings.data.tax_enabled : false;
+        const effectiveSvcToggle = svcToggleOn && psSvcOn;
+        const effectiveTaxToggle = taxToggleOn && psTaxOn;
         const payload = buildPosOrderDraft(cart, {
           propertyId, reservationId: effectiveResId, tableNumber,
           guestName: pickedGuest ? pickedGuest.guest_name || '' : guestName,
           guestPhone, notes: orderNotes, discountType: orderDiscountType,
           discountInput: orderDiscountInput, discountReason,
+          // Per-order override — kirim eksplisit (klien baru WAJIB true/false).
+          // effectiveSvc/effectiveTax menjamin: jika properti OFF → false,
+          // sehingga backend tidak akan menerima true saat properti OFF.
+          serviceChargeEnabled: effectiveSvcToggle,
+          taxEnabled: effectiveTaxToggle,
+          // expected_total: nominal yang ditampilkan kasir.
+          // Hanya dikirim bila pricing settings sudah siap (persentase dapat dipercaya).
+          expectedTotal: pricingSettings.status === 'ready' && estimatedTotal !== undefined
+            ? estimatedTotal
+            : undefined,
         }, canDiscountPos);
         bodyJson = JSON.stringify(payload);
         const fp = bodyJson;
@@ -583,6 +752,16 @@ export default function PosWorkspace({
           setLocalPaidOrderId(null);
           appliedPaidOrderIdRef.current = null;
           idempotencySnapshotRef.current = null;
+          // Reset toggle svc/tax ke default properti (bukan ke OFF paksa)
+          // agar draft baru mengikuti pengaturan properti saat ini.
+          // TIDAK memanggil setSvcToggleOn/setTaxToggleOn dari dalam updater
+          // setPricingSettings (anti-pattern: React tidak menjamin updater
+          // dipanggil, dan side-effect di dalam updater dilarang).
+          // pricingSettings dari closure adalah state terkini di titik ini.
+          if (pricingSettings.status === 'ready') {
+            setSvcToggleOn(pricingSettings.data.service_charge_enabled);
+            setTaxToggleOn(pricingSettings.data.tax_enabled);
+          }
           // Refresh/callback pasca-sukses TIDAK boleh mengubah hasil:
           // order sudah tervalidasi dari respons POST — kegagalan callback
           // (atau pemanggilan apa pun setelahnya) tidak membuat order jadi
@@ -613,11 +792,51 @@ export default function PosWorkspace({
           return { ok: false };
         }
       } else if (res.status === 409) {
-        // Ditolak definitif: key dipakai untuk payload berbeda (fingerprint
-        // mismatch). Hanya pengajuan yang BELUM PERNAH ambigu boleh
-        // membuang snapshot — bila unresolved, snapshot & key dipertahankan
-        // dan draft tetap terkunci (jangan buat key baru).
         const errData: any = await res.json().catch(() => ({}));
+        // ── PRICING_TOTAL_CHANGED: properti di-ubah di tengah, total tidak cocok ─
+        // Ditolak definitif oleh backend (bukan ambigu): order TIDAK dibuat.
+        // - Bila snapshot unresolved/ambiguous (hasil pengajuan sebelumnya
+        //   belum diketahui), JANGAN buang snapshot — idempotency key, payload
+        //   asli, dan status locked dipertahankan penuh; kasir tidak boleh
+        //   membuat key baru sebelum hasil pengajuan sebelumnya dipastikan
+        //   (retry memakai snapshot tersimpan via "Coba Lagi").
+        // - Bila snapshot tidak unresolved, kasir boleh memperbarui estimasi
+        //   lalu submit ulang dengan key baru setelah snapshot dibuang.
+        if (errData.code === 'PRICING_TOTAL_CHANGED' && errData.data?.computed_total !== undefined) {
+          const computed = Number(errData.data.computed_total);
+          const svcPct = Number(errData.data.service_charge_percent) || 0;
+          const taxPct = Number(errData.data.tax_percent) || 0;
+          const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+          setSaveResult({
+            ok: false,
+            message:
+              'Total order berubah: pengaturan properti mungkin telah diperbarui. ' +
+              `Estimasi Anda ${formatIDR(Number(errData.data.expected_total) || 0)}, total server ${formatIDR(computed)}. ` +
+              `Service ${svcPct}%, PBJT ${taxPct}%. ` +
+              (unresolvedNow
+                ? 'Pengajuan sebelumnya belum selesai — hasil belum diketahui, draft tetap terkunci; gunakan "Coba Lagi".'
+                : 'Periksa kembali dan simpan ulang.'),
+          });
+          // Update local pricing state + buang snapshot HANYA bila snapshot
+          // tidak unresolved. Bila unresolved, persentase & draft dikunci
+          // penuh — tidak boleh berubah sebelum pengajuan sebelumnya selesai.
+          if (!unresolvedNow) {
+            setPricingSettings(prev => {
+              if (prev.status !== 'ready') return prev;
+              return {
+                status: 'ready',
+                data: {
+                  ...prev.data,
+                  service_charge_percent: typeof errData.data.service_charge_percent === 'number' ? errData.data.service_charge_percent : prev.data.service_charge_percent,
+                  tax_percent: typeof errData.data.tax_percent === 'number' ? errData.data.tax_percent : prev.data.tax_percent,
+                },
+              };
+            });
+            idempotencySnapshotRef.current = null;
+          }
+          return { ok: false };
+        }
+        // ── 409 lain: idempotency key conflict (fingerprint mismatch) ────────
         const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
         setSaveResult({
           ok: false,
@@ -634,6 +853,35 @@ export default function PosWorkspace({
       } else if (res.status === 400 || res.status === 422) {
         const errData: any = await res.json().catch(() => ({}));
         const unresolvedNow = idempotencySnapshotRef.current?.unresolved === true;
+        // ── Penolakan pricing spesifik: properti di-OFF-kan saat draft aktif ─
+        // Tampilkan alasan jelas, refresh pricing settings agar persentase &
+        // flag lokal sinkron, buang snapshot (ditolak definitif — bukan
+        // ambigu), pertahankan cart & diskon. Kasir dapat memperbaiki toggle
+        // dan submit ulang dengan key baru setelah re-fetch selesai.
+        const isPricing400 =
+          errData.code === 'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY' ||
+          errData.code === 'TAX_NOT_ENABLED_AT_PROPERTY';
+        if (isPricing400 && !unresolvedNow) {
+          setSaveResult({
+            ok: false,
+            message:
+              errData.message ||
+              'Pengaturan pricing properti telah berubah. ' +
+              'Periksa toggle Service Charge/PBJT lalu simpan ulang.',
+          });
+          // Re-fetch pricing settings (isRefetch=true):
+          // - Set status 'loading' dulu → blokir Simpan/Bayar selama re-fetch.
+          // - Sukses: sinkronkan master flag, persentase & toggle ke nilai
+          //   properti terbaru (bahkan saat cart berisi — toggle lama bisa stale).
+          // - Gagal: status 'error' → submit tetap diblokir; kasir bisa klik
+          //   "Muat Ulang" untuk retry manual setelah jaringan pulih.
+          // - Epoch guard: respons diabaikan bila propertyId sudah berubah.
+          // - Cart, diskon, dan input kasir TIDAK disentuh — tetap tersimpan.
+          // - TIDAK ada submit otomatis — kasir memajukan ulang secara manual.
+          void fetchPricingSettings(true);
+          idempotencySnapshotRef.current = null;
+          return { ok: false };
+        }
         setSaveResult({
           ok: false,
           message:
@@ -722,7 +970,7 @@ export default function PosWorkspace({
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
       onRequestPending?.(false);
     }
-  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason]);
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason, svcToggleOn, taxToggleOn, pricingSettings, draftPreview]);
 
   // Retry handler: membaca snapshot (key + body terseri) PERSIS.
   // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
@@ -1221,6 +1469,126 @@ export default function PosWorkspace({
                 <div className="flex justify-between text-xs text-gray-500"><span>Diskon item</span><span>{formatIDR(draftPreview.value.itemDiscount)}</span></div>
                 <div className="flex justify-between text-xs text-gray-500"><span>Diskon pesanan</span><span>{formatIDR(draftPreview.value.orderDiscount)}</span></div>
               </>}
+
+              {/* ── Per-order Service Charge & PBJT toggles ──────────────────────
+                  Terlihat di blok "Total & Checkout", di atas "Total perkiraan".
+                  - Properti ON  → toggle aktif, kasir dapat ON/OFF
+                  - Properti OFF → toggle terlihat abu-abu (disabled), selalu OFF
+                  - draftLocked / pending / ambiguous → toggle terkunci
+                  - Persentase selalu dari pengaturan properti (backend authority). */}
+              {authFetch && propertyId !== null && (
+                <div className={`space-y-1.5 ${draftLocked ? 'opacity-60' : ''}`}>
+                  {/* Loading / error state */}
+                  {pricingSettings.status === 'loading' && (
+                    <p className="text-[11px] text-gray-400">
+                      Memuat pengaturan pricing… submit diblokir hingga selesai.
+                    </p>
+                  )}
+                  {pricingSettings.status === 'error' && (
+                    <div className="space-y-1">
+                      <p className="text-[11px] text-amber-700">
+                        {pricingSettings.message} — submit diblokir hingga pengaturan berhasil dimuat.
+                      </p>
+                      <button
+                        type="button"
+                        className="text-[11px] text-forest-700 underline underline-offset-2 hover:text-forest-900"
+                        onClick={() => { void fetchPricingSettings(true); }}
+                      >
+                        Muat Ulang
+                      </button>
+                    </div>
+                  )}
+
+                  {pricingSettings.status === 'ready' && (() => {
+                    const ps = pricingSettings.data;
+                    return (
+                    <div className="flex items-center justify-between gap-2">
+                      {/* Service Charge */}
+                      <label
+                        className={`flex items-center gap-1.5 text-xs font-medium ${
+                          !ps.service_charge_enabled
+                            ? 'text-gray-400 cursor-not-allowed'
+                            : 'text-gray-700 cursor-pointer'
+                        }`}
+                        title={
+                          !ps.service_charge_enabled
+                            ? 'Service charge tidak diaktifkan di pengaturan properti'
+                            : `Service charge per pesanan (${ps.service_charge_percent ?? 0}%)`
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          checked={svcToggleOn && !!ps.service_charge_enabled}
+                          disabled={
+                            draftLocked ||
+                            !ps.service_charge_enabled
+                          }
+                          onChange={e => { if (canMutateDraft()) setSvcToggleOn(e.target.checked); }}
+                          className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                          aria-label="Aktifkan Service Charge per pesanan"
+                        />
+                        <span>
+                          Service Charge
+                          {ps.service_charge_percent > 0 && (
+                            <span className="text-gray-400"> ({ps.service_charge_percent}%)</span>
+                          )}
+                        </span>
+                      </label>
+
+                      {/* PBJT */}
+                      <label
+                        className={`flex items-center gap-1.5 text-xs font-medium ${
+                          !ps.tax_enabled
+                            ? 'text-gray-400 cursor-not-allowed'
+                            : 'text-gray-700 cursor-pointer'
+                        }`}
+                        title={
+                          !ps.tax_enabled
+                            ? 'PBJT tidak diaktifkan di pengaturan properti'
+                            : `PBJT per pesanan (${ps.tax_percent ?? 0}%)`
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          checked={taxToggleOn && !!ps.tax_enabled}
+                          disabled={
+                            draftLocked ||
+                            !ps.tax_enabled
+                          }
+                          onChange={e => { if (canMutateDraft()) setTaxToggleOn(e.target.checked); }}
+                          className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                          aria-label="Aktifkan PBJT per pesanan"
+                        />
+                        <span>
+                          PBJT
+                          {ps.tax_percent > 0 && (
+                            <span className="text-gray-400"> ({ps.tax_percent}%)</span>
+                          )}
+                        </span>
+                      </label>
+                    </div>
+                  );})()}
+
+                  {/* Estimasi Service Charge & PBJT */}
+                  {draftPreview.value && ((draftPreview.value.serviceCharge > 0) || (draftPreview.value.tax > 0)) && (
+                    <>
+                      {draftPreview.value.serviceCharge > 0 && (
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>Service Charge{pricingSettings.status === 'ready' && pricingSettings.data.service_charge_percent > 0 ? ` (${pricingSettings.data.service_charge_percent}%)` : ''}</span>
+                          <span>{formatIDR(draftPreview.value.serviceCharge)}</span>
+                        </div>
+                      )}
+                      {draftPreview.value.tax > 0 && (
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>PBJT{pricingSettings.status === 'ready' && pricingSettings.data.tax_percent > 0 ? ` (${pricingSettings.data.tax_percent}%)` : ''}</span>
+                          <span>{formatIDR(draftPreview.value.tax)}</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-between items-center text-sm font-black text-gray-900">
                 <span>Total perkiraan</span>
                 <span>{draftPreview.value ? formatIDR(draftPreview.value.total) : '—'}</span>

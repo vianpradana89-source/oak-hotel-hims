@@ -114,7 +114,57 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       discount_value: orderDiscountValueRaw,
       discount_reason: orderDiscountReason,
       items,
+      service_charge_enabled: svcRaw,
+      tax_enabled: taxRaw,
+      expected_total: expectedTotalRaw,
     } = req.body;
+
+    // ── Strict boolean validasi per-order service charge / PPN flags ───────
+    // Keputusan bisnis:
+    //   - true   = kasir aktifkan (hanya jika properti mengizinkan; tolak 400 jika properti OFF)
+    //   - false  = kasir nonaktifkan eksplisit (samaserta absent)
+    //   - absent/undefined = follow-properti (backward compat)
+    //   - null, string, number → 400 VALIDATION_ERROR (INVALID_BOOLEAN)
+    // Persentase selalu dari properti (keputusan 8).
+    if (svcRaw !== undefined && typeof svcRaw !== 'boolean') {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: `service_charge_enabled harus boolean strict (true/false) atau absent (diterima: ${typeof svcRaw} = ${JSON.stringify(svcRaw)})`
+      });
+    }
+    if (taxRaw !== undefined && typeof taxRaw !== 'boolean') {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: `tax_enabled harus boolean strict (true/false) atau absent (diterima: ${typeof taxRaw} = ${JSON.stringify(taxRaw)})`
+      });
+    }
+
+    // ── Expected total validasi (optional, untuk klien baru) ──────────────
+    // expected_total: whole-rupiah integer ≥ 0, opsional (absent = backward compat).
+    // null eksplisit ditolak — hanya angka valid atau field tidak dikirim.
+    // Bila ada, backend hitung ulang total dengan konfigurasi properti aktual
+    // dan bandingkan. Mismatch → 409 PRICING_TOTAL_CHANGED.
+    let expectedTotal: number | null = null;
+    if (expectedTotalRaw !== undefined) {
+      if (expectedTotalRaw === null || !Number.isFinite(Number(expectedTotalRaw))) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'expected_total harus whole-rupiah integer ≥ 0 atau tidak dikirim (absent)'
+        });
+      }
+      const n = Number(expectedTotalRaw);
+      if (!Number.isSafeInteger(n) || n < 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: `expected_total harus whole-rupiah integer ≥ 0 (diterima: ${JSON.stringify(expectedTotalRaw)})`
+        });
+      }
+      expectedTotal = n;
+    }
 
     if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
@@ -300,6 +350,11 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
     }
 
     // Preserve the legacy fingerprint when no expansion metadata is supplied.
+    // NOTE: Legacy payload deliberately excludes the new per-order pricing
+    // override fields (service_charge_enabled, tax_enabled, expected_total).
+    // Clients sending any of these trigger the expandedPayload path, which
+    // includes them explicitly — true/false/absent produce distinct hashes
+    // because the JSON value differs (true, false, null in expandedPayload).
     const legacyPayload = {
       property_id: propertyId,
       reservation_id: reservation_id ?? null,
@@ -313,7 +368,10 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
     };
     const hasExpandedFields = normalizedGuestPhone !== null || normalizedNotes !== null ||
       orderDiscountType !== null || orderDiscountValue !== null || orderDiscountReasonNorm !== null ||
-      items.some((it: any) => it.discount_type != null || it.discount_value != null);
+      items.some((it: any) => it.discount_type != null || it.discount_value != null) ||
+      // New per-order pricing fields: any presence (true, false, or expected_total)
+      // triggers the expanded path. Absent = follow-property, no fingerprint impact.
+      svcRaw !== undefined || taxRaw !== undefined || expectedTotal !== null;
     const expandedPayload = {
       property_id: propertyId,
       reservation_id: reservation_id ?? null,
@@ -324,6 +382,13 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       discount_type: orderDiscountType,
       discount_value: orderDiscountValue,
       discount_reason: orderDiscountReasonNorm,
+      // Per-order pricing override: strict boolean or null (absent).
+      // JSON.stringify distinguishes true, false, and null — three distinct
+      // fingerprint values, guaranteeing retry with a different flag value
+      // is never treated as an identical replay.
+      service_charge_enabled: svcRaw === undefined ? null : svcRaw,
+      tax_enabled: taxRaw === undefined ? null : taxRaw,
+      expected_total: expectedTotal,
       items: items.map((it: any) => ({
         menu_item_id: Number(it.menu_item_id),
         quantity: Number(it.quantity ?? 1),
@@ -707,11 +772,49 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       // Jalur ON CONFLICT winner (Step 7 di atas) sudah RETURN sebelum sini,
       // sehingga di titik ini kita pasti pencipta order baru (bukan replay)
       // dan satu-satunya pemanggil computePosPricing() untuk request ini.
+      //
+      // Merge per-order override dengan properti setting:
+      //   - svcRaw === undefined  → follow properti (backward compat)
+      //   - svcRaw === false      → off-eksplisit (mengakui properti ON)
+      //   - svcRaw === true       → on-eksplisit (ditolak 400 bila properti OFF)
+      // Negasi akses:
+      //   true + properti OFF → 400 SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY
+      //   false dan absent → tidak pernah ditolak.
+      //
       // Semua input bersumber dari DUA snapshot yang sudah tervalidasi di atas:
       //   - activeMenuItems[] (step 5a): harga/nama/kode menu, satu-satunya
       //     sumber persist pos_order_items → menjamin snapshot consistency.
       //   - pricingSettings (step 5b): strict boolean dari PostgreSQL (tanpa
       //     coercion) + percent dari property_pos_pricing_settings.
+      //
+      // expected_total (opsional, klien baru): setelah pricing dihitung,
+      // bandingkan pricing.totalAmount dengan expectedTotal. Mismatch →
+      // 409 PRICING_TOTAL_CHANGED tanpa commit. Order TIDAK dibuat.
+      const svcEffective = svcRaw === false
+        ? false
+        : pricingSettings.service_charge_enabled;
+      const taxEffective = taxRaw === false
+        ? false
+        : pricingSettings.tax_enabled;
+
+      // Negasi akses: true + properti OFF → tolak.
+      if (svcRaw === true && !pricingSettings.service_charge_enabled) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY',
+          message: 'Service charge tidak diaktifkan di pengaturan properti. Tidak dapat mengaktifkan per pesanan.'
+        });
+      }
+      if (taxRaw === true && !pricingSettings.tax_enabled) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'TAX_NOT_ENABLED_AT_PROPERTY',
+          message: 'PPN tidak diaktifkan di pengaturan properti. Tidak dapat mengaktifkan per pesanan.'
+        });
+      }
+
       const pricingInput = {
         items: items.map((it: any, idx: number) => {
           const menuRow = activeMenuItems[idx];
@@ -727,9 +830,9 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         // STRICT BOOLEAN — nilai boolean asli dari driver pg (kolom BOOLEAN
         // PostgreSQL); TIDAK memakai Boolean() agar validasi B1 (INVALID_BOOLEAN)
         // tetap berlaku bila sumbernya bukan boolean.
-        serviceChargeEnabled: pricingSettings.service_charge_enabled,
+        serviceChargeEnabled: svcEffective,
         serviceChargePercent: Number(pricingSettings.service_charge_percent),
-        taxEnabled: pricingSettings.tax_enabled,
+        taxEnabled: taxEffective,
         taxPercent: Number(pricingSettings.tax_percent),
       };
 
@@ -764,6 +867,37 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         }
         // Error tak terduga (bukan PosPricingError) — biarkan lolos ke 500.
         throw e;
+      }
+
+      // ── Expected total guard (klien baru, opsional) ───────────────────────
+      // Bila klien mengirim expected_total (nominal yang ditampilkan kasir),
+      // backend hitung ulang dengan konfigurasi properti aktual. Mismatch
+      // berarti properti di-ubah di tengah (drift percent, dsb.) — tolak
+      // 409 agar frontend dapat memperbarui estimasi dan meminta konfirmasi
+      // kasir. Order TIDAK dibuat.
+      // Perbandingan memakai aturan pembulatan canonical POS (Math.round)
+      // yang sudah diterapkan di computePosPricing — expected_total harus
+      // sama persis dengan pricing.totalAmount.
+      if (expectedTotal !== null && expectedTotal !== pricing.totalAmount) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          status: 'CONFLICT',
+          code: 'PRICING_TOTAL_CHANGED',
+          message:
+            'Total order tidak sesuai estimasi kasir. Pengaturan properti mungkin telah berubah. ' +
+            'Perbarui estimasi dan minta konfirmasi kasir.',
+          data: {
+            computed_total: pricing.totalAmount,
+            expected_total: expectedTotal,
+            service_amount: pricing.serviceAmount,
+            tax_amount: pricing.taxAmount,
+            service_charge_percent: pricing.serviceChargePercentSnapshot,
+            tax_percent: pricing.taxPercentSnapshot,
+            service_charge_enabled: pricing.serviceChargeEnabledSnapshot,
+            tax_enabled: pricing.taxEnabledSnapshot,
+            discounted_subtotal: pricing.discountedSubtotal,
+          }
+        });
       }
 
       // Subtotal untuk audit log: bersumber dari canonical core (satu sumber),

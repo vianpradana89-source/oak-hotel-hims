@@ -433,11 +433,11 @@ const msgNullOpts = buildPosReceiptWhatsAppMessage(mockReceipt, {
 check(msgNullOpts === msgNoOpts, '5.7 null intro/closing produces identical output to no options');
 
 // ============================================================================
-// Test 6: B4.1 service charge & PPN in WhatsApp message
+// Test 6: B4.1 service charge & PBJT in WhatsApp message
 // ============================================================================
-console.log('\n--- Test 6: B4.1 service charge & PPN in WhatsApp message ---');
+console.log('\n--- Test 6: B4.1 service charge & PBJT in WhatsApp message ---');
 
-// 6.1: receipt with service charge + PPN → both lines shown
+// 6.1: receipt with service charge + PBJT → both lines shown
 {
   const receiptSvcTax: PosReceiptData = {
     ...mockReceipt,
@@ -452,19 +452,17 @@ console.log('\n--- Test 6: B4.1 service charge & PPN in WhatsApp message ---');
     },
   };
   const msgSvcTax = buildPosReceiptWhatsAppMessage(receiptSvcTax);
-  check(msgSvcTax.includes('Service Charge: Rp 15.000'), '6.1a service charge line present');
-  check(msgSvcTax.includes('(10%)'), '6.1b service percent shown as (10%)');
-  check(msgSvcTax.includes('PPN: Rp 14.500'), '6.1c PPN line present');
-  check(msgSvcTax.includes('(11%)'), '6.1d tax percent shown as (11%)');
+  check(msgSvcTax.includes('Service Charge (10%): Rp 15.000'), '6.1a service charge line with percent in label');
+  check(msgSvcTax.includes('PBJT (11%): Rp 14.500'), '6.1c PBJT line with percent in label');
   // Service charge appears BEFORE total
   const svcIdx = msgSvcTax.indexOf('Service Charge');
   const totalIdx = msgSvcTax.indexOf('*Total:');
   check(svcIdx >= 0 && totalIdx >= 0 && svcIdx < totalIdx, '6.1e service charge appears before total');
-  const ppnIdx = msgSvcTax.indexOf('PPN:');
-  check(ppnIdx >= 0 && ppnIdx < totalIdx, '6.1f PPN appears before total');
+  const pbjtIdx = msgSvcTax.indexOf('PBJT');
+  check(pbjtIdx >= 0 && pbjtIdx < totalIdx, '6.1f PBJT appears before total');
 }
 
-// 6.2: receipt with service charge only (tax = 0) → PPN line absent
+// 6.2: receipt with service charge only (tax = 0) → PBJT line absent
 {
   const receiptSvcOnly: PosReceiptData = {
     ...mockReceipt,
@@ -479,8 +477,8 @@ console.log('\n--- Test 6: B4.1 service charge & PPN in WhatsApp message ---');
     },
   };
   const msgSvcOnly = buildPosReceiptWhatsAppMessage(receiptSvcOnly);
-  check(msgSvcOnly.includes('Service Charge: Rp 15.000'), '6.2a service charge shown');
-  check(!msgSvcOnly.includes('PPN:'), '6.2b PPN line absent when tax_amount="0"');
+  check(msgSvcOnly.includes('Service Charge (10%): Rp 15.000'), '6.2a service charge shown with percent');
+  check(!msgSvcOnly.includes('PBJT'), '6.2b PBJT line absent when tax_amount="0"');
 }
 
 // 6.3: receipt with tax only (service = 0) → service line absent
@@ -498,16 +496,16 @@ console.log('\n--- Test 6: B4.1 service charge & PPN in WhatsApp message ---');
     },
   };
   const msgTaxOnly = buildPosReceiptWhatsAppMessage(receiptTaxOnly);
-  check(!msgTaxOnly.includes('Service Charge:'), '6.3a service line absent when service_amount="0"');
-  check(msgTaxOnly.includes('PPN: Rp 14.500'), '6.3b PPN shown when tax_amount > 0');
+  check(!msgTaxOnly.includes('Service Charge'), '6.3a service line absent when service_amount="0"');
+  check(msgTaxOnly.includes('PBJT (11%): Rp 14.500'), '6.3b PBJT shown with percent when tax_amount > 0');
 }
 
-// 6.4: legacy receipt (no B4.1 fields) → no service/PPN lines at all
+// 6.4: legacy receipt (no B4.1 fields) → no service/PBJT lines at all
 {
   // mockReceipt has service_amount="0", tax_amount="0" → no lines
   const msgLegacy = buildPosReceiptWhatsAppMessage(mockReceipt);
-  check(!msgLegacy.includes('Service Charge:'), '6.4a no service charge line for legacy receipt');
-  check(!msgLegacy.includes('PPN:'), '6.4b no PPN line for legacy receipt');
+  check(!msgLegacy.includes('Service Charge'), '6.4a no service charge line for legacy receipt');
+  check(!msgLegacy.includes('PBJT'), '6.4b no PBJT line for legacy receipt');
 }
 
 console.log(`\n=== All ${assertions} assertions passed ===`);
