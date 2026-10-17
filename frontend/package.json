@@ -54,7 +54,8 @@
     "preview": "vite preview",
     "test:pos-receipt-api-parser": "node test/pos_receipt_api_parser_test.ts",
     "test:pos-receipt-logo": "node test/pos_receipt_logo_test.ts",
-    "test:pos-receipt-modal-label": "node test/pos_thermal_receipt_modal_label_test.ts"
+    "test:pos-receipt-modal-label": "node test/pos_thermal_receipt_modal_label_test.ts",
+    "test:pos-pricing-settings-tab": "node test/pos_pricing_settings_tab_test.ts"
   },
   "dependencies": {
     "html2pdf.js": "^0.14.0",

@@ -109,6 +109,7 @@ import { createIdentityExtractionRouter } from './domains/identity/identityExtra
 import { createDocumentRouter } from './domains/documents/documentRouter';
 import { createPropertyPaymentInstructionsRouter, createPosPaymentConfigRouter } from './domains/propertyPaymentInstructions/propertyPaymentInstructionsRouter';
 import { createPosCommunicationSettingsRouter } from './domains/posCommunicationSettings/posCommunicationSettingsRouter';
+import { createPosPricingSettingsRouter } from './domains/posPricingSettings/posPricingSettingsRouter';
 import { createPropertyRegistrationFormTermsRouter } from './domains/registrationFormTerms/registrationFormTermsRouter';
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
@@ -8717,6 +8718,7 @@ app.use('/api/front-office', createFrontOfficeSettingsRouter(pool));
 app.use('/api/settings/property/payment-instructions', createPropertyPaymentInstructionsRouter(pool));
 app.use('/api/pos/payment-config', createPosPaymentConfigRouter(pool));
 app.use('/api/pos/communication-settings', createPosCommunicationSettingsRouter(pool));
+app.use('/api/pos/pricing-settings', createPosPricingSettingsRouter(pool));
 app.use('/api/properties', createPropertyPaymentInstructionsRouter(pool));
 app.use('/api/settings/property/registration-form/terms', createPropertyRegistrationFormTermsRouter(pool));
 app.use('/api/properties', createPropertyRegistrationFormTermsRouter(pool));

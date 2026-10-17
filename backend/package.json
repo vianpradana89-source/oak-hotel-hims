@@ -57,6 +57,7 @@
     "test:reservation-edit-reprice": "npm run build && node test/reservation_edit_reprice_payment_test.js",
     "test:room-move": "npm run build && node test/checked_in_room_move_test.js",
     "test:pos-receipt-endpoint": "node test/pos_receipt_endpoint_test.js",
+    "test:pos-pricing-settings": "node test/pos_pricing_settings_endpoint_test.js",
     "test:pos-receipt-canonical": "npm run build && node test/pos_receipt_canonical_serialization_test.js",
     "test:property-branding": "node test/property_branding_persistence_test.js",
     "test:turnover-readiness": "node test/turnover_readiness_test.js",
