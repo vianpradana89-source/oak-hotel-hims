@@ -153,6 +153,9 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
         `SELECT id, property_id, reservation_id, order_number,
                 table_number, guest_name, guest_phone,
                 status, total_amount,
+                service_amount, tax_amount,
+                service_charge_percent_snapshot, tax_percent_snapshot,
+                service_charge_enabled_snapshot, tax_enabled_snapshot,
                 notes,
                 discount_type, discount_value, discount_reason, discount_amount,
                 created_at, updated_at
@@ -271,7 +274,7 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
         `SELECT id, property_id, transaction_no,
                 transaction_type, source_type, source_id,
                 payment_status, payment_method,
-                amount, discount_amount, net_amount,
+                amount, discount_amount, service_amount, tax_amount, net_amount,
                 created_at
          FROM transactions
          WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL
@@ -345,6 +348,57 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
       return;
     }
 
+
+    // 9b. B4.1: Validate service_amount / tax_amount consistency (fail-closed)
+    let orderServiceNum: number;
+    let orderTaxNum: number;
+    let saleServiceNum: number;
+    let saleTaxNum: number;
+    try {
+      orderServiceNum = toWholeRupiahNumber(order.service_amount ?? '0', 'pos_orders.service_amount') ?? 0;
+      orderTaxNum     = toWholeRupiahNumber(order.tax_amount ?? '0', 'pos_orders.tax_amount') ?? 0;
+      saleServiceNum  = toWholeRupiahNumber(sale.service_amount ?? '0', 'transactions.service_amount') ?? 0;
+      saleTaxNum      = toWholeRupiahNumber(sale.tax_amount ?? '0', 'transactions.tax_amount') ?? 0;
+    } catch (canonErr) {
+      integrityError(res, canonErr instanceof Error ? canonErr.message : String(canonErr));
+      return;
+    }
+    if (orderServiceNum !== saleServiceNum) {
+      integrityError(res, `service_amount mismatch: order=${orderServiceNum} vs transaction=${saleServiceNum}`);
+      return;
+    }
+    if (orderTaxNum !== saleTaxNum) {
+      integrityError(res, `tax_amount mismatch: order=${orderTaxNum} vs transaction=${saleTaxNum}`);
+      return;
+    }
+
+    // 9c. B4.1: Validate snapshot percentage & boolean fields (fail-closed)
+    const snapPct = (raw: unknown, label: string): number => {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        throw new Error(`${label} snapshot invalid: ${String(raw)} (harus finite 0-100)`);
+      }
+      return n;
+    };
+    const snapBool = (raw: unknown, label: string): boolean => {
+      if (raw !== true && raw !== false) {
+        throw new Error(`${label} snapshot invalid: ${String(raw)} (harus strict boolean)`);
+      }
+      return raw;
+    };
+    let svcPctSnap: number;
+    let taxPctSnap: number;
+    let svcEnabledSnap: boolean;
+    let taxEnabledSnap: boolean;
+    try {
+      svcPctSnap     = snapPct(order.service_charge_percent_snapshot, 'service_charge_percent_snapshot');
+      taxPctSnap     = snapPct(order.tax_percent_snapshot, 'tax_percent_snapshot');
+      svcEnabledSnap = snapBool(order.service_charge_enabled_snapshot, 'service_charge_enabled_snapshot');
+      taxEnabledSnap = snapBool(order.tax_enabled_snapshot, 'tax_enabled_snapshot');
+    } catch (snapErr) {
+      integrityError(res, snapErr instanceof Error ? snapErr.message : String(snapErr));
+      return;
+    }
     // â”€â”€ 10. Property + Branding (read-only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let propertyRow: Record<string, unknown> | null;
     let branding: Record<string, unknown> | null = null;
@@ -440,6 +494,12 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
           discount_amount: String(orderDiscountNum),
           created_at: order.created_at ? String(order.created_at) : null,
           updated_at: order.updated_at ? String(order.updated_at) : null,
+          service_amount: String(orderServiceNum),
+          tax_amount: String(orderTaxNum),
+          service_charge_percent_snapshot: String(svcPctSnap),
+          tax_percent_snapshot: String(taxPctSnap),
+          service_charge_enabled_snapshot: svcEnabledSnap,
+          tax_enabled_snapshot: taxEnabledSnap,
         },
         items: canonicalItems,
         settlement: {
