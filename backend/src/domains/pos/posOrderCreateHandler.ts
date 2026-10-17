@@ -19,6 +19,7 @@ import crypto from 'crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { Request, Response } from 'express';
 import { computeRequestHash } from '../../utils/hash';
+import { computePosPricing, PosPricingError } from './posPricingCore';
 
 // ── Simple helper (no external dependency) ─────────────────────────────────
 
@@ -554,9 +555,14 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
 
       // Validasi produk aktif: hanya untuk pembuatan order BARU.
       // Replay (di atas) sudah mengembalikan 200/409 tanpa melewati blok ini.
+      // Hasil per-item disimpan sebagai SATU snapshot menu yang dipakai
+      // konsisten untuk: input pricing canonical, persist pos_order_items
+      // (unit_price + nama/kode), dan kalkulasi order total. Tidak ada
+      // pembacaan menu kedua — eliminasi risiko drift harga konkuren.
+      const activeMenuItems: Array<{ id: any; price: any; name: any; item_code: any; property_id: any }> = [];
       for (const item of items) {
         const menuItem = await client.query(
-          'SELECT id, price, name, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
+          'SELECT id, price, name, item_code, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
           [item.menu_item_id]
         );
         if (!hasRows(menuItem)) {
@@ -567,7 +573,39 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
           await client.query('ROLLBACK');
           return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_MENU_ITEM', message: `Menu item ${item.menu_item_id} belongs to a different property` });
         }
+        activeMenuItems.push(menuItem.rows[0]);
       }
+
+      // ─── Step 5b: Baca pricing settings properti (STRICT, tanpa coercion) ──
+      // Backend adalah SATU-SATUNYA pricing authority.
+      // property_pos_pricing_settings adalah PREREQUISITE PHASE A:
+      //   - tabel ada, row property ada  → pakai row tersebut
+      //   - tabel ada, row TIDAK ada     → default in-memory (0/false), TANPA auto-insert
+      //   - tabel TIDAK ada (PHASE A belum di-apply) → query gagal eksplisit → 500
+      // Perhitungan canonical DITAHAN HINGGA SETELAH confirmed winner (step 6/7),
+      // sehingga jalur replay/winner TIDAK pernah recompute dengan settings baru.
+      const pricingRow = await client.query(
+        `SELECT service_charge_enabled, service_charge_percent,
+                tax_enabled, tax_percent
+         FROM property_pos_pricing_settings
+         WHERE property_id = $1`,
+        [propertyId]
+      );
+      // Fallback default in-memory hanya saat row TIDAK ADA (kontrak getPosPricingSettings).
+      // Nilai boolean dari PostgreSQL (driver pg mengembalikan boolean asli untuk
+      // kolom BOOLEAN) diteruskan SEBAGAI ADA — TIDAK di-coerce dengan Boolean().
+      // Validasi strict boolean dipertahankan di canonical core (B1: INVALID_BOOLEAN).
+      const pricingSettings: {
+        service_charge_enabled: boolean;
+        service_charge_percent: number;
+        tax_enabled: boolean;
+        tax_percent: number;
+      } = pricingRow.rows[0] ?? {
+        service_charge_enabled: false,
+        service_charge_percent: 0,
+        tax_enabled: false,
+        tax_percent: 0,
+      };
 
       // ─── Step 6: Insert path (order baru, status DIPAKSA OPEN) ───
       // Status di-create selalu OPEN — payload tidak boleh memilih status lain.
@@ -664,55 +702,121 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       }
 
       const orderId = orderInsert.rows[0].id;
-      let totalAmount = 0;
-      let orderSubtotalAfterItemDiscounts = 0;
+
+      // ─── Step 6b: Kalkulasi canonical HANYA setelah confirmed winner ─────
+      // Jalur ON CONFLICT winner (Step 7 di atas) sudah RETURN sebelum sini,
+      // sehingga di titik ini kita pasti pencipta order baru (bukan replay)
+      // dan satu-satunya pemanggil computePosPricing() untuk request ini.
+      // Semua input bersumber dari DUA snapshot yang sudah tervalidasi di atas:
+      //   - activeMenuItems[] (step 5a): harga/nama/kode menu, satu-satunya
+      //     sumber persist pos_order_items → menjamin snapshot consistency.
+      //   - pricingSettings (step 5b): strict boolean dari PostgreSQL (tanpa
+      //     coercion) + percent dari property_pos_pricing_settings.
+      const pricingInput = {
+        items: items.map((it: any, idx: number) => {
+          const menuRow = activeMenuItems[idx];
+          return {
+            quantity: Number(it.quantity ?? 1),
+            unitPrice: Number(menuRow.price),
+            discountType: it.discount_type ?? null,
+            discountValue: it.discount_value == null ? null : Number(it.discount_value),
+          };
+        }),
+        orderDiscountType: orderDiscountType as 'NOMINAL' | 'PERCENT' | null,
+        orderDiscountValue,
+        // STRICT BOOLEAN — nilai boolean asli dari driver pg (kolom BOOLEAN
+        // PostgreSQL); TIDAK memakai Boolean() agar validasi B1 (INVALID_BOOLEAN)
+        // tetap berlaku bila sumbernya bukan boolean.
+        serviceChargeEnabled: pricingSettings.service_charge_enabled,
+        serviceChargePercent: Number(pricingSettings.service_charge_percent),
+        taxEnabled: pricingSettings.tax_enabled,
+        taxPercent: Number(pricingSettings.tax_percent),
+      };
+
+      // Satu-satunya kalkulasi canonical — dipakai untuk persist item, order,
+      // snapshot, dan total. TIDAK ada consumer yang menghitung ulang.
+      let pricing: ReturnType<typeof computePosPricing>;
+      try {
+        pricing = computePosPricing(pricingInput);
+      } catch (e: any) {
+        await client.query('ROLLBACK');
+        if (e instanceof PosPricingError) {
+          const code = e.code;
+          if (
+            code === 'ITEM_DISCOUNT_EXCEEDS_GROSS' ||
+            code === 'ORDER_DISCOUNT_EXCEEDS_SUBTOTAL'
+          ) {
+            return res.status(422).json({
+              status: 'ERROR',
+              code: 'DISCOUNT_EXCEEDS_SUBTOTAL',
+              message: code === 'ORDER_DISCOUNT_EXCEEDS_SUBTOTAL'
+                ? 'Order discount exceeds subtotal after item discounts'
+                : 'Item discount exceeds subtotal',
+            });
+          }
+          // Pelanggaran validasi numerik lain (quantities, prices, percent)
+          // — semantik existing validation handler (400 VALIDATION_ERROR).
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid pricing input',
+          });
+        }
+        // Error tak terduga (bukan PosPricingError) — biarkan lolos ke 500.
+        throw e;
+      }
+
+      // Subtotal untuk audit log: bersumber dari canonical core (satu sumber),
+      // bukan akumulasi loop item terpisah.
+      // ── Basis audit diskon order: subtotal SETELAH diskon item, SEBELUM diskon order ──
+      // pricing.afterItemDiscount = grossItems − itemDiscountTotal (kontrak B1: L108).
+      // pricing.discountedSubtotal = afterItemDiscount − orderDiscountAmount —
+      // SALAH untuk basis audit karena order discount sendiri dihitung atas
+      // afterItemDiscount, bukan atas discountedSubtotal.
+      // Nilai bersumber dari canonical core (satu sumber), TIDAK dihitung ulang.
+      const orderDiscountBasisAfterItemDiscounts = pricing.afterItemDiscount;
       // Collect per-item discount details for audit (only items with discount).
       const itemDiscountAudit: Array<{
         menu_item_id: number; quantity: number; item_gross: number;
         discount_type: string; discount_value: number; discount_amount: number; item_net: number;
       }> = [];
 
-      for (const item of items) {
-        const menuItem = await client.query(
-          'SELECT id, price, name, item_code FROM pos_menu_items WHERE id = $1 AND property_id = $2 AND is_active = TRUE',
-          [item.menu_item_id, propertyId]
-        );
-        const menu = menuItem.rows[0];
-        if (!menu) {
+      // ─── Step 6c: Persist items + order UPDATE dari SATU snapshot menu ──
+      // Kalkulasi canonical TIDAK di-loop — pricing.items[] adalah sumber
+      // discount_amount per baris. Harga/nama/kode menu HANYA dibaca dari
+      // activeMenuItems[] (step 5a) — TIDAK ada re-query menu di sini,
+      // sehingga persist unit_price konsisten dengan input pricing core.
+      // Validasi active/cross-property sudah dilakukan di step 5a; di sini
+      // cukup guard defensif bahwa snapshot masih selaras dengan request.
+      for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+        const item = items[itemIdx];
+        const menu = activeMenuItems[itemIdx];
+        if (Number(menu.id) !== Number(item.menu_item_id)) {
+          // Tidak mungkin terjadi (activeMenuItems diisi berurutan dari items[]),
+          // tapi guard fail-closed bila asumsi indeks rusak di masa depan.
           await client.query('ROLLBACK');
-          return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
+          return res.status(422).json({
+            status: 'ERROR',
+            code: 'MENU_SNAPSHOT_MISMATCH',
+            message: 'Menu snapshot tidak selaras dengan request items'
+          });
         }
         const qty = Number(item.quantity ?? 1);
         const unitPrice = Number(menu.price);
         const itemGross = qty * unitPrice;
+        // Validasi whole-rupiah integer atas snapshot (fail-closed bila
+        // snapshot menu tidak valid — tidak mungkin terjadi setelah step 5a,
+        // tetapi TIDAK mengandalkan asumsi saja).
         if (menu.price == null || !Number.isSafeInteger(unitPrice) || unitPrice < 0 || !Number.isSafeInteger(itemGross)) {
           await client.query('ROLLBACK');
           return res.status(422).json({ status: 'ERROR', code: 'INVALID_MENU_PRICE', message: 'Menu price and item subtotal must use valid whole rupiah' });
         }
 
-        // ── Diskon per item (per baris) ──────────────────────────────────
-        // NOMINAL: potongan per baris (bukan per unit).
-        // PERCENT: potongan persentase dari itemGross.
-        // NOMINAL must not exceed the line subtotal; invalid input is rejected.
-        // PERCENT is rounded from itemGross * discount_value / 100.
-        let itemDiscountAmount = 0;
         const itDisType = item.discount_type ?? null;
         const itDisVal = item.discount_value ?? null;
-        if (itDisType === 'NOMINAL' && itDisVal !== null && itDisVal !== undefined) {
-          const raw = Number(itDisVal);
-          if (raw > itemGross) {
-            await client.query('ROLLBACK');
-            return res.status(422).json({ status: 'ERROR', code: 'DISCOUNT_EXCEEDS_SUBTOTAL', message: `Item discount exceeds subtotal for menu item ${menu.id}` });
-          }
-          itemDiscountAmount = raw;
-        } else if (itDisType === 'PERCENT' && itDisVal !== null && itDisVal !== undefined) {
-          const raw = Number(itDisVal);
-          itemDiscountAmount = Math.round(itemGross * raw / 100);
-        }
-        itemDiscountAmount = Math.round(itemDiscountAmount);
-        const itemNet = itemGross - itemDiscountAmount;
-        totalAmount += itemNet;
-        orderSubtotalAfterItemDiscounts += itemNet;
+        const linePricing = pricing.items[itemIdx];
+        const itemDiscountAmount = linePricing.lineDiscountAmount;
+        const itemNet = linePricing.lineNet;
 
         await client.query(
           `INSERT INTO pos_order_items
@@ -733,7 +837,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
           itemDiscountAudit.push({
             menu_item_id: Number(item.menu_item_id),
             quantity: qty,
-            item_gross: itemGross,
+            item_gross: linePricing.lineGross,
             discount_type: itDisType!,
             discount_value: Number(itDisVal),
             discount_amount: itemDiscountAmount,
@@ -742,34 +846,28 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         }
       }
 
-      // ── Diskon order (di atas subtotal setelah diskon item) ──────────
-      if (!Number.isSafeInteger(orderSubtotalAfterItemDiscounts)) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({ status: 'ERROR', code: 'INVALID_ORDER_AMOUNT', message: 'Order subtotal exceeds the supported range' });
-      }
-      let orderDiscountAmount = 0;
-      if (orderDiscountType === 'NOMINAL' && orderDiscountValue !== null) {
-        const raw = Number(orderDiscountValue);
-        if (raw > orderSubtotalAfterItemDiscounts) {
-          await client.query('ROLLBACK');
-          return res.status(422).json({ status: 'ERROR', code: 'DISCOUNT_EXCEEDS_SUBTOTAL', message: 'Order discount exceeds subtotal after item discounts' });
-        }
-        orderDiscountAmount = raw;
-      } else if (orderDiscountType === 'PERCENT' && orderDiscountValue !== null) {
-        const raw = Number(orderDiscountValue);
-        orderDiscountAmount = Math.round(orderSubtotalAfterItemDiscounts * raw / 100);
-      }
-      orderDiscountAmount = Math.round(orderDiscountAmount);
-      const finalTotal = orderSubtotalAfterItemDiscounts - orderDiscountAmount;
+      // ── Diskon order + service + tax: semua dari canonical core ──────────
+      const orderDiscountAmount = pricing.orderDiscountAmount;
+      const finalTotal = pricing.totalAmount;
 
       const updatedOrder = await client.query(
         `UPDATE pos_orders
          SET total_amount = $1,
              discount_amount = $2,
+             service_amount = $3,
+             tax_amount = $4,
+             service_charge_percent_snapshot = $5,
+             tax_percent_snapshot = $6,
+             service_charge_enabled_snapshot = $7,
+             tax_enabled_snapshot = $8,
              updated_at = NOW()
-         WHERE id = $3
+         WHERE id = $9
          RETURNING *`,
-        [finalTotal, orderDiscountAmount, orderId]
+        [finalTotal, orderDiscountAmount,
+         pricing.serviceAmount, pricing.taxAmount,
+         pricing.serviceChargePercentSnapshot, pricing.taxPercentSnapshot,
+         pricing.serviceChargeEnabledSnapshot, pricing.taxEnabledSnapshot,
+         orderId]
       );
 
       // Status OPEN → TIDAK ada projection transaksi. Tidak perlu guard status.
@@ -790,7 +888,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
             discount_value: orderDiscountValue,
             discount_amount: orderDiscountAmount,
             basis: 'subtotal_after_item_discounts',
-            basis_amount: orderSubtotalAfterItemDiscounts,
+            basis_amount: orderDiscountBasisAfterItemDiscounts,
             reason: orderDiscountReasonNorm,
           } : null,
           total_discount: itemDiscountTotal + orderDiscountAmount,

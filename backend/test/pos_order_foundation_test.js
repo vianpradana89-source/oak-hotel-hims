@@ -110,6 +110,7 @@ const tracked = {
   reservations: [],
   orders: [],
   idempotencyKeys: [],
+  pricingSettings: [],
 };
 
 // ── Identitas unik per run (menghindari kolisi run paralel/berurutan) ──────
@@ -182,13 +183,16 @@ async function cleanup() {
   // pos_order_items dihapus berdasarkan tracked.orders (order_id),
   // bukan ID item terpisah — FK order_id → pos_orders.id.
   // idempotency_keys global hanya dihapus untuk key milik run ini (tracked).
+  // cleanup `property_pos_pricing_settings` rows sebelum properties (FK constraint).
   const steps = [
     ['pos_order_items', 'DELETE FROM pos_order_items WHERE order_id = $1', tracked.orders],
     ['pos_orders', 'DELETE FROM pos_orders WHERE id = $1', tracked.orders],
     ['pos_menu_items', 'DELETE FROM pos_menu_items WHERE id = $1', tracked.items],
     ['pos_menu_categories', 'DELETE FROM pos_menu_categories WHERE id = $1', tracked.categories],
+    ['property_pos_pricing_settings', 'DELETE FROM property_pos_pricing_settings WHERE property_id = $1', tracked.properties],
     ['reservations', 'DELETE FROM reservations WHERE id = $1', tracked.reservations],
     ['bookings', 'DELETE FROM bookings WHERE id = $1', tracked.bookings],
+    ['audit_logs', 'DELETE FROM audit_logs WHERE property_id = $1', tracked.properties],
     ['users', 'DELETE FROM users WHERE id = $1', tracked.users],
     ['role_permissions', 'DELETE FROM role_permissions WHERE role_id = $1', tracked.roles],
     ['roles', 'DELETE FROM roles WHERE id = $1', tracked.roles],
@@ -232,6 +236,7 @@ async function verifyResidue() {
       ['order_items', 'pos_order_items', 'order_id', tracked.orders],
       ['menu_items', 'pos_menu_items', 'id', tracked.items],
       ['menu_categories', 'pos_menu_categories', 'id', tracked.categories],
+      ['pricing_settings', 'property_pos_pricing_settings', 'property_id', tracked.properties],
       ['reservations', 'reservations', 'id', tracked.reservations],
       ['bookings', 'bookings', 'id', tracked.bookings],
       ['users', 'users', 'id', tracked.users],
@@ -603,6 +608,7 @@ async function setupFixtures() {
       itemA2: itemA2.rows[0].id,
       itemB: itemB.rows[0].id,
       userA: userA.userId,
+      roleA: userA.roleId,
       userB: userB.userId,
       userNoPerm: userNoPerm.userId,
       userMp: userMp.userId,
@@ -2155,7 +2161,444 @@ async function main() {
       );
     }
 
-  } finally {
+    // ─── Skenario 23: PHASE B — Canonical Pricing Core Integration ────────
+    // property_pos_pricing_settings (PHASE A) adalah pre-requisite DB.
+    // Skenario ini menguji: no-row fallback, disabled+nonzero-percent,
+    // service ON, tax ON, kombinasi, replay no-recompute, setting isolation.
+    console.log('\n── Skenario 23: PHASE B canonical pricing integration ──');
+    {
+      const c23 = await pool.connect();
+      let pricingTableReady = false;
+      try {
+        const probe = await c23.query(
+          "SELECT to_regclass('public.property_pos_pricing_settings') AS tbl"
+        );
+        pricingTableReady = probe.rows[0].tbl !== null;
+        expect(pricingTableReady,
+          'Prasyarat: property_pos_pricing_settings (PHASE A) ada di DB');
+
+        if (pricingTableReady) {
+          // ── (a) No row untuk pidA → default in-memory 0/false, TANPA insert ──
+          const noRowBefore = await c23.query(
+            'SELECT COUNT(*)::int AS c FROM property_pos_pricing_settings WHERE property_id = $1',
+            [fx.pidA]
+          );
+          expect(noRowBefore.rows[0].c === 0,
+            '(a) tidak ada row pricing settings untuk pidA (pristine)');
+
+          const rA = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA });
+          expect(rA.status === 201, '(a) no-row create → 201 (dapat: ' + rA.status + ')');
+          const aOrder = rA.json.data;
+          expect(aOrder.id > 0, '(a) order id valid');
+          tracked.orders.push(aOrder.id);
+
+          const aDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    service_charge_percent_snapshot, tax_percent_snapshot,
+                    service_charge_enabled_snapshot, tax_enabled_snapshot,
+                    discount_amount
+             FROM pos_orders WHERE id = $1`, [aOrder.id]);
+          const aR = aDB.rows[0];
+          // Legacy behavior: svc/tax OFF → total = setelah diskon (tanpa svc/tax)
+          expect(Number(aR.total_amount) === 50000,
+            `(a) total_amount legacy 50000 (dapat: ${aR.total_amount})`);
+          expect(Number(aR.service_amount) === 0, '(a) service_amount = 0');
+          expect(Number(aR.tax_amount) === 0, '(a) tax_amount = 0');
+          expect(Number(aR.service_charge_percent_snapshot) === 0, '(a) svc pct snapshot = 0');
+          expect(Number(aR.tax_percent_snapshot) === 0, '(a) tax pct snapshot = 0');
+          expect(aR.service_charge_enabled_snapshot === false, '(a) svc enabled snapshot = false');
+          expect(aR.tax_enabled_snapshot === false, '(a) tax enabled snapshot = false');
+          expect(Number(aR.discount_amount) === 0, '(a) discount_amount = 0');
+          // Tidak ada row pricing settings yang dibuat otomatis.
+          const noRowAfter = await c23.query(
+            'SELECT COUNT(*)::int AS c FROM property_pos_pricing_settings WHERE property_id = $1',
+            [fx.pidA]);
+          expect(noRowAfter.rows[0].c === 0,
+            '(a) tidak ada auto-insert row pricing settings (tetap 0)');
+
+          // ── (b) Insert row disabled + percent non-zero → snapshot preserved ──
+          await c23.query(
+            `INSERT INTO property_pos_pricing_settings
+               (property_id, service_charge_enabled, service_charge_percent,
+                tax_enabled, tax_percent, created_at, updated_at)
+             VALUES ($1, FALSE, 7.5, FALSE, 11.0, NOW(), NOW())`,
+            [fx.pidA]);
+
+          const rB = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA });
+          expect(rB.status === 201, '(b) disabled+nonzero create → 201 (dapat: ' + rB.status + ')');
+          const bOrder = rB.json.data;
+          tracked.orders.push(bOrder.id);
+          const bDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    service_charge_percent_snapshot, tax_percent_snapshot,
+                    service_charge_enabled_snapshot, tax_enabled_snapshot
+             FROM pos_orders WHERE id = $1`, [bOrder.id]);
+          const bR = bDB.rows[0];
+          expect(Number(bR.total_amount) === 50000,
+            `(b) total tetap 50000 (svc/tax OFF) (dapat: ${bR.total_amount})`);
+          expect(Number(bR.service_amount) === 0, '(b) service_amount = 0 (disabled)');
+          expect(Number(bR.tax_amount) === 0, '(b) tax_amount = 0 (disabled)');
+          expect(Number(bR.service_charge_percent_snapshot) === 7.5,
+            '(b) svc pct snapshot = 7.5 (preserved walau disabled)');
+          expect(Number(bR.tax_percent_snapshot) === 11,
+            '(b) tax pct snapshot = 11 (preserved walau disabled)');
+          expect(bR.service_charge_enabled_snapshot === false, '(b) svc enabled = false');
+          expect(bR.tax_enabled_snapshot === false, '(b) tax enabled = false');
+
+          // ── (c) Service ON 10% ──
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = TRUE, service_charge_percent = 10.0,
+                 tax_enabled = FALSE, tax_percent = 0.0, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          const rC = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA });
+          expect(rC.status === 201, '(c) service ON create → 201');
+          const cOrder = rC.json.data;
+          tracked.orders.push(cOrder.id);
+          const cDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [cOrder.id]);
+          const cR = cDB.rows[0];
+          expect(Number(cR.service_amount) === 5000,
+            `(c) service_amount = 5000 (10% dari 50000) (dapat: ${cR.service_amount})`);
+          expect(Number(cR.tax_amount) === 0, '(c) tax_amount = 0');
+          expect(Number(cR.total_amount) === 55000,
+            `(c) total = 55000 (dapat: ${cR.total_amount})`);
+
+          // ── (d) Tax ON 11% (svc OFF) ──
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = FALSE, service_charge_percent = 10.0,
+                 tax_enabled = TRUE, tax_percent = 11.0, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          const rD = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA });
+          const dOrder = rD.json.data;
+          expect(rD.status === 201, '(d) tax ON create → 201');
+          tracked.orders.push(dOrder.id);
+          const dDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [dOrder.id]);
+          const dR = dDB.rows[0];
+          expect(Number(dR.service_amount) === 0, '(d) service = 0');
+          expect(Number(dR.tax_amount) === 5500,
+            `(d) tax = 5500 (11% dari 50000) (dapat: ${dR.tax_amount})`);
+          expect(Number(dR.total_amount) === 55500,
+            `(d) total = 55500 (dapat: ${dR.total_amount})`);
+
+          // ── (e) Service ON 10% + Tax ON 11% (tax base = subtotal + svc) ──
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = TRUE, service_charge_percent = 10.0,
+                 tax_enabled = TRUE, tax_percent = 11.0, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          const rE = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA });
+          const eOrder = rE.json.data;
+          expect(rE.status === 201, '(e) svc+tax create → 201');
+          tracked.orders.push(eOrder.id);
+          const eDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [eOrder.id]);
+          const eR = eDB.rows[0];
+          expect(Number(eR.service_amount) === 5000, '(e) svc = 5000');
+          // Tax base = 50000 + 5000 = 55000; 11% = 6050
+          expect(Number(eR.tax_amount) === 6050,
+            `(e) tax = 6050 (11% dari 55000) (dapat: ${eR.tax_amount})`);
+          expect(Number(eR.total_amount) === 61050,
+            `(e) total = 61050 (dapat: ${eR.total_amount})`);
+
+          // ── (f) Replay no-recompute: setting berubah, snapshot lama tetap ──
+          // Buat order dengan key idempotency baru saat svc+tax ON.
+          const replayKey = `POSF-${RUN_ID}-PHASEB`;
+          tracked.idempotencyKeys.push(replayKey);
+          const rF1 = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA, idempotencyKey: replayKey });
+          expect(rF1.status === 201, '(f) create dengan key → 201');
+          const fOrder = rF1.json.data;
+          tracked.orders.push(fOrder.id);
+          // Ubah setting jadi OFF (total seharusnya 50000 bila recompute).
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = FALSE, tax_enabled = FALSE, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          // Replay dengan key sama → 200, snapshot lama TIDAK recompute.
+          const rF2 = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA, idempotencyKey: replayKey });
+          expect(rF2.status === 200,
+            `(f) replay setelah setting berubah → 200 (dapat: ${rF2.status})`);
+          expect(rF2.json.data.id === fOrder.id, '(f) replay menunjuk order yang sama');
+          const fDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    service_charge_percent_snapshot, tax_percent_snapshot
+             FROM pos_orders WHERE id = $1`, [fOrder.id]);
+          const fR = fDB.rows[0];
+          // Snapshot fOrder dibuat saat svc+tax ON: svc=5000, tax=6050, total=61050
+          expect(Number(fR.total_amount) === 61050,
+            `(f) total replay TIDAK berubah (61050) (dapat: ${fR.total_amount})`);
+          expect(Number(fR.service_amount) === 5000,
+            `(f) svc_amount snapshot tetap 5000 (dapat: ${fR.service_amount})`);
+          expect(Number(fR.tax_amount) === 6050,
+            `(f) tax_amount snapshot tetap 6050 (dapat: ${fR.tax_amount})`);
+
+          // ── (g) Cross-property isolation: setting pidA tidak kena pidB ──
+          // Aktifkan svc+tax di pidA lagi, pastikan order di pidB tidak kena.
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = TRUE, service_charge_percent = 10.0,
+                 tax_enabled = TRUE, tax_percent = 11.0, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          const rG = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidB,
+            items: [{ menu_item_id: fx.itemB, quantity: 1 }],
+          }, { auth: tokenB });
+          expect(rG.status === 201, '(g) cross-prop order → 201');
+          const gOrder = rG.json.data;
+          tracked.orders.push(gOrder.id);
+          const gDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [gOrder.id]);
+          const gR = gDB.rows[0];
+          // pidB tidak punya row pricing settings → default OFF
+          // itemB price=30000, qty=1 → total = 30000
+          expect(Number(gR.service_amount) === 0, '(g) pidB service = 0 (isolasi)');
+          expect(Number(gR.tax_amount) === 0, '(g) pidB tax = 0 (isolasi)');
+          expect(Number(gR.total_amount) === 30000,
+            `(g) pidB total = 30000 (dapat: ${gR.total_amount})`);
+
+          // ── (h) SNAPSHOT CONSISTENCY: ubah harga master + replay tidak recompute ──
+          // Harga master di-ubah SETELAH order dibuat. Replay key+payload sama
+          // TIDAK meng-recompute: pos_order_items.unit_price & total_amount tetap
+          // snapshot lama. Key BARU memakai harga master terbaru (per-request snapshot).
+          const hKey = `POSF-${RUN_ID}-PHASEB_H`;
+          tracked.idempotencyKeys.push(hKey);
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = TRUE, service_charge_percent = 10.0,
+                 tax_enabled = TRUE, tax_percent = 11.0, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          const rH1 = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA, idempotencyKey: hKey });
+          expect(rH1.status === 201, '(h) create dengan svc+tax → 201');
+          const hOrder = rH1.json.data;
+          tracked.orders.push(hOrder.id);
+          const hSnap = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [hOrder.id]);
+          const hOrigTotal = Number(hSnap.rows[0].total_amount);
+          const hOrigSvc = Number(hSnap.rows[0].service_amount);
+          const hOrigTax = Number(hSnap.rows[0].tax_amount);
+          // Ubah harga master itemA 25000 → 40000 (di luar transaksi handler).
+          await c23.query(
+            `UPDATE pos_menu_items SET price = 40000 WHERE id = $1`, [fx.itemA]);
+          const rH2 = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA, idempotencyKey: hKey });
+          expect(rH2.status === 200, '(h) replay setelah harga master berubah → 200');
+          expect(rH2.json.data.id === hOrder.id, '(h) replay menunjuk order yang sama');
+          const hDB2 = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    (SELECT unit_price FROM pos_order_items WHERE order_id = $1 LIMIT 1) AS snap_price
+             FROM pos_orders WHERE id = $1`, [hOrder.id]);
+          const hR2 = hDB2.rows[0];
+          expect(Number(hR2.total_amount) === hOrigTotal,
+            `(h) total TIDAK recompute (${hOrigTotal}) meski harga master kini 40000 (DB: ${hR2.total_amount})`);
+          expect(Number(hR2.service_amount) === hOrigSvc,
+            `(h) service_amount snapshot tetap (${hOrigSvc}) (DB: ${hR2.service_amount})`);
+          expect(Number(hR2.tax_amount) === hOrigTax,
+            `(h) tax_amount snapshot tetap (${hOrigTax}) (DB: ${hR2.tax_amount})`);
+          expect(Number(hR2.snap_price) === 25000,
+            `(h) pos_order_items.unit_price snapshot = 25000 (DB: ${hR2.snap_price})`);
+          // Key BARU + harga master baru → total baru (re-price sah untuk order baru).
+          const hKey2 = `POSF-${RUN_ID}-PHASEB_H2`;
+          tracked.idempotencyKeys.push(hKey2);
+          const rH3 = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2 }],
+          }, { auth: tokenA, idempotencyKey: hKey2 });
+          expect(rH3.status === 201, '(h) key baru → 201');
+          const hOrder2 = rH3.json.data;
+          tracked.orders.push(hOrder2.id);
+          const hDB3 = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    (SELECT unit_price FROM pos_order_items WHERE order_id = $1 LIMIT 1) AS snap_price
+             FROM pos_orders WHERE id = $1`, [hOrder2.id]);
+          const hR3 = hDB3.rows[0];
+          expect(Number(hR3.snap_price) === 40000,
+            `(h) key baru memakai harga master terbaru 40000 (DB: ${hR3.snap_price})`);
+          expect(Number(hR3.service_amount) === 8000,
+            `(h) svc 10% dari 80000 = 8000 (DB: ${hR3.service_amount})`);
+          expect(Number(hR3.tax_amount) === 9680,
+            `(h) tax 11% dari 88000 = 9680 (DB: ${hR3.tax_amount})`);
+          expect(Number(hR3.total_amount) === 97680,
+            `(h) total = 97680 (DB: ${hR3.total_amount})`);
+          // Restore harga master 25000 agar tidak memengaruhi skenario lain.
+          await c23.query(
+            `UPDATE pos_menu_items SET price = 25000 WHERE id = $1`, [fx.itemA]);
+
+          // ── (i) CONCURRENT WINNER: 2 request konkuren, 1 menang, loser tidak recompute ──
+          // Loser (ON CONFLICT winner path) TIDAK melewati computePosPricing —
+          // responsnya adalah data tersimpan winner (REPLAY), bukan kalkulasi ulang.
+          const iKey = `POSF-${RUN_ID}-PHASEB_I`;
+          tracked.idempotencyKeys.push(iKey);
+          const iPayload = {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 3 }],
+          };
+          const [iR1, iR2] = await Promise.all([
+            api('POST', '/api/pos/orders', iPayload, { auth: tokenA, idempotencyKey: iKey }),
+            api('POST', '/api/pos/orders', iPayload, { auth: tokenA, idempotencyKey: iKey }),
+          ]);
+          const iStatuses = [iR1.status, iR2.status].sort();
+          expect(iStatuses[0] === 200 && iStatuses[1] === 201,
+            `(i) 1 winner (201) + 1 loser (200 replay) konkuren (dapat: ${iStatuses.join(',')})`);
+          const iWinnerData = (iR1.status === 201 ? iR1 : iR2).json.data;
+          const iLoser = (iR1.status === 200 ? iR1 : iR2);
+          expect(iLoser.json.status === 'REPLAY' && iLoser.json.data.id === iWinnerData.id,
+            '(i) loser menunjuk order winner (REPLAY, id sama)');
+          const iDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [iWinnerData.id]);
+          const iR = iDB.rows[0];
+          // qty=3, price=25000 → gross=75000; svc=7500; tax base=82500; tax=9075; total=91575
+          expect(Number(iR.service_amount) === 7500, `(i) svc = 7500 (DB: ${iR.service_amount})`);
+          expect(Number(iR.tax_amount) === 9075, `(i) tax = 9075 (DB: ${iR.tax_amount})`);
+          expect(Number(iR.total_amount) === 91575, `(i) total = 91575 (DB: ${iR.total_amount})`);
+          const iCount = await c23.query(
+            'SELECT COUNT(*)::int AS c FROM pos_orders WHERE property_id = $1 AND idempotency_key = $2',
+            [fx.pidA, iKey]);
+          expect(iCount.rows[0].c === 1,
+            `(i) tepat 1 order untuk key konkuren (dapat: ${iCount.rows[0].c})`);
+          tracked.orders.push(iWinnerData.id);
+
+          // ── (j) STRICT BOOLEAN: snapshot flag enabled dari PostgreSQL tanpa coercion ──
+          // Driver pg mengembalikan boolean asli untuk kolom BOOLEAN; handler
+          // meneruskannya ke core tanpa Boolean() → validasi B1 (INVALID_BOOLEAN)
+          // tetap berlaku. Order baru saat svc+tax ON harus snapshot true + benar.
+          const jKey = `POSF-${RUN_ID}-PHASEB_J`;
+          tracked.idempotencyKeys.push(jKey);
+          const rJ = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 1 }],
+          }, { auth: tokenA, idempotencyKey: jKey });
+          expect(rJ.status === 201, '(j) strict-boolean order → 201');
+          const jOrder = rJ.json.data;
+          tracked.orders.push(jOrder.id);
+          const jDB = await c23.query(
+            `SELECT total_amount, service_amount, tax_amount,
+                    service_charge_enabled_snapshot, tax_enabled_snapshot
+             FROM pos_orders WHERE id = $1`, [jOrder.id]);
+          const jR = jDB.rows[0];
+          // price=25000 qty=1 → gross=25000; svc=2500; tax base=27500; tax=3025; total=30525
+          expect(jR.service_charge_enabled_snapshot === true,
+            '(j) svc_enabled snapshot = true (boolean asli dari PG, tanpa coercion)');
+          expect(jR.tax_enabled_snapshot === true,
+            '(j) tax_enabled snapshot = true (boolean asli dari PG, tanpa coercion)');
+          expect(Number(jR.service_amount) === 2500, `(j) svc = 2500 (DB: ${jR.service_amount})`);
+          expect(Number(jR.tax_amount) === 3025, `(j) tax = 3025 (DB: ${jR.tax_amount})`);
+          expect(Number(jR.total_amount) === 30525, `(j) total = 30525 (DB: ${jR.total_amount})`);
+
+          // ── (k) AUDIT LOG basis_amount: item discount + order discount bersamaan ──
+          // Kontrak: basis_amount pada ORDER_DISCOUNT_APPLIED = setelah item discount,
+          // SEBELUM order discount (pricing.afterItemDiscount = 45000, bukan 42750).
+          // Setup: itemA 2×25000=50000, item PERCENT 10% → lineDisc=5000,
+          // afterItem=45000. Order PERCENT 5% → orderDisc=round(45000×5/100)=2250,
+          // discountedSubtotal=42750, total=42750 (svc/tax OFF di sini).
+          // Matikan svc+tax dulu untuk kesederhanaan kalkulasi.
+          await c23.query(
+            `UPDATE property_pos_pricing_settings
+             SET service_charge_enabled = FALSE, tax_enabled = FALSE, updated_at = NOW()
+             WHERE property_id = $1`, [fx.pidA]);
+          // Grant pos.discount.edit ke role A (fixture hanya memberi pos.view/create/edit).
+          // Cleanup otomatis: role_permissions dihapus via tracked.roles (L196/L243).
+          await c23.query(
+            `INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+             SELECT $1, id, TRUE, 'posf-test' FROM permissions WHERE key = 'pos.discount.edit'
+             ON CONFLICT (role_id, permission_id) DO NOTHING`, [fx.roleA]);
+          const kKey = `POSF-${RUN_ID}-PHASEB_K`;
+          tracked.idempotencyKeys.push(kKey);
+          const rK = await api('POST', '/api/pos/orders', {
+            property_id: fx.pidA,
+            items: [{ menu_item_id: fx.itemA, quantity: 2,
+                      discount_type: 'PERCENT', discount_value: 10 }],
+            discount_type: 'PERCENT',
+            discount_value: 5,
+          }, { auth: tokenA, idempotencyKey: kKey });
+          expect(rK.status === 201,
+            `(k) order dengan item+order discount → 201 (dapat: ${rK.status})`);
+          if (rK.status === 201) {
+          const kOrder = rK.json.data;
+          expect(kOrder.id > 0, '(k) order id valid');
+          tracked.orders.push(kOrder.id);
+          // Verifikasi pos_orders:
+          // gross=50000, itemDisc=5000, afterItem=45000,
+          // orderDisc=2250,
+          // discountedSubtotal=42750, svc=0, tax=0, total=42750
+          const kDB = await c23.query(
+            `SELECT total_amount, discount_amount, service_amount, tax_amount
+             FROM pos_orders WHERE id = $1`, [kOrder.id]);
+          const kR = kDB.rows[0];
+          expect(Number(kR.discount_amount) === 2250,
+            `(k) pos_orders.discount_amount = 2250 (order discount) (DB: ${kR.discount_amount})`);
+          expect(Number(kR.total_amount) === 42750,
+            `(k) total_amount = 42750 (DB: ${kR.total_amount})`);
+          // Verifikasi audit_logs — basis_amount HARUS = 45000 (bukan 42750).
+          const kAudit = await c23.query(
+            `SELECT new_value FROM audit_logs
+             WHERE module = 'POS' AND action = 'ORDER_DISCOUNT_APPLIED'
+               AND record_id = $1
+             ORDER BY id DESC LIMIT 1`, [String(kOrder.id)]);
+          expect((kAudit.rowCount ?? 0) === 1,
+            '(k) audit log ORDER_DISCOUNT_APPLIED ada 1 baris');
+          if ((kAudit.rowCount ?? 0) === 1) {
+            const kPayload = JSON.parse(kAudit.rows[0].new_value);
+            // basis_amount: SETELAH item discount (45000), SEBELUM order discount.
+            expect(
+              kPayload.order_discount &&
+              kPayload.order_discount.basis_amount === 45000,
+              `(k) basis_amount = 45000 (setelah item disc, sebelum order disc) (dapat: ${kPayload.order_discount ? kPayload.order_discount.basis_amount : 'n/a'})`);
+            // discount_amount pada audit payload = 2250
+            expect(
+              kPayload.order_discount && kPayload.order_discount.discount_amount === 2250,
+              `(k) audit order_discount.discount_amount = 2250 (dapat: ${kPayload.order_discount ? kPayload.order_discount.discount_amount : 'n/a'})`);
+            // total_discount = itemDiscountTotal(5000) + orderDiscount(2250) = 7250
+            expect(
+              kPayload.total_discount === 7250,
+              `(k) total_discount = 7250 (item 5000 + order 2250) (dapat: ${kPayload.total_discount})`);
+            // Verifikasi item discount di audit
+            expect(
+              Array.isArray(kPayload.item_discounts) &&
+              kPayload.item_discounts.length === 1 &&
+              kPayload.item_discounts[0].discount_amount === 5000,
+              '(k) item_discounts[0].discount_amount = 5000');
+          }
+          }
+          }
+       } finally {
+         c23.release();
+       }
+     }
+   } finally {
     // 5) Shutdown server.
     if (server) {
       try {
