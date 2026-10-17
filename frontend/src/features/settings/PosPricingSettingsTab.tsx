@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 /**
- * PosPricingSettingsTab — Service Charge & PPN (PPN) POS settings form.
+ * PosPricingSettingsTab — Service Charge & PBJT POS settings form.
  *
  * Follows the visual/loading/save/error pattern of PosCommunicationSettingsTab.
  * Rendered inside the "POS & F&B" category of ManagementSettingsWorkspace,
@@ -158,7 +158,7 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
       return;
     }
     if (isNaN(taxNum) || taxNum < 0 || taxNum > 100) {
-      setFeedback({ type: 'error', message: 'Persen PPN harus angka 0–100 (maks 2 desimal).' });
+      setFeedback({ type: 'error', message: 'Persen PBJT harus angka 0–100 (maks 2 desimal).' });
       return;
     }
     if (Math.round(svcNum * 100) / 100 !== svcNum) {
@@ -166,7 +166,7 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
       return;
     }
     if (Math.round(taxNum * 100) / 100 !== taxNum) {
-      setFeedback({ type: 'error', message: 'Persen PPN maksimal 2 desimal.' });
+      setFeedback({ type: 'error', message: 'Persen PBJT maksimal 2 desimal.' });
       return;
     }
 
@@ -332,7 +332,7 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
         <div className="border-b border-neutral-100 pb-3">
           <div className="flex items-center gap-2.5">
             <h3 className="text-sm font-bold text-neutral-900">
-              Service Charge & PPN POS
+              Service Charge & PBJT POS
               {activeProperty && (
                 <span className="ml-2 text-[11px] font-normal text-neutral-400">
                   — {activeProperty.name}
@@ -344,7 +344,7 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
             </span>
           </div>
           <p className="text-xs text-neutral-500 mt-1">
-            Atur service charge dan PPN (Pajak Pertambahan Nilai) untuk order POS/F&B.
+            Atur service charge dan PBJT (Pajak Barang dan Jasa Tertentu) untuk order POS/F&B.
             Nilai disimpan sebagai snapshot per order; order historis tidak berubah saat setting diubah.
           </p>
         </div>
@@ -385,19 +385,19 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
           </div>
         </div>
 
-        {/* PPN section */}
+        {/* PBJT section */}
         <div className="space-y-3">
           <div className="text-xs font-bold uppercase tracking-wider text-neutral-600">
-            PPN (Pajak Pertambahan Nilai)
+            PBJT (Pajak Barang dan Jasa Tertentu)
           </div>
           <div className="p-4 bg-neutral-50 rounded-xl border border-neutral-200/80 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-xs font-bold text-neutral-800">
-                  Aktifkan PPN
+                  Aktifkan PBJT
                 </div>
                 <div className="text-[11px] text-neutral-500">
-                  PPN dihitung di atas (subtotal setelah diskon + service charge).
+                  PBJT dihitung di atas (subtotal setelah diskon + service charge).
                 </div>
               </div>
               <label className="relative inline-flex items-center cursor-pointer">
@@ -412,8 +412,8 @@ export const PosPricingSettingsTab: React.FC<PosPricingSettingsTabProps> = ({
               </label>
             </div>
             <PercentInput
-              label="Persen PPN"
-              description="0.00 – 100.00 % (maks 2 desimal). Digunakan saat PPN diaktifkan."
+              label="Persen PBJT"
+              description="0.00 – 100.00 % (maks 2 desimal). Digunakan saat PBJT diaktifkan."
               value={taxPercent}
               onChange={setTaxPercent}
               disabled={saving || !taxEnabled}
