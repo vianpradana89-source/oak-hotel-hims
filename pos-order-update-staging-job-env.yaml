@@ -1,0 +1,96 @@
+# =============================================================================
+# Env non-secret untuk Cloud Run Job: pos-order-update-migration-staging
+# DB_PASSWORD datang dari Secret Manager (jangan taruh di sini).
+# =============================================================================
+DB_HOST: "/cloudsql/oak-lawang-pms:asia-southeast2:oak-hims-staging-db15"
+DB_PORT: "5432"
+DB_USER: "postgres"
+DB_NAME: "oak_hotel_db"
+NODE_ENV: "production"
+
+# =============================================================================
+# CATATAN STATE MIGRATION (pos_order_update_v1):
+# - Migration ini menambah kolom BARU pos_orders.version (INTEGER NOT NULL
+#   DEFAULT 1) dan tabel BARU pos_order_edit_requests (+ index).
+# - Prasyarat: tabel schema_migrations dan pos_orders harus sudah ada.
+# - Mode --apply pada database yang belum termigrasi seharusnya melaporkan:
+#     READY_TO_APPLY (exit 0), lalu status apply = "applied".
+# - Jalankan --check TERLEBIH DAHULU dan WAJIB review output sebelum --apply.
+# - Kondisi mismatch berbahaya (PARTIAL_OR_MISMATCHED_SCHEMA, MARKER_MISMATCH,
+#   SCHEMA_MISMATCH_MARKER_ABSENT, INDEX_NAME_CONFLICT,
+#   READY_TO_MARK_OR_RECONCILE) -> exit 1, STOP, diagnosis manual.
+# - Backend baru (POS-EDIT-1A) membaca pos_orders.version dan
+#   pos_order_edit_requests; jalankan migration SEBELUM backend baru melayani.
+# =============================================================================
+#
+# CONTOH PERINTAH CLOUD RUN JOB (SEMUA BARIS DI BAWAH ADALAH KETERANGAN,
+# BUKAN ENV YANG DIBACA --env-vars-file. COPY-PASTE TANPA tanda # untuk pakai.)
+#
+# Image (hasil Cloud Build):
+#   asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/
+#     oak-hims-pos-order-update-migration-staging:<_SOURCE_SHA>
+#
+# Entrypoint dipertahankan dari Dockerfile:
+#   ENTRYPOINT ["node", "backend/scripts/run_pos_order_update_migration_staging.js"]
+# Jadi --args hanya meneruskan flag --check / --apply.
+#
+# URUTAN EKSEKUSI WAJIB:
+#   1. create + execute --check  -> baca output
+#   2. review output --check oleh developer / owner
+#   3. create + execute --apply HANYA setelah review disetujui
+#   4. execute --check lagi untuk verifikasi final
+# =============================================================================
+
+# # 1) Make job --check (read-only readiness)
+# gcloud run jobs create pos-order-update-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --image=asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-order-update-migration-staging:<_SOURCE_SHA> \
+#   --args="--check" \
+#   --set-cloudsql-instances=oak-lawang-pms:asia-southeast2:oak-hims-staging-db15 \
+#   --tasks=1 \
+#   --parallelism=1 \
+#   --max-retries=0 \
+#   --env-vars-file=pos-order-update-staging-job-env.yaml \
+#   --service-account=549046591118-compute@developer.gserviceaccount.com \
+#   --update-secrets \
+#     DB_PASSWORD=oak-hims-staging-db-postgres-password:2
+
+# # 2) Execute --check (read-only, wait untuk hasil)
+# gcloud run jobs execute pos-order-update-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
+
+# # 3) REVIEW output --check -- WAJIB sebelum lanjut ke --apply
+# #    State yang diharapkan: READY_TO_APPLY (exit 0)
+# #    Jika PARTIAL_OR_MISMATCHED_SCHEMA / MARKER_MISMATCH /
+# #    SCHEMA_MISMATCH_MARKER_ABSENT / INDEX_NAME_CONFLICT /
+# #    READY_TO_MARK_OR_RECONCILE -> STOP, diagnosis manual
+
+# # 4) Make job --apply (HANYA setelah review --check disetujui)
+# gcloud run jobs create pos-order-update-staging-apply \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --image=asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-pos-order-update-migration-staging:<_SOURCE_SHA> \
+#   --args="--apply" \
+#   --set-cloudsql-instances=oak-lawang-pms:asia-southeast2:oak-hims-staging-db15 \
+#   --tasks=1 \
+#   --parallelism=1 \
+#   --max-retries=0 \
+#   --env-vars-file=pos-order-update-staging-job-env.yaml \
+#   --service-account=549046591118-compute@developer.gserviceaccount.com \
+#   --update-secrets \
+#     DB_PASSWORD=oak-hims-staging-db-postgres-password:2
+
+# # 5) Execute --apply (HANYA setelah langkah 3 review disetujui)
+# gcloud run jobs execute pos-order-update-staging-apply \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
+
+# # 6) Verifikasi final: execute --check lagi (harapkan ALREADY_APPLIED, exit 0)
+# gcloud run jobs execute pos-order-update-staging-check \
+#   --project=oak-lawang-pms \
+#   --region=asia-southeast2 \
+#   --wait
