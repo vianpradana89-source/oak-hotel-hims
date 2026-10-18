@@ -4795,6 +4795,14 @@ function AppContent() {
           setPosOrdersRefreshReservationId(resId);
           setPosOrdersRefreshVersion((v) => v + 1);
         }}
+        onOrderEdited={(edited) => {
+          // POS-EDIT-1B.4: setelah PUT edit sukses, bump refresh panel reservasi
+          // scoped sesuai reservationId order yang di-edit (ON clause WHERE IN).
+          // TIDAK membuat order baru; TIDAK menjalankan pembayaran.
+          const resId = edited?.reservationId ?? null;
+          setPosOrdersRefreshReservationId(resId);
+          setPosOrdersRefreshVersion((v) => v + 1);
+        }}
         canPickGuest={canPickGuest}
         onRequestPending={(pending) => { posRequestPendingRef.current = pending; }}
         onUnresolvedChange={(unresolved) => { posUnresolvedRef.current = unresolved; }}

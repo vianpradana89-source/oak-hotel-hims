@@ -52,6 +52,18 @@ interface PosModalProps {
   canPickGuest?: boolean;
   /** Callback setelah order berhasil dibuat */
   onOrderCreated?: (order: PosOrderItem) => void;
+  /**
+   * POS-EDIT-1B.4: Callback setelah PUT edit order berhasil (200).
+   * Dipakai App untuk bump refresh panel reservasi scoped (ON clause WHERE IN).
+   * Tidak membuat order baru; tidak menjalankan pembayaran.
+   */
+  onOrderEdited?: (order: {
+    orderId: number;
+    orderNumber: string;
+    total_amount: number;
+    version: number;
+    reservationId: number | null;
+  }) => void;
   /** Buka modal pembayaran CASH untuk order yang baru dibuat (forward ke App). */
   onOpenCashPayment?: (ctx: import('./PosPayCashModal').PosPayCashOrderContext) => void;
   /**
@@ -97,6 +109,7 @@ export default function PosModal({
   canDiscountPos = false,
   canPickGuest = false,
   onOrderCreated,
+  onOrderEdited,
   onOpenCashPayment,
   paidOrderId,
   payCashModalPresent = false,
@@ -276,6 +289,7 @@ export default function PosModal({
             canDiscountPos={canDiscountPos}
             canPickGuest={canPickGuest}
             onOrderCreated={onOrderCreated}
+            onOrderEdited={onOrderEdited}
             onOpenCashPayment={onOpenCashPayment}
             paidOrderId={paidOrderId}
           />
