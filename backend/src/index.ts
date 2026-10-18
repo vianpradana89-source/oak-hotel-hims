@@ -144,6 +144,8 @@ import { releaseReservationInventoryForCheckout } from './domains/reservations/r
 import { createReservationCheckoutHandler } from './domains/reservations/reservationCheckoutHandler';
 import { createPosOrderCreateHandler } from './domains/pos/posOrderCreateHandler';
 import { createPosOrderStatusHandler } from './domains/pos/posOrderStatusHandler';
+import { createPosOrderDetailHandler } from './domains/pos/posOrderDetailHandler';
+import { createPosOrderUpdateHandler } from './domains/pos/posOrderUpdateHandler';
 import { createPosReceiptHandler } from './domains/pos/posReceiptHandler';
 import {
   buildBookingChildStatusSummary,
@@ -350,6 +352,13 @@ app.use(async (req, res, next) => {
   // request_fingerprint). Cache global (idempotency_keys) TIDAK dipakai agar
   // replay tidak melewati auth/permission/property-scope.
   if (req.method === 'POST' && /^\/api\/pos\/orders\/\d+\/pay$/.test(req.path)) return next();
+  // Bypass cache global untuk PUT /api/pos/orders/:id (POS-EDIT-1A):
+  // Dedup ditangani di handler via body.idempotency_key + tabel
+  // pos_order_edit_requests. Regex mencakup varian trailing slash & kapitalisasi
+  // (case-insensitive + "/?" opsional); <id> divalidasi di handler sebagai digit.
+  // Cache global (idempotency_keys) TIDAK dipakai agar HIT tidak pernah
+  // melewati auth/permission/property-scope.
+  if (req.method === 'PUT' && /^\/api\/pos\/orders\/[^/]+\/?$/i.test(req.path)) return next();
   // Non-canonical variants of /api/pos/orders (trailing slash / case difference) → 404.
   // Express default (case-sensitive routing=false, strict routing=false) routes these
   // to the same POS handler; reject here BEFORE global cache lookup so they never
@@ -6127,6 +6136,33 @@ app.get('/api/pos/orders/:id/receipt', createPosReceiptHandler({
   connect: () => pool.connect(),
   release: (client) => client.release(),
   assertPropertyScope
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POS ORDER DETAIL — GET /api/pos/orders/:id/detail
+// POS ORDER UPDATE — PUT /api/pos/orders/:id  (POS-EDIT-1A)
+// ─────────────────────────────────────────────────────────────────────────
+app.get('/api/pos/orders/:id/detail', createPosOrderDetailHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client) => client.release(),
+  assertPropertyScope,
+}));
+
+app.put('/api/pos/orders/:id', createPosOrderUpdateHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client) => client.release(),
+  assertPropertyScope,
+  checkDiscountPermission: async (poolArg, userId, propertyId) => {
+    try {
+      const permKeys = await getUserEffectivePermissions(poolArg, userId);
+      return permKeys.includes('pos.discount.edit');
+    } catch {
+      // Fail-closed: if permission check fails, deny discount.
+      return false;
+    }
+  },
 }));
 
 app.get('/api/accounting/summary', async (req, res) => {
