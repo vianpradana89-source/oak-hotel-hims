@@ -217,7 +217,7 @@ export default function PosWorkspace({
   const [guestName, setGuestName] = useState('Walk-in Guest');
   const [guestPhone, setGuestPhone] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
-  const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('');
+  const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('PERCENT');
   const [orderDiscountInput, setOrderDiscountInput] = useState('');
   const [discountReason, setDiscountReason] = useState('');
 
@@ -748,7 +748,7 @@ export default function PosWorkspace({
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
           onUnresolvedChange?.(false);
           setCart([]);
-          setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('');
+          setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('PERCENT');
           setOrderDiscountInput(''); setDiscountReason('');
           setAmbiguous(false);
           setLocalPaidOrderId(null);
@@ -1379,7 +1379,7 @@ export default function PosWorkspace({
                     Klik item menu di samping untuk menambahkan pesanan.
                   </div>
                 ) : (
-                  cart.map(({ item, qty, discountType = '', discountInput = '', notes = '' }, lineIndex) => (
+                  cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => (
                     <div
                       key={item.id}
                       className="flex flex-wrap items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
@@ -1421,7 +1421,7 @@ export default function PosWorkspace({
                       </div>
                       <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
                         {canDiscountPos && <div className="flex items-center gap-2">
-                          {/* Input angka diskon langsung (default tampilan 0, satuan default Rp).
+                          {/* Input angka diskon langsung (placeholder 0, default satuan %).
                               Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
                               (01→1, 0050→50) dilakukan pada onChange. */}
                           <input
@@ -1433,7 +1433,7 @@ export default function PosWorkspace({
                             onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
                             onChange={e => {
                               if (!canMutateDraft()) return;
-                              const t = (discountType || 'NOMINAL') as PosDiscountType;
+                              const t = (discountType || 'PERCENT') as PosDiscountType;
                               const val = normalizeDiscountInput(e.target.value, t);
                               // Saat user mengetik nilai, set juga discountType secara eksplisit
                               // agar effectiveDiscount tidak gagal mengenali diskon
@@ -1450,7 +1450,7 @@ export default function PosWorkspace({
                             onChange={e => {
                               if (!canMutateDraft()) return;
                               const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
-                              const currentType = (discountType || 'NOMINAL') as PosDiscountType;
+                              const currentType = (discountType || 'PERCENT') as PosDiscountType;
                               // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
                               // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
                               if (newType !== currentType) {
@@ -1498,7 +1498,7 @@ export default function PosWorkspace({
                     onFocus={() => { (document.activeElement as HTMLInputElement | null)?.select?.(); }}
                     onChange={e => {
                       if (!canMutateDraft()) return;
-                      const t = (orderDiscountType || 'NOMINAL') as PosDiscountType;
+                      const t = (orderDiscountType || 'PERCENT') as PosDiscountType;
                       const val = normalizeDiscountInput(e.target.value, t);
                       // Set discountType eksplisit saat user mengetik nilai agar
                       // effectiveDiscount mengenali diskon (type='' + input='1000'
@@ -1518,7 +1518,7 @@ export default function PosWorkspace({
                       const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
                       setOrderDiscountType(newType);
                       // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah.
-                      if (newType !== (orderDiscountType || 'NOMINAL')) {
+                      if (newType !== (orderDiscountType || 'PERCENT')) {
                         setOrderDiscountInput('');
                       }
                     }}
@@ -1666,8 +1666,8 @@ export default function PosWorkspace({
                 <p>Izin diskon tidak tersedia. Hapus diskon untuk menyimpan pesanan biasa.</p>
                 <button type="button" disabled={draftLocked} className="underline font-semibold" onClick={() => {
                   if (!canMutateDraft()) return;
-                  setCart(lines => lines.map(line => ({...line, discountType: '' as PosDiscountType, discountInput: ''})));
-                  setOrderDiscountType(''); setOrderDiscountInput(''); setDiscountReason('');
+                  setCart(lines => lines.map(line => ({...line, discountType: 'PERCENT' as PosDiscountType, discountInput: ''})));
+                  setOrderDiscountType('PERCENT'); setOrderDiscountInput(''); setDiscountReason('');
                 }}>Hapus semua diskon</button>
               </div>}
               {draftPreview.value?.total === 0 && cart.length > 0 && <p className="text-xs text-amber-700">Total nol belum dapat dibayar.</p>}

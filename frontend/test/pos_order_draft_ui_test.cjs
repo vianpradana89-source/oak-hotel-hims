@@ -246,7 +246,8 @@ async function lifecycle() {
     assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(JSON.parse(init.body));return created(requests.at(-1));});h.addItem();
-  h.byAria('Nilai diskon Coffee','1000');h.byAria('Satuan diskon pesanan','%');
+  // Default satuan item = PERCENT (%). Set Rp eksplisit sebelum nominal 1000.
+  h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','1000');h.byAria('Satuan diskon pesanan','%');
   h.byAria('Nilai diskon pesanan','10');h.byAria('Alasan diskon pesanan','member');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace granted discount emits LINE then order fields; save alone never opens pay',()=>{
     assert.equal(requests[0].items[0].discount_type,'NOMINAL');assert.equal(requests[0].items[0].discount_value,1000);
@@ -256,7 +257,7 @@ async function lifecycle() {
   requests=[];let attempt=0;
   h=harness(async(_url,init)=>{requests.push({body:init.body,key:init.headers['Idempotency-Key']});
     if(++attempt===1)throw new Error('network');if(attempt===2)return json({code:'DISCOUNT_PERMISSION_DENIED'},403);return created(JSON.parse(init.body),200);});
-  h.addItem();h.byAria('Nilai diskon Coffee','1000');h.labelled('Nomor WhatsApp','+628123');
+  h.addItem();h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','1000');h.labelled('Nomor WhatsApp','+628123');
   h.labelled('Catatan pesanan','same order');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace ambiguous locks phone/note/discount drafts and keeps result unresolved',()=>{
     assert.equal(h.signals.created.length,0);assert.equal(h.signals.unresolved.at(-1),true);
@@ -296,7 +297,7 @@ async function lifecycle() {
     assert.equal(h.nodes().find(n=>n.type==='textarea').props.disabled,false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
-  h.byAria('Nilai diskon Coffee','1000');h.changeProps({canDiscountPos:false});
+  h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','1000');h.changeProps({canDiscountPos:false});
   await h.settle();
   check('Workspace permission lost retains draft and offers explicit removal',()=>assert.equal(h.button('Simpan Pesanan').props.disabled,true));
   h.click('Hapus semua diskon');h.click('Simpan Pesanan');await h.settle();
@@ -339,9 +340,27 @@ async function lifecycle() {
       const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
       assert.equal(node.props.value,'50');
     });
-    // 0.5% tetap valid (decimal persen) — toggle ke % dahulu
+    // Default satuan sekarang PERCENT (%). Toggle ke % (unit yang sama) TIDAK
+    // me-reset nilai (perilaku yang disetujui: hanya satuan BERUBAH me-reset).
+    // Nilai '50' dari 0050 masih tersimpan.
     h.byAria('Satuan diskon Coffee','%');await h.settle();
-    check('UI input: toggle % mereset nilai, satuan jadi %',()=>{
+    check('UI input: satuan sudah % → toggle % tidak me-reset nilai',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'50','nilai tetap 50 — satuan tidak berubah');
+      const unit=h.nodes().find(n=>n.props['aria-label']==='Satuan diskon Coffee');
+      assert.equal(unit.props.value,'%');
+    });
+    // Toggle ke Rp → satuan BERUBAH → nilai di-reset.
+    h.byAria('Satuan diskon Coffee','Rp');await h.settle();
+    check('UI input: toggle Rp (satuan berubah) mereset nilai ke kosong',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'');
+      const unit=h.nodes().find(n=>n.props['aria-label']==='Satuan diskon Coffee');
+      assert.equal(unit.props.value,'Rp');
+    });
+    // Toggle kembali ke % → satuan BERUBAH → reset lagi.
+    h.byAria('Satuan diskon Coffee','%');await h.settle();
+    check('UI input: toggle kembali % (satuan berubah) mereset nilai',()=>{
       const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
       assert.equal(node.props.value,'');
       const unit=h.nodes().find(n=>n.props['aria-label']==='Satuan diskon Coffee');
@@ -381,7 +400,11 @@ async function lifecycle() {
     let reqs=[];
     h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));});
     h.addItem();await h.settle();
-    // NOMINAL '1.5' (desimal) → tetap '1.5' setelah normalisasi → preview error
+    // NOMINAL '1.5' (desimal) → tetap '1.5' setelah normalisasi → preview error.
+    // Default satuan sekarang PERCENT (%), jadi WAJIB pilih Rp eksplisit dulu
+    // agar '1.5' diinterpretasikan sebagai 1.5 Rupiah (invalid: Rp bulat),
+    // bukan sebagai 1.5% (yang valid dan tidak menghasilkan error).
+    h.byAria('Satuan diskon Coffee','Rp');
     h.byAria('Nilai diskon Coffee','1.5');await h.settle();
     check('UI input: NOMINAL "1.5" → preview error, Simpan disabled (tidak diubah jadi "1")',()=>{
       const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
@@ -391,7 +414,7 @@ async function lifecycle() {
         'Pesan error preview tampil');
       assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled saat input tidak valid');
     });
-    // NOMINAL '-1' (negatif) → tetap '-1' → preview error
+    // NOMINAL '-1' (negatif) → tetap '-1' → preview error (masih satuan Rp).
     h.byAria('Nilai diskon Coffee','-1');await h.settle();
     check('UI input: NOMINAL "-1" → preview error, Simpan disabled (tidak diubah jadi "1")',()=>{
       const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
@@ -427,14 +450,15 @@ async function lifecycle() {
     let reqs=[];
     h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));});
     h.addItem();await h.settle();
-    h.byAria('Nilai diskon Coffee','99999');await h.settle();
+    // Set Rp eksplisit (default sekarang PERCENT; 99999 Rp > basis → throw).
+    h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','99999');await h.settle();
     check('UI input: diskon > basis → preview error, Simpan disabled',()=>{
       const pNodes=h.nodes().filter(n=>n.type==='p'&&typeof n.props.children==='string');
       assert.ok(pNodes.some(p=>p.props.children.includes('melampaui')||p.props.children.includes('diskon')||p.props.children.includes('Periksa')),
         'Pesan error draftPreview tampil');
       assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled saat preview error');
     });
-    // Nilai valid → preview OK
+    // Nilai valid (Rp 1000 pada basis 13000) → preview OK
     h.byAria('Nilai diskon Coffee','1000');await h.settle();
     check('UI input: diskon valid → preview OK, Simpan enabled',()=>{
       assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled saat diskon valid');
@@ -512,7 +536,7 @@ async function lifecycle() {
     if(attempt400===1) return json({status:'ERROR',code:'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY',message:'Service charge di properti ini dimatikan.'},400);
     return created(requests.at(-1));
   },{pricingData:{service_charge_enabled:false,service_charge_percent:0,tax_enabled:false,tax_percent:0}});
-  h.addItem();h.byAria('Nilai diskon Coffee','500');
+  h.addItem();h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','500');
   await h.settle();
   h.click('Simpan Pesanan');await h.settle();
   check('HTTP 400 pricing: draft preserved, no auto-retry, error message shown',()=>{
@@ -544,7 +568,7 @@ async function lifecycle() {
     if(attemptPtc===2) return json({status:'ERROR',code:'PRICING_TOTAL_CHANGED',message:'Total berubah',data:{computed_total:45000,expected_total:40000,service_charge_percent:10,tax_percent:11}},409);
     return created(JSON.parse(init.body));
   },{pricingData:{service_charge_enabled:true,service_charge_percent:10,tax_enabled:true,tax_percent:11}});
-  h.addItem();h.byAria('Nilai diskon Coffee','500');
+  h.addItem();h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','500');
   await h.settle();
   h.click('Simpan Pesanan');await h.settle(); // attempt 1 → network → unresolved
   h.click('Coba Lagi');await h.settle();       // attempt 2 → 409 PTC (unresolved)
@@ -644,7 +668,7 @@ async function lifecycle() {
       pricingQueue,
       onPricingFetch() {pricingFetches++;},
     });
-    h.addItem();h.byAria('Nilai diskon Coffee','700');
+    h.addItem();h.byAria('Satuan diskon Coffee','Rp');h.byAria('Nilai diskon Coffee','700');
     h.labelled('Catatan pesanan','catatan penting');
     await h.settle();
     h.click('Simpan Pesanan');await h.settle(); // 400 → auto re-fetch gagal (queue[1]="__FAIL__")
