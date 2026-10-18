@@ -16,7 +16,10 @@ import { strict as assert } from 'node:assert';
 import {
   previewPosDraft,
   buildPosOrderDraft,
+  normalizeDiscountInput,
+  effectiveDiscount,
   type PosCartLine,
+  type PosDiscountType,
   type PosDraftDetails,
   type PosPricingPreviewParams,
 } from '../src/features/pos/posOrderDraft.ts';
@@ -258,6 +261,178 @@ check('previewPosDraft with svc+tax OFF gives same total as absent (backward com
   const pOff = previewPosDraft(lines, '', '', { serviceChargeEnabled: false, taxEnabled: false });
   const pAbsent = previewPosDraft(lines, '', '');
   assert.equal(pOff.total, pAbsent.total, 'explicit OFF must equal absent for zero-percent scenarios');
+});
+
+// ── 7. Discount input normalization & effectiveDiscount ─────────────────────
+// Regression: UI diskon baru (input angka langsung + satuan Rp/%).
+// Keputusan #5: input kosong = tanpa diskon (bukan error).
+// Keputusan #6: nilai 0 = tanpa diskon, permission tidak teraktifkan.
+// Keputusan #4: Rp bulat, % maks 100 & maks 2 desimal.
+// Keputusan #3: leading-zero tidak boleh menghasilkan 01/05/0050.
+
+check('normalizeDiscountInput: 01 → 1, 0050 → 50, 0 → 0 (leading-zero strip)', () => {
+  assert.equal(normalizeDiscountInput('01', 'NOMINAL'), '1');
+  assert.equal(normalizeDiscountInput('0050', 'NOMINAL'), '50');
+  assert.equal(normalizeDiscountInput('0', 'NOMINAL'), '0');
+});
+
+check('normalizeDiscountInput: 0.5, 10.25, 0.05 preserved (PERCENT decimal)', () => {
+  assert.equal(normalizeDiscountInput('0.5', 'PERCENT'), '0.5');
+  assert.equal(normalizeDiscountInput('10.25', 'PERCENT'), '10.25');
+  assert.equal(normalizeDiscountInput('0.05', 'PERCENT'), '0.05');
+});
+
+check('normalizeDiscountInput: 1.001 → 1.00 (PERCENT 2-decimal limit)', () => {
+  assert.equal(normalizeDiscountInput('1.001', 'PERCENT'), '1.00');
+});
+
+check('normalizeDiscountInput: empty stays empty', () => {
+  assert.equal(normalizeDiscountInput('', 'NOMINAL'), '');
+  assert.equal(normalizeDiscountInput('', 'PERCENT'), '');
+});
+
+check('effectiveDiscount: empty/0 → no discount (type cleared)', () => {
+  for (const [t, inp] of [['NOMINAL','0'],['NOMINAL',''],['PERCENT','0'],['PERCENT','']]) {
+    const r = effectiveDiscount(t as PosDiscountType, inp);
+    assert.equal(r.type, '', `${t} ${JSON.stringify(inp)} → type cleared`);
+    assert.equal(r.input, '', `${t} ${JSON.stringify(inp)} → input cleared`);
+  }
+  // Positive value keeps type:
+  const r1 = effectiveDiscount('NOMINAL', '100');
+  assert.equal(r1.type, 'NOMINAL');
+  assert.equal(r1.input, '100');
+  const r2 = effectiveDiscount('PERCENT', '5.5');
+  assert.equal(r2.type, 'PERCENT');
+  assert.equal(r2.input, '5.5');
+});
+
+check('previewPosDraft: 0.5% PERCENT order discount on 13000 → 65', () => {
+  const p = previewPosDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1 }],
+    'PERCENT', '0.5',
+  );
+  assert.equal(p.orderDiscount, 65, `expected 65, got ${p.orderDiscount}`);
+});
+
+check('previewPosDraft: 10.25% PERCENT order discount on 10000 → 1025', () => {
+  const p = previewPosDraft(
+    [{ item: { id: 1, name: 'X', price: 10_000 }, qty: 1 }],
+    'PERCENT', '10.25',
+  );
+  assert.equal(p.orderDiscount, 1_025, `expected 1025, got ${p.orderDiscount}`);
+});
+
+check('previewPosDraft: 0% PERCENT discount = no discount (total unchanged)', () => {
+  const p = previewPosDraft(lines, 'PERCENT', '0');
+  assert.equal(p.orderDiscount, 0);
+  assert.equal(p.total, 26_000, 'total unchanged when 0% discount');
+});
+
+check('previewPosDraft: line discount 0.5% on 13000 → 65', () => {
+  const p = previewPosDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'PERCENT', discountInput: '0.5' }],
+    '', '',
+  );
+  assert.equal(p.lines[0].discount, 65);
+  assert.equal(p.lines[0].net, 12_935);
+});
+
+check('previewPosDraft: 100% PERCENT line discount → total 0', () => {
+  const p = previewPosDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'PERCENT', discountInput: '100' }],
+    '', '',
+  );
+  assert.equal(p.lines[0].discount, 13_000);
+  assert.equal(p.total, 0);
+});
+
+check('previewPosDraft: discount exceeding basis → throw', () => {
+  assert.throws(
+    () => previewPosDraft(
+      [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'NOMINAL', discountInput: '13001' }],
+      '', '',
+    ),
+    /Diskon melebihi subtotal/,
+  );
+  assert.throws(
+    () => previewPosDraft(lines, 'NOMINAL', '61001'),
+    /Diskon melebihi subtotal/,
+  );
+});
+
+check('buildPosOrderDraft: PERCENT 0 → no discount_type in payload, no permission needed', () => {
+  const payload = buildPosOrderDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'PERCENT', discountInput: '0' }],
+    { ...details, discountType: 'PERCENT', discountInput: '0' },
+    false, // no permission
+  );
+  assert.equal('discount_type' in payload, false, 'order discount_type absent');
+  assert.equal('discount_type' in payload.items[0], false, 'item discount_type absent');
+});
+
+check('buildPosOrderDraft: empty input = no discount, no permission, no payload field', () => {
+  const payload = buildPosOrderDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'NOMINAL', discountInput: '' }],
+    { ...details, discountType: 'NOMINAL', discountInput: '' },
+    false,
+  );
+  assert.equal('discount_type' in payload, false);
+  assert.equal('discount_type' in payload.items[0], false);
+});
+
+check('buildPosOrderDraft: positive line discount still requires permission', () => {
+  assert.throws(
+    () => buildPosOrderDraft(
+      [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 3, discountType: 'NOMINAL', discountInput: '5000' }],
+      details,
+      false,
+    ),
+    /izin diskon/,
+  );
+});
+
+check('buildPosOrderDraft: PERCENT 50% on 13000 → discount_value=50 in payload', () => {
+  const payload = buildPosOrderDraft(
+    [{ item: { id: 1, name: 'Coffee', price: 13_000 }, qty: 1, discountType: 'PERCENT', discountInput: '50' }],
+    { ...details, discountType: 'PERCENT', discountInput: '50' },
+    true,
+  );
+  assert.equal(payload.items[0].discount_type, 'PERCENT');
+  assert.equal(payload.items[0].discount_value, 50, 'discount_value is the percent, not the rupiah amount');
+});
+
+// ── 8. Invalid PERCENT input: tidak valid tidak diubah diam-diam (regression) ─
+
+check('normalizeDiscountInput PERCENT: invalid characters not silently stripped', () => {
+  // Karakter tidak valid dalam bagian desimal TIDAK dihapus diam-diam;
+  // nilai dilewatkan apa adanya ke discount() sehingga validasi regex menolak.
+  assert.equal(normalizeDiscountInput('1.a5', 'PERCENT'), '1.a5', 'huruf a tidak dihapus');
+  assert.equal(normalizeDiscountInput('1.-5', 'PERCENT'), '1.-5', 'tanda minus tidak dihapus');
+  assert.equal(normalizeDiscountInput('1e2', 'PERCENT'), '1e2', 'e (scientific) tidak dihapus');
+  assert.equal(normalizeDiscountInput('NaN', 'PERCENT'), 'NaN', 'huruf NaN tidak dihapus');
+});
+
+check('previewPosDraft PERCENT: invalid inputs throw (not silently converted)', () => {
+  // Setiap input berikut TIDAK menghasilkan diskon positif valid;
+  // discount() melempar error karena regex /^\d+(\.\d{1,2})?$/ gagal.
+  // Catatan: '1.5' PERCENT = 1.5% (VALID) — hanya '1.5' NOMINAL yang invalid.
+  for (const inp of ['1.a5', '1.-5', '1e2', 'NaN']) {
+    assert.throws(
+      () => previewPosDraft(lines, 'PERCENT', inp),
+      /Diskon persen maksimal dua angka desimal/,
+      `expected throw for ${JSON.stringify(inp)}`,
+    );
+  }
+});
+
+check('previewPosDraft PERCENT: valid decimals still work', () => {
+  // Perilaku valid yang dipertahankan.
+  const p1 = previewPosDraft(lines, 'PERCENT', '0.5');
+  assert.equal(p1.orderDiscount, 130, '0.5% of 26000 = 130');
+  const p2 = previewPosDraft(lines, 'PERCENT', '10.25');
+  assert.equal(p2.orderDiscount, 2665, '10.25% of 26000 = 2665');
+  const p3 = previewPosDraft(lines, 'PERCENT', '1.00');
+  assert.equal(p3.orderDiscount, 260, '1.00% of 26000 = 260');
 });
 
 console.log(`\n[RESULT] ${pass} PASS, ${process.exitCode ? 'SOME FAILED' : '0 FAIL'}`);

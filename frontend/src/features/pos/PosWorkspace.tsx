@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
-import {buildPosOrderDraft, previewPosDraft, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams} from './posOrderDraft';
+import {buildPosOrderDraft, previewPosDraft, normalizeDiscountInput, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams} from './posOrderDraft';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 
@@ -535,7 +535,9 @@ export default function PosWorkspace({
     }
   }, [cart, orderDiscountType, orderDiscountInput, svcToggleOn, taxToggleOn, pricingSettings]);
   const cartSubtotal = draftPreview.value?.gross || 0;
-  const hasDiscount = !!orderDiscountType || cart.some(line => !!line.discountType);
+  const hasDiscount =
+    (orderDiscountInput.trim() !== '' && Number(orderDiscountInput) > 0) ||
+    cart.some(line => line.discountInput && line.discountInput.trim() !== '' && Number(line.discountInput) > 0);
   // ── Guard pricing: blokir submit bila pricing settings belum ready ───────
   //  - 'loading'  → persentase belum diketahui; expected_total tidak valid.
   //  - 'error'    → konfigurasi tidak dapat dipercaya; submit tanpa expected_total
@@ -1418,15 +1420,50 @@ export default function PosWorkspace({
                         </button>
                       </div>
                       <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
-                        {canDiscountPos && <div className="flex gap-2">
-                          <select aria-label={`Diskon item ${item.name}`} value={discountType} disabled={draftLocked}
-                            onChange={e => {if (canMutateDraft()) changeLine(item.id, {discountType: e.target.value as PosDiscountType, discountInput: ''});}}
-                            className="min-w-0 flex-1 border border-gray-200 rounded p-1">
-                            <option value="">Tanpa diskon</option><option value="NOMINAL">Nominal per baris</option><option value="PERCENT">Persen per baris</option>
+                        {canDiscountPos && <div className="flex items-center gap-2">
+                          {/* Input angka diskon langsung (default tampilan 0, satuan default Rp).
+                              Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
+                              (01→1, 0050→50) dilakukan pada onChange. */}
+                          <input
+                            aria-label={`Nilai diskon ${item.name}`}
+                            type="text"
+                            inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                            value={discountInput}
+                            disabled={draftLocked}
+                            onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                            onChange={e => {
+                              if (!canMutateDraft()) return;
+                              const t = (discountType || 'NOMINAL') as PosDiscountType;
+                              const val = normalizeDiscountInput(e.target.value, t);
+                              // Saat user mengetik nilai, set juga discountType secara eksplisit
+                              // agar effectiveDiscount tidak gagal mengenali diskon
+                              // (type=''+input='1000' tidak bisa di-aktifkan).
+                              changeLine(item.id, { discountType: t, discountInput: val });
+                            }}
+                            className="w-24 border border-gray-200 rounded p-1 text-xs"
+                            placeholder="0"
+                          />
+                          <select
+                            aria-label={`Satuan diskon ${item.name}`}
+                            value={discountType === 'PERCENT' ? '%' : 'Rp'}
+                            disabled={draftLocked}
+                            onChange={e => {
+                              if (!canMutateDraft()) return;
+                              const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
+                              const currentType = (discountType || 'NOMINAL') as PosDiscountType;
+                              // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
+                              // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
+                              if (newType !== currentType) {
+                                changeLine(item.id, { discountType: newType, discountInput: '' });
+                              } else {
+                                changeLine(item.id, { discountType: newType });
+                              }
+                            }}
+                            className="w-14 border border-gray-200 rounded p-1 text-xs"
+                          >
+                            <option value="Rp">Rp</option>
+                            <option value="%">%</option>
                           </select>
-                          {discountType && <input aria-label={`Nilai diskon ${item.name}`} type="text" inputMode="decimal" value={discountInput}
-                            disabled={draftLocked} onChange={e => changeLine(item.id, {discountInput: e.target.value})}
-                            className="w-24 border border-gray-200 rounded p-1" placeholder={discountType === 'PERCENT' ? '%' : 'Rp'} />}
                         </div>}
                         {draftPreview.value && <div className="flex justify-between text-gray-600"><span>Total baris</span>
                           <span>{formatIDR(draftPreview.value.lines[lineIndex].net)}</span></div>}
@@ -1447,22 +1484,53 @@ export default function PosWorkspace({
                 <span>{formatIDR(cartSubtotal)}</span>
               </div>
               {canDiscountPos && <div className="space-y-2">
-                <label className="block text-xs font-semibold text-gray-600">Diskon pesanan
-                  <select value={orderDiscountType} disabled={draftLocked}
-                    onChange={e => {if (canMutateDraft()) {setOrderDiscountType(e.target.value as PosDiscountType); setOrderDiscountInput('');}}}
-                    className="block w-full mt-1 border border-gray-200 rounded p-2 text-xs">
-                    <option value="">Tanpa diskon</option><option value="NOMINAL">Nominal</option><option value="PERCENT">Persen</option>
+                <label className="flex items-center gap-2 text-xs font-semibold text-gray-600">
+                  <span className="shrink-0">Diskon pesanan</span>
+                  {/* Input angka diskon langsung + pilihan satuan Rp / %.
+                      Nilai kosong / 0 = tanpa diskon. Keputusan #7: toggle
+                      satuan me-reset nilai ke kosong. */}
+                  <input
+                    aria-label="Nilai diskon pesanan"
+                    type="text"
+                    inputMode={orderDiscountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                    value={orderDiscountInput}
+                    disabled={draftLocked}
+                    onFocus={() => { (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                    onChange={e => {
+                      if (!canMutateDraft()) return;
+                      const t = (orderDiscountType || 'NOMINAL') as PosDiscountType;
+                      const val = normalizeDiscountInput(e.target.value, t);
+                      // Set discountType eksplisit saat user mengetik nilai agar
+                      // effectiveDiscount mengenali diskon (type='' + input='1000'
+                      // tidak aktif bila type tidak diset).
+                      setOrderDiscountType(t);
+                      setOrderDiscountInput(val);
+                    }}
+                    className="w-28 border border-gray-200 rounded p-1 text-xs"
+                    placeholder="0"
+                  />
+                  <select
+                    aria-label="Satuan diskon pesanan"
+                    value={orderDiscountType === 'PERCENT' ? '%' : 'Rp'}
+                    disabled={draftLocked}
+                    onChange={e => {
+                      if (!canMutateDraft()) return;
+                      const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
+                      setOrderDiscountType(newType);
+                      // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah.
+                      if (newType !== (orderDiscountType || 'NOMINAL')) {
+                        setOrderDiscountInput('');
+                      }
+                    }}
+                    className="w-14 border border-gray-200 rounded p-1 text-xs"
+                  >
+                    <option value="Rp">Rp</option>
+                    <option value="%">%</option>
                   </select>
                 </label>
-                {orderDiscountType && <>
-                  <input aria-label="Nilai diskon pesanan" type="text" inputMode="decimal" value={orderDiscountInput} disabled={draftLocked}
-                    onChange={e => {if (canMutateDraft()) setOrderDiscountInput(e.target.value);}}
-                    placeholder={orderDiscountType === 'PERCENT' ? 'Persen (maks. 100)' : 'Nominal rupiah'}
-                    className="w-full border border-gray-200 rounded p-2 text-xs" />
-                  <input aria-label="Alasan diskon pesanan" type="text" maxLength={100} value={discountReason} disabled={draftLocked}
-                    onChange={e => {if (canMutateDraft()) setDiscountReason(e.target.value);}} placeholder="Alasan diskon (opsional)"
-                    className="w-full border border-gray-200 rounded p-2 text-xs" />
-                </>}
+                <input aria-label="Alasan diskon pesanan" type="text" maxLength={100} value={discountReason} disabled={draftLocked}
+                  onChange={e => {if (canMutateDraft()) setDiscountReason(e.target.value);}} placeholder="Alasan diskon (opsional)"
+                  className="w-full border border-gray-200 rounded p-2 text-xs" />
                 <p className="text-[11px] text-gray-500">Diskon pesanan dihitung setelah diskon setiap baris.</p>
               </div>}
               {draftPreview.value && <>

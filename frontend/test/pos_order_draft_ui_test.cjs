@@ -59,15 +59,88 @@ check('Normal order without discount permission omits every discount field', () 
   const b = D.buildPosOrderDraft(plain, details, false);
   assert.equal('discount_type' in b,false); assert.equal('discount_value' in b.items[0],false);
 });
-check('Explicit zero-valued discount still requires the separate permission', () => {
-  assert.throws(() => D.buildPosOrderDraft(plain,{...details,discountType:'NOMINAL',discountInput:'0'},false));
+check('Zero-valued discount = no discount: no permission, no payload field', () => {
+  // Keputusan #6: nilai 0 / kosong berarti TIDAK ada diskon — permission tidak
+  // teraktifkan dan field diskon tidak dikirim ke payload.
+  const b0 = D.buildPosOrderDraft(plain,{...details,discountType:'NOMINAL',discountInput:'0'},false);
+  assert.equal('discount_type' in b0,false); assert.equal('discount_value' in b0,false);
+  const bz = D.buildPosOrderDraft(plain,{...details,discountType:'PERCENT',discountInput:'0'},false);
+  assert.equal('discount_type' in bz,false);
+  const be = D.buildPosOrderDraft(plain,{...details,discountType:'NOMINAL',discountInput:''},false);
+  assert.equal('discount_type' in be,false);
+  // Item line 0 juga tidak mengirim field:
+  const bl = D.buildPosOrderDraft([{...plain[0],discountType:'NOMINAL',discountInput:'0'}],details,false);
+  assert.equal('discount_type' in bl.items[0],false);
+});
+check('Positive item-line discount still requires the separate permission', () => {
   assert.throws(() => D.buildPosOrderDraft(lines,details,false));
 });
-for (const [type,input] of [['NOMINAL','1.5'],['NOMINAL','-1'],['NOMINAL','1e3'],['NOMINAL',''],['PERCENT','100.01'],['PERCENT','1.001'],['PERCENT','NaN'],['PERCENT','']])
+// Cases that MUST still throw (invalid non-empty values):
+//  - '1.5' NOMINAL → desimal di rupiah bulat → throw
+//  - '-1'  → negatif → throw
+//  - '1e3' → scientific → throw
+//  - '100.01' PERCENT → 3 desimal → throw
+//  - '1.001' PERCENT → 3 desimal → throw
+for (const [type,input] of [['NOMINAL','1.5'],['NOMINAL','-1'],['NOMINAL','1e3'],['PERCENT','100.01'],['PERCENT','1.001'],['PERCENT','NaN']])
   check('Reject invalid '+type+' discount '+JSON.stringify(input), () => assert.throws(() => D.previewPosDraft(plain,type,input)));
+// Empty input = no discount (keputusan #5): tidak throw, nilai 0.
+check('Empty discount input is treated as no discount, not an error', () => {
+  const pNominal = D.previewPosDraft(plain,'NOMINAL','');
+  assert.equal(pNominal.orderDiscount, 0);
+  const pPercent = D.previewPosDraft(plain,'PERCENT','');
+  assert.equal(pPercent.orderDiscount, 0);
+});
 check('Reject nominal above LINE or post-LINE order basis', () => {
   assert.throws(() => D.previewPosDraft([{...plain[0],discountType:'NOMINAL',discountInput:'13001'}],'',''));
   assert.throws(() => D.previewPosDraft(lines,'NOMINAL','61001'));
+});
+// ── Regression: input normalization & leading-zero (keputusan #3, #4) ─────
+check('normalizeDiscountInput: 01→1, 0050→50, 0→0 (NOMINAL leading-zero)', () => {
+  assert.equal(D.normalizeDiscountInput('01','NOMINAL'), '1');
+  assert.equal(D.normalizeDiscountInput('0050','NOMINAL'), '50');
+  assert.equal(D.normalizeDiscountInput('0','NOMINAL'), '0');
+});
+check('normalizeDiscountInput: 0.5 & 10.25 preserved (PERCENT decimal)', () => {
+  assert.equal(D.normalizeDiscountInput('0.5','PERCENT'), '0.5');
+  assert.equal(D.normalizeDiscountInput('10.25','PERCENT'), '10.25');
+});
+check('normalizeDiscountInput: 0.05→0.05, 1.001→1.00 (PERCENT 2-decimal limit)', () => {
+  assert.equal(D.normalizeDiscountInput('0.05','PERCENT'), '0.05');
+  assert.equal(D.normalizeDiscountInput('1.001','PERCENT'), '1.00');
+});
+check('normalizeDiscountInput: empty stays empty', () => {
+  assert.equal(D.normalizeDiscountInput('','NOMINAL'), '');
+  assert.equal(D.normalizeDiscountInput('','PERCENT'), '');
+});
+check('effectiveDiscount: value 0 or empty → type cleared (no discount, no permission)', () => {
+  for (const [t,inp] of [['NOMINAL','0'],['NOMINAL',''],['PERCENT','0'],['PERCENT','']]) {
+    const r = D.effectiveDiscount(t, inp);
+    assert.equal(r.type, '', t+' '+JSON.stringify(inp)+' → type cleared');
+    assert.equal(r.input, '', t+' '+JSON.stringify(inp)+' → input cleared');
+  }
+  // Positive value keeps type:
+  const r1 = D.effectiveDiscount('NOMINAL','100');
+  assert.equal(r1.type, 'NOMINAL'); assert.equal(r1.input, '100');
+  const r2 = D.effectiveDiscount('PERCENT','5.5');
+  assert.equal(r2.type, 'PERCENT'); assert.equal(r2.input, '5.5');
+});
+check('previewPosDraft: 0.5% PERCENT discount on 13000 → round(13000*0.5/100)=65', () => {
+  const p = D.previewPosDraft([{...plain[0],discountType:'PERCENT',discountInput:'0.5'}],'','');
+  assert.equal(p.lines[0].discount, 65);
+});
+check('previewPosDraft: 10.25% PERCENT order discount on 10000 → round(10000*10.25/100)=1025', () => {
+  const p = D.previewPosDraft([{item:{id:1,name:'X',price:10000},qty:1}],'PERCENT','10.25');
+  assert.equal(p.orderDiscount, 1025);
+});
+check('previewPosDraft: 100% PERCENT line discount → total 0', () => {
+  const p = D.previewPosDraft([{...plain[0],discountType:'PERCENT',discountInput:'100'}],'','');
+  assert.equal(p.lines[0].discount, 13000);
+  assert.equal(p.total, 0);
+});
+check('buildPosOrderDraft: PERCENT 0 → no discount_type in payload', () => {
+  const b = D.buildPosOrderDraft(plain,{...details,discountType:'PERCENT',discountInput:'0'},false);
+  assert.equal('discount_type' in b, false);
+  assert.equal('discount_value' in b, false);
 });
 check('Phone/order note/reason/line note lengths fail before POST', () => {
   for (const patch of [{guestPhone:'x'.repeat(51)},{notes:'x'.repeat(1001)},{discountReason:'x'.repeat(101)}])
@@ -170,10 +243,10 @@ async function lifecycle() {
     assert.equal('unit_price' in b.items[0],false);assert.equal('discount_type' in b,false);
     assert.equal(b.service_charge_enabled,false);assert.equal(b.tax_enabled,false);
     assert.equal(h.signals.created.length,1);assert.equal(h.signals.pay.length,1);assert.equal(h.signals.pay[0].totalAmount,'10000');
-    assert.equal(h.nodes().some(n=>n.props['aria-label']==='Diskon item Coffee'),false);
+    assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(JSON.parse(init.body));return created(requests.at(-1));});h.addItem();
-  h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.labelled('Diskon pesanan','PERCENT');
+  h.byAria('Nilai diskon Coffee','1000');h.byAria('Satuan diskon pesanan','%');
   h.byAria('Nilai diskon pesanan','10');h.byAria('Alasan diskon pesanan','member');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace granted discount emits LINE then order fields; save alone never opens pay',()=>{
     assert.equal(requests[0].items[0].discount_type,'NOMINAL');assert.equal(requests[0].items[0].discount_value,1000);
@@ -183,7 +256,7 @@ async function lifecycle() {
   requests=[];let attempt=0;
   h=harness(async(_url,init)=>{requests.push({body:init.body,key:init.headers['Idempotency-Key']});
     if(++attempt===1)throw new Error('network');if(attempt===2)return json({code:'DISCOUNT_PERMISSION_DENIED'},403);return created(JSON.parse(init.body),200);});
-  h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.labelled('Nomor WhatsApp','+628123');
+  h.addItem();h.byAria('Nilai diskon Coffee','1000');h.labelled('Nomor WhatsApp','+628123');
   h.labelled('Catatan pesanan','same order');await h.settle();h.click('Simpan Pesanan');await h.settle();
   check('Workspace ambiguous locks phone/note/discount drafts and keeps result unresolved',()=>{
     assert.equal(h.signals.created.length,0);assert.equal(h.signals.unresolved.at(-1),true);
@@ -206,7 +279,7 @@ async function lifecycle() {
     });h.cleanup();
   }
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
-  h.byAria('Diskon item Coffee','PERCENT');h.byAria('Nilai diskon Coffee','100');
+  h.byAria('Satuan diskon Coffee','%');h.byAria('Nilai diskon Coffee','100');
   await h.settle();
   check('Workspace zero-total Bayar disabled; ordinary save still separate',()=>{
     assert.equal(h.button('Bayar').props.disabled,true);assert.equal(h.button('Simpan Pesanan').props.disabled,false);assert.equal(requests.length,0);
@@ -223,13 +296,161 @@ async function lifecycle() {
     assert.equal(h.nodes().find(n=>n.type==='textarea').props.disabled,false);
   });h.cleanup();
   requests=[];h=harness(async(_url,init)=>{requests.push(init.body);return created(JSON.parse(init.body));});h.addItem();
-  h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','1000');h.changeProps({canDiscountPos:false});
+  h.byAria('Nilai diskon Coffee','1000');h.changeProps({canDiscountPos:false});
   await h.settle();
   check('Workspace permission lost retains draft and offers explicit removal',()=>assert.equal(h.button('Simpan Pesanan').props.disabled,true));
   h.click('Hapus semua diskon');h.click('Simpan Pesanan');await h.settle();
   check('Workspace explicit removal preserves items and sends ordinary order',()=>{
     assert.equal(requests.length,1);assert.equal(JSON.parse(requests[0]).items.length,1);assert.equal('discount_type' in JSON.parse(requests[0]).items[0],false);
   });h.cleanup();
+  // ── Regression: input normalisasi diskon UI (0→1, 0→5, 01→1, 0050→50, toggle Rp/%) ─
+  {
+    let reqs=[];
+    h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));});
+    h.addItem();await h.settle();
+    // Skenario nyata: input awal kosong (placeholder "0").
+    // User fokus → select-all otomatis. Tekan End (cancel select-all, cursor
+    // ke akhir). Ketik "1" → teks asli menjadi "01". Normalisasi WAJUB jadi "1".
+    // Skenario ini mensimulasikan apa yang sebenarnya terjadi di DOM:
+    //   initial state: value='' + placeholder='0'
+    //   user fokus:    select-all pada string kosong (tidak ada efek)
+    //   user ketik '1':e.target.value = '1' (input kosong → '1', bukan '01')
+    //   user append '1' ke '0': e.target.value = '01' → normalisasi → '1'
+    h.byAria('Nilai diskon Coffee','0');await h.settle();
+    check('UI input: ketik 0 → tersimpan "0" (= tanpa diskon)',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'0');
+    });
+    // User menekan End, lalu mengetik '1' tanpa select-all → teks asli = '01'
+    h.byAria('Nilai diskon Coffee','01');await h.settle();
+    check('UI input: 0 lalu append 1 → normalisasi menjadi "1" (bukan "01")',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'1');
+    });
+    // User append '5' ke '0' → teks asli = '05' → normalisasi '5'
+    h.byAria('Nilai diskon Coffee','05');await h.settle();
+    check('UI input: 0 lalu append 5 → normalisasi menjadi "5"',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'5');
+    });
+    // 0050 → 50: normalisasi multi leading-zero
+    h.byAria('Nilai diskon Coffee','0050');await h.settle();
+    check('UI input: 0050 → normalisasi menjadi "50"',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'50');
+    });
+    // 0.5% tetap valid (decimal persen) — toggle ke % dahulu
+    h.byAria('Satuan diskon Coffee','%');await h.settle();
+    check('UI input: toggle % mereset nilai, satuan jadi %',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'');
+      const unit=h.nodes().find(n=>n.props['aria-label']==='Satuan diskon Coffee');
+      assert.equal(unit.props.value,'%');
+    });
+    h.byAria('Nilai diskon Coffee','0.5');await h.settle();
+    check('UI input: 0.5% tersimpan sebagai "0.5" (tidak diubah)',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'0.5');
+    });
+    // 10.25% tetap valid
+    h.byAria('Nilai diskon Coffee','10.25');await h.settle();
+    check('UI input: 10.25% tersimpan sebagai "10.25" (tidak diubah)',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'10.25');
+    });
+    // Toggle kembali ke Rp mereset nilai
+    h.byAria('Satuan diskon Coffee','Rp');await h.settle();
+    check('UI input: toggle Rp mereset nilai ke kosong',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'');
+      const unit=h.nodes().find(n=>n.props['aria-label']==='Satuan diskon Coffee');
+      assert.equal(unit.props.value,'Rp');
+    });
+    // Input kosong → tanpa diskon, payload tidak mengirim field
+    h.click('Simpan Pesanan');await h.settle();
+    check('UI input: nilai kosong → payload tanpa diskon',()=>{
+      const b=reqs[0];
+      assert.equal('discount_type' in b,false,'Order discount field tidak ada');
+      assert.equal('discount_value' in b,false,'Order discount value tidak ada');
+      assert.equal('discount_type' in b.items[0],false,'Item discount field tidak ada');
+    });
+    h.cleanup();
+  }
+  // ── Regression: nilai tidak valid TIDAK diubah diam-diam menjadi valid ─────
+  {
+    let reqs=[];
+    h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));});
+    h.addItem();await h.settle();
+    // NOMINAL '1.5' (desimal) → tetap '1.5' setelah normalisasi → preview error
+    h.byAria('Nilai diskon Coffee','1.5');await h.settle();
+    check('UI input: NOMINAL "1.5" → preview error, Simpan disabled (tidak diubah jadi "1")',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'1.5','nilai tetap 1.5, tidak dihapus diam-diam');
+      const pNodes=h.nodes().filter(n=>n.type==='p'&&typeof n.props.children==='string');
+      assert.ok(pNodes.some(p=>p.props.children.includes('rupiah')||p.props.children.includes('Periksa')||p.props.children.includes('bulat')),
+        'Pesan error preview tampil');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled saat input tidak valid');
+    });
+    // NOMINAL '-1' (negatif) → tetap '-1' → preview error
+    h.byAria('Nilai diskon Coffee','-1');await h.settle();
+    check('UI input: NOMINAL "-1" → preview error, Simpan disabled (tidak diubah jadi "1")',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'-1','nilai tetap -1, tidak diubah secara diam-diam');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true);
+    });
+    // PERCENT '1.001' → normalisasi membatasi 2 desimal menjadi '1.00'
+    h.byAria('Satuan diskon Coffee','%');await h.settle();
+    h.byAria('Nilai diskon Coffee','1.001');await h.settle();
+    check('UI input: PERCENT "1.001" → normalisasi membatasi 2 desimal → "1.00"',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'1.00','3 desimal dipangkas menjadi 2 desimal');
+    });
+    // Karakter tidak valid dalam desimal persen tidak dihapus diam-diam.
+    // "1.a5" → tetap "1.a5" → preview error, Simpan disabled.
+    h.byAria('Nilai diskon Coffee','1.a5');await h.settle();
+    check('UI input: PERCENT "1.a5" → tidak dihapus diam-diam, Simpan disabled',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'1.a5','huruf a tidak dihapus');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true);
+    });
+    // "1.-5" → tetap "1.-5" → preview error.
+    h.byAria('Nilai diskon Coffee','1.-5');await h.settle();
+    check('UI input: PERCENT "1.-5" → tidak dihapus diam-diam, Simpan disabled',()=>{
+      const node=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.equal(node.props.value,'1.-5','tanda minus tidak dihapus');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true);
+    });
+    h.cleanup();
+  }
+  // ── Regression: diskon lebih besar dari basis ditolak ──────────────────────
+  {
+    let reqs=[];
+    h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));});
+    h.addItem();await h.settle();
+    h.byAria('Nilai diskon Coffee','99999');await h.settle();
+    check('UI input: diskon > basis → preview error, Simpan disabled',()=>{
+      const pNodes=h.nodes().filter(n=>n.type==='p'&&typeof n.props.children==='string');
+      assert.ok(pNodes.some(p=>p.props.children.includes('melampaui')||p.props.children.includes('diskon')||p.props.children.includes('Periksa')),
+        'Pesan error draftPreview tampil');
+      assert.equal(h.button('Simpan Pesanan').props.disabled,true,'Simpan disabled saat preview error');
+    });
+    // Nilai valid → preview OK
+    h.byAria('Nilai diskon Coffee','1000');await h.settle();
+    check('UI input: diskon valid → preview OK, Simpan enabled',()=>{
+      assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled saat diskon valid');
+    });
+    h.cleanup();
+  }
+  // ── Regression: permission diskon ─────────────────────────────────────────
+  {
+    let reqs=[];
+    h=harness(async(_url,init)=>{reqs.push(JSON.parse(init.body));return created(reqs.at(-1));},{canDiscountPos:false});
+    h.addItem();await h.settle();
+    check('UI: canDiscountPos=false → input diskon tidak tampil',()=>{
+      assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee'),false);
+    });
+    h.cleanup();
+  }
   // ── Regression: pricing loading guard ─────────────────────────────────────
   // Saat pricing settings masih 'loading', tombol submit harus disabled.
   // Setelah settle (pricing ready), tombol enabled kembali.
@@ -291,7 +512,7 @@ async function lifecycle() {
     if(attempt400===1) return json({status:'ERROR',code:'SERVICE_CHARGE_NOT_ENABLED_AT_PROPERTY',message:'Service charge di properti ini dimatikan.'},400);
     return created(requests.at(-1));
   },{pricingData:{service_charge_enabled:false,service_charge_percent:0,tax_enabled:false,tax_percent:0}});
-  h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','500');
+  h.addItem();h.byAria('Nilai diskon Coffee','500');
   await h.settle();
   h.click('Simpan Pesanan');await h.settle();
   check('HTTP 400 pricing: draft preserved, no auto-retry, error message shown',()=>{
@@ -323,7 +544,7 @@ async function lifecycle() {
     if(attemptPtc===2) return json({status:'ERROR',code:'PRICING_TOTAL_CHANGED',message:'Total berubah',data:{computed_total:45000,expected_total:40000,service_charge_percent:10,tax_percent:11}},409);
     return created(JSON.parse(init.body));
   },{pricingData:{service_charge_enabled:true,service_charge_percent:10,tax_enabled:true,tax_percent:11}});
-  h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','500');
+  h.addItem();h.byAria('Nilai diskon Coffee','500');
   await h.settle();
   h.click('Simpan Pesanan');await h.settle(); // attempt 1 → network → unresolved
   h.click('Coba Lagi');await h.settle();       // attempt 2 → 409 PTC (unresolved)
@@ -381,8 +602,11 @@ async function lifecycle() {
       assert.equal(attemptRf,1,'Tidak ada auto-retry setelah 400');
       assert.equal(pricingFetches,2,'Re-fetch pricing dipanggil 1x tambahan (initial + refetch)');
       assert.equal(h.button('Simpan Pesanan').props.disabled,false,'Simpan enabled setelah re-fetch ready');
-      // Cart masih ada
-      assert.equal(h.nodes().some(n=>n.props['aria-label']==='Nilai diskon Coffee')===false,true,'Tidak ada diskon di draft ini');
+      // Cart masih ada (dish) — input diskon selalu terlihat bila canDiscountPos,
+      // tetapi nilai diskon belum di-set (tanpa diskon di draft ini).
+      const discNode=h.nodes().find(n=>n.props['aria-label']==='Nilai diskon Coffee');
+      assert.ok(discNode,'Input diskon item tersedia');
+      assert.equal(discNode.props.value,'','Nilai diskon kosong = tanpa diskon');
     });
     // Submit lagi: toggle svc sekarang OFF (sinkron ke properti baru)
     // → payload svc OFF → backend accept.
@@ -420,7 +644,7 @@ async function lifecycle() {
       pricingQueue,
       onPricingFetch() {pricingFetches++;},
     });
-    h.addItem();h.byAria('Diskon item Coffee','NOMINAL');h.byAria('Nilai diskon Coffee','700');
+    h.addItem();h.byAria('Nilai diskon Coffee','700');
     h.labelled('Catatan pesanan','catatan penting');
     await h.settle();
     h.click('Simpan Pesanan');await h.settle(); // 400 → auto re-fetch gagal (queue[1]="__FAIL__")

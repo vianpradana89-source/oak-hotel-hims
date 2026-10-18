@@ -71,6 +71,80 @@ function discount(type: PosDiscountType, input: string, basis: number): {value: 
   if (amount > basis) throw new Error('Diskon melebihi subtotal.');
   return {value, amount};
 }
+
+/**
+ * Normalisasi input angka diskon dari UI:
+ *
+ * Perilaku per jenis:
+ *  - NOMINAL: hanya strip leading zeros (01→1, 0050→50). Karakter desimal
+ *    atau non-digit (mis. '1.5', '-1', '1e3') DITETAPKAN sebagai-isinya —
+ *    tidak diubah menjadi nilai valid; validasi di discount() akan menolak.
+ *  - PERCENT: selain strip leading zeros, bagian setelah titik desimal
+ *    dibatasi 2 digit (1.001 → 1.00; 0.5, 10.25, 0.05 tetap).
+ *  - Strip leading zeros hanya berlaku bila digit nol di depan diikuti
+ *    digit lain: 01 → 1, 0050 → 50; tetapi 0, 0.5, 0.05 TIDAK berubah
+ *    (regex ^0+(?=\d) tidak cocok karena titik bukan digit).
+ *  - Input kosong → tetap kosong (= tanpa diskon).
+ *
+ * Jaminan penting (keputusan #4): nilai yang tidak valid secara sintaks
+ * (mis. '-1', '1e3', 'NaN', '1.5' untuk NOMINAL) TIDAK dikonversi secara
+ * diam-diam menjadi nilai valid; nilai tersebut dilewatkan apa adanya ke
+ * discount() sehingga validasi regex/range melempar error — bukan diam-diam
+ * menghasilkan diskon positif yang berbeda dari yang diketik user.
+ *
+ * Di-export untuk dipakai oleh PosWorkspace (onChange input) & test.
+ */
+export function normalizeDiscountInput(raw: string, type: PosDiscountType): string {
+  // Kosong / tanpa diskon → kosong.
+  if (raw === '') return '';
+  let s = raw;
+  if (type === 'PERCENT') {
+    // Batasi 2 angka desimal: '1.001' → '1.00', '0.5' tetap '0.5'.
+    // PENTING: hanya batasi panjang desimal bila seluruh bagian desimal
+    // terdiri dari digit. Jika mengandung karakter tidak valid (huruf,
+    // tanda, dll — mis. '1.a5', '1.-5'), biarkan apa adanya agar
+    // discount() menolak (regex /^\d+(\.\d{1,2})?$/ gagal).
+    // Tidak boleh secara diam-diam menghapus karakter tidak valid
+    // karena itu menghasilkan nilai valid yang berbeda dari input user.
+    const dot = s.indexOf('.');
+    if (dot !== -1) {
+      const int = s.slice(0, dot);
+      const dec = s.slice(dot + 1);
+      // Hanya batasi desimal bila dec seluruhnya digit.
+      if (/^\d+$/.test(dec)) {
+        s = int + '.' + dec.slice(0, 2);
+      }
+      // Jika dec mengandung karakter tidak valid → s tetap raw (discount() akan reject).
+    }
+  }
+  // Strip leading zeros hanya bila diikuti digit lain:
+  //   01 → 1, 0050 → 50, tetapi 0.5 → 0.5, 0 → 0.
+  //   (regex ^0+(?=\d) tidak cocok bila setelah 0 ada titik atau string habis)
+  s = s.replace(/^0+(?=\d)/, '');
+  return s;
+}
+
+/**
+ * Diskon EFEKTIF: nilai kosong ATAU 0 berarti TIDAK ADA diskon
+ * (type dinormalisasi ke ''). Ini membuat:
+ *  - permission diskon tidak teraktifkan untuk nilai nol/kosong,
+ *  - payload tidak mengirim diskon nol (tidak ada discount_type/value 0),
+ *  - preview menampilkan 0 untuk item/order discount.
+ * Nilai > 0 mengembalikan (type, input) yang tetap valid untuk discount().
+ */
+export function effectiveDiscount(type: PosDiscountType, input: string): {type: PosDiscountType; input: string} {
+  const t = (type || '') as PosDiscountType;
+  if (t === '') return {type: '', input: ''};
+  const trimmed = input.trim();
+  // Kosong = tanpa diskon (keputusan #5).
+  if (trimmed === '') return {type: '', input: ''};
+  // Nol eksplisit = tanpa diskon (keputusan #6). Cek string untuk menghindari
+  // mengkonversi nilai invalid (mis. '-1', '1e3') menjadi Number dan
+  // mengira itu "nol" — nilai invalid harus tetap melewati discount()
+  // agar validasi regex/range melempar error.
+  if (trimmed === '0' || trimmed === '0.0' || trimmed === '0.00') return {type: '', input: ''};
+  return {type: t, input: trimmed};
+}
 export function previewPosDraft(
   lines: PosCartLine[],
   type: PosDiscountType,
@@ -81,13 +155,15 @@ export function previewPosDraft(
     const price = Number(line.item.price), gross = price * line.qty;
     if (!Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(line.qty) || line.qty <= 0 || !Number.isSafeInteger(gross))
       throw new Error('Harga dan jumlah item belum valid.');
-    const amount = discount(line.discountType || '', line.discountInput || '', gross).amount;
+    const eff = effectiveDiscount(line.discountType || '', line.discountInput || '');
+    const amount = discount(eff.type, eff.input, gross).amount;
     return {gross, discount: amount, net: gross - amount};
   });
   const gross = values.reduce((sum, v) => sum + v.gross, 0);
   const subtotal = values.reduce((sum, v) => sum + v.net, 0);
   if (!Number.isSafeInteger(gross) || !Number.isSafeInteger(subtotal)) throw new Error('Total pesanan melebihi batas.');
-  const orderDiscount = discount(type, input, subtotal).amount;
+  const effOrder = effectiveDiscount(type, input);
+  const orderDiscount = discount(effOrder.type, effOrder.input, subtotal).amount;
   // ── Canonical POS formula (identik dengan computePosPricing backend): ─────
   // 1. base     = subtotal − orderDiscount   (= afterItemDiscount di backend)
   // 2. svc      = svcEnabled ? round(base × svcPct / 100) : 0
@@ -118,7 +194,9 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
     throw new Error('Properti dan item pesanan harus valid.');
   if (details.reservationId !== null && (!Number.isInteger(details.reservationId) || details.reservationId <= 0 || details.reservationId > 2147483647))
     throw new Error('Reservasi tidak valid.');
-  const usesDiscount = !!details.discountType || lines.some(line => !!line.discountType);
+  const usesDiscount =
+    effectiveDiscount(details.discountType, details.discountInput).type !== '' ||
+    lines.some(line => effectiveDiscount(line.discountType || '', line.discountInput || '').type !== '');
   if (usesDiscount && !canDiscount) throw new Error('Anda tidak memiliki izin diskon POS. Hapus diskon untuk menyimpan pesanan biasa.');
   const preview = previewPosDraft(lines, details.discountType, details.discountInput);
   const payload: Record<string, unknown> = {
@@ -132,17 +210,20 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
       const item: Record<string, unknown> = {menu_item_id: line.item.id, quantity: line.qty};
       const notes = optional(line.notes || '', 1000, 'Catatan item');
       if (notes) item.notes = notes;
-      if (line.discountType) {
-        item.discount_type = line.discountType;
-        item.discount_value = discount(line.discountType, line.discountInput || '', Number(line.item.price) * line.qty).value;
+      // Hanya kirim field diskon bila nilai > 0 (kosong/nol = tanpa diskon).
+      const effLine = effectiveDiscount(line.discountType || '', line.discountInput || '');
+      if (effLine.type !== '') {
+        item.discount_type = effLine.type;
+        item.discount_value = discount(effLine.type, effLine.input, Number(line.item.price) * line.qty).value;
       }
       return item;
     }),
   };
   if (details.reservationId !== null) payload.reservation_id = details.reservationId;
-  if (details.discountType) {
-    payload.discount_type = details.discountType;
-    payload.discount_value = discount(details.discountType, details.discountInput, preview.subtotal).value;
+  const effOrder = effectiveDiscount(details.discountType, details.discountInput);
+  if (effOrder.type !== '') {
+    payload.discount_type = effOrder.type;
+    payload.discount_value = discount(effOrder.type, effOrder.input, preview.subtotal).value;
     payload.discount_reason = optional(details.discountReason, 100, 'Alasan diskon');
   }
   // ── Per-order Service Charge & PBJT override ──────────────────────────────────
