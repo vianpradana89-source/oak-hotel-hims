@@ -192,6 +192,127 @@ function generateUUIDv4(): string {
 }
 
 /**
+ * POS-EDIT-1B (P3): identitas LOKAL stabil per baris cart edit.
+ *
+ * localId dibuat sekali saat baris lahir (seed dari server atau tambah menu)
+ * dan ikut terbawa setiap kali baris diubah (spread `{...line}`). Dipakai untuk
+ * mengaitkan baris draft dengan baris yang BENAR-BENAR dikirim dalam snapshot
+ * PUT — sehingga rekonsiliasi identitas tidak perlu menebak dari menu saja.
+ */
+let editCartLineSeq = 0;
+function newEditCartLineId(): string {
+  editCartLineSeq += 1;
+  return `edit-line-${editCartLineSeq}`;
+}
+
+/** Field identitas yang relevan untuk memetakan baris draft ↔ item server. */
+type EditCartIdentityFields = {
+  localId: string;
+  menuItemId: number;
+  orderItemId?: number;
+  notes: string | null;
+  discount_type: 'NOMINAL' | 'PERCENT' | null;
+  discount_value: number | null;
+};
+
+/**
+ * Snapshot PUT terakhir: isi draft yang benar-benar dikirim ke server
+ * (bukan draft terkini) + id item yang SUDAH dikenal sebelum PUT itu.
+ * Disimpan di ref, bukan state, karena hanya dibaca saat respons GET menyusul.
+ */
+type EditPutSnapshot = {
+  orderId: number;
+  entries: EditCartIdentityFields[];
+  knownIds: number[];
+};
+
+type EditServerItemIdentity = {
+  posOrderItemId: number;
+  menuItemId: number;
+  notes: string | null;
+  discount_type: 'NOMINAL' | 'PERCENT' | null;
+  discount_value: number | null;
+};
+
+/**
+ * Tanda identitas item = menu + notes + diskon item (BUKAN menu saja).
+ * Quantity sengaja TIDAK dipakai: pengguna boleh mengubah quantity selama GET
+ * tanpa mengubah identitas baris. Harga juga tidak dipakai (snapshot server).
+ */
+function editItemSignature(x: {
+  menuItemId: number;
+  notes: string | null;
+  discount_type: 'NOMINAL' | 'PERCENT' | null;
+  discount_value: number | null;
+}): string {
+  return [x.menuItemId, x.notes ?? '', x.discount_type ?? '', x.discount_value ?? ''].join('\u0001');
+}
+
+/**
+ * POS-EDIT-1B (P3): petakan baris snapshot PUT yang dikirim TANPA id (item
+ * baru yang baru dibuat server) ke `pos_order_items.id` hasil GET.
+ *
+ * Aturan (tanpa menebak dari menu saja):
+ *  1. Kandidat hanya item server yang id-nya BELUM dikenal sebelum PUT
+ *     (`knownIds`/id yang dikirim sebagai item existing) — id item lama yang
+ *     dihapus pengguna tidak akan pernah dipakai ulang untuk baris pengganti.
+ *  2. Baris dipetakan lewat `localId` (identitas lokal stabil) ↔ snapshot,
+ *     lalu dicocokkan ke item server dengan tanda identitas penuh
+ *     (menu + notes + diskon item).
+ *  3. Pemetaan hanya diterapkan bila jumlah baris dan kandidat per tanda
+ *     identitas SAMA. Bila tidak (respons tidak cukup untuk memastikan),
+ *     fungsi mengembalikan `unresolved = true` dan pemanggil WAJIB memblokir
+ *     simpan serta menampilkan penanganan eksplisit — draft tetap dipertahankan.
+ *
+ * Baris yang lahir SETELAH snapshot PUT tidak ada di peta: baris itu memang
+ * belum pernah disimpan dan tetap tanpa id (akan INSERT baris baru).
+ */
+function mapPutNewItemIds(
+  snapshot: EditPutSnapshot | null,
+  serverItems: EditServerItemIdentity[]
+): { ids: Map<string, number>; unresolved: boolean } {
+  const ids = new Map<string, number>();
+  if (!snapshot) return {ids, unresolved: true};
+  const known = new Set(snapshot.knownIds);
+  const sentExisting = new Set<number>();
+  for (const e of snapshot.entries) {
+    if (e.orderItemId !== undefined) sentExisting.add(e.orderItemId);
+  }
+  // Item yang baru dibuat oleh PUT ini: id tidak dikenal sebelumnya & bukan
+  // item existing yang dikirim ulang.
+  const candidates = serverItems.filter((it) =>
+    Number.isInteger(it.posOrderItemId)
+    && !known.has(it.posOrderItemId)
+    && !sentExisting.has(it.posOrderItemId));
+  const pending = snapshot.entries.filter((e) => e.orderItemId === undefined);
+  if (pending.length === 0) return {ids, unresolved: false};
+
+  const pendingBySig = new Map<string, EditCartIdentityFields[]>();
+  for (const e of pending) {
+    const key = editItemSignature(e);
+    const group = pendingBySig.get(key);
+    if (group) group.push(e); else pendingBySig.set(key, [e]);
+  }
+  const candidatesBySig = new Map<string, number[]>();
+  for (const it of candidates) {
+    const key = editItemSignature(it);
+    const group = candidatesBySig.get(key);
+    if (group) group.push(it.posOrderItemId); else candidatesBySig.set(key, [it.posOrderItemId]);
+  }
+  let unresolved = false;
+  for (const [sig, entries] of pendingBySig) {
+    const pool = candidatesBySig.get(sig) ?? [];
+    // Jumlah tidak sama → respons tidak cukup untuk memastikan pemetaan.
+    // Baris dengan tanda identitas identik saling setara, jadi urutan id
+    // menaik aman dipakai ketika jumlahnya cocok.
+    if (pool.length !== entries.length) { unresolved = true; continue; }
+    const sorted = [...pool].sort((a, b) => a - b);
+    entries.forEach((entry, i) => ids.set(entry.localId, sorted[i]));
+  }
+  return {ids, unresolved};
+}
+
+/**
  * Signal pembayaran sukses dari App (propertyId + orderId dari settlement
  * terverifikasi). PosModal meneruskan ke PosWorkspace; bila cocok dengan
  * order hasil create-session ini, status lokal diubah menjadi PAID.
@@ -387,6 +508,13 @@ export default function PosWorkspace({
   const [editAmbiguous, setEditAmbiguous] = useState(false);
 
   /**
+   * POS-EDIT-1B (P2): warning saat refresh detail pasca-PUT tidak berhasil.
+   * PUT tetap dianggap sukses — hanya state draft yang belum sinkron.
+   * Bersih (null) saat PUT sukses + GET juga sukses, atau saat editor ditutup.
+   */
+  const [editSyncWarning, setEditSyncWarning] = useState<string | null>(null);
+
+  /**
    * POS-EDIT-1B.3: metadata order yang sedang di-edit (mirror editingOrder,
    * tetapi mutable via form input). TIDAK mengubah editingOrder sampai
    * saveEditedOrder dipanggil — hanya draft edit lokal.
@@ -430,6 +558,8 @@ export default function PosWorkspace({
   // items=[] DITOLAK (sesuai backend & builder): penghapusan terakhir
   // baris diblokir oleh removeEditCartLine.
   interface EditCartLine {
+    /** Identitas LOKAL stabil (bukan id server) — kunci rekonsiliasi P3. */
+    localId: string;
     orderItemId?: number;
     menuItemId: number;
     quantity: number;
@@ -441,6 +571,93 @@ export default function PosWorkspace({
     code: string;
   }
   const [editCart, setEditCart] = useState<EditCartLine[] | null>(null);
+
+  /**
+   * POS-EDIT-1B (P3 — race guard draft vs GET sinkronisasi):
+   * Counter revision draft edit. DINAIKKAN SECARA SINKRON di setiap jalur
+   * perubahan draft (quantity, tambah/hapus item, notes/diskon item, metadata
+   * order) — bukan lewat useEffect dan bukan side effect di dalam updater
+   * setState.
+   *
+   * loadOrderDetail mencatat nilai revision saat GET dimulai. Pada jalur
+   * sinkronisasi pasca-PUT (preserveSuccess), hasil GET HANYA diterapkan bila
+   * revision masih sama — draft yang berubah selama GET tidak boleh ditimpa
+   * snapshot server yang lebih lama. GET awal (membuka order) tidak terpengaruh
+   * karena draft belum ada / revision tidak berubah.
+   *
+   * `editDraftRevision` = cermin state (untuk render) dari ref di atas; nilainya
+   * selalu di-set dari ref pada call site yang sama, bukan lewat useEffect.
+   */
+  const editDraftRevisionRef = useRef(0);
+  const [editDraftRevision, setEditDraftRevision] = useState(0);
+
+  /**
+   * POS-EDIT-1B (P3b): revision draft yang sudah TERSIMPAN (PUT sukses
+   * terakhir) atau yang baru di-seed dari server.
+   * `editDraftRevision > editSavedRevision` (dan editSuccess ada) berarti ada
+   * perubahan draft lanjutan yang belum tersimpan → UI menyediakan tombol
+   * simpan lanjutan pada order yang sama, tanpa menghapus status PUT sukses.
+   * null = belum ada baseline (editor belum pernah sukses PUT).
+   */
+  const [editSavedRevision, setEditSavedRevision] = useState<number | null>(null);
+
+  /**
+   * POS-EDIT-1B (P3b): pesan bila identitas item baru hasil PUT tidak dapat
+   * dipastikan dari respons GET. Simpan DIBLOKIR (bukan menebak identitas) dan
+   * draft tetap dipertahankan.
+   */
+  const [editIdentityUnresolved, setEditIdentityUnresolved] = useState<string | null>(null);
+
+  /**
+   * Snapshot PUT terakhir (draft yang benar-benar dikirim + id yang sudah
+   * dikenal sebelum PUT). Dipakai saat respons GET sinkronisasi datang untuk
+   * memetakan baris item baru ke pos_order_items.id tanpa menebak dari menu.
+   */
+  const editPutSnapshotRef = useRef<EditPutSnapshot | null>(null);
+
+  /**
+   * Tandai draft berubah: bump revision SECARA SINKRON (ref) + cermin state
+   * untuk render. Tidak ada side effect di dalam updater setState.
+   */
+  const markEditDraftChanged = useCallback((): void => {
+    editDraftRevisionRef.current += 1;
+    setEditDraftRevision(editDraftRevisionRef.current);
+  }, []);
+
+  /**
+   * P3b: ada perubahan draft SETELAH PUT sukses terakhir (atau setelah seed
+   * server). Dipakai UI untuk membedakan "sudah tersimpan" dari "belum
+   * tersimpan" — banner sukses tetap ada, tetapi tombol simpan lanjutan
+   * disediakan pada order yang sama.
+   */
+  const hasUnsavedEditChanges = editSuccess !== null
+    && editSavedRevision !== null
+    && editDraftRevision > editSavedRevision;
+
+  /**
+   * POS-EDIT-1B (P3b — celah lanjutan): GET sinkronisasi pasca-PUT GAGAL,
+   * padahal PUT mengirim item BARU (tanpa `id`).
+   *
+   * Akibatnya identitas item yang SUDAH tersimpan (pos_order_items.id +
+   * snapshot harga terkunci) belum dapat dipastikan. Memakai mekanisme
+   * `editIdentityUnresolved` yang sudah ada (TIDAK menambah state baru):
+   * simpan lanjutan diblokir lewat tombol DAN guard handler sampai identitas
+   * dipastikan, dan draft pengguna dipertahankan.
+   *
+   * Ini kegagalan GET, BUKAN kegagalan PUT — banner sukses PUT pertama tetap
+   * dipertahankan (R6 tidak dilanggar).
+   */
+  const flagUnresolvedAfterFailedSync = useCallback((): void => {
+    const snapshot = editPutSnapshotRef.current;
+    if (!snapshot) return;
+    // Hanya relevan bila PUT memang mengirim item tanpa id (item baru).
+    if (!snapshot.entries.some((entry) => entry.orderItemId === undefined)) return;
+    setEditIdentityUnresolved(
+      'Sinkronisasi detail setelah simpan gagal, sehingga identitas item baru yang sudah tersimpan belum dapat dipastikan. ' +
+      'Penyimpanan lanjutan diblokir agar item yang sudah tersimpan tidak dikirim ulang sebagai item baru (tanpa ID). ' +
+      'Draft Anda dipertahankan — tekan "Muat Ulang Detail" untuk menyinkronkan (draft akan diganti data server).'
+    );
+  }, []);
 
   /**
    * seedEditCartFromDetail — mengisi cart edit dari items[] GET detail
@@ -459,6 +676,7 @@ export default function PosWorkspace({
         return;
       }
       setEditCart(items.map((it) => ({
+        localId: newEditCartLineId(),
         orderItemId: it.posOrderItemId,
         menuItemId: it.menuItemId,
         quantity: it.quantity,
@@ -481,6 +699,11 @@ export default function PosWorkspace({
    */
   const updateEditCartQuantity = useCallback(
     (index: number, delta: number): boolean => {
+      // P3: tandai draft berubah SINKRON — GET sinkronisasi yang sedang
+      // in-flight tidak boleh menimpa draft ini. (No-op guard qty min/max tetap
+      // dihitung sebagai interaksi draft; konsekuensinya hanya melewatkan satu
+      // reseed.)
+      markEditDraftChanged();
       let applied = false;
       setEditCart((prev) => {
         if (!prev || index < 0 || index >= prev.length || !Number.isInteger(delta)) {
@@ -495,7 +718,7 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    []
+    [markEditDraftChanged]
   );
 
   /**
@@ -506,9 +729,12 @@ export default function PosWorkspace({
    */
   const addNewEditCartLine = useCallback(
     (menuItem: PosMenuItem): void => {
+      // P3: tandai draft berubah sinkron (baris item baru ditambahkan).
+      markEditDraftChanged();
       setEditCart((prev) => [
         ...(prev ?? []),
         {
+          localId: newEditCartLineId(),
           menuItemId: menuItem.id,
           quantity: 1,
           notes: null,
@@ -529,6 +755,8 @@ export default function PosWorkspace({
    */
   const removeEditCartLine = useCallback(
     (index: number): boolean => {
+      // P3: tandai draft berubah sinkron (baris item dihapus).
+      markEditDraftChanged();
       let applied = false;
       setEditCart((prev) => {
         if (!prev || prev.length <= 1 || index < 0 || index >= prev.length) {
@@ -539,7 +767,7 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    []
+    [markEditDraftChanged]
   );
 
   /**
@@ -557,6 +785,8 @@ export default function PosWorkspace({
         discount_value?: number | null;
       }
     ): boolean => {
+      // P3: tandai draft berubah sinkron (notes / diskon item).
+      markEditDraftChanged();
       let applied = false;
       setEditCart((prev) => {
         if (!prev || index < 0 || index >= prev.length) return prev;
@@ -580,8 +810,20 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    []
+    [markEditDraftChanged]
   );
+
+  /**
+   * POS-EDIT-1B (P3): satu-satunya jalur perubahan metadata order (meja,
+   * nama tamu, WhatsApp, catatan, alasan diskon, tipe & nilai diskon order).
+   * Semua field form memakai helper ini agar revision draft dinaikkan SECARA
+   * SINKRON sebelum state berubah — bukan dari useEffect, bukan dari dalam
+   * updater setState.
+   */
+  const updateEditMeta = useCallback((patch: Partial<EditMetaDraft>): void => {
+    markEditDraftChanged();
+    setEditMeta((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, [markEditDraftChanged]);
 
   // ── POS-EDIT-1B.2.2 — Preview total cart edit (HANYA display) ────────────
   // Menghitung total indikatif dari baris cart edit (snapshot harga existing
@@ -781,10 +1023,22 @@ export default function PosWorkspace({
     setEditConflict(null);
     setEditSuccess(null);
     setEditAmbiguous(false);
+    setEditSyncWarning(null);
+    setEditIdentityUnresolved(null);
+    setEditSavedRevision(null);
     setEditLoading(false);
     setEditSaving(false);
     editIdempotencyRef.current = null;
+    editPutSnapshotRef.current = null;
     editSubmittingRef.current = false;
+    // P3c: editor ditutup → tidak ada simpan lanjutan yang mungkin; GET yang
+    // masih in-flight tidak boleh membuka/menutup state (epoch guard).
+    editDetailInFlightRef.current = false;
+    // POS-EDIT-1B (P3 — race guard): bump epoch GET detail — setiap GET yang
+    // masih in-flight saat close akan melihat epoch !== editDetailEpochRef.current
+    // setelah await-nya selesai dan otomatis mengabaikan responsnya. Mencegah
+    // GET lambat membuka ulang editor / menimpa state yang sudah di-reset.
+    editDetailEpochRef.current++;
   }, []);
 
   // Snapshot idempotency PUT — TERPISAH dari idempotencySnapshotRef (CREATE).
@@ -798,6 +1052,21 @@ export default function PosWorkspace({
   const editSubmittingRef = useRef(false);
   // Epoch guard untuk GET detail (propertyId bisa berubah cepat).
   const editDetailEpochRef = useRef(0);
+  /**
+   * POS-EDIT-1B (P3c): penanda SINKRON bahwa GET detail — termasuk
+   * sinkronisasi pasca-PUT — sedang berjalan.
+   *
+   * Kenapa ref, bukan state: tombol "Simpan Perubahan" bisa ditekan pada tick
+   * yang sama sebelum render berikutnya sempat menonaktifkannya. Guard handler
+   * WAJIB membaca penanda sinkron ini agar PUT lanjutan tidak dikirim selama
+   * identitas item tersimpan belum dipastikan. State `editLoading` tetap
+   * dipakai untuk tampilan/disabled tombol.
+   *
+   * Draft TETAP boleh diedit selama GET (tidak ada yang dikunci), dan
+   * Batal/Kembali tetap bekerja lewat epoch guard (closeEditorView), bukan
+   * dengan menonaktifkan tombol.
+   */
+  const editDetailInFlightRef = useRef(false);
 
   /**
    * loadOrderDetail(orderId) — GET /api/pos/orders/:id/detail?property_id=...
@@ -810,65 +1079,119 @@ export default function PosWorkspace({
    * - 404 → order tidak ditemukan, state reset ke 'create'.
    * - 401/403 → hentikan operasi, tidak retry.
    * TIDAK dipanggil otomatis saat ini; diaktifkan di tahap UI wiring (POS-EDIT-1B.2.2).
+   *
+   * @param preserveSuccess - path sync pasca-PUT (P2): bila true, kegagalan
+   *   GET mengisi editSyncWarning (bukan editError), dan sukses TIDAK clear
+   *   editSuccess (banner tetap tampil). Default undefined = perilaku lama
+   *   (reload/open editor).
+   *
+   * POS-EDIT-1B (P3 — race guard):
+   *   - `epoch` membatalkan respons GET yang sudah tidak relevan (editor
+   *     ditutup / order lain dibuka / property berubah / reload lebih baru).
+   *     Guard diperiksa SETELAH SETIAP await, termasuk `res.json()` pada jalur
+   *     error.
+   *   - `draftRevisionAtStart` mencatat revision draft saat GET dimulai. Pada
+   *     jalur sinkronisasi pasca-PUT, bila draft berubah selama GET, hasil GET
+   *     TIDAK diterapkan: draft pengguna dipertahankan, hanya version server
+   *     (monoton naik) dan identitas item baru yang direkonsiliasi, dan status
+   *     sinkronisasi dilaporkan jujur lewat editSyncWarning.
+   *     Reload/open eksplisit (non-preserveSuccess) sengaja tetap men-seed ulang
+   *     draft — itu memang maksud tindakan pengguna.
    */
   const loadOrderDetail = useCallback(
-    async (orderId: number): Promise<boolean> => {
+    async (orderId: number, preserveSuccess?: boolean): Promise<boolean> => {
       if (!authFetch || propertyId === null) return false;
       const epoch = ++editDetailEpochRef.current;
+      const draftRevisionAtStart = editDraftRevisionRef.current;
+      // epoch berubah → respons ini sudah basi (dibatalkan oleh closeEditorView,
+      // GET yang lebih baru, atau perubahan properti).
+      const isStale = (): boolean => epoch !== editDetailEpochRef.current;
       setEditLoading(true);
       setEditError(null);
       setEditConflict(null);
+      // P3b: pelaporan kegagalan GET. Kegagalan GET BUKAN kegagalan PUT —
+      // pada jalur sync pasca-PUT: warning (bukan editError) + banner sukses
+      // PUT dipertahankan. Bila PUT mengirim item baru, identitas item
+      // tersimpan belum pasti → blokir simpan lanjutan (mekanisme unresolved).
+      const reportSyncFailure = (msg: string): void => {
+        if (preserveSuccess) {
+          setEditSyncWarning(msg);
+          flagUnresolvedAfterFailedSync();
+        } else {
+          setEditError(msg);
+        }
+      };
+      // P3c: tandai SINKRON bahwa GET berjalan — guard handler simpan lanjutan
+      // membaca ref ini (tidak menunggu render tombol disabled).
+      editDetailInFlightRef.current = true;
       try {
         const res = await authFetch(
           `/api/pos/orders/${orderId}/detail?property_id=${propertyId}`
         );
-        if (epoch !== editDetailEpochRef.current) return false; // propertyId sudah berubah
+        if (isStale()) return false; // editor ditutup / GET lebih baru / property berubah
 
         if (res.status === 404) {
+          if (isStale()) return false;
           setEditLoading(false);
-          setEditMode('create');
-          setEditingOrder(null);
-          setEditCart(null); // POS-EDIT-1B.2.2: bersihkan cart edit
-          editIdempotencyRef.current = null;
+          if (preserveSuccess) {
+            // P2 sync: order terhapus saat refresh - tampilkan peringatan,
+            // jangan reset editor (PUT sudah sukses). P3b: identitas item baru
+            // hasil PUT juga tidak dapat dipastikan → blokir simpan lanjutan.
+            setEditSyncWarning('Order tidak ditemukan saat pemuatan ulang detail. Gunakan "Muat Ulang Detail".');
+            flagUnresolvedAfterFailedSync();
+          } else {
+            setEditMode('create');
+            setEditingOrder(null);
+            setEditCart(null);
+            editIdempotencyRef.current = null;
+          }
           return false;
         }
         if (res.status === 401 || res.status === 403) {
           const j = await res.json().catch(() => ({} as Record<string, unknown>));
-          setEditError((j as { message?: string }).message || `Akses ditolak (HTTP ${res.status}).`);
+          if (isStale()) return false; // respons basi: jangan sentuh state editor
+          const msg = (j as { message?: string }).message || `Akses ditolak (HTTP ${res.status}).`;
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
         if (!res.ok) {
           const j = await res.json().catch(() => ({} as Record<string, unknown>));
-          setEditError((j as { message?: string }).message || `Gagal memuat detail order (HTTP ${res.status}).`);
+          if (isStale()) return false; // respons basi: jangan sentuh state editor
+          const msg = (j as { message?: string }).message || `Gagal memuat detail order (HTTP ${res.status}).`;
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
 
         const json = await res.json();
-        if (epoch !== editDetailEpochRef.current) return false;
+        if (isStale()) return false;
         const data = json?.data;
         const order = data?.order;
         if (!order || !Array.isArray(data?.items)) {
-          setEditError('Respons GET detail tidak valid (shape tidak lengkap).');
+          const msg = 'Respons GET detail tidak valid (shape tidak lengkap).';
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
         // Validasi: order.id cocok, version ≥ 1, status valid
         if (Number(order.id) !== orderId) {
-          setEditError('ID order tidak cocok dengan yang diminta.');
+          const msg = 'ID order tidak cocok dengan yang diminta.';
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
         const version = Number(order.version ?? 1);
         if (!Number.isInteger(version) || version < 1) {
-          setEditError('Versi order tidak valid.');
+          const msg = 'Versi order tidak valid.';
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
         const status = String(order.status ?? '').toUpperCase();
         if (status !== 'OPEN' && status !== 'PAID' && status !== 'VOIDED') {
-          setEditError(`Status order tidak dikenal: ${status}`);
+          const msg = `Status order tidak dikenal: ${status}`;
+          reportSyncFailure(msg);
           setEditLoading(false);
           return false;
         }
@@ -890,6 +1213,64 @@ export default function PosWorkspace({
           name: typeof it.item_name_snapshot === 'string' ? it.item_name_snapshot : 'Menu',
           code: typeof it.item_code_snapshot === 'string' ? it.item_code_snapshot : '',
         }));
+
+        // ── P3 race guard: draft berubah selama GET sinkronisasi ───────────
+        // Hanya pada jalur sync pasca-PUT (preserveSuccess). Bila pengguna
+        // mengubah draft setelah GET dimulai, snapshot server dianggap BASI
+        // untuk draft: jangan timpa cart/meta pengguna.
+        // - Version tetap dinaikkan ke nilai server (monoton) agar PUT
+        //   berikutnya memakai expected_version yang benar.
+        // - Identitas item baru (tanpa orderItemId) dilengkapi dari items[]
+        //   server agar simpan berikutnya tidak INSERT duplikat.
+        // - Status PAID/VOIDED di server tetap mengunci editor (readonly).
+        // - Loading tetap berakhir; status sinkronisasi dilaporkan jujur.
+        if (preserveSuccess && editDraftRevisionRef.current !== draftRevisionAtStart) {
+          setEditingOrder((prev) => (
+            prev && prev.orderId === orderId
+              ? { ...prev, version: Math.max(prev.version, version) }
+              : prev
+          ));
+          // Identitas item baru (P3): petakan HANYA baris yang benar-benar
+          // dikirim dalam snapshot PUT terakhir — dikaitkan lewat localId dan
+          // dicocokkan dengan tanda identitas penuh (menu + notes + diskon
+          // item), BUKAN FIFO menu pada draft terkini. Baris yang lahir setelah
+          // snapshot tidak dipetakan (memang belum pernah disimpan).
+          const snapshot = editPutSnapshotRef.current;
+          const mapping = mapPutNewItemIds(
+            snapshot && snapshot.orderId === orderId ? snapshot : null,
+            items,
+          );
+          if (mapping.ids.size > 0) {
+            setEditCart((prev) => {
+              if (prev === null) return prev;
+              let changed = false;
+              const next = prev.map((line) => {
+                if (line.orderItemId !== undefined) return line; // id existing: jangan disentuh
+                const id = mapping.ids.get(line.localId);
+                if (id === undefined) return line;
+                changed = true;
+                return { ...line, orderItemId: id };
+              });
+              return changed ? next : prev;
+            });
+          }
+          if (status !== 'OPEN') setEditMode('readonly');
+          setEditLoading(false);
+          // Pemetaan tidak dapat dipastikan (jumlah kandidat ≠ jumlah baris
+          // snapshot) → blokir simpan. Draft tetap dipertahankan; pengguna
+          // diberi jalan keluar eksplisit (muat ulang detail).
+          setEditIdentityUnresolved(mapping.unresolved
+            ? 'Identitas item baru tidak dapat dipastikan dari respons server, jadi penyimpanan diblokir agar tidak menulis item dengan identitas salah. Draft Anda dipertahankan — muat ulang detail untuk menyinkronkan (draft akan diganti data server).'
+            : null);
+          setEditSyncWarning(
+            'Draft Anda berubah saat detail order dimuat ulang, jadi hasil muat ulang server ' +
+            'TIDAK diterapkan agar perubahan Anda tidak hilang. Versi order terbaru tetap dipakai. ' +
+            (mapping.unresolved
+              ? 'Penyimpanan lanjutan diblokir sampai identitas item baru dapat dipastikan.'
+              : 'Perubahan lanjutan dapat disimpan dengan tombol Simpan Perubahan.')
+          );
+          return false;
+        }
 
         setEditingOrder({
           orderId,
@@ -930,19 +1311,37 @@ export default function PosWorkspace({
         setEditMode(status === 'OPEN' ? 'edit' : 'readonly');
         // Key idempotency baru per siklus (bukan key CREATE dari order.idempotency_key)
         editIdempotencyRef.current = null;
-        setEditSuccess(null);
+        // Draft di-seed ulang dari server → draft = kondisi tersimpan (baseline
+        // revisi baru). Snapshot PUT lama tidak relevan lagi.
+        editPutSnapshotRef.current = null;
+        setEditSavedRevision(editDraftRevisionRef.current);
+        setEditIdentityUnresolved(null);
+        // P2: jangan clear success bila dipanggil dari saveEditedOrder (sync).
+        if (!preserveSuccess) setEditSuccess(null);
         setEditAmbiguous(false);
         setEditLoading(false);
+        // Draft sudah sinkron dengan server - bersihkan sync warning bila ada.
+        if (preserveSuccess) setEditSyncWarning(null);
         return true;
       } catch (networkErr) {
-        if (epoch !== editDetailEpochRef.current) return false;
-        setEditError('Gagal memuat detail order (network error). Coba lagi.');
+        if (isStale()) return false;
+        if (preserveSuccess) {
+          setEditSyncWarning('Gagal memuat ulang detail order (network error). Gunakan "Muat Ulang Detail".');
+          flagUnresolvedAfterFailedSync();
+        } else {
+          setEditError('Gagal memuat detail order (network error). Coba lagi.');
+        }
         setEditLoading(false);
         console.error('[PosWorkspace] loadOrderDetail network error:', networkErr);
         return false;
+      } finally {
+        // P3c: GET selesai (sukses/gagal/network) → buka blokir simpan lanjutan.
+        // Hanya pemilik epoch terbaru yang boleh membersihkan; respons basi
+        // tidak boleh membuka blokir milik GET yang lebih baru.
+        if (epoch === editDetailEpochRef.current) editDetailInFlightRef.current = false;
       }
     },
-    [authFetch, propertyId, seedEditCartFromDetail]
+    [authFetch, propertyId, seedEditCartFromDetail, flagUnresolvedAfterFailedSync]
   );
 
   /**
@@ -1013,6 +1412,14 @@ export default function PosWorkspace({
         return false;
       }
       if (!authFetch) return false;
+      // P3b: identitas item baru belum dapat dipastikan → JANGAN simpan
+      // (mencegah menulis item dengan identitas salah / duplikat). Pesan dan
+      // tombol pemulihan sudah ditampilkan di panel editor.
+      if (editIdentityUnresolved !== null) return false;
+      // P3c: GET sinkronisasi detail masih berjalan → identitas item tersimpan
+      // belum dipastikan. Guard SINKRON (ref), tidak bergantung pada render
+      // berikutnya yang menonaktifkan tombol.
+      if (editDetailInFlightRef.current) return false;
 
       // ── Bangun payload dengan buildPosOrderEditPayload ────────────────────
       let bodyJson: string;
@@ -1099,8 +1506,34 @@ export default function PosWorkspace({
           setEditError(err instanceof Error ? err.message : 'Payload edit tidak valid.');
           return false;
         }
+        // POS-EDIT-1B (P3b): snapshot identitas — isi draft yang BENAR-BENAR
+        // dikirim PUT ini (localId per baris) + id item yang sudah dikenal
+        // SEBELUM PUT. Dipakai saat GET sinkronisasi menyusul untuk mengaitkan
+        // item baru hasil PUT ke pos_order_items.id tanpa menebak dari menu.
+        // Retry identik memakai snapshot ini juga (body tidak dibangun ulang).
+        const knownIds = new Set<number>();
+        for (const it of editingOrder.items ?? []) knownIds.add(it.posOrderItemId);
+        for (const line of editCart ?? []) {
+          if (line.orderItemId !== undefined) knownIds.add(line.orderItemId);
+        }
+        editPutSnapshotRef.current = {
+          orderId: editingOrder.orderId,
+          entries: (editCart ?? []).map((line) => ({
+            localId: line.localId,
+            menuItemId: line.menuItemId,
+            orderItemId: line.orderItemId,
+            notes: line.notes,
+            discount_type: line.discount_type,
+            discount_value: line.discount_value,
+          })),
+          knownIds: [...knownIds],
+        };
         editIdempotencyRef.current = { key, bodyJson, orderId: editingOrder.orderId };
       }
+
+      // Revision draft yang benar-benar dikirim (bukan revision saat respons
+      // datang): perubahan draft selama PUT tetap dihitung "belum tersimpan".
+      const submittedRevision = editDraftRevisionRef.current;
 
       editSubmittingRef.current = true;
       setEditSaving(true);
@@ -1133,6 +1566,12 @@ export default function PosWorkspace({
               orderNumber: editingOrder.orderNumber,
             });
             setEditAmbiguous(false);
+            // P3b: draft yang barusan dikirim = kondisi tersimpan. Bila draft
+            // berubah lagi setelah ini (termasuk selama PUT), revision menjadi
+            // lebih besar → UI menawarkan "Simpan Perubahan" pada order yang
+            // sama tanpa menghapus status PUT sukses.
+            setEditSavedRevision(submittedRevision);
+            setEditIdentityUnresolved(null);
             // POS-EDIT-1B.4: notifikasi parent sekali — refresh daftar POS orders
             // + bump refresh panel reservasi scoped. TIDAK memanggil onOpenCashPayment.
             onOrderEdited?.({
@@ -1147,6 +1586,15 @@ export default function PosWorkspace({
             // respons lama diabaikan bila properti berganti / request lebih baru).
             // TIDAK dipanggil pada path 4xx/5xx/network/200-malformed.
             onRefresh?.();
+            // POS-EDIT-1B (P2 — server authoritative sync):
+            // Respons PUT hanya memuat {order:{id,total_amount,version}, replayed}
+            // — TIDAK memuat items[]. Untuk menyinkronkan editCart/quantity/total
+            // dengan state server, panggil loadOrderDetail (GET detail) secara
+            // fire-and-forget. Bila GET gagal, PUT tetap dianggap berhasil:
+            // kegagalan dilaporkan lewat editSyncWarning (bukan editError),
+            // sehingga banner sukses PUT tetap tampil.
+            // P3: loadOrderDetail menolak menimpa draft yang berubah selama GET.
+            void loadOrderDetail(editingOrder.orderId, true);
             // Siklus edit selesai — buang snapshot; submit berikutnya
             // memakai key UUID baru (siklus baru), bukan replay.
             editIdempotencyRef.current = null;
@@ -1259,7 +1707,7 @@ export default function PosWorkspace({
         if (editSaving) setEditSaving(false);
       }
     },
-    [editMode, editingOrder, propertyId, canEditPos, canDiscountPos, authFetch, editSaving, editMeta, onOrderEdited, onRefresh]
+    [editMode, editingOrder, propertyId, canEditPos, canDiscountPos, authFetch, editSaving, editMeta, editCart, editIdentityUnresolved, onOrderEdited, onRefresh, buildEditItemsFromCart, loadOrderDetail]
   );
 
   // Ref sinkron: orderId yang sudah diterapkan status PAID lokal.
@@ -2767,7 +3215,7 @@ export default function PosWorkspace({
                   <span className="text-[11px] text-gray-400">v{editingOrder.version}</span>
                 </div>
                 <div className="flex gap-2">
-                  {editMode === 'edit' && !editConflict && !editSuccess && (
+                  {editMode === 'edit' && !editConflict && (!editSuccess || hasUnsavedEditChanges) && (
                     <>
                       <button
                         type="button"
@@ -2780,13 +3228,17 @@ export default function PosWorkspace({
                       <button
                         type="button"
                         onClick={() => void saveEditedOrder()}
-                        disabled={editSaving || editConflict !== null || (editCart !== null && editCart.length === 0)}
+                        disabled={editSaving || editLoading || editConflict !== null || editIdentityUnresolved !== null || (editCart !== null && editCart.length === 0)}
                         className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-900 text-white hover:bg-purple-800 disabled:opacity-40 cursor-pointer"
                       >
-                        {editSaving ? 'Menyimpan…' : 'Simpan'}
+                        {editSaving ? 'Menyimpan…' : (hasUnsavedEditChanges ? 'Simpan Perubahan' : 'Simpan')}
                       </button>
                     </>
                   )}
+                  {/* Navigasi TIDAK dikunci saat editLoading: GET detail yang
+                      masih berjalan dibatalkan lewat epoch guard
+                      (closeEditorView menaikkan editDetailEpochRef), bukan
+                      dengan menonaktifkan tombol Batal/Kembali. */}
                   <button
                     type="button"
                     onClick={closeEditorView}
@@ -2845,6 +3297,20 @@ export default function PosWorkspace({
                   </div>
                 )}
 
+                {/* ── Identitas item tidak dapat dipastikan (P3b) ─────────── */}
+                {editIdentityUnresolved && (
+                  <div role="alert" className="bg-red-50 border border-red-300 rounded-xl p-3 text-xs text-red-800 space-y-2">
+                    <p className="font-semibold">⛔ {editIdentityUnresolved}</p>
+                    <button
+                      type="button"
+                      onClick={reloadEditDetail}
+                      className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold text-xs cursor-pointer"
+                    >
+                      Muat Ulang Detail
+                    </button>
+                  </div>
+                )}
+
                 {/* ── Sukses ─────────────────────────────────────────────── */}
                 {!editError && !editConflict && editSuccess && (
                   <div role="status" className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 text-xs text-emerald-800 space-y-2">
@@ -2855,6 +3321,19 @@ export default function PosWorkspace({
                     <p className="text-emerald-600">
                       Order tidak dibuat baru; pembayaran tidak diproses otomatis.
                     </p>
+                    {hasUnsavedEditChanges && !editIdentityUnresolved && (
+                      <p className="text-amber-800 border-t border-emerald-200 pt-1.5 font-semibold">
+                        ● Ada perubahan draft SETELAH penyimpanan terakhir — perubahan ini belum tersimpan.
+                        {editLoading
+                          ? ' Sinkronisasi detail masih berjalan; simpan lanjutan diaktifkan setelah sinkronisasi selesai.'
+                          : ' Gunakan tombol "Simpan Perubahan" untuk menyimpan ke order yang sama.'}
+                      </p>
+                    )}
+                    {editSyncWarning && (
+                      <p className="text-amber-700 border-t border-emerald-200 pt-1.5 font-medium">
+                        ⚠ {editSyncWarning}
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -2871,7 +3350,7 @@ export default function PosWorkspace({
                             type="text"
                             maxLength={20}
                             value={editMeta.tableNumber}
-                            onChange={e => setEditMeta(m => m ? { ...m, tableNumber: e.target.value } : m)}
+                            onChange={e => updateEditMeta({ tableNumber: e.target.value })}
                             className="w-full border border-gray-200 rounded-lg p-1.5"
                             placeholder="Tabel / Takeaway"
                           />
@@ -2882,7 +3361,7 @@ export default function PosWorkspace({
                             type="text"
                             maxLength={100}
                             value={editMeta.guestName}
-                            onChange={e => setEditMeta(m => m ? { ...m, guestName: e.target.value } : m)}
+                            onChange={e => updateEditMeta({ guestName: e.target.value })}
                             className="w-full border border-gray-200 rounded-lg p-1.5"
                           />
                         </div>
@@ -2892,7 +3371,7 @@ export default function PosWorkspace({
                             type="tel"
                             maxLength={50}
                             value={editMeta.guestPhone}
-                            onChange={e => setEditMeta(m => m ? { ...m, guestPhone: e.target.value } : m)}
+                            onChange={e => updateEditMeta({ guestPhone: e.target.value })}
                             className="w-full border border-gray-200 rounded-lg p-1.5"
                             placeholder="Opsional"
                           />
@@ -2903,7 +3382,7 @@ export default function PosWorkspace({
                             type="text"
                             maxLength={1000}
                             value={editMeta.orderNotes}
-                            onChange={e => setEditMeta(m => m ? { ...m, orderNotes: e.target.value } : m)}
+                            onChange={e => updateEditMeta({ orderNotes: e.target.value })}
                             className="w-full border border-gray-200 rounded-lg p-1.5"
                           />
                         </div>
@@ -2913,7 +3392,7 @@ export default function PosWorkspace({
                             type="text"
                             maxLength={100}
                             value={editMeta.discountReason}
-                            onChange={e => setEditMeta(m => m ? { ...m, discountReason: e.target.value } : m)}
+                            onChange={e => updateEditMeta({ discountReason: e.target.value })}
                             className="w-full border border-gray-200 rounded-lg p-1.5"
                           />
                         </div>
@@ -2922,7 +3401,7 @@ export default function PosWorkspace({
                             <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Order</label>
                             <select
                               value={editMeta.orderDiscountType}
-                              onChange={e => setEditMeta(m => m ? { ...m, orderDiscountType: e.target.value as EditMetaDraft['orderDiscountType'] } : m)}
+                              onChange={e => updateEditMeta({ orderDiscountType: e.target.value as EditMetaDraft['orderDiscountType'] })}
                               className="border border-gray-200 rounded-lg p-1.5 text-xs w-24"
                             >
                               <option value="">—</option>
@@ -2939,7 +3418,7 @@ export default function PosWorkspace({
                                 type="number"
                                 min={0}
                                 value={editMeta.orderDiscountInput}
-                                onChange={e => setEditMeta(m => m ? { ...m, orderDiscountInput: e.target.value } : m)}
+                                onChange={e => updateEditMeta({ orderDiscountInput: e.target.value })}
                                 className="border border-gray-200 rounded-lg p-1.5 text-xs w-28"
                               />
                             </div>
