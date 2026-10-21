@@ -66,10 +66,13 @@ function compile(file) {
 }
 function load(code, imports = {}) {
   const module = {exports: {}};
+  const noopAlert = () => {};
+  const defaultConfirm = () => true;
   vm.runInNewContext(code, {module, exports: module.exports, require: name => {
     if (name in imports) return imports[name]; throw new Error('Unexpected import ' + name);
   }, console: {error() {}, warn() {}}, crypto: {randomUUID}, AbortController, URL, Response, Blob,
-    window: {setTimeout() {return 1;}, clearTimeout() {}}, document: {activeElement: {focus() {}}}},
+    alert: noopAlert, confirm: defaultConfirm,
+    window: {setTimeout() {return 1;}, clearTimeout() {}, alert: noopAlert, confirm: defaultConfirm}, document: {activeElement: {focus() {}}}},
     {timeout: 3000});
   return module.exports;
 }
@@ -301,7 +304,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: () => putOk(2, 26000), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.incQty(0);                                  // draft qty 2
-    h.click('Simpan'); await h.settle2();          // PUT sukses → GET sync in-flight
+    h.click('Simpan Perubahan'); await h.settle2();          // PUT sukses → GET sync in-flight
     assert.equal(h.hasText('Memuat detail order'), true, 'GET sinkronisasi benar-benar in-flight');
     h.incQty(0);                                  // draft qty 3 SELAMA GET
     assert.deepEqual(h.qtys(), [3]);
@@ -323,7 +326,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: () => putOk(2, 26000), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.typeInto('Nama Tamu', 'Budi');               // draft = nilai server (belum berubah)
-    h.click('Simpan'); await h.settle2();          // GET sync in-flight
+    h.click('Simpan Perubahan'); await h.settle2();          // GET sync in-flight
     h.typeInto('Nama Tamu', 'Siti');               // draft berubah selama GET
     d.resolve(detail({version: 2, guestName: 'Server Name'}));
     await h.settle2();
@@ -409,7 +412,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.incQty(0);
-    h.click('Simpan'); await h.settle2();
+    h.click('Simpan Perubahan'); await h.settle2();
     assert.equal(h.log.puts.length, 1);
     assert.ok(h.hasText('Coba Lagi (retry identik)'), 'tombol retry identik tampil');
     h.click('Coba Lagi (retry identik)'); await h.settle2();
@@ -429,7 +432,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
     h.openOrder(); await h.settle2();
     h.incQty(0); h.incQty(0);                      // 1 → 3
     assert.deepEqual(h.qtys(), [3]);
-    h.click('Simpan'); await h.settle2();
+    h.click('Simpan Perubahan'); await h.settle2();
     const body = JSON.parse(h.log.puts[0].body);
     assert.equal(body.items[0].quantity, 3, 'payload harus memakai qty 3, bukan closure lama');
     assert.equal(body.items[0].id, 9001, 'identitas item existing (pos_order_items.id) dipertahankan');
@@ -467,7 +470,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
     h.openOrder(); await h.settle2();
     h.addMenu(2);                                   // baris BARU (belum punya id)
     assert.equal(h.hasBaruBadge(), true, 'baris item baru ditandai BARU');
-    h.click('Simpan'); await h.settle2();           // PUT membuat item baru di server
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT membuat item baru di server
     h.incQty(1);                                    // draft berubah selama GET → snapshot ditolak
     d.resolve(detail({version: 2, items: [line(9001, 1, 1), line(9002, 2, 1)]}));
     await h.settle2();
@@ -488,7 +491,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 26000) : putOk(3, 26000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.incQty(0);                                    // draft qty 2
-    h.click('Simpan'); await h.settle2();           // PUT#1 200 → GET sync in-flight
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 200 → GET sync in-flight
     assert.equal(h.hasText('Memuat detail order'), true, 'GET sinkronisasi benar-benar in-flight');
     h.incQty(0);                                    // draft qty 3 SELAMA GET
     d.resolve(detail({version: 2, items: [line(9001, 1, 2)]}));
@@ -522,7 +525,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 26000) : putOk(3, 26000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.incQty(0);
-    h.click('Simpan'); await h.settle2();           // PUT#1 hanya berisi item existing 9001
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 hanya berisi item existing 9001
     h.addMenu(1);                                   // baris Coffee BARU (tanpa id)
     h.removeLine(0);                                // item lama (9001) dihapus SELAMA GET
     assert.deepEqual(h.qtys(), [1]);
@@ -552,7 +555,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
     // Diskon hanya pada baris "manis" (order-level diskon tidak dipakai di test ini).
     h.setItemDiscount(2, 'NOMINAL'); h.setItemDiscountValue(0, '1000');
     assert.equal(h.baruCount(), 2);
-    h.click('Simpan'); await h.settle2();           // PUT#1 membuat 2 item baru
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 membuat 2 item baru
     h.incQty(0);                                    // draft berubah selama GET
     // Server mengembalikan urutan item baru TERBALIK (9502 lebih dulu).
     d.resolve(detail({version: 2, items: [
@@ -582,7 +585,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 23000) : putOk(3, 33000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.addMenu(2);                                   // Tea#1 — masuk snapshot PUT#1
-    h.click('Simpan'); await h.settle2();           // PUT#1 + GET sync in-flight
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 + GET sync in-flight
     h.addMenu(2);                                   // Tea#2 — lahir SESUDAH snapshot
     d.resolve(detail({version: 2, items: [line(9001, 1, 1), line(9501, 2, 1)]}));
     await h.settle2();
@@ -607,7 +610,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 33000) : putOk(3, 33000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.addMenu(2); h.addMenu(2);                     // dua baris Tea identik (signature sama)
-    h.click('Simpan'); await h.settle2();           // PUT#1 membuat 2 item baru
+    h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 membuat 2 item baru
     h.incQty(0);                                    // draft berubah selama GET
     // Server hanya mengembalikan SATU kandidat item baru → jumlah tidak cocok.
     d.resolve(detail({version: 2, items: [line(9001, 1, 1), line(9501, 2, 1)]}));
@@ -633,7 +636,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 23000) : putOk(3, 23000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.addMenu(2);                                   // item BARU ikut terkirim di PUT#1
-    h.click('Simpan'); await h.settle2(); await h.settle2();
+    h.click('Simpan Perubahan'); await h.settle2(); await h.settle2();
     assert.ok(h.hasText('berhasil disimpan'), 'banner sukses PUT pertama tetap tampil (GET gagal ≠ PUT gagal)');
     assert.ok(h.hasText('detail tidak tersedia'), 'kegagalan GET dilaporkan sebagai warning sinkronisasi');
     assert.equal(h.hasText('Gagal memuat detail order (HTTP 500)'), false,
@@ -665,7 +668,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
       put: ({n}) => (n === 1 ? putOk(2, 23000) : putOk(3, 33000)), post: () => json({}, 500)});
     h.openOrder(); await h.settle2();
     h.addMenu(2);                                    // item BARU ikut PUT#1
-    h.click('Simpan'); await h.settle2();            // PUT#1 200 → GET sync in-flight
+    h.click('Simpan Perubahan'); await h.settle2();            // PUT#1 200 → GET sync in-flight
     assert.equal(h.hasText('Memuat detail order'), true, 'GET sinkronisasi benar-benar in-flight');
     h.incQty(0);                                     // draft berubah SELAMA GET
     assert.deepEqual(h.qtys(), [2, 1], 'draft tetap boleh diedit selama GET');

@@ -54,14 +54,14 @@ console.log('=== POS-EDIT-1B: React Callback Regression Test ===\n');
 
 await check('A1: P1 — saveEditedOrder deps include buildEditItemsFromCart', () => {
   assert.ok(
-    src.includes('buildEditItemsFromCart, loadOrderDetail]'),
+    src.includes('buildEditItemsFromCart, loadOrderDetail, onRequestPending]'),
     'buildEditItemsFromCart not in saveEditedOrder deps'
   );
 });
 
 await check('A2: P1+P2 — saveEditedOrder deps include loadOrderDetail', () => {
   assert.ok(
-    src.includes('buildEditItemsFromCart, loadOrderDetail]'),
+    src.includes('buildEditItemsFromCart, loadOrderDetail, onRequestPending]'),
     'loadOrderDetail not in saveEditedOrder deps'
   );
 });
@@ -115,16 +115,23 @@ await check('A8: P4 — saveEditedOrder guards double-submit via editSubmittingR
 });
 
 await check('A9: P3 UX — Batal/Kembali TIDAK dikunci saat editLoading (epoch guard, bukan disabled)', () => {
-  const btnIdx = src.indexOf('Kembali ke Riwayat');
-  assert.ok(btnIdx !== -1, '"Kembali ke Riwayat" button not found');
-  const before = src.slice(Math.max(0, btnIdx - 1200), btnIdx);
+  // Cari tombol JSX "Kembali ke Riwayat" yang didahului oleh "disabled={editSaving}"
+  // dalam radius < 300 char. Ulangi semua kemunculan teks karena ada juga
+  // komentar closeEditorView dan teks alert panel yang sama-sama memakai frasa ini.
+  let occ = -1, btnIdx = -1;
+  while (true) {
+    occ = src.indexOf('Kembali ke Riwayat', occ + 1);
+    if (occ === -1) break;
+    const dIdx = src.lastIndexOf('disabled={editSaving}', occ);
+    if (dIdx !== -1 && occ - dIdx < 300) { btnIdx = occ; break; }
+  }
+  assert.ok(btnIdx !== -1, 'tombol JSX "Kembali ke Riwayat" tidak ditemukan');
+  const disabledIdx = src.lastIndexOf('disabled={editSaving}', btnIdx);
+  // Navigasi tidak boleh dikunci saat editLoading (race ditangani epoch guard)
+  const windowBefore = src.slice(Math.max(0, disabledIdx - 300), disabledIdx);
   assert.ok(
-    !before.includes('disabled={editSaving || editLoading}'),
+    !windowBefore.includes('disabled={editSaving || editLoading}'),
     'navigasi tidak boleh mengunci tombol saat editLoading (race ditangani epoch guard)'
-  );
-  assert.ok(
-    before.includes('disabled={editSaving}'),
-    'navigasi harus tetap memakai guard editSaving (PUT in-flight)'
   );
 });
 
@@ -261,7 +268,7 @@ await check('A20: P3 — identitas item baru direkonsiliasi lewat snapshot PUT +
 await check('A21: P3b — keberhasilan PUT dibedakan dari perubahan draft yang belum tersimpan', () => {
   assert.ok(src.includes('const [editSavedRevision, setEditSavedRevision]'),
     'baseline revision tersimpan tidak ada');
-  assert.ok(src.includes('const hasUnsavedEditChanges = editSuccess !== null'),
+  assert.ok(src.includes('const hasUnsavedEditChanges = editingOrder !== null') && src.includes('editDraftRevision > (editSavedRevision ?? 0)'),
     'penanda perubahan belum tersimpan tidak ada');
   assert.ok(src.includes('(!editSuccess || hasUnsavedEditChanges)'),
     'tombol simpan lanjutan tidak tersedia setelah PUT sukses');

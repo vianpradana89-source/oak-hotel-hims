@@ -615,6 +615,91 @@ export default function PosWorkspace({
    */
   const editPutSnapshotRef = useRef<EditPutSnapshot | null>(null);
 
+  const editSubmittingRef = useRef(false);
+  // POS-EDIT-1B (taf2): guard sinkron anti double-click tombol Bayar EDIT.
+  const editPayPendingRef = useRef(false);
+  const [editPayPending, setEditPayPending] = useState(false);
+  // Epoch guard untuk GET detail (propertyId bisa berubah cepat).
+  const editDetailEpochRef = useRef(0);
+  /** Promise in-flight dari pemanggilan loadOrderDetail terbaru (untuk await eksplisit tanpa polling). */
+  const editDetailPromiseRef = useRef<Promise<boolean> | null>(null);
+
+  /** Snapshot server otoritatif terbaru hasil GET detail (untuk context pembayaran & audit). */
+  const editServerSnapshotRef = useRef<{
+    orderId: number;
+    propertyId: number;
+    orderNumber: string;
+    status: string;
+    version: number;
+    totalAmount: number | string;
+    guestName: string | null;
+    guestPhone: string | null;
+    tableNumber: string | null;
+    reservationId: number | null;
+    epoch: number;
+    draftRevision: number;
+    timestamp: number;
+  } | null>(null);
+
+  /** Ref sinkron cermin state untuk perlindungan stale closure pada operasi async. */
+  const editingOrderRef = useRef(editingOrder);
+  editingOrderRef.current = editingOrder;
+  const editModeRef = useRef(editMode);
+  editModeRef.current = editMode;
+  const editConflictRef = useRef(editConflict);
+  editConflictRef.current = editConflict;
+  const editAmbiguousRef = useRef(editAmbiguous);
+  editAmbiguousRef.current = editAmbiguous;
+  const editIdentityUnresolvedRef = useRef(editIdentityUnresolved);
+  editIdentityUnresolvedRef.current = editIdentityUnresolved;
+  const editSavedRevisionRef = useRef<number | null>(editSavedRevision);
+  editSavedRevisionRef.current = editSavedRevision;
+  const propertyIdRef = useRef(propertyId);
+  propertyIdRef.current = propertyId;
+  const editDetailInFlightRef = useRef(false);
+  const editPayIntentIdRef = useRef(0);
+  useEffect(() => () => {
+    editPayIntentIdRef.current += 1;
+    editDetailEpochRef.current += 1;
+  }, []);
+  const appliedPaidOrderIdRef = useRef<number | null>(null);
+  const cartRef = useRef(cart);
+  cartRef.current = cart;
+  const ambiguousRef = useRef(ambiguous);
+  ambiguousRef.current = ambiguous;
+  const onCartChangeRef = useRef(onCartChange);
+  onCartChangeRef.current = onCartChange;
+  const onRequestPendingRef = useRef(onRequestPending);
+  onRequestPendingRef.current = onRequestPending;
+  const onUnresolvedChangeRef = useRef(onUnresolvedChange);
+  onUnresolvedChangeRef.current = onUnresolvedChange;
+
+  /**
+   * Pelaporan gabungan CREATE + EDIT ke parent secara sinkron (melalui ref
+   * callback terbaru). Mencegah nilai false dari CREATE menimpa state aktif
+   * milik EDIT, maupun sebaliknya.
+   */
+  const reportDirtyToParent = useCallback((): void => {
+    const createDirty = cartRef.current.length > 0;
+    const editDirty = editingOrderRef.current !== null
+      && editDraftRevisionRef.current > (editSavedRevisionRef.current ?? 0);
+    onCartChangeRef.current?.(createDirty || editDirty);
+  }, []);
+
+  const reportPendingToParent = useCallback((): void => {
+    const isPending = Boolean(submittingRef.current || editSubmittingRef.current);
+    onRequestPendingRef.current?.(isPending);
+  }, []);
+
+  const reportUnresolvedToParent = useCallback((): void => {
+    const isUnresolved = Boolean(
+      ambiguousRef.current ||
+      idempotencySnapshotRef.current?.unresolved === true ||
+      editAmbiguousRef.current
+    );
+    onUnresolvedChangeRef.current?.(isUnresolved);
+  }, []);
+
   /**
    * Tandai draft berubah: bump revision SECARA SINKRON (ref) + cermin state
    * untuk render. Tidak ada side effect di dalam updater setState.
@@ -622,7 +707,8 @@ export default function PosWorkspace({
   const markEditDraftChanged = useCallback((): void => {
     editDraftRevisionRef.current += 1;
     setEditDraftRevision(editDraftRevisionRef.current);
-  }, []);
+    reportDirtyToParent();
+  }, [reportDirtyToParent]);
 
   /**
    * P3b: ada perubahan draft SETELAH PUT sukses terakhir (atau setelah seed
@@ -630,9 +716,8 @@ export default function PosWorkspace({
    * tersimpan" — banner sukses tetap ada, tetapi tombol simpan lanjutan
    * disediakan pada order yang sama.
    */
-  const hasUnsavedEditChanges = editSuccess !== null
-    && editSavedRevision !== null
-    && editDraftRevision > editSavedRevision;
+  const hasUnsavedEditChanges = editingOrder !== null
+    && editDraftRevision > (editSavedRevision ?? 0);
 
   /**
    * POS-EDIT-1B (P3b — celah lanjutan): GET sinkronisasi pasca-PUT GAGAL,
@@ -652,11 +737,12 @@ export default function PosWorkspace({
     if (!snapshot) return;
     // Hanya relevan bila PUT memang mengirim item tanpa id (item baru).
     if (!snapshot.entries.some((entry) => entry.orderItemId === undefined)) return;
-    setEditIdentityUnresolved(
+    const msg =
       'Sinkronisasi detail setelah simpan gagal, sehingga identitas item baru yang sudah tersimpan belum dapat dipastikan. ' +
       'Penyimpanan lanjutan diblokir agar item yang sudah tersimpan tidak dikirim ulang sebagai item baru (tanpa ID). ' +
-      'Draft Anda dipertahankan — tekan "Muat Ulang Detail" untuk menyinkronkan (draft akan diganti data server).'
-    );
+      'Draft Anda dipertahankan — tekan "Muat Ulang Detail" untuk menyinkronkan (draft akan diganti data server).';
+    editIdentityUnresolvedRef.current = msg;
+    setEditIdentityUnresolved(msg);
   }, []);
 
   /**
@@ -692,6 +778,37 @@ export default function PosWorkspace({
   );
 
   /**
+   * POS-NAV-GUARD: Validasi sinkron & state apakah draft EDIT boleh dimutasi.
+   * Menolak mutasi pada:
+   * - mode readonly (editMode !== 'edit' || editModeRef.current !== 'edit')
+   * - tanpa izin (!canEditPos)
+   * - status order bukan OPEN (PAID, VOIDED, financial lock, atau terverifikasi signal PAID)
+   * - PUT pending (editSubmittingRef.current || editSaving)
+   * - hasil ambigu (editAmbiguousRef.current || editAmbiguous)
+   * - conflict versi (editConflictRef.current !== null || editConflict !== null)
+   * - properti tidak cocok (propertyId === null || propertyIdRef.current !== propertyId)
+   *
+   * CATATAN PENTING:
+   * - GET sinkronisasi pasca-PUT (editDetailInFlightRef) TIDAK MEMBLOKIR mutasi draft
+   *   lokal (sesuai regression R3/R4/R12/R18 dan S4d saat fase GET proses Bayar).
+   * - editIdentityUnresolved TIDAK MEMBLOKIR mutasi draft lokal (sesuai R17); hanya
+   *   penyimpanan (saveEditedOrder) dan pembayaran (handleEditPay) yang diblokir.
+   */
+  const canMutateEditDraft = useCallback((): boolean => {
+    if (!canEditPos) return false;
+    if (editMode !== 'edit' || editModeRef.current !== 'edit') return false;
+    const cur = editingOrderRef.current ?? editingOrder;
+    if (!cur) return false;
+    if (cur.status !== 'OPEN') return false;
+    if (appliedPaidOrderIdRef.current === cur.orderId || localPaidOrderId === cur.orderId) return false;
+    if (editSubmittingRef.current || editSaving) return false;
+    if (editAmbiguousRef.current || editAmbiguous) return false;
+    if (editConflictRef.current !== null || editConflict !== null) return false;
+    if (propertyId === null || propertyIdRef.current !== propertyId) return false;
+    return true;
+  }, [canEditPos, editMode, editingOrder, localPaidOrderId, editSaving, editAmbiguous, editConflict, propertyId]);
+
+  /**
    * Ubah quantity satu baris cart edit dengan DELTA (±1).
    * Quantity hasil harus integer 1..9999 (kontrak backend).
    * Qty 1 + delta -1 → tidak berubah (guard minimum).
@@ -699,6 +816,7 @@ export default function PosWorkspace({
    */
   const updateEditCartQuantity = useCallback(
     (index: number, delta: number): boolean => {
+      if (!canMutateEditDraft()) return false;
       // P3: tandai draft berubah SINKRON — GET sinkronisasi yang sedang
       // in-flight tidak boleh menimpa draft ini. (No-op guard qty min/max tetap
       // dihitung sebagai interaksi draft; konsekuensinya hanya melewatkan satu
@@ -718,7 +836,7 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    [markEditDraftChanged]
+    [canMutateEditDraft, markEditDraftChanged]
   );
 
   /**
@@ -729,6 +847,7 @@ export default function PosWorkspace({
    */
   const addNewEditCartLine = useCallback(
     (menuItem: PosMenuItem): void => {
+      if (!canMutateEditDraft()) return;
       // P3: tandai draft berubah sinkron (baris item baru ditambahkan).
       markEditDraftChanged();
       setEditCart((prev) => [
@@ -746,7 +865,7 @@ export default function PosWorkspace({
         },
       ]);
     },
-    []
+    [canMutateEditDraft, markEditDraftChanged]
   );
 
   /**
@@ -755,6 +874,7 @@ export default function PosWorkspace({
    */
   const removeEditCartLine = useCallback(
     (index: number): boolean => {
+      if (!canMutateEditDraft()) return false;
       // P3: tandai draft berubah sinkron (baris item dihapus).
       markEditDraftChanged();
       let applied = false;
@@ -767,7 +887,7 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    [markEditDraftChanged]
+    [canMutateEditDraft, markEditDraftChanged]
   );
 
   /**
@@ -785,6 +905,7 @@ export default function PosWorkspace({
         discount_value?: number | null;
       }
     ): boolean => {
+      if (!canMutateEditDraft()) return false;
       // P3: tandai draft berubah sinkron (notes / diskon item).
       markEditDraftChanged();
       let applied = false;
@@ -810,7 +931,7 @@ export default function PosWorkspace({
       });
       return applied;
     },
-    [markEditDraftChanged]
+    [canMutateEditDraft, markEditDraftChanged]
   );
 
   /**
@@ -821,9 +942,10 @@ export default function PosWorkspace({
    * updater setState.
    */
   const updateEditMeta = useCallback((patch: Partial<EditMetaDraft>): void => {
+    if (!canMutateEditDraft()) return;
     markEditDraftChanged();
     setEditMeta((prev) => (prev ? { ...prev, ...patch } : prev));
-  }, [markEditDraftChanged]);
+  }, [canMutateEditDraft, markEditDraftChanged]);
 
   // ── POS-EDIT-1B.2.2 — Preview total cart edit (HANYA display) ────────────
   // Menghitung total indikatif dari baris cart edit (snapshot harga existing
@@ -1014,7 +1136,15 @@ export default function PosWorkspace({
    * respons 200 mengubah state yang sudah di-reset.
    */
   const closeEditorView = useCallback((): void => {
-    if (editSubmittingRef.current) return; // PUT in-flight — jangan tutup
+    if (editSubmittingRef.current || editSaving || editAmbiguousRef.current || editAmbiguous) {
+      alert('Tunggu proses simpan/pembayaran selesai sebelum menutup editor.');
+      return;
+    }
+    if (editingOrder !== null && hasUnsavedEditChanges) {
+      if (!window.confirm('Ada perubahan draft yang belum disimpan. Yakin ingin membuang draft dan keluar?')) {
+        return;
+      }
+    }
     setEditMode('create');
     setEditingOrder(null);
     setEditCart(null);
@@ -1031,6 +1161,17 @@ export default function PosWorkspace({
     editIdempotencyRef.current = null;
     editPutSnapshotRef.current = null;
     editSubmittingRef.current = false;
+    editPayIntentIdRef.current += 1;
+    editPayPendingRef.current = false;
+    setEditPayPending(false);
+    editingOrderRef.current = null;
+    editModeRef.current = 'create';
+    editConflictRef.current = null;
+    editAmbiguousRef.current = false;
+    editIdentityUnresolvedRef.current = null;
+    editSavedRevisionRef.current = null;
+    editServerSnapshotRef.current = null;
+    editDetailPromiseRef.current = null;
     // P3c: editor ditutup → tidak ada simpan lanjutan yang mungkin; GET yang
     // masih in-flight tidak boleh membuka/menutup state (epoch guard).
     editDetailInFlightRef.current = false;
@@ -1039,7 +1180,11 @@ export default function PosWorkspace({
     // setelah await-nya selesai dan otomatis mengabaikan responsnya. Mencegah
     // GET lambat membuka ulang editor / menimpa state yang sudah di-reset.
     editDetailEpochRef.current++;
-  }, []);
+    reportDirtyToParent();
+    reportUnresolvedToParent();
+    // Kembali ke Riwayat (tabel daftar order).
+    setActiveTab('orders');
+  }, [hasUnsavedEditChanges, editSaving, editAmbiguous, editingOrder, reportDirtyToParent, reportUnresolvedToParent]);
 
   // Snapshot idempotency PUT — TERPISAH dari idempotencySnapshotRef (CREATE).
   // Setiap siklus edit (reload detail / open order baru) → key UUID baru.
@@ -1049,24 +1194,6 @@ export default function PosWorkspace({
     bodyJson: string;
     orderId: number;
   } | null>(null);
-  const editSubmittingRef = useRef(false);
-  // Epoch guard untuk GET detail (propertyId bisa berubah cepat).
-  const editDetailEpochRef = useRef(0);
-  /**
-   * POS-EDIT-1B (P3c): penanda SINKRON bahwa GET detail — termasuk
-   * sinkronisasi pasca-PUT — sedang berjalan.
-   *
-   * Kenapa ref, bukan state: tombol "Simpan Perubahan" bisa ditekan pada tick
-   * yang sama sebelum render berikutnya sempat menonaktifkannya. Guard handler
-   * WAJIB membaca penanda sinkron ini agar PUT lanjutan tidak dikirim selama
-   * identitas item tersimpan belum dipastikan. State `editLoading` tetap
-   * dipakai untuk tampilan/disabled tombol.
-   *
-   * Draft TETAP boleh diedit selama GET (tidak ada yang dikunci), dan
-   * Batal/Kembali tetap bekerja lewat epoch guard (closeEditorView), bukan
-   * dengan menonaktifkan tombol.
-   */
-  const editDetailInFlightRef = useRef(false);
 
   /**
    * loadOrderDetail(orderId) — GET /api/pos/orders/:id/detail?property_id=...
@@ -1100,7 +1227,14 @@ export default function PosWorkspace({
    */
   const loadOrderDetail = useCallback(
     async (orderId: number, preserveSuccess?: boolean): Promise<boolean> => {
-      if (!authFetch || propertyId === null) return false;
+      let deferredResolve: (val: boolean) => void = () => {};
+      editDetailPromiseRef.current = new Promise<boolean>((resolve) => {
+        deferredResolve = resolve;
+      });
+      if (!authFetch || propertyId === null) {
+        deferredResolve(false);
+        return false;
+      }
       const epoch = ++editDetailEpochRef.current;
       const draftRevisionAtStart = editDraftRevisionRef.current;
       // epoch berubah → respons ini sudah basi (dibatalkan oleh closeEditorView,
@@ -1144,6 +1278,10 @@ export default function PosWorkspace({
             setEditingOrder(null);
             setEditCart(null);
             editIdempotencyRef.current = null;
+            editingOrderRef.current = null;
+            editModeRef.current = 'create';
+            editSavedRevisionRef.current = null;
+            reportDirtyToParent();
           }
           return false;
         }
@@ -1214,27 +1352,18 @@ export default function PosWorkspace({
           code: typeof it.item_code_snapshot === 'string' ? it.item_code_snapshot : '',
         }));
 
-        // ── P3 race guard: draft berubah selama GET sinkronisasi ───────────
-        // Hanya pada jalur sync pasca-PUT (preserveSuccess). Bila pengguna
-        // mengubah draft setelah GET dimulai, snapshot server dianggap BASI
-        // untuk draft: jangan timpa cart/meta pengguna.
-        // - Version tetap dinaikkan ke nilai server (monoton) agar PUT
-        //   berikutnya memakai expected_version yang benar.
-        // - Identitas item baru (tanpa orderItemId) dilengkapi dari items[]
-        //   server agar simpan berikutnya tidak INSERT duplikat.
-        // - Status PAID/VOIDED di server tetap mengunci editor (readonly).
-        // - Loading tetap berakhir; status sinkronisasi dilaporkan jujur.
+        const isPaidOrder = (appliedPaidOrderIdRef.current === orderId || localPaidOrderId === orderId);
+        const effectiveStatus = isPaidOrder ? 'PAID' : status;
+        const effectiveEditMode = effectiveStatus === 'OPEN' ? 'edit' : 'readonly';
+
+        // P3 race guard: draft berubah selama GET sinkronisasi pasca-PUT
         if (preserveSuccess && editDraftRevisionRef.current !== draftRevisionAtStart) {
           setEditingOrder((prev) => (
             prev && prev.orderId === orderId
-              ? { ...prev, version: Math.max(prev.version, version) }
+              ? { ...prev, version: Math.max(prev.version, version), status: effectiveStatus }
               : prev
           ));
-          // Identitas item baru (P3): petakan HANYA baris yang benar-benar
-          // dikirim dalam snapshot PUT terakhir — dikaitkan lewat localId dan
-          // dicocokkan dengan tanda identitas penuh (menu + notes + diskon
-          // item), BUKAN FIFO menu pada draft terkini. Baris yang lahir setelah
-          // snapshot tidak dipetakan (memang belum pernah disimpan).
+          // Rekonsiliasi identitas item baru via snapshot PUT terakhir
           const snapshot = editPutSnapshotRef.current;
           const mapping = mapPutNewItemIds(
             snapshot && snapshot.orderId === orderId ? snapshot : null,
@@ -1254,11 +1383,13 @@ export default function PosWorkspace({
               return changed ? next : prev;
             });
           }
-          if (status !== 'OPEN') setEditMode('readonly');
+          if (effectiveStatus !== 'OPEN') setEditMode('readonly');
           setEditLoading(false);
-          // Pemetaan tidak dapat dipastikan (jumlah kandidat ≠ jumlah baris
-          // snapshot) → blokir simpan. Draft tetap dipertahankan; pengguna
-          // diberi jalan keluar eksplisit (muat ulang detail).
+          // Pemetaan tidak pasti -> blokir simpan lanjutan
+          editServerSnapshotRef.current = null;
+          editIdentityUnresolvedRef.current = mapping.unresolved
+            ? 'Identitas item baru tidak dapat dipastikan dari respons server, jadi penyimpanan diblokir agar tidak menulis item dengan identitas salah. Draft Anda dipertahankan — muat ulang detail untuk menyinkronkan (draft akan diganti data server).'
+            : null;
           setEditIdentityUnresolved(mapping.unresolved
             ? 'Identitas item baru tidak dapat dipastikan dari respons server, jadi penyimpanan diblokir agar tidak menulis item dengan identitas salah. Draft Anda dipertahankan — muat ulang detail untuk menyinkronkan (draft akan diganti data server).'
             : null);
@@ -1275,7 +1406,7 @@ export default function PosWorkspace({
         setEditingOrder({
           orderId,
           version,
-          status,
+          status: effectiveStatus,
           orderNumber: String(order.order_number ?? ''),
           items,
           tableNumber: typeof order.table_number === 'string' ? order.table_number : null,
@@ -1308,22 +1439,64 @@ export default function PosWorkspace({
             : '',
           orderDiscountInput: order.discount_value == null ? '' : String(order.discount_value),
         });
-        setEditMode(status === 'OPEN' ? 'edit' : 'readonly');
+        setEditMode(effectiveEditMode);
+        editModeRef.current = effectiveEditMode;
+        editingOrderRef.current = {
+          orderId,
+          version,
+          status: effectiveStatus,
+          orderNumber: String(order.order_number ?? ''),
+          items,
+          tableNumber: typeof order.table_number === 'string' ? order.table_number : null,
+          guestName: typeof order.guest_name === 'string' ? order.guest_name : null,
+          guestPhone: typeof order.guest_phone === 'string' ? order.guest_phone : null,
+          orderNotes: typeof order.notes === 'string' ? order.notes : null,
+          discountReason: typeof order.discount_reason === 'string' ? order.discount_reason : null,
+          orderDiscountType: (order.discount_type === 'NOMINAL' || order.discount_type === 'PERCENT') ? order.discount_type : null,
+          orderDiscountValue: order.discount_value == null ? null : Number(order.discount_value),
+          reservationId: order.reservation_id == null ? null : Number(order.reservation_id),
+          svcSnapshotEnabled: order.service_charge_enabled_snapshot === true,
+          svcSnapshotPercent: Number(order.service_charge_percent_snapshot) || 0,
+          taxSnapshotEnabled: order.tax_enabled_snapshot === true,
+          taxSnapshotPercent: Number(order.tax_percent_snapshot) || 0,
+        };
         // Key idempotency baru per siklus (bukan key CREATE dari order.idempotency_key)
         editIdempotencyRef.current = null;
         // Draft di-seed ulang dari server → draft = kondisi tersimpan (baseline
         // revisi baru). Snapshot PUT lama tidak relevan lagi.
         editPutSnapshotRef.current = null;
+        editSavedRevisionRef.current = editDraftRevisionRef.current;
         setEditSavedRevision(editDraftRevisionRef.current);
         setEditIdentityUnresolved(null);
+        editIdentityUnresolvedRef.current = null;
         // P2: jangan clear success bila dipanggil dari saveEditedOrder (sync).
         if (!preserveSuccess) setEditSuccess(null);
+        editAmbiguousRef.current = false;
         setEditAmbiguous(false);
         setEditLoading(false);
+        reportDirtyToParent();
+        reportUnresolvedToParent();
         // Draft sudah sinkron dengan server - bersihkan sync warning bila ada.
         if (preserveSuccess) setEditSyncWarning(null);
+        editServerSnapshotRef.current = {
+          orderId,
+          propertyId,
+          orderNumber: String(order.order_number ?? ''),
+          status: effectiveStatus,
+          version,
+          totalAmount: Number.isFinite(Number(order.total_amount)) ? (order.total_amount as number | string) : 0,
+          guestName: typeof order.guest_name === 'string' ? order.guest_name : null,
+          guestPhone: typeof order.guest_phone === 'string' ? order.guest_phone : null,
+          tableNumber: typeof order.table_number === 'string' ? order.table_number : null,
+          reservationId: order.reservation_id == null ? null : Number(order.reservation_id),
+          epoch,
+          draftRevision: draftRevisionAtStart,
+          timestamp: Date.now(),
+        };
+        deferredResolve(true);
         return true;
       } catch (networkErr) {
+        editServerSnapshotRef.current = null;
         if (isStale()) return false;
         if (preserveSuccess) {
           setEditSyncWarning('Gagal memuat ulang detail order (network error). Gunakan "Muat Ulang Detail".');
@@ -1335,6 +1508,7 @@ export default function PosWorkspace({
         console.error('[PosWorkspace] loadOrderDetail network error:', networkErr);
         return false;
       } finally {
+        deferredResolve(false);
         // P3c: GET selesai (sukses/gagal/network) → buka blokir simpan lanjutan.
         // Hanya pemilik epoch terbaru yang boleh membersihkan; respons basi
         // tidak boleh membuka blokir milik GET yang lebih baru.
@@ -1355,6 +1529,34 @@ export default function PosWorkspace({
     setEditConflict(null);
     void loadOrderDetail(editingOrder.orderId);
   }, [editingOrder, loadOrderDetail]);
+
+  /**
+   * POS-EDIT-1B (taf1): muat detail order dari Riwayat, lalu pindah ke
+   * register. State register tetap ter-mount saat Riwayat tampil,
+   * sehingga draft CREATE tidak ter-reset.
+   */
+  const openEditOrderInRegister = (orderId: number): void => {
+    if (editSubmittingRef.current || editSaving || editAmbiguousRef.current || editAmbiguous) {
+      alert('Tunggu proses simpan/pembayaran order saat ini selesai sebelum membuka order lain.');
+      return;
+    }
+    // Membuka kembali order yang SAMA yang sedang diedit: pertahankan draft
+    // (jangan melakukan reseed diam-diam setelah dialog menyatakan draft dipertahankan).
+    if (editingOrder !== null && editingOrder.orderId === orderId) {
+      setActiveTab('register');
+      return;
+    }
+    if (editingOrder !== null && editingOrder.orderId !== orderId && hasUnsavedEditChanges) {
+      if (!window.confirm(`Ada perubahan draft yang belum disimpan pada order #${editingOrder.orderNumber}. Yakin ingin membuang draft dan membuka order lain?`)) {
+        return;
+      }
+    }
+    editPayIntentIdRef.current += 1;
+    editPayPendingRef.current = false;
+    setEditPayPending(false);
+    setActiveTab('register');
+    void loadOrderDetail(orderId);
+  };
 
   /**
    * saveEditedOrder() — PUT /api/pos/orders/:id dengan body dari
@@ -1416,6 +1618,7 @@ export default function PosWorkspace({
       // (mencegah menulis item dengan identitas salah / duplikat). Pesan dan
       // tombol pemulihan sudah ditampilkan di panel editor.
       if (editIdentityUnresolved !== null) return false;
+      if (editIdentityUnresolvedRef.current !== null) return false;
       // P3c: GET sinkronisasi detail masih berjalan → identitas item tersimpan
       // belum dipastikan. Guard SINKRON (ref), tidak bergantung pada render
       // berikutnya yang menonaktifkan tombol.
@@ -1537,6 +1740,8 @@ export default function PosWorkspace({
 
       editSubmittingRef.current = true;
       setEditSaving(true);
+      // POS-EDIT-1B (taf2): notifikasi parent request mutatif in-flight.
+      reportPendingToParent();
 
       try {
         const res = await authFetch(`/api/pos/orders/${editingOrder.orderId}`, {
@@ -1556,8 +1761,12 @@ export default function PosWorkspace({
             setEditingOrder((prev) =>
               prev ? { ...prev, version: newVersion } : prev
             );
+            if (editingOrderRef.current && editingOrderRef.current.orderId === editingOrder.orderId) {
+              editingOrderRef.current = { ...editingOrderRef.current, version: newVersion };
+            }
             setEditError(null);
             setEditConflict(null);
+            editConflictRef.current = null;
             setEditSaving(false);
             // POS-EDIT-1B.3: catat sukses + versi server; hapus flag ambigu.
             setEditSuccess({
@@ -1565,13 +1774,18 @@ export default function PosWorkspace({
               version: newVersion,
               orderNumber: editingOrder.orderNumber,
             });
+            editAmbiguousRef.current = false;
             setEditAmbiguous(false);
             // P3b: draft yang barusan dikirim = kondisi tersimpan. Bila draft
             // berubah lagi setelah ini (termasuk selama PUT), revision menjadi
             // lebih besar → UI menawarkan "Simpan Perubahan" pada order yang
             // sama tanpa menghapus status PUT sukses.
+            editSavedRevisionRef.current = submittedRevision;
             setEditSavedRevision(submittedRevision);
             setEditIdentityUnresolved(null);
+            editIdentityUnresolvedRef.current = null;
+            reportUnresolvedToParent();
+            reportDirtyToParent();
             // POS-EDIT-1B.4: notifikasi parent sekali — refresh daftar POS orders
             // + bump refresh panel reservasi scoped. TIDAK memanggil onOpenCashPayment.
             onOrderEdited?.({
@@ -1602,6 +1816,9 @@ export default function PosWorkspace({
           }
           // Sukses tapi shape tidak valid → ambiguous, pertahankan snapshot.
           setEditError('Server membalas sukses tetapi data order tidak lengkap. Gunakan "Coba Lagi".');
+          editAmbiguousRef.current = true;
+          setEditAmbiguous(true);
+          reportUnresolvedToParent();
           setEditSaving(false);
           return false;
         }
@@ -1612,36 +1829,48 @@ export default function PosWorkspace({
           const msg = String((errJson as { message?: string }).message ?? '');
           if (code === 'ORDER_VERSION_CONFLICT') {
             // Perlu reload detail — kunci editor sampai reload.
-            setEditConflict({ code, message: msg || 'Versi order sudah berubah. Muat ulang detail.' });
+            const conflictObj = { code, message: msg || 'Versi order sudah berubah. Muat ulang detail.' };
+            editConflictRef.current = conflictObj;
+            setEditConflict(conflictObj);
             setEditError(null);
+            editAmbiguousRef.current = false;
             setEditAmbiguous(false);
+            reportUnresolvedToParent();
             setEditSaving(false);
             return false;
           }
           if (code === 'PRICING_TOTAL_CHANGED') {
             // Jangan simpan diam-diam — tampilkan perbedaan total.
             setEditError(msg || 'Total order berubah. Periksa kembali harga properti.');
+            editConflictRef.current = null;
             setEditConflict(null);
             // Buang snapshot: pengajuan definitif ditolak, boleh submit ulang.
             editIdempotencyRef.current = null;
+            editAmbiguousRef.current = false;
             setEditAmbiguous(false);
+            reportUnresolvedToParent();
             setEditSaving(false);
             return false;
           }
           if (code === 'IDEMPOTENCY_KEY_CONFLICT') {
             // Jangan otomatis ganti key — snapshot dipertahankan untuk retry identik.
             setEditError(msg || 'Idempotency key sudah dipakai untuk payload berbeda. Gunakan siklus edit baru.');
+            editConflictRef.current = null;
             setEditConflict(null);
             setEditSaving(false);
             return false;
           }
           if (code === 'ORDER_NOT_OPEN' || code === 'FINANCIAL_LOCK') {
             // Kunci editor permanen (order sudah terminal / financial lock).
+            editModeRef.current = 'readonly';
             setEditMode('readonly');
             setEditError(msg || 'Order tidak dapat diedit (status berubah / terkunci).');
+            editConflictRef.current = null;
             setEditConflict(null);
             editIdempotencyRef.current = null;
+            editAmbiguousRef.current = false;
             setEditAmbiguous(false);
+            reportUnresolvedToParent();
             setEditSaving(false);
             return false;
           }
@@ -1649,7 +1878,9 @@ export default function PosWorkspace({
           // buang snapshot agar submit berikutnya memakai key baru.
           setEditError(msg || `Konflik (HTTP 409). ${code}`);
           editIdempotencyRef.current = null;
+          editAmbiguousRef.current = false;
           setEditAmbiguous(false);
+          reportUnresolvedToParent();
           setEditSaving(false);
           return false;
         }
@@ -1660,7 +1891,9 @@ export default function PosWorkspace({
           setEditError(msg);
           // Buang snapshot: ditolak definitif, boleh submit ulang dengan key baru.
           editIdempotencyRef.current = null;
+          editAmbiguousRef.current = false;
           setEditAmbiguous(false);
+          reportUnresolvedToParent();
           setEditSaving(false);
           return false;
         }
@@ -1670,6 +1903,7 @@ export default function PosWorkspace({
           const msg = String((errJson as { message?: string }).message ?? 'Akses ditolak.');
           setEditError(msg);
           // Kunci editor: izin tidak valid, jangan retry.
+          editModeRef.current = 'readonly';
           setEditMode('readonly');
           editIdempotencyRef.current = null;
           setEditSaving(false);
@@ -1682,7 +1916,9 @@ export default function PosWorkspace({
           const msg = String((errJson as { message?: string }).message ?? `Server error (HTTP ${res.status}).`);
           setEditError(msg + ' Snapshot dipertahankan — gunakan "Coba Lagi" untuk retry identik.');
           // POS-EDIT-1B.3: tandai ambiguous agar UI menampilkan "Coba Lagi".
+          editAmbiguousRef.current = true;
           setEditAmbiguous(true);
+          reportUnresolvedToParent();
           setEditSaving(false);
           return false;
         }
@@ -1692,29 +1928,121 @@ export default function PosWorkspace({
         const msg = String((errJson as { message?: string }).message ?? `Gagal menyimpan (HTTP ${res.status}).`);
         setEditError(msg);
         editIdempotencyRef.current = null;
+        editAmbiguousRef.current = false;
         setEditAmbiguous(false); // error definitif: hapus flag ambigu
+        reportUnresolvedToParent();
         setEditSaving(false);
         return false;
       } catch (networkErr) {
+        editServerSnapshotRef.current = null;
         // Network error → ambiguous, snapshot DIPERTAHANKAN.
         setEditError('Network error saat menyimpan. Snapshot dipertahankan — gunakan "Coba Lagi".');
+        editAmbiguousRef.current = true;
         setEditAmbiguous(true);
+        reportUnresolvedToParent();
         setEditSaving(false);
         console.error('[PosWorkspace] saveEditedOrder network error:', networkErr);
         return false;
       } finally {
         editSubmittingRef.current = false;
         if (editSaving) setEditSaving(false);
+        // POS-EDIT-1B (taf2): PUT selesai — hapus request pending.
+        reportPendingToParent();
       }
     },
-    [editMode, editingOrder, propertyId, canEditPos, canDiscountPos, authFetch, editSaving, editMeta, editCart, editIdentityUnresolved, onOrderEdited, onRefresh, buildEditItemsFromCart, loadOrderDetail]
+    [editMode, editingOrder, propertyId, canEditPos, canDiscountPos, authFetch, editSaving, editMeta, editCart, editIdentityUnresolved, onOrderEdited, onRefresh, buildEditItemsFromCart, loadOrderDetail, onRequestPending]
   );
+  /**
+   * POS-EDIT-1B (taf2): simpan draft EDIT (bila masih ada perubahan),
+   * lalu buka modal pembayaran. Context dibangun dari state server terbaru
+   * yang dikonfirmasi eksplisit via await, bukan membaca closure lama.
+   */
+  const handleEditPay = useCallback(async (): Promise<void> => {
+    // 1. Guard sinkron anti double-click
+    if (editPayPendingRef.current) return;
 
-  // Ref sinkron: orderId yang sudah diterapkan status PAID lokal.
-  // Mencegah effect re-menerapkan perubahan saveResult bila paidOrderId
-  // prop tetap tidak null antar render (mis. App belum reset setelah tutup
-  // modal pembayaran) — satu pembaruan per order, tanpa loop render.
-  const appliedPaidOrderIdRef = useRef<number | null>(null);
+    // 2. Pre-await validation
+    const currentOrder = editingOrderRef.current;
+    if (!currentOrder) return;
+    if (editModeRef.current !== 'edit') return;
+    if (propertyIdRef.current === null || propertyIdRef.current === undefined) return;
+    if (!canEditPos) return;
+    if (currentOrder.status !== 'OPEN') return;
+    if (editSubmittingRef.current) return;
+    if (editDetailInFlightRef.current) return;
+    if (editIdentityUnresolvedRef.current !== null) return;
+    if (editConflictRef.current !== null) return;
+    if (editAmbiguousRef.current) return;
+
+    const targetOrderId = currentOrder.orderId;
+    const targetPropertyId = propertyIdRef.current;
+    const initialRevision = editDraftRevisionRef.current;
+    const isDirty = hasUnsavedEditChanges;
+    const payIntentId = ++editPayIntentIdRef.current;
+
+    editPayPendingRef.current = true;
+    setEditPayPending(true);
+
+    try {
+      if (isDirty) {
+        // Draft kotor: simpan draft (PUT) terlebih dahulu
+        const saveOk = await saveEditedOrder();
+        if (!saveOk || editPayIntentIdRef.current !== payIntentId) return;
+
+        // saveEditedOrder memicu loadOrderDetail(..., true) pasca-PUT.
+        // Await promise sinkronisasi secara eksplisit (tanpa polling timer).
+        const syncPromise = editDetailPromiseRef.current;
+        const syncOk = syncPromise ? await syncPromise : false;
+        if (!syncOk || editPayIntentIdRef.current !== payIntentId) return;
+      } else {
+        // Draft bersih: muat snapshot server terverifikasi untuk order & property ini
+        const getOk = await loadOrderDetail(targetOrderId, true);
+        if (!getOk || editPayIntentIdRef.current !== payIntentId) return;
+      }
+
+      // Validasi post-await (lifecycle, session, property, order, revisi, conflict, status)
+      if (editPayIntentIdRef.current !== payIntentId) return;
+      if (editModeRef.current !== 'edit') return;
+      const latestOrder = editingOrderRef.current;
+      if (!latestOrder || latestOrder.orderId !== targetOrderId) return;
+      if (propertyIdRef.current !== targetPropertyId) return;
+      // Perubahan draft baru selama await membatalkan niat pembayaran
+      if (editDraftRevisionRef.current !== initialRevision) return;
+      if (latestOrder.status !== 'OPEN') return;
+      if (appliedPaidOrderIdRef.current === targetOrderId || localPaidOrderId === targetOrderId) return;
+      if (editIdentityUnresolvedRef.current !== null) return;
+      if (editConflictRef.current !== null) return;
+      if (editAmbiguousRef.current) return;
+
+      // Validasi snapshot server otoritatif
+      const snap = editServerSnapshotRef.current;
+      if (!snap || snap.orderId !== targetOrderId || snap.propertyId !== targetPropertyId) return;
+      if (snap.status !== 'OPEN') return;
+
+      const totalAmountStr = String(snap.totalAmount ?? '').trim();
+      const totalAmountNum = Number(totalAmountStr);
+      if (!totalAmountStr || !Number.isFinite(totalAmountNum) || totalAmountNum <= 0) return;
+
+      // Bangun context pembayaran dari snapshot server terbaru
+      const ctx: PosPayCashOrderContext = {
+        propertyId: targetPropertyId,
+        orderId: targetOrderId,
+        orderNumber: snap.orderNumber,
+        totalAmount: totalAmountStr,
+        guestName: snap.guestName,
+        reservationId: snap.reservationId,
+      };
+
+      // Context EDIT tidak boleh menimpa payCtxRef CREATE!
+      // Status tidak diubah menjadi PAID hanya karena modal dibuka.
+      onOpenCashPayment?.(ctx);
+    } finally {
+      if (editPayIntentIdRef.current === payIntentId) {
+        editPayPendingRef.current = false;
+        setEditPayPending(false);
+      }
+    }
+  }, [canEditPos, hasUnsavedEditChanges, saveEditedOrder, loadOrderDetail, onOpenCashPayment, localPaidOrderId]);
 
   // Effect: signal pembayaran dari App — bila cocok saveResult.order
   // (propertyId EKSAK + orderId EKSAK), tandai order lokal sebagai PAID.
@@ -1742,8 +2070,40 @@ export default function PosWorkspace({
         message: `Order ${sr.order.order_number} LUNAS (pembayaran terverifikasi).`,
         order: { ...sr.order, status: 'PAID' },
       });
+      return;
     }
-  }, [paidOrderId, saveResult, propertyId]);
+
+    // POS-EDIT-1B (taf2): Branch 2 — order dari Riwayat (propertyId/orderId cocok).
+    // Kunci mutasi + sembunyikan Bayar setelah PAID terverifikasi.
+    if (
+      propertyId != null &&
+      paidOrderId.propertyId === propertyId &&
+      editingOrder !== null &&
+      editingOrder.orderId === paidOrderId.orderId &&
+      editingOrder.status !== 'PAID'
+    ) {
+      setLocalPaidOrderId(paidOrderId.orderId);
+      appliedPaidOrderIdRef.current = paidOrderId.orderId;
+      if (editingOrderRef.current && editingOrderRef.current.orderId === paidOrderId.orderId) {
+        editingOrderRef.current = { ...editingOrderRef.current, status: 'PAID' };
+      }
+      setEditingOrder((prev) =>
+        prev && prev.orderId === paidOrderId.orderId
+          ? { ...prev, status: 'PAID' }
+          : prev
+      );
+      editModeRef.current = 'readonly';
+      setEditMode('readonly');
+      if (editServerSnapshotRef.current?.orderId === paidOrderId.orderId) {
+        editServerSnapshotRef.current.status = 'PAID';
+      }
+      editPayIntentIdRef.current += 1;
+      if (editPayPendingRef.current) {
+        editPayPendingRef.current = false;
+        setEditPayPending(false);
+      }
+    }
+  }, [paidOrderId, saveResult, propertyId, editingOrder]);
 
   // ── Inisialisasi identitas dari reservasi (hanya saat draft baru) ─────────
   // guestNameInitial mengisi ulang field "Nama Tamu" HANYA saat:
@@ -1837,6 +2197,7 @@ export default function PosWorkspace({
   useEffect(() => {
     if (cart.length > 0 && saveResult?.ok) {
       setSaveResult(null);
+      ambiguousRef.current = false;
       setAmbiguous(false);
       idempotencySnapshotRef.current = null;
       if (pricingSettings.status === 'ready') {
@@ -1846,22 +2207,31 @@ export default function PosWorkspace({
     }
   }, [cart.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Notifikasi parent saat isi cart berubah (untuk guard close modal).
+  // Notifikasi parent saat status dirty CREATE atau EDIT berubah (untuk guard close modal / pindah properti).
   useEffect(() => {
-    onCartChange?.(cart.length > 0);
-  }, [cart, onCartChange]);
+    const createDirty = cart.length > 0;
+    const editDirty = editingOrder !== null && editDraftRevision > (editSavedRevision ?? 0);
+    onCartChange?.(createDirty || editDirty);
+  }, [cart, editingOrder, editDraftRevision, editSavedRevision, onCartChange]);
 
-  // Notifikasi request in-flight ke parent (sinkron, dipakai guard close/switch).
+  // Notifikasi request mutatif in-flight gabungan (CREATE + EDIT) ke parent.
   useEffect(() => {
-    onRequestPending?.(saving);
-  }, [saving, onRequestPending]);
+    const isPending = Boolean(saving || editSaving || submittingRef.current || editSubmittingRef.current);
+    onRequestPending?.(isPending);
+  }, [saving, editSaving, onRequestPending]);
 
-  // Notifikasi status unresolved (snapshot ambigu) ke parent.
+  // Notifikasi status unresolved/ambigu gabungan (CREATE + EDIT) ke parent.
   // Parent memakai ref sinkron: saat unresolved, close/property-switch yang
   // membuang snapshot harus dicegah; Retry tetap bisa digunakan.
   useEffect(() => {
-    onUnresolvedChange?.(ambiguous);
-  }, [ambiguous, onUnresolvedChange]);
+    const isUnresolved = Boolean(
+      ambiguous ||
+      idempotencySnapshotRef.current?.unresolved === true ||
+      editAmbiguous ||
+      editAmbiguousRef.current
+    );
+    onUnresolvedChange?.(isUnresolved);
+  }, [ambiguous, editAmbiguous, onUnresolvedChange]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -2061,7 +2431,7 @@ export default function PosWorkspace({
     // Input validation is complete before publishing pending; failures cannot strand the close guard.
     submittingRef.current = true;
     setSaving(true);
-    onRequestPending?.(true);
+    reportPendingToParent();
 
     try {
       const res = await authFetch('/api/pos/orders', {
@@ -2151,14 +2521,17 @@ export default function PosWorkspace({
           // Sukses nyata: reset draft + snapshot + key + ambigu.
           // Notifikasi unresolved=false LANGSUNG (sinkron, bukan menunggu
           // useEffect) — hanya dipanggil SETELAH sukses terverifikasi.
-          onUnresolvedChange?.(false);
+          ambiguousRef.current = false;
+          idempotencySnapshotRef.current = null;
+          cartRef.current = [];
+          reportUnresolvedToParent();
+          reportDirtyToParent();
           setCart([]);
           setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('PERCENT');
           setOrderDiscountInput(''); setDiscountReason('');
           setAmbiguous(false);
           setLocalPaidOrderId(null);
           appliedPaidOrderIdRef.current = null;
-          idempotencySnapshotRef.current = null;
           // Reset toggle svc/tax ke default properti (bukan ke OFF paksa)
           // agar draft baru mengikuti pengaturan properti saat ini.
           // TIDAK memanggil setSvcToggleOn/setTaxToggleOn dari dalam updater
@@ -2189,7 +2562,8 @@ export default function PosWorkspace({
           }
           // Notifikasi unresolved LANGSUNG (sinkron, bukan menunggu useEffect) —
           // parent aktifkan guard close/switch sebelum pending dilepas di finally.
-          onUnresolvedChange?.(true);
+          ambiguousRef.current = true;
+          reportUnresolvedToParent();
           setAmbiguous(true);
           setSaveResult({
             ok: false,
@@ -2325,7 +2699,8 @@ export default function PosWorkspace({
         }
         // Notifikasi unresolved LANGSUNG — guard close/switch aktif sebelum
         // pending dilepas di finally.
-        onUnresolvedChange?.(true);
+        ambiguousRef.current = true;
+        reportUnresolvedToParent();
         setAmbiguous(true);
         setSaveResult({
           ok: false,
@@ -2360,7 +2735,8 @@ export default function PosWorkspace({
       }
       // Notifikasi unresolved LANGSUNG — guard close/switch aktif sebelum
       // pending dilepas di finally.
-      onUnresolvedChange?.(true);
+      ambiguousRef.current = true;
+      reportUnresolvedToParent();
       setAmbiguous(true);
       setSaveResult({
         ok: false,
@@ -2375,7 +2751,7 @@ export default function PosWorkspace({
       // Lepaskan pending LANGSUNG di tick yang sama (sinkron) — parent (App)
       // memakai ref, jadi guard close/switch terbebas tepat saat request selesai.
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
-      onRequestPending?.(false);
+      reportPendingToParent();
     }
   }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason, svcToggleOn, taxToggleOn, pricingSettings, draftPreview]);
 
@@ -2531,7 +2907,16 @@ export default function PosWorkspace({
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('orders')}
+          onClick={() => {
+            // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
+            if (editSubmittingRef.current || editDetailInFlightRef.current) {
+              alert('Tunggu request selesai sebelum berpindah tab.'); return;
+            }
+            if (editingOrder !== null && hasUnsavedEditChanges) {
+              if (!confirm('Ada perubahan edit yang belum disimpan. Draft dipertahankan — lanjutkan?')) return;
+            }
+            setActiveTab('orders');
+          }}
           className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
             activeTab === 'orders'
               ? 'bg-purple-900 text-white shadow-xs'
@@ -2592,12 +2977,23 @@ export default function PosWorkspace({
 
             {/* Menu Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {filteredMenu.map((item) => (
+              {filteredMenu.map((item) => {
+                const isEditSession = editMode !== 'create' && editingOrder !== null;
+                const catalogLocked = isEditSession ? !canMutateEditDraft() : draftLocked;
+                return (
                 <div
                   key={item.id}
-                  onClick={() => addToCart(item)}
+                  onClick={() => {
+                    // POS-EDIT-1B (taf1): katalog menambah ke cart edit saat EDIT aktif
+                    if (editMode !== 'create' && editingOrder !== null) {
+                      if (!canMutateEditDraft()) return;
+                      addNewEditCartLine(item);
+                    } else {
+                      addToCart(item);
+                    }
+                  }}
                   className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all group ${
-                    draftLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
+                    catalogLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
                   }`}
                 >
                   <div>
@@ -2625,261 +3021,748 @@ export default function PosWorkspace({
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
           {/* Right: Cart / Order Slip (1 col) */}
           <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between h-fit space-y-4">
             <div>
-              <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-                <h3 className="font-bold text-sm text-gray-900">Slip Pesanan</h3>
-                <span className="text-xs bg-purple-50 text-purple-700 font-semibold px-2 py-0.5 rounded-full">
-                  {cart.reduce((c, l) => c + l.qty, 0)} Items
-                </span>
-              </div>
+            {editingOrder !== null ? (
+              <div>
 
-              {/* Table & Guest Form — terkunci saat pending/ambigu agar
-                   payload replay tetap identik dengan snapshot */}
-              <div className={`my-3 space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
-                {/* ── Mode POS header: pilih tamu menginap ATAU pelanggan manual ── */}
-                {showGuestPicker && !pickedGuest && (
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">Tamu</label>
-                    <GuestPicker
-                      propertyId={propertyId!}
-                      authFetch={authFetch}
-                      disabled={draftLocked}
-                      onGuestSelected={(g) => {
-                        // Guard: jangan ubah pickedGuest/nama/konteks saat
-                        // draft ter-lock atau request sedang in-flight.
-                        if (draftLocked || submittingRef.current) return;
-                        setPickedGuest(g);
-                        setGuestPhone('');
-                        // Set guest_name dari reservasi — hanya bila draft masih kosong
-                        // (tidak menyentuh draft yang sudah ada).
-                        if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
-                          setGuestName(g.guest_name || 'Walk-in Guest');
-                        }
-                      }}
-                    />
+              <div className="bg-white border border-purple-200 rounded-2xl shadow-xs overflow-hidden">
+                {/* Header panel */}
+                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-purple-900 text-sm">
+                      {editingOrder.orderNumber}
+                    </span>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                      editMode === 'readonly'
+                        ? 'bg-gray-100 text-gray-600 border-gray-200'
+                        : 'bg-purple-50 text-purple-700 border-purple-200'
+                    }`}>
+                      {editingOrder.status}
+                    </span>
+                    <span className="text-[11px] text-gray-400">v{editingOrder.version}</span>
                   </div>
-                )}
-
-                {/* ── Tamu reservasi dipilih: identitas read-only ── */}
-                {showGuestPicker && pickedGuest && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] uppercase font-bold text-gray-500">Tamu Terhubung</span>
+                  <div className="flex gap-2">
+                    {editMode === 'edit' && !editConflict && (!editSuccess || hasUnsavedEditChanges) && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={closeEditorView}
+                          disabled={editSaving}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void saveEditedOrder()}
+                          disabled={editSaving || editLoading || editConflict !== null || editIdentityUnresolved !== null || (editCart !== null && editCart.length === 0)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-900 text-white hover:bg-purple-800 disabled:opacity-40 cursor-pointer"
+                        >
+                          {editSaving ? 'Menyimpan…' : (hasUnsavedEditChanges ? 'Simpan Perubahan' : 'Simpan')}
+                        </button>
+                      </>
+                    )}
+                    {/* Bayar — simpan draft (bila dirty) lalu buka modal pembayaran CASH */}
+                    {onOpenCashPayment && editMode === 'edit' && !editConflict && editingOrder !== null && editingOrder.status === 'OPEN' && (
                       <button
                         type="button"
-                        onClick={() => {if (canMutateDraft()) {setPickedGuest(null); setGuestPhone('');}}}
-                        disabled={draftLocked}
-                        className="text-[10px] text-gray-400 hover:text-gray-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        onClick={() => void handleEditPay()}
+                        disabled={editSaving || editLoading || editPayPending || editIdentityUnresolved !== null || editAmbiguous}
+                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 cursor-pointer"
                       >
-                        Hapus
+                        {editPayPending ? 'Menunggu simpan…' : 'Bayar'}
+                      </button>
+                    )}
+                    {/* Navigasi TIDAK dikunci saat editLoading: GET detail yang
+                        masih berjalan dibatalkan lewat epoch guard
+                        (closeEditorView menaikkan editDetailEpochRef), bukan
+                        dengan menonaktifkan tombol Batal/Kembali. */}
+                    <button
+                      type="button"
+                      onClick={closeEditorView}
+                      disabled={editSaving}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
+                    >
+                      Kembali ke Riwayat
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-4 space-y-4">
+
+                  {/* ── Konflik 409 (ORDER_VERSION_CONFLICT) ───────────────── */}
+                  {editConflict && (
+                    <div role="alert" className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs text-amber-800 space-y-2">
+                      <p className="font-semibold">⚠ {editConflict.message}</p>
+                      <p>Detail order sudah berubah di server. Muat ulang untuk melanjutkan.</p>
+                      <button
+                        type="button"
+                        onClick={reloadEditDetail}
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs cursor-pointer"
+                      >
+                        Muat Ulang Detail
                       </button>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
-                        Kamar {pickedGuest.room_number || '-'}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
-                        {pickedGuest.guest_name || 'Tamu'}
-                      </span>
-                      {pickedGuest.reservation_id && (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-purple-50 text-purple-800 border border-purple-200">
-                          Res #{String(pickedGuest.reservation_id)}
-                        </span>
+                  )}
+
+                  {/* ── Error definitif / ambiguous ────────────────────────── */}
+                  {!editConflict && editError && (
+                    <div role="alert" className={`rounded-xl p-3 text-xs space-y-2 border ${
+                      editAmbiguous
+                        ? 'bg-orange-50 border-orange-300 text-orange-800'
+                        : 'bg-red-50 border-red-300 text-red-800'
+                    }`}>
+                      <p className="font-semibold">{editError}</p>
+                      {editAmbiguous && (
+                        <button
+                          type="button"
+                          onClick={() => void saveEditedOrder()}
+                          disabled={editSaving}
+                          className="px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs cursor-pointer disabled:opacity-40"
+                        >
+                          Coba Lagi (retry identik)
+                        </button>
+                      )}
+                      {(editError.includes('Muat ulang') || editError.includes('total')) && !editAmbiguous && (
+                        <button
+                          type="button"
+                          onClick={reloadEditDetail}
+                          className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold text-xs cursor-pointer"
+                        >
+                          Muat Ulang Detail
+                        </button>
                       )}
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {/* ── Form input: Nomor Meja (hanya saat pelanggan manual) + Nama Tamu ── */}
-                <div className="grid grid-cols-2 gap-2">
-                  {/* Nomor Meja (manual) ATAU Kamar readonly (reservasi scoped/header) */}
-                  {reservationId != null ? (
-                    // Dari reservasi asal (scoped): Kamar readonly memakai roomNumberInitial
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
-                      <input
-                        type="text"
-                        value={roomNumberInitial ?? ''}
-                        readOnly
-                        disabled
-                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
-                      />
-                    </div>
-                  ) : showGuestPicker && pickedGuest ? (
-                    // Dari header dengan tamu terpilih: Kamar readonly memakai pickedGuest.room_number
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
-                      <input
-                        type="text"
-                        value={pickedGuest.room_number || ''}
-                        readOnly
-                        disabled
-                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
-                      />
-                    </div>
-                  ) : (
-                    // Pelanggan manual: Nomor Meja editable
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Nomor Meja</label>
-                      <input
-                        type="text"
-                        value={tableNumber}
-                        onChange={(e) => {if (canMutateDraft()) setTableNumber(e.target.value);}}
-                        disabled={draftLocked}
-                        className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
-                      />
+                  {/* ── Identitas item tidak dapat dipastikan (P3b) ─────────── */}
+                  {editIdentityUnresolved && (
+                    <div role="alert" className="bg-red-50 border border-red-300 rounded-xl p-3 text-xs text-red-800 space-y-2">
+                      <p className="font-semibold">⛔ {editIdentityUnresolved}</p>
+                      <button
+                        type="button"
+                        onClick={reloadEditDetail}
+                        className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold text-xs cursor-pointer"
+                      >
+                        Muat Ulang Detail
+                      </button>
                     </div>
                   )}
-                  {/* Nama Tamu — read-only bila reservasi terhubung (header/scoped),
-                      input biasa bila pelanggan manual */}
-                  {(showGuestPicker && pickedGuest) || reservationId != null ? (
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
-                      <input
-                        type="text"
-                        value={pickedGuest ? (pickedGuest.guest_name ?? '') : (guestNameInitial ?? guestName)}
-                        readOnly
-                        disabled
-                        className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
-                      />
+
+                  {/* ── Sukses ─────────────────────────────────────────────── */}
+                  {!editError && !editConflict && editSuccess && (
+                    <div role="status" className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 text-xs text-emerald-800 space-y-2">
+                      <p className="font-semibold">
+                        ✓ Order {editSuccess.orderNumber} berhasil disimpan — versi {editSuccess.version}
+                      </p>
+                      <p>Total versi server: <strong>{formatIDR(editSuccess.total_amount)}</strong></p>
+                      <p className="text-emerald-600">
+                        Order tidak dibuat baru; pembayaran tidak diproses otomatis.
+                      </p>
+                      {hasUnsavedEditChanges && !editIdentityUnresolved && (
+                        <p className="text-amber-800 border-t border-emerald-200 pt-1.5 font-semibold">
+                          ● Ada perubahan draft SETELAH penyimpanan terakhir — perubahan ini belum tersimpan.
+                          {editLoading
+                            ? ' Sinkronisasi detail masih berjalan; simpan lanjutan diaktifkan setelah sinkronisasi selesai.'
+                            : ' Gunakan tombol "Simpan Perubahan" untuk menyimpan ke order yang sama.'}
+                        </p>
+                      )}
+                      {editSyncWarning && (
+                        <p className="text-amber-700 border-t border-emerald-200 pt-1.5 font-medium">
+                          ⚠ {editSyncWarning}
+                        </p>
+                      )}
                     </div>
-                  ) : (
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
-                      <input
-                        type="text"
-                        value={guestName}
-                        onChange={(e) => {if (canMutateDraft()) setGuestName(e.target.value);}}
-                        disabled={draftLocked}
-                        className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
-                      />
+                  )}
+
+                  {/* ── Detail order (read-only saat PAID/VOIDED, editable saat OPEN) ── */}
+                  {!editConflict && (
+                    <div className={`space-y-3 ${editSaving ? 'opacity-60 pointer-events-none' : ''}`}>
+
+                      {/* Metadata editable (hanya editMode='edit') */}
+                      {editMode === 'edit' && editMeta && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Meja</label>
+                            <input
+                              type="text"
+                              maxLength={20}
+                              value={editMeta.tableNumber}
+                              onChange={e => updateEditMeta({ tableNumber: e.target.value })}
+                              className="w-full border border-gray-200 rounded-lg p-1.5"
+                              placeholder="Tabel / Takeaway"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Nama Tamu</label>
+                            <input
+                              type="text"
+                              maxLength={100}
+                              value={editMeta.guestName}
+                              onChange={e => updateEditMeta({ guestName: e.target.value })}
+                              className="w-full border border-gray-200 rounded-lg p-1.5"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">No. WhatsApp</label>
+                            <input
+                              type="tel"
+                              maxLength={50}
+                              value={editMeta.guestPhone}
+                              onChange={e => updateEditMeta({ guestPhone: e.target.value })}
+                              className="w-full border border-gray-200 rounded-lg p-1.5"
+                              placeholder="Opsional"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Order</label>
+                            <input
+                              type="text"
+                              maxLength={1000}
+                              value={editMeta.orderNotes}
+                              onChange={e => updateEditMeta({ orderNotes: e.target.value })}
+                              className="w-full border border-gray-200 rounded-lg p-1.5"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Alasan Diskon</label>
+                            <input
+                              type="text"
+                              maxLength={100}
+                              value={editMeta.discountReason}
+                              onChange={e => updateEditMeta({ discountReason: e.target.value })}
+                              className="w-full border border-gray-200 rounded-lg p-1.5"
+                            />
+                          </div>
+                          <div className="flex items-end gap-2">
+                            <div>
+                              <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Order</label>
+                              <select
+                                value={editMeta.orderDiscountType}
+                                onChange={e => updateEditMeta({ orderDiscountType: e.target.value as EditMetaDraft['orderDiscountType'] })}
+                                className="border border-gray-200 rounded-lg p-1.5 text-xs w-24"
+                              >
+                                <option value="">—</option>
+                                <option value="NOMINAL">NOMINAL</option>
+                                <option value="PERCENT">PERCENT</option>
+                              </select>
+                            </div>
+                            {editMeta.orderDiscountType !== '' && (
+                              <div>
+                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
+                                  {editMeta.orderDiscountType === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={editMeta.orderDiscountInput}
+                                  onChange={e => updateEditMeta({ orderDiscountInput: e.target.value })}
+                                  className="border border-gray-200 rounded-lg p-1.5 text-xs w-28"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Metadata read-only (PAID/VOIDED atau saat conflict) */}
+                      {editMode === 'readonly' && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-gray-600 space-y-1">
+                          <div><strong className="text-gray-500">Meja:</strong> {editingOrder.tableNumber ?? 'Takeaway'}</div>
+                          <div><strong className="text-gray-500">Nama Tamu:</strong> {editingOrder.guestName ?? 'Walk-in Guest'}</div>
+                          <div><strong className="text-gray-500">No. WhatsApp:</strong> {editingOrder.guestPhone ?? '—'}</div>
+                          <div><strong className="text-gray-500">Catatan:</strong> {editingOrder.orderNotes ?? '—'}</div>
+                          <div><strong className="text-gray-500">Alasan Diskon:</strong> {editingOrder.discountReason ?? '—'}</div>
+                          <div>
+                            <strong className="text-gray-500">Diskon Order:</strong>{' '}
+                            {editingOrder.orderDiscountType
+                              ? `${editingOrder.orderDiscountType} ${editingOrder.orderDiscountValue ?? 0}`
+                              : '—'}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Service charge & PBJT snapshot (read-only) */}
+                      <div className="flex gap-4 text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-2">
+                        <span>
+                          Service Charge: <strong>{editingOrder.svcSnapshotEnabled ? `ON (${editingOrder.svcSnapshotPercent}%)` : 'OFF'}</strong>
+                        </span>
+                        <span>
+                          PBJT: <strong>{editingOrder.taxSnapshotEnabled ? `ON (${editingOrder.taxSnapshotPercent}%)` : 'OFF'}</strong>
+                        </span>
+                      </div>
+
+                      {/* ── Cart items ───────────────────────────────────────── */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+                            Item Pesanan ({(editCart ?? []).length})
+                          </h3>
+                          {editMode === 'edit' && !editSaving && !editConflict && (
+                            <span className="text-[11px] text-gray-400">
+                              Item new memakai harga live; item existing mempertahankan snapshot.
+                            </span>
+                          )}
+                        </div>
+
+                        {(editCart ?? []).map((line, idx) => (
+                          <div
+                            key={line.orderItemId ?? `new-${line.menuItemId}-${idx}`}
+                            className="border border-gray-200 rounded-xl p-3 space-y-2 bg-gray-50/30"
+                          >
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-2 flex-1 min-w-0">
+                                <span className="font-mono text-xs font-bold text-gray-900 truncate">
+                                  {line.name}
+                                </span>
+                                <span className="text-[11px] text-gray-400">
+                                  @ {formatIDR(line.unit_price)}
+                                </span>
+                                {line.orderItemId === undefined && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">BARU</span>
+                                )}
+                              </div>
+
+                              {/* Qty control */}
+                              {editMode === 'edit' && !editSaving && !editConflict ? (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => updateEditCartQuantity(idx, -1)}
+                                    disabled={line.quantity <= 1}
+                                    className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 disabled:opacity-30 cursor-pointer"
+                                    aria-label="Kurangi jumlah"
+                                  >−</button>
+                                  <span className="w-8 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateEditCartQuantity(idx, 1)}
+                                    className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 cursor-pointer"
+                                    aria-label="Tambah jumlah"
+                                  >+</button>
+                                </div>
+                              ) : (
+                                <span className="text-xs font-bold text-gray-900">× {line.quantity}</span>
+                              )}
+
+                              {/* Hapus item (hanya edit mode, dan bukan baris terakhir) */}
+                              {editMode === 'edit' && !editSaving && !editConflict && (editCart?.length ?? 0) > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeEditCartLine(idx)}
+                                  className="text-[11px] text-red-600 hover:text-red-800 font-semibold underline cursor-pointer"
+                                >
+                                  Hapus
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Notes & discount item */}
+                            {editMode === 'edit' && !editSaving && !editConflict ? (
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                                <div>
+                                  <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Item</label>
+                                  <input
+                                    type="text"
+                                    maxLength={1000}
+                                    value={line.notes ?? ''}
+                                    onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
+                                    className="w-full border border-gray-200 rounded p-1 bg-white"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Item</label>
+                                  <select
+                                    value={line.discount_type ?? ''}
+                                    onChange={e => updateEditCartItemMeta(idx, {
+                                      discount_type: (e.target.value === '' ? null : e.target.value as 'NOMINAL' | 'PERCENT'),
+                                    })}
+                                    className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
+                                  >
+                                    <option value="">—</option>
+                                    <option value="NOMINAL">NOMINAL</option>
+                                    <option value="PERCENT">PERCENT</option>
+                                  </select>
+                                </div>
+                                {line.discount_type !== null && (
+                                  <div>
+                                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
+                                      {line.discount_type === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
+                                    </label>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      value={line.discount_value ?? ''}
+                                      onChange={e => updateEditCartItemMeta(idx, {
+                                        discount_value: e.target.value === '' ? null : Number(e.target.value),
+                                      })}
+                                      className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-gray-500 space-y-0.5">
+                                {line.notes && <p><strong className="text-gray-400">Catatan:</strong> {line.notes}</p>}
+                                {line.discount_type && (
+                                  <p><strong className="text-gray-400">Diskon:</strong> {line.discount_type} {line.discount_value ?? 0}{line.discount_type === 'PERCENT' ? '%' : ' IDR'}</p>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="flex justify-between text-[11px] text-gray-500">
+                              <span>Subtotal</span>
+                              <span className="font-bold text-gray-700">{formatIDR(line.unit_price * line.quantity)}</span>
+                            </div>
+                          </div>
+                        ))}
+
+                        {/* Tambah menu baru (hanya edit mode, dan cart belum kosong) */}
+                        {editMode === 'edit' && !editSaving && !editConflict && (
+                          <div>
+                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1">Tambah Menu</label>
+                            <select
+                              value=""
+                              onChange={e => {
+                                const sel = posMenu.find(m => String(m.id) === e.target.value);
+                                if (sel) addNewEditCartLine(sel);
+                              }}
+                              className="w-full sm:w-64 border border-gray-300 rounded-lg p-2 text-xs bg-white cursor-pointer"
+                            >
+                              <option value="" disabled>— pilih menu —</option>
+                              {posMenu.map(m => {
+                                const alreadyInCart = (editCart ?? []).some(l => l.menuItemId === m.id);
+                                return (
+                                  <option key={m.id} value={m.id}>
+                                    {m.name} ({m.item_code ?? ''}){alreadyInCart ? '  [sudah ada]' : ''}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            {editCart && editCart.length > 0 && (
+                              <p className="text-[10px] text-gray-400 mt-0.5">
+                                Menambahkan menu yang sudah ada akan membuat baris baru (badge BARU); item existing tidak diubah otomatis.
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Preview total edit */}
+                        {editPreview && (
+                          <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs space-y-1">
+                            <div className="flex justify-between text-purple-700">
+                              <span>Estimasi Subtotal</span>
+                              <span>{formatIDR(editPreview.subtotal)}</span>
+                            </div>
+                            {editPreview.orderDiscount > 0 && (
+                              <div className="flex justify-between text-purple-600">
+                                <span>Diskon Order</span>
+                                <span>-{formatIDR(editPreview.orderDiscount)}</span>
+                              </div>
+                            )}
+                            {editPreview.serviceCharge > 0 && (
+                              <div className="flex justify-between text-purple-600">
+                                <span>Service Charge</span>
+                                <span>{formatIDR(editPreview.serviceCharge)}</span>
+                              </div>
+                            )}
+                            {editPreview.tax > 0 && (
+                              <div className="flex justify-between text-purple-600">
+                                <span>PBJT</span>
+                                <span>{formatIDR(editPreview.tax)}</span>
+                              </div>
+                            )}
+                            <div className="flex justify-between font-bold text-purple-900 pt-1 border-t border-purple-100">
+                              <span>Total Estimasi</span>
+                              <span>{formatIDR(editPreview.total)}</span>
+                            </div>
+                            <p className="text-[10px] text-purple-400 italic">
+                              Estimasi lokal. Total final dihitung server (harga DB + kalkulasi otoritatif).
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Blok: semua item dihapus */}
+                        {editCart !== null && editCart.length === 0 && editMode === 'edit' && (
+                          <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
+                            Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau tekan "Kembali ke Riwayat".
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Loading detail */}
+                  {editLoading && (
+                    <div className="text-xs text-gray-500 flex items-center gap-2">
+                      <span className="w-4 h-4 border-2 border-purple-300 border-t-purple-900 rounded-full animate-spin" />
+                      Memuat detail order…
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="space-y-2 mb-3">
-                <label className="block text-xs font-semibold text-gray-600">Nomor WhatsApp untuk struk (opsional)
-                  <input type="tel" maxLength={50} value={guestPhone} disabled={draftLocked}
-                    onChange={e => {if (canMutateDraft()) setGuestPhone(e.target.value);}}
-                    placeholder="08… atau +62…" className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
-                </label>
-                <label className="block text-xs font-semibold text-gray-600">Catatan pesanan (opsional)
-                  <textarea maxLength={1000} rows={2} value={orderNotes} disabled={draftLocked}
-                    onChange={e => {if (canMutateDraft()) setOrderNotes(e.target.value);}}
-                    className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
-                </label>
               </div>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                  <h3 className="font-bold text-sm text-gray-900">Slip Pesanan</h3>
+                  <span className="text-xs bg-purple-50 text-purple-700 font-semibold px-2 py-0.5 rounded-full">
+                    {cart.reduce((c, l) => c + l.qty, 0)} Items
+                  </span>
+                </div>
 
-              {/* Cart Items */}
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {cart.length === 0 ? (
-                  <div className="py-8 text-center text-xs text-gray-400">
-                    Klik item menu di samping untuk menambahkan pesanan.
-                  </div>
-                ) : (
-                  cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => (
-                    <div
-                      key={item.id}
-                      className="flex flex-wrap items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
-                    >
-                      <div className="min-w-0 flex-1 pr-2">
-                        <div className="font-semibold text-gray-800 truncate">{item.name}</div>
-                        <div className="text-gray-500 text-[11px]">
-                          {formatIDR(Number(item.price))}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1.5">
+                {/* Table & Guest Form — terkunci saat pending/ambigu agar
+                     payload replay tetap identik dengan snapshot */}
+                <div className={`my-3 space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
+                  {/* ── Mode POS header: pilih tamu menginap ATAU pelanggan manual ── */}
+                  {showGuestPicker && !pickedGuest && (
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500 block mb-1">Tamu</label>
+                      <GuestPicker
+                        propertyId={propertyId!}
+                        authFetch={authFetch}
+                        disabled={draftLocked}
+                        onGuestSelected={(g) => {
+                          // Guard: jangan ubah pickedGuest/nama/konteks saat
+                          // draft ter-lock atau request sedang in-flight.
+                          if (draftLocked || submittingRef.current) return;
+                          setPickedGuest(g);
+                          setGuestPhone('');
+                          // Set guest_name dari reservasi — hanya bila draft masih kosong
+                          // (tidak menyentuh draft yang sudah ada).
+                          if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
+                            setGuestName(g.guest_name || 'Walk-in Guest');
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {/* ── Tamu reservasi dipilih: identitas read-only ── */}
+                  {showGuestPicker && pickedGuest && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase font-bold text-gray-500">Tamu Terhubung</span>
                         <button
                           type="button"
-                          onClick={() => updateCartQty(item.id, -1)}
+                          onClick={() => {if (canMutateDraft()) {setPickedGuest(null); setGuestPhone('');}}}
                           disabled={draftLocked}
-                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                          className="text-[10px] text-gray-400 hover:text-gray-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         >
-                          -
-                        </button>
-                        <span className="font-bold w-4 text-center">{qty}</span>
-                        <button
-                          type="button"
-                          onClick={() => updateCartQty(item.id, 1)}
-                          disabled={draftLocked}
-                          className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removeFromCart(item.id)}
-                          disabled={draftLocked}
-                          className="text-red-500 hover:text-red-700 ml-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
+                          Hapus
                         </button>
                       </div>
-                      <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
-                        {canDiscountPos && <div className="flex items-center gap-2">
-                          {/* Input angka diskon langsung (placeholder 0, default satuan %).
-                              Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
-                              (01→1, 0050→50) dilakukan pada onChange. */}
-                          <input
-                            aria-label={`Nilai diskon ${item.name}`}
-                            type="text"
-                            inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
-                            value={discountInput}
-                            disabled={draftLocked}
-                            onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
-                            onChange={e => {
-                              if (!canMutateDraft()) return;
-                              const t = (discountType || 'PERCENT') as PosDiscountType;
-                              const val = normalizeDiscountInput(e.target.value, t);
-                              // Saat user mengetik nilai, set juga discountType secara eksplisit
-                              // agar effectiveDiscount tidak gagal mengenali diskon
-                              // (type=''+input='1000' tidak bisa di-aktifkan).
-                              changeLine(item.id, { discountType: t, discountInput: val });
-                            }}
-                            className="w-24 border border-gray-200 rounded p-1 text-xs"
-                            placeholder="0"
-                          />
-                          <select
-                            aria-label={`Satuan diskon ${item.name}`}
-                            value={discountType === 'PERCENT' ? '%' : 'Rp'}
-                            disabled={draftLocked}
-                            onChange={e => {
-                              if (!canMutateDraft()) return;
-                              const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
-                              const currentType = (discountType || 'PERCENT') as PosDiscountType;
-                              // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
-                              // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
-                              if (newType !== currentType) {
-                                changeLine(item.id, { discountType: newType, discountInput: '' });
-                              } else {
-                                changeLine(item.id, { discountType: newType });
-                              }
-                            }}
-                            className="w-14 border border-gray-200 rounded p-1 text-xs"
-                          >
-                            <option value="Rp">Rp</option>
-                            <option value="%">%</option>
-                          </select>
-                        </div>}
-                        {draftPreview.value && <div className="flex justify-between text-gray-600"><span>Total baris</span>
-                          <span>{formatIDR(draftPreview.value.lines[lineIndex].net)}</span></div>}
-                        <input aria-label={`Catatan ${item.name}`} type="text" maxLength={1000} value={notes} disabled={draftLocked}
-                          onChange={e => changeLine(item.id, {notes: e.target.value})} placeholder="Catatan item (opsional)"
-                          className="w-full border border-gray-200 rounded p-1" />
+                      <div className="flex flex-wrap gap-1.5">
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                          Kamar {pickedGuest.room_number || '-'}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
+                          {pickedGuest.guest_name || 'Tamu'}
+                        </span>
+                        {pickedGuest.reservation_id && (
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-purple-50 text-purple-800 border border-purple-200">
+                            Res #{String(pickedGuest.reservation_id)}
+                          </span>
+                        )}
                       </div>
                     </div>
-                  ))
-                )}
+                  )}
+
+                  {/* ── Form input: Nomor Meja (hanya saat pelanggan manual) + Nama Tamu ── */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* Nomor Meja (manual) ATAU Kamar readonly (reservasi scoped/header) */}
+                    {reservationId != null ? (
+                      // Dari reservasi asal (scoped): Kamar readonly memakai roomNumberInitial
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
+                        <input
+                          type="text"
+                          value={roomNumberInitial ?? ''}
+                          readOnly
+                          disabled
+                          className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                        />
+                      </div>
+                    ) : showGuestPicker && pickedGuest ? (
+                      // Dari header dengan tamu terpilih: Kamar readonly memakai pickedGuest.room_number
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Kamar</label>
+                        <input
+                          type="text"
+                          value={pickedGuest.room_number || ''}
+                          readOnly
+                          disabled
+                          className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                        />
+                      </div>
+                    ) : (
+                      // Pelanggan manual: Nomor Meja editable
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Nomor Meja</label>
+                        <input
+                          type="text"
+                          value={tableNumber}
+                          onChange={(e) => {if (canMutateDraft()) setTableNumber(e.target.value);}}
+                          disabled={draftLocked}
+                          className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
+                        />
+                      </div>
+                    )}
+                    {/* Nama Tamu — read-only bila reservasi terhubung (header/scoped),
+                        input biasa bila pelanggan manual */}
+                    {(showGuestPicker && pickedGuest) || reservationId != null ? (
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
+                        <input
+                          type="text"
+                          value={pickedGuest ? (pickedGuest.guest_name ?? '') : (guestNameInitial ?? guestName)}
+                          readOnly
+                          disabled
+                          className="w-full text-xs bg-gray-100 border border-gray-200 rounded-lg p-1.5 mt-0.5 text-gray-500 cursor-not-allowed"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
+                        <input
+                          type="text"
+                          value={guestName}
+                          onChange={(e) => {if (canMutateDraft()) setGuestName(e.target.value);}}
+                          disabled={draftLocked}
+                          className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2 mb-3">
+                  <label className="block text-xs font-semibold text-gray-600">Nomor WhatsApp untuk struk (opsional)
+                    <input type="tel" maxLength={50} value={guestPhone} disabled={draftLocked}
+                      onChange={e => {if (canMutateDraft()) setGuestPhone(e.target.value);}}
+                      placeholder="08… atau +62…" className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
+                  </label>
+                  <label className="block text-xs font-semibold text-gray-600">Catatan pesanan (opsional)
+                    <textarea maxLength={1000} rows={2} value={orderNotes} disabled={draftLocked}
+                      onChange={e => {if (canMutateDraft()) setOrderNotes(e.target.value);}}
+                      className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
+                  </label>
+                </div>
+
+                {/* Cart Items */}
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {cart.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-gray-400">
+                      Klik item menu di samping untuk menambahkan pesanan.
+                    </div>
+                  ) : (
+                    cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => (
+                      <div
+                        key={item.id}
+                        className="flex flex-wrap items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
+                      >
+                        <div className="min-w-0 flex-1 pr-2">
+                          <div className="font-semibold text-gray-800 truncate">{item.name}</div>
+                          <div className="text-gray-500 text-[11px]">
+                            {formatIDR(Number(item.price))}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => updateCartQty(item.id, -1)}
+                            disabled={draftLocked}
+                            className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            -
+                          </button>
+                          <span className="font-bold w-4 text-center">{qty}</span>
+                          <button
+                            type="button"
+                            onClick={() => updateCartQty(item.id, 1)}
+                            disabled={draftLocked}
+                            className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeFromCart(item.id)}
+                            disabled={draftLocked}
+                            className="text-red-500 hover:text-red-700 ml-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                        <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
+                          {canDiscountPos && <div className="flex items-center gap-2">
+                            {/* Input angka diskon langsung (placeholder 0, default satuan %).
+                                Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
+                                (01→1, 0050→50) dilakukan pada onChange. */}
+                            <input
+                              aria-label={`Nilai diskon ${item.name}`}
+                              type="text"
+                              inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                              value={discountInput}
+                              disabled={draftLocked}
+                              onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                              onChange={e => {
+                                if (!canMutateDraft()) return;
+                                const t = (discountType || 'PERCENT') as PosDiscountType;
+                                const val = normalizeDiscountInput(e.target.value, t);
+                                // Saat user mengetik nilai, set juga discountType secara eksplisit
+                                // agar effectiveDiscount tidak gagal mengenali diskon
+                                // (type=''+input='1000' tidak bisa di-aktifkan).
+                                changeLine(item.id, { discountType: t, discountInput: val });
+                              }}
+                              className="w-24 border border-gray-200 rounded p-1 text-xs"
+                              placeholder="0"
+                            />
+                            <select
+                              aria-label={`Satuan diskon ${item.name}`}
+                              value={discountType === 'PERCENT' ? '%' : 'Rp'}
+                              disabled={draftLocked}
+                              onChange={e => {
+                                if (!canMutateDraft()) return;
+                                const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
+                                const currentType = (discountType || 'PERCENT') as PosDiscountType;
+                                // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
+                                // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
+                                if (newType !== currentType) {
+                                  changeLine(item.id, { discountType: newType, discountInput: '' });
+                                } else {
+                                  changeLine(item.id, { discountType: newType });
+                                }
+                              }}
+                              className="w-14 border border-gray-200 rounded p-1 text-xs"
+                            >
+                              <option value="Rp">Rp</option>
+                              <option value="%">%</option>
+                            </select>
+                          </div>}
+                          {draftPreview.value && <div className="flex justify-between text-gray-600"><span>Total baris</span>
+                            <span>{formatIDR(draftPreview.value.lines[lineIndex].net)}</span></div>}
+                          <input aria-label={`Catatan ${item.name}`} type="text" maxLength={1000} value={notes} disabled={draftLocked}
+                            onChange={e => changeLine(item.id, {notes: e.target.value})} placeholder="Catatan item (opsional)"
+                            className="w-full border border-gray-200 rounded p-1" />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
               </div>
+            )}
             </div>
 
             {/* Total & Checkout */}
@@ -3082,112 +3965,119 @@ export default function PosWorkspace({
                   <span>Simulasi cart — tidak tersimpan, tidak dibayar, tidak diposting ke folio.</span>
                 </div>
               )}
-                {/* Real save action — replace demo alert when authFetch is provided */}
-                {authFetch ? (
-                  <>
-                    {!canEditPos && (
-                      <p className="text-[11px] text-stone-500 mb-1">
-                        Anda tidak memiliki izin untuk membuat order POS.
-                      </p>
-                    )}
-                    {/* Dua tombol: "Simpan Pesanan" (OPEN saja) + "Bayar"
-                        (OPEN → langsung CASH payment) bila onOpenCashPayment tersedia.
-                        Kedua tombol disabled saat saving/busy/draft kosong/
-                        tidak ada izin edit. */}
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        disabled={!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy}
-                        onClick={() => void handleSaveOrder()}
-                        className={`flex-1 py-2.5 rounded-xl ${
-                          onOpenCashPayment
-                            ? 'bg-emerald-700 hover:bg-emerald-600'
-                            : 'bg-emerald-800 hover:bg-emerald-700'
-                        } disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer`}
-                      >
-                        {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
-                      </button>
-                      {onOpenCashPayment && (
-                        <button
-                          type="button"
-                          disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy}
-                          onClick={() => void handleSaveAndPay()}
-                          className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
-                        >
-                          {saving ? 'Menyimpan…' : 'Bayar'}
-                        </button>
-                      )}
-                    </div>
-                  {(ambiguous || saveResult) && (
-                    <div
-                      className={`rounded-lg p-2 text-[11px] font-medium ${
-                        saveResult?.ok
-                          ? 'bg-emerald-50 border border-emerald-300 text-emerald-800'
-                          : 'bg-red-50 border border-red-200 text-red-800'
-                      }`}
-                    >
-                       {ambiguous && (
-                         <>
-                           <p className="font-semibold mb-1">Hasil penyimpanan belum diketahui</p>
-                           <p className="mb-2">
-                             Draft &amp; idempotency key terkunci dan tidak dapat diubah —
-                             hanya tombol "Coba Lagi" yang dapat menyelesaikan keadaan ini.
-                             Gunakan tombol di bawah untuk mengirim ulang dengan key &amp;
-                             payload yang sama (aman — tidak membuat order duplikat).
-                             Draft baru dapat dibuat HANYA SETELAH replay sukses terverifikasi.
-                           </p>
-                         </>
-                       )}
-                       {saveResult && <p>{saveResult.message}</p>}
-                       {(ambiguous || !saveResult?.ok) && (
+                {/* CREATE buttons — hanya saat mode CREATE */}
+                {editingOrder === null && (
+                <>
+                    {/* Real save action — replace demo alert when authFetch is provided */}
+                    {authFetch ? (
+                      <>
+                        {!canEditPos && (
+                          <p className="text-[11px] text-stone-500 mb-1">
+                            Anda tidak memiliki izin untuk membuat order POS.
+                          </p>
+                        )}
+                        {/* Dua tombol: "Simpan Pesanan" (OPEN saja) + "Bayar"
+                            (OPEN → langsung CASH payment) bila onOpenCashPayment tersedia.
+                            Kedua tombol disabled saat saving/busy/draft kosong/
+                            tidak ada izin edit. */}
+                        <div className="flex gap-2">
                           <button
                             type="button"
-                            onClick={handleRetrySave}
-                            disabled={saving || !canEditPos}
-                            className="mt-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-[11px] font-bold cursor-pointer"
+                            disabled={!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy}
+                            onClick={() => void handleSaveOrder()}
+                            className={`flex-1 py-2.5 rounded-xl ${
+                              onOpenCashPayment
+                                ? 'bg-emerald-700 hover:bg-emerald-600'
+                                : 'bg-emerald-800 hover:bg-emerald-700'
+                            } disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer`}
                           >
-                           Coba Lagi
-                         </button>
-                       )}
-                        {/* Bayar — hanya untuk order sukses + izin edit + callback tersedia */}
-                        {saveResult?.ok && saveResult.order && canEditPos && onOpenCashPayment &&
-                          propertyId != null &&
-                          payCtxRef.current &&
-                          payCtxRef.current.orderId === saveResult.order.id &&
-                          saveResult.order.status === 'OPEN' &&
-                          localPaidOrderId !== saveResult.order.id && (
+                            {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
+                          </button>
+                          {onOpenCashPayment && (
                             <button
                               type="button"
-                              onClick={() => {
-                                // Pakai context tersimpan (bukan state UI saat ini)
-                                // agar identitas pembayaran stabil.
-                                onOpenCashPayment(payCtxRef.current!);
-                              }}
-                              className="mt-2 px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded text-[11px] font-bold cursor-pointer"
+                              disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy}
+                              onClick={() => void handleSaveAndPay()}
+                              className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
                             >
-                              Bayar
+                              {saving ? 'Menyimpan…' : 'Bayar'}
                             </button>
                           )}
-                        {/* Indikator order sudah LUNAS (lokal atau dari signal App) */}
-                        {saveResult?.ok && saveResult.order && localPaidOrderId === saveResult.order.id && (
-                          <div className="mt-2 text-[11px] font-semibold text-emerald-700">
-                            ✓ LUNAS — pembayaran terverifikasi
-                          </div>
-                        )}
-                    </div>
-                  )}                </>
-              ) : (
-                <button
-                  type="button"
-                  disabled={cart.length === 0 || busy}
-                  onClick={() => {
-                    alert(`[DEMO] Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} (simulasi, tidak tersimpan/diposting).`);
-                    setCart([]);
-                  }}
-                  className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
-                >
-                  [Demo] Bayar
-                </button>
+                        </div>
+                      {(ambiguous || saveResult) && (
+                        <div
+                          className={`rounded-lg p-2 text-[11px] font-medium ${
+                            saveResult?.ok
+                              ? 'bg-emerald-50 border border-emerald-300 text-emerald-800'
+                              : 'bg-red-50 border border-red-200 text-red-800'
+                          }`}
+                        >
+                           {ambiguous && (
+                             <>
+                               <p className="font-semibold mb-1">Hasil penyimpanan belum diketahui</p>
+                               <p className="mb-2">
+                                 Draft &amp; idempotency key terkunci dan tidak dapat diubah —
+                                 hanya tombol "Coba Lagi" yang dapat menyelesaikan keadaan ini.
+                                 Gunakan tombol di bawah untuk mengirim ulang dengan key &amp;
+                                 payload yang sama (aman — tidak membuat order duplikat).
+                                 Draft baru dapat dibuat HANYA SETELAH replay sukses terverifikasi.
+                               </p>
+                             </>
+                           )}
+                           {saveResult && <p>{saveResult.message}</p>}
+                           {(ambiguous || !saveResult?.ok) && (
+                              <button
+                                type="button"
+                                onClick={handleRetrySave}
+                                disabled={saving || !canEditPos}
+                                className="mt-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-[11px] font-bold cursor-pointer"
+                              >
+                               Coba Lagi
+                             </button>
+                           )}
+                            {/* Bayar — hanya untuk order sukses + izin edit + callback tersedia */}
+                            {saveResult?.ok && saveResult.order && canEditPos && onOpenCashPayment &&
+                              propertyId != null &&
+                              payCtxRef.current &&
+                              payCtxRef.current.orderId === saveResult.order.id &&
+                              saveResult.order.status === 'OPEN' &&
+                              localPaidOrderId !== saveResult.order.id && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // Pakai context tersimpan (bukan state UI saat ini)
+                                    // agar identitas pembayaran stabil.
+                                    onOpenCashPayment(payCtxRef.current!);
+                                  }}
+                                  className="mt-2 px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white rounded text-[11px] font-bold cursor-pointer"
+                                >
+                                  Bayar
+                                </button>
+                              )}
+                            {/* Indikator order sudah LUNAS (lokal atau dari signal App) */}
+                            {saveResult?.ok && saveResult.order && localPaidOrderId === saveResult.order.id && (
+                              <div className="mt-2 text-[11px] font-semibold text-emerald-700">
+                                ✓ LUNAS — pembayaran terverifikasi
+                              </div>
+                            )}
+                        </div>
+                      )}                </>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={cart.length === 0 || busy}
+                      onClick={() => {
+                        alert(`[DEMO] Pesanan ${tableNumber} untuk ${guestName} sebesar ${formatIDR(cartSubtotal)} (simulasi, tidak tersimpan/diposting).`);
+                        setCart([]);
+                      }}
+                      className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors shadow-xs cursor-pointer"
+                    >
+                      [Demo] Bayar
+                    </button>
+                  )}
+
+
+                </>
               )}
             </div>
           </div>
@@ -3196,477 +4086,22 @@ export default function PosWorkspace({
         /* Orders History — POS-EDIT-1B.3 */
         <div className="space-y-4">
 
-          {/* ── Editor panel (terlihat saat order detail dimuat) ────────────── */}
+          {/* POS-EDIT-1B (taf1): banner bila editor aktif di register */}
           {editingOrder !== null && (
-            <div className="bg-white border border-purple-200 rounded-2xl shadow-xs overflow-hidden">
-              {/* Header panel */}
-              <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-bold text-purple-900 text-sm">
-                    {editingOrder.orderNumber}
-                  </span>
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
-                    editMode === 'readonly'
-                      ? 'bg-gray-100 text-gray-600 border-gray-200'
-                      : 'bg-purple-50 text-purple-700 border-purple-200'
-                  }`}>
-                    {editingOrder.status}
-                  </span>
-                  <span className="text-[11px] text-gray-400">v{editingOrder.version}</span>
-                </div>
-                <div className="flex gap-2">
-                  {editMode === 'edit' && !editConflict && (!editSuccess || hasUnsavedEditChanges) && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={closeEditorView}
-                        disabled={editSaving}
-                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
-                      >
-                        Batal
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void saveEditedOrder()}
-                        disabled={editSaving || editLoading || editConflict !== null || editIdentityUnresolved !== null || (editCart !== null && editCart.length === 0)}
-                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-900 text-white hover:bg-purple-800 disabled:opacity-40 cursor-pointer"
-                      >
-                        {editSaving ? 'Menyimpan…' : (hasUnsavedEditChanges ? 'Simpan Perubahan' : 'Simpan')}
-                      </button>
-                    </>
-                  )}
-                  {/* Navigasi TIDAK dikunci saat editLoading: GET detail yang
-                      masih berjalan dibatalkan lewat epoch guard
-                      (closeEditorView menaikkan editDetailEpochRef), bukan
-                      dengan menonaktifkan tombol Batal/Kembali. */}
-                  <button
-                    type="button"
-                    onClick={closeEditorView}
-                    disabled={editSaving}
-                    className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
-                  >
-                    Kembali ke Riwayat
-                  </button>
-                </div>
-              </div>
-
-              <div className="p-4 space-y-4">
-
-                {/* ── Konflik 409 (ORDER_VERSION_CONFLICT) ───────────────── */}
-                {editConflict && (
-                  <div role="alert" className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs text-amber-800 space-y-2">
-                    <p className="font-semibold">⚠ {editConflict.message}</p>
-                    <p>Detail order sudah berubah di server. Muat ulang untuk melanjutkan.</p>
-                    <button
-                      type="button"
-                      onClick={reloadEditDetail}
-                      className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs cursor-pointer"
-                    >
-                      Muat Ulang Detail
-                    </button>
-                  </div>
-                )}
-
-                {/* ── Error definitif / ambiguous ────────────────────────── */}
-                {!editConflict && editError && (
-                  <div role="alert" className={`rounded-xl p-3 text-xs space-y-2 border ${
-                    editAmbiguous
-                      ? 'bg-orange-50 border-orange-300 text-orange-800'
-                      : 'bg-red-50 border-red-300 text-red-800'
-                  }`}>
-                    <p className="font-semibold">{editError}</p>
-                    {editAmbiguous && (
-                      <button
-                        type="button"
-                        onClick={() => void saveEditedOrder()}
-                        disabled={editSaving}
-                        className="px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs cursor-pointer disabled:opacity-40"
-                      >
-                        Coba Lagi (retry identik)
-                      </button>
-                    )}
-                    {(editError.includes('Muat ulang') || editError.includes('total')) && !editAmbiguous && (
-                      <button
-                        type="button"
-                        onClick={reloadEditDetail}
-                        className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold text-xs cursor-pointer"
-                      >
-                        Muat Ulang Detail
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* ── Identitas item tidak dapat dipastikan (P3b) ─────────── */}
-                {editIdentityUnresolved && (
-                  <div role="alert" className="bg-red-50 border border-red-300 rounded-xl p-3 text-xs text-red-800 space-y-2">
-                    <p className="font-semibold">⛔ {editIdentityUnresolved}</p>
-                    <button
-                      type="button"
-                      onClick={reloadEditDetail}
-                      className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold text-xs cursor-pointer"
-                    >
-                      Muat Ulang Detail
-                    </button>
-                  </div>
-                )}
-
-                {/* ── Sukses ─────────────────────────────────────────────── */}
-                {!editError && !editConflict && editSuccess && (
-                  <div role="status" className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 text-xs text-emerald-800 space-y-2">
-                    <p className="font-semibold">
-                      ✓ Order {editSuccess.orderNumber} berhasil disimpan — versi {editSuccess.version}
-                    </p>
-                    <p>Total versi server: <strong>{formatIDR(editSuccess.total_amount)}</strong></p>
-                    <p className="text-emerald-600">
-                      Order tidak dibuat baru; pembayaran tidak diproses otomatis.
-                    </p>
-                    {hasUnsavedEditChanges && !editIdentityUnresolved && (
-                      <p className="text-amber-800 border-t border-emerald-200 pt-1.5 font-semibold">
-                        ● Ada perubahan draft SETELAH penyimpanan terakhir — perubahan ini belum tersimpan.
-                        {editLoading
-                          ? ' Sinkronisasi detail masih berjalan; simpan lanjutan diaktifkan setelah sinkronisasi selesai.'
-                          : ' Gunakan tombol "Simpan Perubahan" untuk menyimpan ke order yang sama.'}
-                      </p>
-                    )}
-                    {editSyncWarning && (
-                      <p className="text-amber-700 border-t border-emerald-200 pt-1.5 font-medium">
-                        ⚠ {editSyncWarning}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* ── Detail order (read-only saat PAID/VOIDED, editable saat OPEN) ── */}
-                {!editConflict && (
-                  <div className={`space-y-3 ${editSaving ? 'opacity-60 pointer-events-none' : ''}`}>
-
-                    {/* Metadata editable (hanya editMode='edit') */}
-                    {editMode === 'edit' && editMeta && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Meja</label>
-                          <input
-                            type="text"
-                            maxLength={20}
-                            value={editMeta.tableNumber}
-                            onChange={e => updateEditMeta({ tableNumber: e.target.value })}
-                            className="w-full border border-gray-200 rounded-lg p-1.5"
-                            placeholder="Tabel / Takeaway"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Nama Tamu</label>
-                          <input
-                            type="text"
-                            maxLength={100}
-                            value={editMeta.guestName}
-                            onChange={e => updateEditMeta({ guestName: e.target.value })}
-                            className="w-full border border-gray-200 rounded-lg p-1.5"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">No. WhatsApp</label>
-                          <input
-                            type="tel"
-                            maxLength={50}
-                            value={editMeta.guestPhone}
-                            onChange={e => updateEditMeta({ guestPhone: e.target.value })}
-                            className="w-full border border-gray-200 rounded-lg p-1.5"
-                            placeholder="Opsional"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Order</label>
-                          <input
-                            type="text"
-                            maxLength={1000}
-                            value={editMeta.orderNotes}
-                            onChange={e => updateEditMeta({ orderNotes: e.target.value })}
-                            className="w-full border border-gray-200 rounded-lg p-1.5"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Alasan Diskon</label>
-                          <input
-                            type="text"
-                            maxLength={100}
-                            value={editMeta.discountReason}
-                            onChange={e => updateEditMeta({ discountReason: e.target.value })}
-                            className="w-full border border-gray-200 rounded-lg p-1.5"
-                          />
-                        </div>
-                        <div className="flex items-end gap-2">
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Order</label>
-                            <select
-                              value={editMeta.orderDiscountType}
-                              onChange={e => updateEditMeta({ orderDiscountType: e.target.value as EditMetaDraft['orderDiscountType'] })}
-                              className="border border-gray-200 rounded-lg p-1.5 text-xs w-24"
-                            >
-                              <option value="">—</option>
-                              <option value="NOMINAL">NOMINAL</option>
-                              <option value="PERCENT">PERCENT</option>
-                            </select>
-                          </div>
-                          {editMeta.orderDiscountType !== '' && (
-                            <div>
-                              <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
-                                {editMeta.orderDiscountType === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
-                              </label>
-                              <input
-                                type="number"
-                                min={0}
-                                value={editMeta.orderDiscountInput}
-                                onChange={e => updateEditMeta({ orderDiscountInput: e.target.value })}
-                                className="border border-gray-200 rounded-lg p-1.5 text-xs w-28"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Metadata read-only (PAID/VOIDED atau saat conflict) */}
-                    {editMode === 'readonly' && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-gray-600 space-y-1">
-                        <div><strong className="text-gray-500">Meja:</strong> {editingOrder.tableNumber ?? 'Takeaway'}</div>
-                        <div><strong className="text-gray-500">Nama Tamu:</strong> {editingOrder.guestName ?? 'Walk-in Guest'}</div>
-                        <div><strong className="text-gray-500">No. WhatsApp:</strong> {editingOrder.guestPhone ?? '—'}</div>
-                        <div><strong className="text-gray-500">Catatan:</strong> {editingOrder.orderNotes ?? '—'}</div>
-                        <div><strong className="text-gray-500">Alasan Diskon:</strong> {editingOrder.discountReason ?? '—'}</div>
-                        <div>
-                          <strong className="text-gray-500">Diskon Order:</strong>{' '}
-                          {editingOrder.orderDiscountType
-                            ? `${editingOrder.orderDiscountType} ${editingOrder.orderDiscountValue ?? 0}`
-                            : '—'}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Service charge & PBJT snapshot (read-only) */}
-                    <div className="flex gap-4 text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-2">
-                      <span>
-                        Service Charge: <strong>{editingOrder.svcSnapshotEnabled ? `ON (${editingOrder.svcSnapshotPercent}%)` : 'OFF'}</strong>
-                      </span>
-                      <span>
-                        PBJT: <strong>{editingOrder.taxSnapshotEnabled ? `ON (${editingOrder.taxSnapshotPercent}%)` : 'OFF'}</strong>
-                      </span>
-                    </div>
-
-                    {/* ── Cart items ───────────────────────────────────────── */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">
-                          Item Pesanan ({(editCart ?? []).length})
-                        </h3>
-                        {editMode === 'edit' && !editSaving && !editConflict && (
-                          <span className="text-[11px] text-gray-400">
-                            Item new memakai harga live; item existing mempertahankan snapshot.
-                          </span>
-                        )}
-                      </div>
-
-                      {(editCart ?? []).map((line, idx) => (
-                        <div
-                          key={line.orderItemId ?? `new-${line.menuItemId}-${idx}`}
-                          className="border border-gray-200 rounded-xl p-3 space-y-2 bg-gray-50/30"
-                        >
-                          <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
-                              <span className="font-mono text-xs font-bold text-gray-900 truncate">
-                                {line.name}
-                              </span>
-                              <span className="text-[11px] text-gray-400">
-                                @ {formatIDR(line.unit_price)}
-                              </span>
-                              {line.orderItemId === undefined && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">BARU</span>
-                              )}
-                            </div>
-
-                            {/* Qty control */}
-                            {editMode === 'edit' && !editSaving && !editConflict ? (
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => updateEditCartQuantity(idx, -1)}
-                                  disabled={line.quantity <= 1}
-                                  className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 disabled:opacity-30 cursor-pointer"
-                                  aria-label="Kurangi jumlah"
-                                >−</button>
-                                <span className="w-8 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => updateEditCartQuantity(idx, 1)}
-                                  className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 cursor-pointer"
-                                  aria-label="Tambah jumlah"
-                                >+</button>
-                              </div>
-                            ) : (
-                              <span className="text-xs font-bold text-gray-900">× {line.quantity}</span>
-                            )}
-
-                            {/* Hapus item (hanya edit mode, dan bukan baris terakhir) */}
-                            {editMode === 'edit' && !editSaving && !editConflict && (editCart?.length ?? 0) > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => removeEditCartLine(idx)}
-                                className="text-[11px] text-red-600 hover:text-red-800 font-semibold underline cursor-pointer"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Notes & discount item */}
-                          {editMode === 'edit' && !editSaving && !editConflict ? (
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
-                              <div>
-                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Item</label>
-                                <input
-                                  type="text"
-                                  maxLength={1000}
-                                  value={line.notes ?? ''}
-                                  onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
-                                  className="w-full border border-gray-200 rounded p-1 bg-white"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Item</label>
-                                <select
-                                  value={line.discount_type ?? ''}
-                                  onChange={e => updateEditCartItemMeta(idx, {
-                                    discount_type: (e.target.value === '' ? null : e.target.value as 'NOMINAL' | 'PERCENT'),
-                                  })}
-                                  className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
-                                >
-                                  <option value="">—</option>
-                                  <option value="NOMINAL">NOMINAL</option>
-                                  <option value="PERCENT">PERCENT</option>
-                                </select>
-                              </div>
-                              {line.discount_type !== null && (
-                                <div>
-                                  <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
-                                    {line.discount_type === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={line.discount_value ?? ''}
-                                    onChange={e => updateEditCartItemMeta(idx, {
-                                      discount_value: e.target.value === '' ? null : Number(e.target.value),
-                                    })}
-                                    className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="text-[11px] text-gray-500 space-y-0.5">
-                              {line.notes && <p><strong className="text-gray-400">Catatan:</strong> {line.notes}</p>}
-                              {line.discount_type && (
-                                <p><strong className="text-gray-400">Diskon:</strong> {line.discount_type} {line.discount_value ?? 0}{line.discount_type === 'PERCENT' ? '%' : ' IDR'}</p>
-                              )}
-                            </div>
-                          )}
-
-                          <div className="flex justify-between text-[11px] text-gray-500">
-                            <span>Subtotal</span>
-                            <span className="font-bold text-gray-700">{formatIDR(line.unit_price * line.quantity)}</span>
-                          </div>
-                        </div>
-                      ))}
-
-                      {/* Tambah menu baru (hanya edit mode, dan cart belum kosong) */}
-                      {editMode === 'edit' && !editSaving && !editConflict && (
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1">Tambah Menu</label>
-                          <select
-                            value=""
-                            onChange={e => {
-                              const sel = posMenu.find(m => String(m.id) === e.target.value);
-                              if (sel) addNewEditCartLine(sel);
-                            }}
-                            className="w-full sm:w-64 border border-gray-300 rounded-lg p-2 text-xs bg-white cursor-pointer"
-                          >
-                            <option value="" disabled>— pilih menu —</option>
-                            {posMenu.map(m => {
-                              const alreadyInCart = (editCart ?? []).some(l => l.menuItemId === m.id);
-                              return (
-                                <option key={m.id} value={m.id}>
-                                  {m.name} ({m.item_code ?? ''}){alreadyInCart ? '  [sudah ada]' : ''}
-                                </option>
-                              );
-                            })}
-                          </select>
-                          {editCart && editCart.length > 0 && (
-                            <p className="text-[10px] text-gray-400 mt-0.5">
-                              Menambahkan menu yang sudah ada akan membuat baris baru (badge BARU); item existing tidak diubah otomatis.
-                            </p>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Preview total edit */}
-                      {editPreview && (
-                        <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs space-y-1">
-                          <div className="flex justify-between text-purple-700">
-                            <span>Estimasi Subtotal</span>
-                            <span>{formatIDR(editPreview.subtotal)}</span>
-                          </div>
-                          {editPreview.orderDiscount > 0 && (
-                            <div className="flex justify-between text-purple-600">
-                              <span>Diskon Order</span>
-                              <span>-{formatIDR(editPreview.orderDiscount)}</span>
-                            </div>
-                          )}
-                          {editPreview.serviceCharge > 0 && (
-                            <div className="flex justify-between text-purple-600">
-                              <span>Service Charge</span>
-                              <span>{formatIDR(editPreview.serviceCharge)}</span>
-                            </div>
-                          )}
-                          {editPreview.tax > 0 && (
-                            <div className="flex justify-between text-purple-600">
-                              <span>PBJT</span>
-                              <span>{formatIDR(editPreview.tax)}</span>
-                            </div>
-                          )}
-                          <div className="flex justify-between font-bold text-purple-900 pt-1 border-t border-purple-100">
-                            <span>Total Estimasi</span>
-                            <span>{formatIDR(editPreview.total)}</span>
-                          </div>
-                          <p className="text-[10px] text-purple-400 italic">
-                            Estimasi lokal. Total final dihitung server (harga DB + kalkulasi otoritatif).
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Blok: semua item dihapus */}
-                      {editCart !== null && editCart.length === 0 && editMode === 'edit' && (
-                        <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
-                          Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau tekan "Kembali ke Riwayat".
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Loading detail */}
-                {editLoading && (
-                  <div className="text-xs text-gray-500 flex items-center gap-2">
-                    <span className="w-4 h-4 border-2 border-purple-300 border-t-purple-900 rounded-full animate-spin" />
-                    Memuat detail order…
-                  </div>
-                )}
-              </div>
+            <div className="rounded-lg p-3 bg-purple-50 border border-purple-200 text-purple-800 text-xs flex items-center justify-between gap-2">
+              <span>Order <b>{editingOrder.orderNumber}</b> sedang di-edit di tab Kasir.</span>
+              <button
+                type="button"
+                onClick={() => setActiveTab('register')}
+                className="shrink-0 px-3 py-1 rounded bg-purple-700 hover:bg-purple-600 text-white font-bold text-xs cursor-pointer"
+              >
+                Lanjutkan Edit di Kasir
+              </button>
             </div>
           )}
 
+
           {/* ── Tabel Riwayat (disembunyikan saat editor terbuka) ───────────── */}
-          {editingOrder === null && (
             <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-xs">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs sm:text-sm">
@@ -3692,7 +4127,7 @@ export default function PosWorkspace({
                           <td className="py-3 px-4">
                             <button
                               type="button"
-                              onClick={() => void loadOrderDetail(order.id)}
+                              onClick={() => void openEditOrderInRegister(order.id)}
                               disabled={editLoading}
                               className="font-mono font-semibold text-purple-900 hover:underline hover:text-purple-700 text-xs sm:text-sm cursor-pointer disabled:opacity-40 disabled:no-underline"
                             >
@@ -3726,7 +4161,6 @@ export default function PosWorkspace({
                 </div>
               )}
             </div>
-          )}
         </div>
       )}
     </div>
