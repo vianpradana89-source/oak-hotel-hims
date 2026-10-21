@@ -176,9 +176,9 @@ function harness(handler, overrides = {}) {
       && n.props.children.some(c => c && c.type === tag));
   }
   function itemNotesInput(index) {
-    const div = labelledDivs('Catatan Item', 'input')[index];
-    assert.ok(div, 'Missing item notes input #' + index);
-    return div.props.children.find(c => c && c.type === 'input');
+    const inputs = nodes().filter(n => n.type === 'input' && String(n.props['aria-label'] || '').startsWith('Catatan item'));
+    assert.ok(inputs[index], 'Missing item notes input #' + index);
+    return inputs[index];
   }
   function typeItemNotes(index, value) {
     const n = itemNotesInput(index);
@@ -205,7 +205,7 @@ function harness(handler, overrides = {}) {
     n.props.onChange({target: {value}}); render();
   }
   function removeLine(index) {
-    const btns = nodes().filter(n => n.type === 'button' && label(n) === 'Hapus');
+    const btns = nodes().filter(n => n.type === 'button' && (String(n.props['aria-label'] || '').startsWith('Hapus item') || label(n) === 'Hapus'));
     assert.ok(btns[index], 'Missing Hapus button #' + index);
     assert.equal(!!btns[index].props.disabled, false);
     btns[index].props.onClick(); render();

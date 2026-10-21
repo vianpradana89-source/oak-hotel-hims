@@ -896,6 +896,126 @@ async function lifecycle() {
       headerBtns[refreshIdx].props.onClick();
       assert.equal(refreshed, 1, 'Klik Refresh Data memanggil onRefresh');
     });
+
+    // ── Regression: Layout Kolom Kiri/Kanan & Baris Item Ringkas (CREATE & EDIT) ──
+    {
+      const hCompact = harness(async (url, init = {}) => {
+        const method = (init.method || 'GET').toUpperCase();
+        if (method === 'GET' && String(url).includes('/api/pos/orders/55')) {
+          return json({
+            status: 'SUCCESS',
+            data: {
+              order: {
+                id: 55,
+                order_number: 'POS-55',
+                status: 'OPEN',
+                version: 1,
+                table_number: 'VIP-2',
+                guest_name: 'Siti Aminah',
+                guest_whatsapp_number: '08111222333',
+                notes: 'Pedas sedang',
+                subtotal_amount: 26000,
+                total_amount: 26000,
+                discount_amount: 0,
+                discount_type: null,
+                discount_value: null,
+                discount_reason: null,
+                service_charge_percent_snapshot: 0,
+                service_charge_amount: 0,
+                tax_percent_snapshot: 0,
+                tax_amount: 0,
+              },
+              items: [
+                {
+                  id: 501,
+                  menu_item_id: 1,
+                  quantity: 2,
+                  unit_price: 13000,
+                  subtotal_amount: 26000,
+                  notes: 'hangat',
+                  discount_type: null,
+                  discount_value: null,
+                  discount_amount: 0,
+                  item_name_snapshot: 'Coffee',
+                  item_code_snapshot: 'CF-01',
+                },
+              ],
+            },
+          }, 200);
+        }
+        const b = JSON.parse(init.body);
+        return created(b);
+      }, {
+        posOrders: [
+          { id: 55, order_number: 'POS-55', status: 'OPEN', total_amount: '26000', table_number: 'VIP-2', guest_name: 'Siti Aminah' },
+        ],
+      });
+      await hCompact.settle();
+
+      hCompact.addItem();
+      await hCompact.settle();
+
+      check('Layout kolom kiri memuat KPI + tab + pencarian + katalog; baris CREATE ringkas tanpa label Total baris berulang', () => {
+        const leftCol = hCompact.nodes().find(n => n.type === 'div' && String(n.props?.className || '').includes('lg:col-span-7'));
+        assert.ok(leftCol, 'Kolom kiri lg:col-span-7 tersedia');
+        const leftDescendants = [];
+        (function walkLeft(n) {
+          if (Array.isArray(n)) { n.forEach(walkLeft); return; }
+          if (!n || typeof n !== 'object') return;
+          leftDescendants.push(n);
+          walkLeft(n.props?.children);
+        })(leftCol);
+        assert.ok(leftDescendants.some(n => n.props?.children === 'Menu Aktif'), 'Kartu KPI Menu Aktif berada di kolom kiri');
+        assert.ok(leftDescendants.some(n => n.props?.children === 'Total Pesanan'), 'Kartu KPI Total Pesanan berada di kolom kiri');
+        assert.ok(leftDescendants.some(n => n.props?.children === 'Total Transaksi POS'), 'Kartu KPI Total Transaksi POS berada di kolom kiri');
+        assert.ok(leftDescendants.some(n => n.type === 'button' && String(n.props?.children || '').includes('Kasir')), 'Tab Kasir berada di kolom kiri');
+        assert.ok(leftDescendants.some(n => n.type === 'input' && n.props?.placeholder === 'Cari menu F&B...'), 'Input pencarian katalog berada di kolom kiri');
+
+        const repeatedTotalBaris = hCompact.nodes().some(n => n.type === 'span' && n.props?.children === 'Total baris');
+        assert.equal(repeatedTotalBaris, false, 'Label berulang Total baris per item dihapus');
+
+        const lineTotalSpan = hCompact.nodes().find(n => n.type === 'span' && n.props?.['data-line-total'] === 'Coffee');
+        assert.ok(lineTotalSpan, 'Total baris kanan CREATE tersedia');
+        assert.ok(String(lineTotalSpan.props.children).includes('13.000'), 'Total baris awal Coffee = Rp 13.000');
+      });
+
+      const incCreateBtn = hCompact.nodes().find(n => n.type === 'button' && n.props?.['aria-label'] === 'Tambah jumlah Coffee');
+      incCreateBtn.props.onClick();
+      hCompact.render();
+      hCompact.byAria('Nilai diskon Coffee', '10');
+      hCompact.byAria('Catatan Coffee', 'Less sugar');
+      await hCompact.settle();
+
+      check('CREATE: perubahan qty dan diskon memperbarui total baris kanan canonical; catatan tersimpan di draft', () => {
+        const lineTotalSpan = hCompact.nodes().find(n => n.type === 'span' && n.props?.['data-line-total'] === 'Coffee');
+        assert.ok(String(lineTotalSpan.props.children).includes('23.400'), 'Total baris Coffee setelah qty=2 & diskon 10% = Rp 23.400');
+        const noteInput = hCompact.nodes().find(n => n.type === 'input' && n.props?.['aria-label'] === 'Catatan Coffee');
+        assert.equal(noteInput.props.value, 'Less sugar', 'Catatan item CREATE tersimpan di draft');
+      });
+
+      hCompact.click('Riwayat Order (1)');
+      hCompact.click('POS-55');
+      await hCompact.settle();
+
+      const incEditBtn = hCompact.nodes().find(n => n.type === 'button' && n.props?.['aria-label'] === 'Tambah jumlah');
+      incEditBtn.props.onClick();
+      hCompact.render();
+      hCompact.byAria('Nilai diskon item Coffee', '10');
+      hCompact.byAria('Catatan item Coffee', 'Extra panas');
+      await hCompact.settle();
+
+      check('EDIT: baris ringkas tanpa @ harga satuan & memperbarui total baris kanan canonical serta menyimpan catatan', () => {
+        const hasUnitAtText = hCompact.nodes().some(n => n.type === 'span' && Array.isArray(n.props?.children) && n.props.children[0] === '@ ');
+        assert.equal(hasUnitAtText, false, 'Harga satuan @ di samping nama makanan dihapus pada EDIT');
+        const editLineTotal = hCompact.nodes().find(n => n.type === 'span' && n.props?.['data-edit-line-total'] === 'Coffee');
+        assert.ok(editLineTotal, 'Total baris kanan EDIT tersedia');
+        assert.ok(String(editLineTotal.props.children).includes('35.100'), 'Total baris EDIT Coffee setelah qty=3 & diskon 10% = Rp 35.100');
+        const editNoteInput = hCompact.nodes().find(n => n.type === 'input' && n.props?.['aria-label'] === 'Catatan item Coffee');
+        assert.equal(editNoteInput.props.value, 'Extra panas', 'Catatan item EDIT tersimpan di draft');
+      });
+
+      hCompact.cleanup();
+    }
   }
 }
 (async()=>{if(!contractOnly)await lifecycle();console.log(`\n[RESULT] ${pass} PASS, 0 FAIL${contractOnly?' (contract only; component lifecycle not run)':''}`);})()

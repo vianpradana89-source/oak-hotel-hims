@@ -2815,99 +2815,107 @@ export default function PosWorkspace({
     // handleSaveOrder.
   }, [handleSaveOrder, onOpenCashPayment]);
 
+  const kpiCardsSection = (
+    <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
+        <div className="text-xs text-gray-500 font-medium">Menu Aktif</div>
+        <div className="text-xl sm:text-2xl font-black text-gray-900 mt-0.5">{posMenu.length}</div>
+        <div className="text-[11px] text-gray-400 mt-0.5">Item makanan &amp; minuman</div>
+      </div>
+      <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
+        <div className="text-xs text-gray-500 font-medium">Total Pesanan</div>
+        <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{posOrders.length}</div>
+        <div className="text-[11px] text-gray-400 mt-0.5">Order tercatat</div>
+      </div>
+      <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
+        <div className="text-xs text-gray-500 font-medium">Total Transaksi POS</div>
+        <div className="text-xl sm:text-2xl font-black text-emerald-700 mt-0.5">{formatIDR(totalOrdersAmount)}</div>
+        <div className="text-[11px] text-gray-400 mt-0.5">Akumulasi penjualan</div>
+      </div>
+    </div>
+  );
+
+  const viewSelectorTabsSection = (
+    <div className="shrink-0 flex items-center justify-between gap-2 border-b border-gray-200 pb-2 flex-wrap">
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab('register')}
+          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            activeTab === 'register'
+              ? 'bg-purple-900 text-white shadow-xs'
+              : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+          }`}
+        >
+          Kasir &amp; Menu POS
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
+            if (editSubmittingRef.current || editDetailInFlightRef.current) {
+              alert('Tunggu request selesai sebelum berpindah tab.'); return;
+            }
+            if (editingOrder !== null && hasUnsavedEditChanges) {
+              if (!confirm('Ada perubahan edit yang belum disimpan. Draft dipertahankan — lanjutkan?')) return;
+            }
+            setActiveTab('orders');
+          }}
+          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            activeTab === 'orders'
+              ? 'bg-purple-900 text-white shadow-xs'
+              : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+          }`}
+        >
+          Riwayat Order ({posOrders.length})
+        </button>
+      </div>
+
+      {(reservationId != null || (onCreateDemoOrder && !busy)) && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {reservationId != null && (
+            <>
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                {reservationLabel || `Reservasi #${reservationId}`}
+              </span>
+              {guestNameInitial && (
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
+                  Tamu: {guestNameInitial}
+                </span>
+              )}
+              {roomNumberInitial && (
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                  Kamar {roomNumberInitial}
+                </span>
+              )}
+            </>
+          )}
+          {onCreateDemoOrder && !busy && (
+            <button
+              type="button"
+              onClick={onCreateDemoOrder}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            >
+              [Demo] Buat Order Contoh
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-3 pb-6 lg:pb-0 lg:h-full lg:overflow-hidden">
-      {/* KPI Stats */}
-      <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Menu Aktif</div>
-          <div className="text-xl sm:text-2xl font-black text-gray-900 mt-0.5">{posMenu.length}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">Item makanan &amp; minuman</div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Total Pesanan</div>
-          <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{posOrders.length}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">Order tercatat</div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Total Transaksi POS</div>
-          <div className="text-xl sm:text-2xl font-black text-emerald-700 mt-0.5">{formatIDR(totalOrdersAmount)}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">Akumulasi penjualan</div>
-        </div>
-      </div>
-
-      {/* View Selector Tabs */}
-      <div className="shrink-0 flex items-center justify-between gap-2 border-b border-gray-200 pb-2 flex-wrap">
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setActiveTab('register')}
-            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              activeTab === 'register'
-                ? 'bg-purple-900 text-white shadow-xs'
-                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-            }`}
-          >
-            Kasir &amp; Menu POS
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
-              if (editSubmittingRef.current || editDetailInFlightRef.current) {
-                alert('Tunggu request selesai sebelum berpindah tab.'); return;
-              }
-              if (editingOrder !== null && hasUnsavedEditChanges) {
-                if (!confirm('Ada perubahan edit yang belum disimpan. Draft dipertahankan — lanjutkan?')) return;
-              }
-              setActiveTab('orders');
-            }}
-            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              activeTab === 'orders'
-                ? 'bg-purple-900 text-white shadow-xs'
-                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-            }`}
-          >
-            Riwayat Order ({posOrders.length})
-          </button>
-        </div>
-
-        {(reservationId != null || (onCreateDemoOrder && !busy)) && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {reservationId != null && (
-              <>
-                <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                  {reservationLabel || `Reservasi #${reservationId}`}
-                </span>
-                {guestNameInitial && (
-                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
-                    Tamu: {guestNameInitial}
-                  </span>
-                )}
-                {roomNumberInitial && (
-                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
-                    Kamar {roomNumberInitial}
-                  </span>
-                )}
-              </>
-            )}
-            {onCreateDemoOrder && !busy && (
-              <button
-                type="button"
-                onClick={onCreateDemoOrder}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
-              >
-                [Demo] Buat Order Contoh
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-
       {activeTab === 'register' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start lg:items-stretch lg:flex-1 lg:min-h-0 lg:overflow-hidden">
-          {/* Left: Menu Picker (7 cols on desktop) */}
+          {/* Left: KPI + Tabs + Search/Filter + Menu Picker (7 cols on desktop) */}
           <div className="lg:col-span-7 flex flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-hidden">
+            {/* KPI Stats */}
+            {kpiCardsSection}
+
+            {/* View Selector Tabs */}
+            {viewSelectorTabsSection}
+
             {/* Search & Category Filter */}
             <div className="shrink-0 bg-white border border-gray-200 rounded-2xl p-3.5 shadow-xs space-y-2.5">
               <div className="relative">
@@ -3283,24 +3291,75 @@ export default function PosWorkspace({
                         {(editCart ?? []).map((line, idx) => (
                           <div
                             key={line.orderItemId ?? `new-${line.menuItemId}-${idx}`}
-                            className="border border-gray-200 rounded-xl p-3 space-y-2 bg-gray-50/30"
+                            className="border border-gray-200 rounded-xl p-2.5 space-y-2 bg-gray-50/30"
                           >
                             <div className="flex items-center justify-between gap-2 flex-wrap">
-                              <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-1 min-w-[6rem]">
                                 <span className="font-mono text-xs font-bold text-gray-900 truncate">
                                   {line.name}
                                 </span>
-                                <span className="text-[11px] text-gray-400">
-                                  @ {formatIDR(line.unit_price)}
-                                </span>
                                 {line.orderItemId === undefined && (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">BARU</span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold shrink-0">BARU</span>
                                 )}
                               </div>
 
+                              {/* Diskon item inline */}
+                              {editMode === 'edit' && !editSaving && !editConflict && canDiscountPos && (
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <div className="flex items-center w-20 min-w-0 border border-gray-200 rounded-lg bg-white overflow-hidden">
+                                    <span className="px-1.5 py-1 text-[11px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
+                                      {(line.discount_type ?? 'PERCENT') === 'NOMINAL' ? 'Rp' : '%'}
+                                    </span>
+                                    <input
+                                      aria-label={`Nilai diskon item ${line.name}`}
+                                      type="number"
+                                      min={0}
+                                      max={(line.discount_type ?? 'PERCENT') === 'PERCENT' ? 100 : undefined}
+                                      value={line.discount_value ?? ''}
+                                      onChange={e => {
+                                        const raw = e.target.value;
+                                        if (raw.trim() === '') {
+                                          updateEditCartItemMeta(idx, {
+                                            discount_type: null,
+                                            discount_value: null,
+                                          });
+                                        } else {
+                                          updateEditCartItemMeta(idx, {
+                                            discount_type: line.discount_type ?? 'PERCENT',
+                                            discount_value: Number(raw),
+                                          });
+                                        }
+                                      }}
+                                      placeholder="0"
+                                      className="w-full min-w-0 px-1.5 py-1 text-xs bg-white focus:outline-hidden"
+                                    />
+                                  </div>
+                                  <select
+                                    aria-label={`Satuan diskon item ${line.name}`}
+                                    value={line.discount_type ?? 'PERCENT'}
+                                    onChange={e => {
+                                      const v = e.target.value;
+                                      const nextType: 'NOMINAL' | 'PERCENT' | null =
+                                        (v === 'NOMINAL' || v === 'Rp')
+                                          ? 'NOMINAL'
+                                          : (v === 'PERCENT' || v === '%')
+                                            ? 'PERCENT'
+                                            : null;
+                                      updateEditCartItemMeta(idx, {
+                                        discount_type: nextType,
+                                      });
+                                    }}
+                                    className="w-14 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs font-medium bg-white"
+                                  >
+                                    <option value="NOMINAL">Rp</option>
+                                    <option value="PERCENT">%</option>
+                                  </select>
+                                </div>
+                              )}
+
                               {/* Qty control */}
                               {editMode === 'edit' && !editSaving && !editConflict ? (
-                                <div className="flex items-center gap-1">
+                                <div className="flex items-center gap-1 shrink-0">
                                   <button
                                     type="button"
                                     onClick={() => updateEditCartQuantity(idx, -1)}
@@ -3317,103 +3376,54 @@ export default function PosWorkspace({
                                   >+</button>
                                 </div>
                               ) : (
-                                <span className="text-xs font-bold text-gray-900">× {line.quantity}</span>
+                                <span className="text-xs font-bold text-gray-900 shrink-0">× {line.quantity}</span>
                               )}
+
+                              {/* Total baris (canonical preview net setelah diskon item, sebelum diskon order/service/PBJT) */}
+                              <span
+                                data-edit-line-total={line.name}
+                                className="font-bold text-xs text-gray-900 tabular-nums shrink-0 text-right min-w-[4.75rem]"
+                              >
+                                {editPreview?.lines[idx]
+                                  ? formatIDR(editPreview.lines[idx].net)
+                                  : formatIDR(line.unit_price * line.quantity)}
+                              </span>
 
                               {/* Hapus item (hanya edit mode, dan bukan baris terakhir) */}
                               {editMode === 'edit' && !editSaving && !editConflict && (editCart?.length ?? 0) > 1 && (
                                 <button
                                   type="button"
+                                  aria-label={`Hapus item ${line.name}`}
+                                  title="Hapus item"
                                   onClick={() => removeEditCartLine(idx)}
-                                  className="text-[11px] text-red-600 hover:text-red-800 font-semibold underline cursor-pointer"
+                                  className="w-6 h-6 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 cursor-pointer"
                                 >
-                                  Hapus
+                                  ×
                                 </button>
                               )}
                             </div>
 
-                            {/* Notes & discount item */}
+                            {/* Catatan item selebar baris */}
                             {editMode === 'edit' && !editSaving && !editConflict ? (
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-                                <div>
-                                  <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Item</label>
-                                  <input
-                                    type="text"
-                                    maxLength={1000}
-                                    value={line.notes ?? ''}
-                                    onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
-                                    className="w-full border border-gray-200 rounded-lg px-2 py-1 bg-white text-xs"
-                                  />
-                                </div>
-                                {canDiscountPos && (
-                                  <div>
-                                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Item</label>
-                                    <div className="flex items-center gap-1.5">
-                                      <div className="flex items-center flex-1 min-w-0 border border-gray-200 rounded-lg bg-white overflow-hidden">
-                                        <span className="px-2 py-1 text-[11px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
-                                          {(line.discount_type ?? 'PERCENT') === 'NOMINAL' ? 'Rp' : '%'}
-                                        </span>
-                                        <input
-                                          aria-label={`Nilai diskon item ${line.name}`}
-                                          type="number"
-                                          min={0}
-                                          max={(line.discount_type ?? 'PERCENT') === 'PERCENT' ? 100 : undefined}
-                                          value={line.discount_value ?? ''}
-                                          onChange={e => {
-                                            const raw = e.target.value;
-                                            if (raw.trim() === '') {
-                                              updateEditCartItemMeta(idx, {
-                                                discount_type: null,
-                                                discount_value: null,
-                                              });
-                                            } else {
-                                              updateEditCartItemMeta(idx, {
-                                                discount_type: line.discount_type ?? 'PERCENT',
-                                                discount_value: Number(raw),
-                                              });
-                                            }
-                                          }}
-                                          placeholder="0"
-                                          className="w-full min-w-0 px-2 py-1 text-xs bg-white focus:outline-hidden"
-                                        />
-                                      </div>
-                                      <select
-                                        aria-label={`Satuan diskon item ${line.name}`}
-                                        value={line.discount_type ?? 'PERCENT'}
-                                        onChange={e => {
-                                          const v = e.target.value;
-                                          const nextType: 'NOMINAL' | 'PERCENT' | null =
-                                            (v === 'NOMINAL' || v === 'Rp')
-                                              ? 'NOMINAL'
-                                              : (v === 'PERCENT' || v === '%')
-                                                ? 'PERCENT'
-                                                : null;
-                                          updateEditCartItemMeta(idx, {
-                                            discount_type: nextType,
-                                          });
-                                        }}
-                                        className="w-16 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs font-medium bg-white"
-                                      >
-                                        <option value="NOMINAL">Rp</option>
-                                        <option value="PERCENT">%</option>
-                                      </select>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
+                              <input
+                                aria-label={`Catatan item ${line.name}`}
+                                type="text"
+                                maxLength={1000}
+                                value={line.notes ?? ''}
+                                onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
+                                placeholder="Catatan item (opsional)"
+                                className="w-full border border-gray-200 rounded-lg px-2.5 py-1 bg-white text-xs"
+                              />
                             ) : (
-                              <div className="text-[11px] text-gray-500 space-y-0.5">
-                                {line.notes && <p><strong className="text-gray-400">Catatan:</strong> {line.notes}</p>}
-                                {line.discount_type && (
-                                  <p><strong className="text-gray-400">Diskon:</strong> {line.discount_type} {line.discount_value ?? 0}{line.discount_type === 'PERCENT' ? '%' : ' IDR'}</p>
-                                )}
-                              </div>
+                              (line.notes || line.discount_type) ? (
+                                <div className="text-[11px] text-gray-500 space-y-0.5">
+                                  {line.notes && <p><strong className="text-gray-400">Catatan:</strong> {line.notes}</p>}
+                                  {line.discount_type && (
+                                    <p><strong className="text-gray-400">Diskon:</strong> {line.discount_type} {line.discount_value ?? 0}{line.discount_type === 'PERCENT' ? '%' : ' IDR'}</p>
+                                  )}
+                                </div>
+                              ) : null
                             )}
-
-                            <div className="flex justify-between text-[11px] text-gray-500">
-                              <span>Subtotal</span>
-                              <span className="font-bold text-gray-700">{formatIDR(line.unit_price * line.quantity)}</span>
-                            </div>
                           </div>
                         ))}
 
@@ -3668,100 +3678,119 @@ export default function PosWorkspace({
                     cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => (
                       <div
                         key={item.id}
-                        className="flex flex-wrap items-center justify-between p-2 bg-gray-50 rounded-lg text-xs"
+                        className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-2"
                       >
-                        <div className="min-w-0 flex-1 pr-2">
-                          <div className="font-semibold text-gray-800 truncate">{item.name}</div>
-                          <div className="text-gray-500 text-[11px]">
-                            {formatIDR(Number(item.price))}
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="min-w-[6rem] flex-1">
+                            <div className="font-semibold text-gray-800 truncate">{item.name}</div>
                           </div>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => updateCartQty(item.id, -1)}
-                            disabled={draftLocked}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            -
-                          </button>
-                          <span className="font-bold w-4 text-center">{qty}</span>
-                          <button
-                            type="button"
-                            onClick={() => updateCartQty(item.id, 1)}
-                            disabled={draftLocked}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-gray-200 text-gray-700 font-bold hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            +
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => removeFromCart(item.id)}
-                            disabled={draftLocked}
-                            className="text-red-500 hover:text-red-700 ml-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
-                        </div>
-                        <div className="basis-full mt-2 space-y-2 border-t border-gray-200 pt-2">
-                          {canDiscountPos && <div className="flex items-center gap-2">
-                            {/* Input angka diskon langsung (placeholder 0, default satuan %).
-                                Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
-                                (01→1, 0050→50) dilakukan pada onChange. */}
-                            <div className="flex items-center border border-gray-200 rounded bg-white px-2 py-1 w-28">
-                              <span className="text-xs text-gray-500 mr-1 select-none">
-                                {discountType === 'PERCENT' ? '%' : 'Rp'}
-                              </span>
-                              <input
-                                aria-label={`Nilai diskon ${item.name}`}
-                                type="text"
-                                inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
-                                value={discountInput}
+
+                          {canDiscountPos && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              {/* Input angka diskon langsung (placeholder 0, default satuan %).
+                                  Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
+                                  (01→1, 0050→50) dilakukan pada onChange. */}
+                              <div className="flex items-center border border-gray-200 rounded-lg bg-white px-2 py-1 w-20">
+                                <span className="text-[11px] text-gray-500 mr-1 select-none shrink-0">
+                                  {discountType === 'PERCENT' ? '%' : 'Rp'}
+                                </span>
+                                <input
+                                  aria-label={`Nilai diskon ${item.name}`}
+                                  type="text"
+                                  inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                                  value={discountInput}
+                                  disabled={draftLocked}
+                                  onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                                  onChange={e => {
+                                    if (!canMutateDraft()) return;
+                                    const t = (discountType || 'PERCENT') as PosDiscountType;
+                                    const val = normalizeDiscountInput(e.target.value, t);
+                                    // Saat user mengetik nilai, set juga discountType secara eksplisit
+                                    // agar effectiveDiscount tidak gagal mengenali diskon
+                                    // (type=''+input='1000' tidak bisa di-aktifkan).
+                                    changeLine(item.id, { discountType: t, discountInput: val });
+                                  }}
+                                  className="w-full min-w-0 text-xs outline-none bg-transparent"
+                                  placeholder="0"
+                                />
+                              </div>
+                              <select
+                                aria-label={`Satuan diskon ${item.name}`}
+                                value={discountType === 'PERCENT' ? '%' : 'Rp'}
                                 disabled={draftLocked}
-                                onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
                                 onChange={e => {
                                   if (!canMutateDraft()) return;
-                                  const t = (discountType || 'PERCENT') as PosDiscountType;
-                                  const val = normalizeDiscountInput(e.target.value, t);
-                                  // Saat user mengetik nilai, set juga discountType secara eksplisit
-                                  // agar effectiveDiscount tidak gagal mengenali diskon
-                                  // (type=''+input='1000' tidak bisa di-aktifkan).
-                                  changeLine(item.id, { discountType: t, discountInput: val });
+                                  const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
+                                  const currentType = (discountType || 'PERCENT') as PosDiscountType;
+                                  // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
+                                  // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
+                                  if (newType !== currentType) {
+                                    changeLine(item.id, { discountType: newType, discountInput: '' });
+                                  } else {
+                                    changeLine(item.id, { discountType: newType });
+                                  }
                                 }}
-                                className="w-full text-xs outline-none bg-transparent"
-                                placeholder="0"
-                              />
+                                className="w-14 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs bg-white"
+                              >
+                                <option value="Rp">Rp</option>
+                                <option value="%">%</option>
+                              </select>
                             </div>
-                            <select
-                              aria-label={`Satuan diskon ${item.name}`}
-                              value={discountType === 'PERCENT' ? '%' : 'Rp'}
+                          )}
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              aria-label={`Kurangi jumlah ${item.name}`}
+                              onClick={() => updateCartQty(item.id, -1)}
                               disabled={draftLocked}
-                              onChange={e => {
-                                if (!canMutateDraft()) return;
-                                const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
-                                const currentType = (discountType || 'PERCENT') as PosDiscountType;
-                                // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
-                                // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
-                                if (newType !== currentType) {
-                                  changeLine(item.id, { discountType: newType, discountInput: '' });
-                                } else {
-                                  changeLine(item.id, { discountType: newType });
-                                }
-                              }}
-                              className="w-16 border border-gray-200 rounded p-1 text-xs bg-white"
+                              className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                             >
-                              <option value="Rp">Rp</option>
-                              <option value="%">%</option>
-                            </select>
-                          </div>}
-                          {draftPreview.value && <div className="flex justify-between text-gray-600"><span>Total baris</span>
-                            <span>{formatIDR(draftPreview.value.lines[lineIndex].net)}</span></div>}
-                          <input aria-label={`Catatan ${item.name}`} type="text" maxLength={1000} value={notes} disabled={draftLocked}
-                            onChange={e => changeLine(item.id, {notes: e.target.value})} placeholder="Catatan item (opsional)"
-                            className="w-full border border-gray-200 rounded p-1" />
+                              -
+                            </button>
+                            <span className="font-bold w-6 text-center text-gray-900">{qty}</span>
+                            <button
+                              type="button"
+                              aria-label={`Tambah jumlah ${item.name}`}
+                              onClick={() => updateCartQty(item.id, 1)}
+                              disabled={draftLocked}
+                              className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
+
+                          <span
+                            data-line-total={item.name}
+                            className="font-bold text-gray-900 tabular-nums shrink-0 text-right min-w-[4.75rem]"
+                          >
+                            {draftPreview.value
+                              ? formatIDR(draftPreview.value.lines[lineIndex].net)
+                              : formatIDR(Number(item.price) * qty)}
+                          </span>
+
+                          <button
+                            type="button"
+                            aria-label={`Hapus item ${item.name}`}
+                            title="Hapus item"
+                            onClick={() => removeFromCart(item.id)}
+                            disabled={draftLocked}
+                            className="w-6 h-6 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            ×
+                          </button>
                         </div>
+
+                        <input
+                          aria-label={`Catatan ${item.name}`}
+                          type="text"
+                          maxLength={1000}
+                          value={notes}
+                          disabled={draftLocked}
+                          onChange={e => changeLine(item.id, {notes: e.target.value})}
+                          placeholder="Catatan item (opsional)"
+                          className="w-full border border-gray-200 rounded-lg px-2.5 py-1 bg-white text-xs"
+                        />
                       </div>
                     ))
                   )}
@@ -4099,6 +4128,8 @@ export default function PosWorkspace({
       ) : (
         /* Orders History — POS-EDIT-1B.3 */
         <div className="flex flex-col flex-1 min-h-0 gap-3 lg:overflow-hidden">
+          {kpiCardsSection}
+          {viewSelectorTabsSection}
 
           {/* POS-EDIT-1B (taf1): banner bila editor aktif di register */}
           {editingOrder !== null && (
