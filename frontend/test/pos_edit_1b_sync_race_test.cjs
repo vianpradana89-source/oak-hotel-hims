@@ -158,7 +158,7 @@ function harness(handler, overrides = {}) {
   function nodes() {const out = []; (function walk(n) {if (Array.isArray(n)) {n.forEach(walk); return;} if (!n || typeof n !== 'object') return;
     out.push(n); walk(n.props?.children);})(tree); return out;}
   function label(n) {const flatten = v => Array.isArray(v) ? v.map(flatten).join('') : v && typeof v === 'object' ? flatten(v.props?.children) : v == null ? '' : String(v); return flatten(n.props.children);}
-  function button(text) {const n = nodes().find(n => n.type === 'button' && label(n) === text); assert.ok(n, 'Missing button ' + text); return n;}
+  function button(text) {const n = nodes().find(n => n.type === 'button' && (label(n) === text || n.props['aria-label'] === text)); assert.ok(n, 'Missing button ' + text); return n;}
   function click(text) {const n = button(text); assert.equal(!!n.props.disabled, false, 'Disabled button ' + text); n.props.onClick(); render();}
   function forceClick(text) {const n = button(text); n.props.onClick(); render();}
   function field(name) {
@@ -186,9 +186,9 @@ function harness(handler, overrides = {}) {
     n.props.onChange({target: {value}}); render();
   }
   function itemDiscount(index) {
-    const div = labelledDivs('Diskon Item', 'select')[index];
-    assert.ok(div, 'Missing item discount select #' + index);
-    return div.props.children.find(c => c && c.type === 'select');
+    const sels = nodes().filter(n => n.type === 'select' && String(n.props['aria-label'] || '').startsWith('Satuan diskon item'));
+    assert.ok(sels[index], 'Missing item discount select #' + index);
+    return sels[index];
   }
   function setItemDiscount(index, type) {
     const sel = itemDiscount(index);
@@ -196,9 +196,9 @@ function harness(handler, overrides = {}) {
     sel.props.onChange({target: {value: type}}); render();
   }
   function itemDiscountValue(index) {
-    const div = labelledDivs('Nilai', 'input')[index];
-    assert.ok(div, 'Missing item discount value #' + index);
-    return div.props.children.find(c => c && c.type === 'input');
+    const inputs = nodes().filter(n => n.type === 'input' && String(n.props['aria-label'] || '').startsWith('Nilai diskon item'));
+    assert.ok(inputs[index], 'Missing item discount value #' + index);
+    return inputs[index];
   }
   function setItemDiscountValue(index, value) {
     const n = itemDiscountValue(index);
@@ -216,10 +216,14 @@ function harness(handler, overrides = {}) {
     assert.equal(!!n.props.disabled, false); n.props.onClick(); render();}
   function qtys() {return nodes().filter(n => n.type === 'span' && String(n.props.className || '').includes('w-8'))
     .map(n => Number(label(n)));}
-  function menuSelect() {return nodes().find(n => n.type === 'select'
-    && (n.props.children || []).some(c => c && c.type === 'option' && label(c).includes('pilih menu')));}
-  function addMenu(menuId) {const s = menuSelect(); assert.ok(s, 'Missing "Tambah Menu" select');
-    s.props.onChange({target: {value: String(menuId)}}); render();}
+  function menuSelect() {return null;}
+  function addMenu(menuId) {
+    const m = MENU.find(x => x.id === Number(menuId));
+    assert.ok(m, 'Unknown menu id ' + menuId);
+    const card = nodes().find(n => n.type === 'div' && typeof n.props.onClick === 'function' && label(n).includes(m.name));
+    assert.ok(card, 'Missing menu card for ' + m.name);
+    card.props.onClick(); render();
+  }
   function text() {return nodes().map(n => typeof n.props.children === 'string' ? n.props.children : '').join('\n');}
   function hasText(substr) {return nodes().some(n => label(n).includes(substr));}
   function hasBaruBadge() {return nodes().some(n => n.type === 'span' && label(n) === 'BARU');}
@@ -346,14 +350,14 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
     h.click('Simpan'); await h.settle2();
     assert.equal(h.hasText('Memuat detail order'), true, 'GET sync in-flight');
     // Navigasi tidak boleh dikunci selama editLoading (epoch guard yang menangani).
-    const back = h.button('Kembali ke Riwayat');
-    assert.equal(!!back.props.disabled, false, 'Kembali ke Riwayat TIDAK disabled saat editLoading');
-    h.click('Kembali ke Riwayat'); await h.settle2();
-    assert.equal(h.hasText('Kembali ke Riwayat'), false, 'editor tertutup');
+    const back = h.button('Batalkan edit pesanan');
+    assert.equal(!!back.props.disabled, false, 'Batalkan edit pesanan TIDAK disabled saat editLoading');
+    h.click('Batalkan edit pesanan'); await h.settle2();
+    assert.equal(h.nodes().some(n => n.type === 'button' && n.props['aria-label'] === 'Batalkan edit pesanan'), false, 'editor tertutup');
     assert.ok(h.hasText('POS-501'), 'daftar riwayat tampil kembali');
     d.resolve(detail({version: 2, items: [line(9001, 1, 5)]}));
     await h.settle2();
-    assert.equal(h.hasText('Kembali ke Riwayat'), false, 'respons GET lama tidak membuka editor kembali');
+    assert.equal(h.nodes().some(n => n.type === 'button' && n.props['aria-label'] === 'Batalkan edit pesanan'), false, 'respons GET lama tidak membuka editor kembali');
     assert.equal(h.hasText('Item Pesanan'), false, 'state editor tidak dihidupkan lagi');
     assert.equal(h.hasText('Memuat detail order'), false, 'loading tidak tersisa');
     h.cleanup();
@@ -553,7 +557,7 @@ const idr = n => new Intl.NumberFormat('id-ID', {style: 'currency', currency: 'I
     h.addMenu(2); h.typeItemNotes(1, 'pedas');
     h.addMenu(2); h.typeItemNotes(2, 'manis');
     // Diskon hanya pada baris "manis" (order-level diskon tidak dipakai di test ini).
-    h.setItemDiscount(2, 'NOMINAL'); h.setItemDiscountValue(0, '1000');
+    h.setItemDiscount(2, 'NOMINAL'); h.setItemDiscountValue(2, '1000');
     assert.equal(h.baruCount(), 2);
     h.click('Simpan Perubahan'); await h.settle2();           // PUT#1 membuat 2 item baru
     h.incQty(0);                                    // draft berubah selama GET

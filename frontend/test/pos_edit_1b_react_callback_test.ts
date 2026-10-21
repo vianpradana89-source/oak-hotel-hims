@@ -115,22 +115,23 @@ await check('A8: P4 — saveEditedOrder guards double-submit via editSubmittingR
 });
 
 await check('A9: P3 UX — Batal/Kembali TIDAK dikunci saat editLoading (epoch guard, bukan disabled)', () => {
-  // Cari tombol JSX "Kembali ke Riwayat" yang didahului oleh "disabled={editSaving}"
-  // dalam radius < 300 char. Ulangi semua kemunculan teks karena ada juga
-  // komentar closeEditorView dan teks alert panel yang sama-sama memakai frasa ini.
+  // Cari tombol JSX "Batalkan edit pesanan" yang disertai "disabled={editSaving}"
+  // dalam radius < 300 char.
   let occ = -1, btnIdx = -1;
   while (true) {
-    occ = src.indexOf('Kembali ke Riwayat', occ + 1);
+    occ = src.indexOf('Batalkan edit pesanan', occ + 1);
     if (occ === -1) break;
     const dIdx = src.lastIndexOf('disabled={editSaving}', occ);
-    if (dIdx !== -1 && occ - dIdx < 300) { btnIdx = occ; break; }
+    const dAfterIdx = src.indexOf('disabled={editSaving}', occ);
+    if ((dIdx !== -1 && occ - dIdx < 300) || (dAfterIdx !== -1 && dAfterIdx - occ < 300)) {
+      btnIdx = occ;
+      break;
+    }
   }
-  assert.ok(btnIdx !== -1, 'tombol JSX "Kembali ke Riwayat" tidak ditemukan');
-  const disabledIdx = src.lastIndexOf('disabled={editSaving}', btnIdx);
-  // Navigasi tidak boleh dikunci saat editLoading (race ditangani epoch guard)
-  const windowBefore = src.slice(Math.max(0, disabledIdx - 300), disabledIdx);
+  assert.ok(btnIdx !== -1, 'tombol JSX "Batalkan edit pesanan" tidak ditemukan');
+  const windowAround = src.slice(Math.max(0, btnIdx - 300), btnIdx + 300);
   assert.ok(
-    !windowBefore.includes('disabled={editSaving || editLoading}'),
+    !windowAround.includes('disabled={editSaving || editLoading}'),
     'navigasi tidak boleh mengunci tombol saat editLoading (race ditangani epoch guard)'
   );
 });

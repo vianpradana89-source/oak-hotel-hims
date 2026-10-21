@@ -221,13 +221,13 @@ function harness(handler, overrides = {}) {
   }
 
   function button(text) {
-    const n = nodes().find(n => n.type === 'button' && label(n) === text);
+    const n = nodes().find(n => n.type === 'button' && (label(n) === text || n.props['aria-label'] === text));
     assert.ok(n, 'Missing button ' + text);
     return n;
   }
 
   function findButton(text) {
-    return nodes().find(n => n.type === 'button' && label(n) === text);
+    return nodes().find(n => n.type === 'button' && (label(n) === text || n.props['aria-label'] === text));
   }
 
   function click(text) {
@@ -273,10 +273,9 @@ function harness(handler, overrides = {}) {
   }
 
   function addMenu(menuId) {
-    const s = menuSelect();
-    assert.ok(s, 'Missing "Tambah Menu" select');
-    s.props.onChange({ target: { value: String(menuId) } });
-    render();
+    const m = MENU.find(x => x.id === Number(menuId));
+    assert.ok(m, 'Unknown menu id ' + menuId);
+    clickMenuCard(m.name);
   }
 
   function clickMenuCard(name) {
@@ -583,8 +582,8 @@ const putOk = (version, total) => json({
     h.click('Bayar');
     await h.settle2();
 
-    // Tutup editor
-    h.click('Kembali ke Riwayat');
+    // Tutup editor (ikon × Batalkan edit pesanan)
+    h.click('Batalkan edit pesanan');
     await h.settle2();
 
     // Lepas GET yang tertahan
@@ -702,7 +701,7 @@ const putOk = (version, total) => json({
 
     // 3. Kembali ke alur create dan klik "Bayar" di banner alur CREATE
     // Tutup editor untuk kembali ke Riwayat lalu ke Kasir
-    h.click('Kembali ke Riwayat');
+    h.click('Batalkan edit pesanan');
     await h.settle2();
     h.click('Kasir & Menu POS');
     await h.settle2();
@@ -752,7 +751,7 @@ const putOk = (version, total) => json({
     h.incQty(0);
     assert.equal(h.signals.dirty, true);
     h.setConfirmResult(true);
-    h.click('Batal');
+    h.click('Batalkan edit pesanan');
     await h.settle2();
     assert.equal(h.signals.dirty, false, 'Setelah keluar dari editor, dirty harus dibersihkan');
 
@@ -968,6 +967,100 @@ const putOk = (version, total) => json({
 
     // 5. Pastikan onOpenCashPayment tidak terpanggil
     assert.equal(h.signals.pay.length, 0, 'onOpenCashPayment tidak boleh terpanggil setelah PosWorkspace unmount');
+  });
+
+  // S12. Panel CREATE tersembunyi pada OPEN/PAID, kembali tersedia saat CREATE, dan aksi bawah memakai handler & guard yang sama.
+  await check('S12: Panel CREATE tersembunyi saat membuka order OPEN/PAID, kembali tersedia saat CREATE, serta aksi bawah memakai handler & guard yang sama', async () => {
+    const ORDER_PAID = {
+      id: 503, order_number: 'POS-503', status: 'PAID', total_amount: '20000',
+      table_number: 'C3', guest_name: 'Rina'
+    };
+    const h = harness({
+      get: ({ url }) => {
+        if (url.includes('/503/detail')) {
+          return json({
+            status: 'OK',
+            data: {
+              order: {
+                id: 503, property_id: 7, order_number: 'POS-503', status: 'PAID', version: 1,
+                total_amount: '20000', table_number: 'C3', guest_name: 'Rina',
+                guest_phone: null, notes: null, discount_reason: null, discount_type: null,
+                discount_value: null, reservation_id: null,
+                service_charge_enabled_snapshot: false, service_charge_percent_snapshot: 0,
+                tax_enabled_snapshot: false, tax_percent_snapshot: 0,
+              },
+              items: [line(9003, 2, 2)],
+            },
+          });
+        }
+        return detail({ status: 'OPEN', totalAmount: '26000', guestName: 'Budi' });
+      },
+      put: () => putOk(2, 36000),
+      post: () => json({}, 500),
+    }, {
+      posOrders: [ORDER, ORDER_PAID],
+      canDiscountPos: true,
+    });
+
+    const hasCreateTotalPanel = () => h.nodes().some(n => n.type === 'span' && h.label(n) === 'Total perkiraan');
+
+    // 1. Mode CREATE awal: panel Total & Checkout CREATE ("Total perkiraan" & "Simpan Pesanan") tersedia
+    assert.equal(hasCreateTotalPanel(), true, 'Panel Total perkiraan CREATE harus tampil pada mode CREATE');
+    assert.ok(h.findButton('Simpan Pesanan'), 'Tombol Simpan Pesanan CREATE harus tampil pada mode CREATE');
+
+    // 2. Buka order existing OPEN (POS-501): panel CREATE harus disembunyikan
+    h.click('Riwayat Order (2)');
+    h.click('POS-501');
+    await h.settle2();
+
+    assert.equal(hasCreateTotalPanel(), false, 'Panel Total perkiraan CREATE harus tersembunyi saat membuka order OPEN');
+    assert.equal(h.findButton('Simpan Pesanan'), undefined, 'Tombol Simpan Pesanan CREATE tidak boleh tampil saat mengedit order existing');
+    assert.equal(h.findButton('Kembali ke Riwayat'), undefined, 'Tombol Kembali ke Riwayat di slip harus sudah dihapus');
+    assert.ok(h.findButton('Batalkan edit pesanan'), 'Tombol × (Batalkan edit pesanan) harus ada di header slip');
+
+    // Pastikan dropdown "Tambah Menu" sudah tidak ada di editor
+    const tambahMenuSelect = h.nodes().find(n => n.type === 'select'
+      && (n.props.children || []).some(c => c && c.type === 'option' && h.label(c).includes('pilih menu')));
+    assert.equal(tambahMenuSelect, undefined, 'Dropdown Tambah Menu di editor harus sudah dihapus');
+
+    // Pastikan tombol Simpan dan Bayar berada berdampingan di bagian bawah rincian total
+    const bottomActionGroup = h.nodes().find(n =>
+      n.type === 'div' &&
+      String(n.props.className || '').includes('flex gap-2') &&
+      Array.isArray(n.props.children) &&
+      n.props.children.some(c => c && c.type === 'button' && (h.label(c) === 'Simpan' || h.label(c) === 'Simpan Perubahan')) &&
+      n.props.children.some(c => c && c.type === 'button' && h.label(c) === 'Bayar')
+    );
+    assert.ok(bottomActionGroup, 'Tombol Simpan dan Bayar harus berdampingan (flex gap-2) di bawah rincian total');
+
+    // Uji kartu katalog menambah ke order existing yang sedang aktif, dan tombol bawah memicu PUT + Bayar
+    h.clickMenuCard('Tea');
+    await h.settle2();
+    assert.ok(h.findButton('Simpan Perubahan'), 'Setelah menambah menu dari katalog kiri, tombol bawah berubah menjadi Simpan Perubahan');
+    h.click('Simpan Perubahan');
+    await h.settle2();
+    assert.equal(h.log.puts.length, 1, 'Tombol Simpan Perubahan di bawah harus memakai handler saveEditedOrder yang sama');
+
+    // 3. Buka order PAID (POS-503): panel CREATE tetap tersembunyi, dan tombol Simpan/Bayar tidak ditampilkan
+    h.click('Riwayat Order (2)');
+    h.click('POS-503');
+    await h.settle2();
+
+    assert.equal(hasCreateTotalPanel(), false, 'Panel Total perkiraan CREATE harus tetap tersembunyi saat membuka order PAID');
+    assert.equal(h.findButton('Simpan'), undefined, 'Order PAID tidak boleh menampilkan tombol Simpan');
+    assert.equal(h.findButton('Simpan Perubahan'), undefined, 'Order PAID tidak boleh menampilkan tombol Simpan Perubahan');
+    assert.equal(h.findButton('Bayar'), undefined, 'Order PAID tidak boleh menampilkan tombol Bayar');
+
+    // 4. Klik tombol × (Batalkan edit pesanan) lalu kembali ke tab Kasir: panel CREATE tersedia kembali
+    h.click('Batalkan edit pesanan');
+    await h.settle2();
+    h.click('Kasir & Menu POS');
+    await h.settle2();
+
+    assert.equal(hasCreateTotalPanel(), true, 'Panel Total perkiraan CREATE harus kembali tersedia setelah keluar dari sesi edit');
+    assert.ok(h.findButton('Simpan Pesanan'), 'Tombol Simpan Pesanan CREATE harus kembali tersedia pada mode CREATE');
+
+    h.cleanup();
   });
 
   console.log(`\n[RESULT] ${pass} PASS, ${fail} FAIL`);

@@ -969,21 +969,24 @@ export default function PosWorkspace({
   const editPreview = useMemo<ReturnType<typeof previewPosDraft> | null>(() => {
     if (editCart === null || editingOrder === null) return null;
     try {
-      const lines: PosCartLine[] = editCart.map((l) => ({
-        item: { id: l.menuItemId, name: l.name, price: l.unit_price },
-        qty: l.quantity,
-        discountType: (l.discount_type ?? '') as PosDiscountType,
-        discountInput: l.discount_value == null ? '' : String(l.discount_value),
-        notes: l.notes ?? '',
-      }));
+      const lines: PosCartLine[] = editCart.map((l) => {
+        const hasItemDiscount = l.discount_type !== null && l.discount_value !== null;
+        return {
+          item: { id: l.menuItemId, name: l.name, price: l.unit_price },
+          qty: l.quantity,
+          discountType: (hasItemDiscount ? l.discount_type : '') as PosDiscountType,
+          discountInput: hasItemDiscount ? String(l.discount_value) : '',
+          notes: l.notes ?? '',
+        };
+      });
       // POS-EDIT-1B.4: pakai editMeta bila tersedia (draft form aktif),
       // fallback ke editingOrder (nilai GET detail original).
-      const orderDiscountType = editMeta
-        ? (editMeta.orderDiscountType === '' ? '' : editMeta.orderDiscountType) as PosDiscountType
-        : ((editingOrder.orderDiscountType ?? '') as PosDiscountType);
       const orderDiscountInput = editMeta
         ? editMeta.orderDiscountInput
         : (editingOrder.orderDiscountValue == null ? '' : String(editingOrder.orderDiscountValue));
+      const orderDiscountType = editMeta
+        ? (editMeta.orderDiscountType === '' || orderDiscountInput.trim() === '' ? '' : editMeta.orderDiscountType) as PosDiscountType
+        : ((editingOrder.orderDiscountType ?? '') as PosDiscountType);
       return previewPosDraft(
         lines,
         orderDiscountType,
@@ -1018,14 +1021,15 @@ export default function PosWorkspace({
     (): PosOrderEditItem[] | undefined => {
       if (editCart === null || editCart.length === 0) return undefined;
       return editCart.map((line) => {
+        const hasItemDiscount = line.discount_type !== null && line.discount_value !== null;
         const item: PosOrderEditItem = {
           menu_item_id: line.menuItemId,
           quantity: line.quantity,
           // Notes/diskon: WAJIB resend (full-replace — omit ≠ preserve untuk
           // field item; undefined/omitted di JSON → NULL di DB).
           notes: line.notes,
-          discount_type: line.discount_type,
-          discount_value: line.discount_value,
+          discount_type: hasItemDiscount ? line.discount_type : null,
+          discount_value: hasItemDiscount ? line.discount_value : null,
         };
         // Item existing → kirim orderId (pos_order_items.id; builder
         // memetakan orderId → key output `id`). Item baru → tanpa key
@@ -1079,7 +1083,9 @@ export default function PosWorkspace({
               ? (editMeta.discountReason === '' ? null : editMeta.discountReason)
               : editingOrder.discountReason,
             order_discount_type: editMeta?.orderDiscountType !== undefined
-              ? (editMeta.orderDiscountType === '' ? null : editMeta.orderDiscountType as 'NOMINAL' | 'PERCENT')
+              ? (editMeta.orderDiscountType === '' || (editMeta.orderDiscountInput ?? '').trim() === ''
+                  ? null
+                  : editMeta.orderDiscountType as 'NOMINAL' | 'PERCENT')
               : editingOrder.orderDiscountType,
             order_discount_value: editMeta?.orderDiscountInput !== undefined
               ? (() => {
@@ -1691,7 +1697,9 @@ export default function PosWorkspace({
                 : editingOrder.discountReason,
               // order_discount_type/value dari editMeta (form input)
               order_discount_type: editMeta?.orderDiscountType !== undefined
-                ? (editMeta.orderDiscountType === '' ? null : editMeta.orderDiscountType as 'NOMINAL' | 'PERCENT')
+                ? (editMeta.orderDiscountType === '' || (editMeta.orderDiscountInput ?? '').trim() === ''
+                    ? null
+                    : editMeta.orderDiscountType as 'NOMINAL' | 'PERCENT')
                 : editingOrder.orderDiscountType,
               order_discount_value: editMeta?.orderDiscountInput !== undefined
                 ? (() => {
@@ -1721,14 +1729,17 @@ export default function PosWorkspace({
         }
         editPutSnapshotRef.current = {
           orderId: editingOrder.orderId,
-          entries: (editCart ?? []).map((line) => ({
-            localId: line.localId,
-            menuItemId: line.menuItemId,
-            orderItemId: line.orderItemId,
-            notes: line.notes,
-            discount_type: line.discount_type,
-            discount_value: line.discount_value,
-          })),
+          entries: (editCart ?? []).map((line) => {
+            const hasItemDiscount = line.discount_type !== null && line.discount_value !== null;
+            return {
+              localId: line.localId,
+              menuItemId: line.menuItemId,
+              orderItemId: line.orderItemId,
+              notes: line.notes,
+              discount_type: hasItemDiscount ? line.discount_type : null,
+              discount_value: hasItemDiscount ? line.discount_value : null,
+            };
+          }),
           knownIds: [...knownIds],
         };
         editIdempotencyRef.current = { key, bodyJson, orderId: editingOrder.orderId };
@@ -2928,9 +2939,9 @@ export default function PosWorkspace({
       </div>
 
       {activeTab === 'register' ? (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left: Menu Picker (2 cols) */}
-          <div className="lg:col-span-2 space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Left: Menu Picker (7 cols on desktop) */}
+          <div className="lg:col-span-7 space-y-4">
             {/* Search & Category Filter */}
             <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-xs space-y-3">
               <div className="relative">
@@ -3026,8 +3037,8 @@ export default function PosWorkspace({
             </div>
           </div>
 
-          {/* Right: Cart / Order Slip (1 col) */}
-          <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between h-fit space-y-4">
+          {/* Right: Cart / Order Slip (5 cols on desktop) */}
+          <div className="lg:col-span-5 bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between h-fit space-y-4">
             <div>
             {editingOrder !== null ? (
               <div>
@@ -3049,48 +3060,19 @@ export default function PosWorkspace({
                     <span className="text-[11px] text-gray-400">v{editingOrder.version}</span>
                   </div>
                   <div className="flex gap-2">
-                    {editMode === 'edit' && !editConflict && (!editSuccess || hasUnsavedEditChanges) && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={closeEditorView}
-                          disabled={editSaving}
-                          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
-                        >
-                          Batal
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void saveEditedOrder()}
-                          disabled={editSaving || editLoading || editConflict !== null || editIdentityUnresolved !== null || (editCart !== null && editCart.length === 0)}
-                          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-900 text-white hover:bg-purple-800 disabled:opacity-40 cursor-pointer"
-                        >
-                          {editSaving ? 'Menyimpan…' : (hasUnsavedEditChanges ? 'Simpan Perubahan' : 'Simpan')}
-                        </button>
-                      </>
-                    )}
-                    {/* Bayar — simpan draft (bila dirty) lalu buka modal pembayaran CASH */}
-                    {onOpenCashPayment && editMode === 'edit' && !editConflict && editingOrder !== null && editingOrder.status === 'OPEN' && (
-                      <button
-                        type="button"
-                        onClick={() => void handleEditPay()}
-                        disabled={editSaving || editLoading || editPayPending || editIdentityUnresolved !== null || editAmbiguous}
-                        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 cursor-pointer"
-                      >
-                        {editPayPending ? 'Menunggu simpan…' : 'Bayar'}
-                      </button>
-                    )}
                     {/* Navigasi TIDAK dikunci saat editLoading: GET detail yang
                         masih berjalan dibatalkan lewat epoch guard
                         (closeEditorView menaikkan editDetailEpochRef), bukan
                         dengan menonaktifkan tombol Batal/Kembali. */}
                     <button
                       type="button"
+                      aria-label="Batalkan edit pesanan"
+                      title="Batalkan edit pesanan"
                       onClick={closeEditorView}
                       disabled={editSaving}
-                      className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 cursor-pointer"
+                      className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-sm font-bold border border-gray-300 bg-white text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-40 cursor-pointer"
                     >
-                      Kembali ke Riwayat
+                      ×
                     </button>
                   </div>
                 </div>
@@ -3231,44 +3213,61 @@ export default function PosWorkspace({
                               className="w-full border border-gray-200 rounded-lg p-1.5"
                             />
                           </div>
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Alasan Diskon</label>
-                            <input
-                              type="text"
-                              maxLength={100}
-                              value={editMeta.discountReason}
-                              onChange={e => updateEditMeta({ discountReason: e.target.value })}
-                              className="w-full border border-gray-200 rounded-lg p-1.5"
-                            />
-                          </div>
-                          <div className="flex items-end gap-2">
-                            <div>
-                              <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Order</label>
-                              <select
-                                value={editMeta.orderDiscountType}
-                                onChange={e => updateEditMeta({ orderDiscountType: e.target.value as EditMetaDraft['orderDiscountType'] })}
-                                className="border border-gray-200 rounded-lg p-1.5 text-xs w-24"
-                              >
-                                <option value="">—</option>
-                                <option value="NOMINAL">NOMINAL</option>
-                                <option value="PERCENT">PERCENT</option>
-                              </select>
-                            </div>
-                            {editMeta.orderDiscountType !== '' && (
+                          {canDiscountPos && (
+                            <>
                               <div>
-                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
-                                  {editMeta.orderDiscountType === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
-                                </label>
+                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Alasan Diskon</label>
                                 <input
-                                  type="number"
-                                  min={0}
-                                  value={editMeta.orderDiscountInput}
-                                  onChange={e => updateEditMeta({ orderDiscountInput: e.target.value })}
-                                  className="border border-gray-200 rounded-lg p-1.5 text-xs w-28"
+                                  type="text"
+                                  maxLength={100}
+                                  value={editMeta.discountReason}
+                                  onChange={e => updateEditMeta({ discountReason: e.target.value })}
+                                  className="w-full border border-gray-200 rounded-lg p-1.5"
                                 />
                               </div>
-                            )}
-                          </div>
+                              <div>
+                                <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Order</label>
+                                <div className="flex items-center gap-1.5">
+                                  <div className="flex items-center flex-1 min-w-0 border border-gray-200 rounded-lg bg-white overflow-hidden">
+                                    <span className="px-2 py-1.5 text-[11px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
+                                      {editMeta.orderDiscountType === 'NOMINAL' ? 'Rp' : '%'}
+                                    </span>
+                                    <input
+                                      aria-label="Nilai diskon pesanan edit"
+                                      type="number"
+                                      min={0}
+                                      max={(editMeta.orderDiscountType || 'PERCENT') === 'PERCENT' ? 100 : undefined}
+                                      value={editMeta.orderDiscountInput}
+                                      onChange={e => {
+                                        const val = e.target.value;
+                                        if (val.trim() === '') {
+                                          updateEditMeta({ orderDiscountType: '', orderDiscountInput: '' });
+                                        } else {
+                                          const effType = (editMeta.orderDiscountType || 'PERCENT') as 'NOMINAL' | 'PERCENT';
+                                          updateEditMeta({ orderDiscountType: effType, orderDiscountInput: val });
+                                        }
+                                      }}
+                                      placeholder="0"
+                                      className="w-full min-w-0 px-2 py-1.5 text-xs bg-white focus:outline-hidden"
+                                    />
+                                  </div>
+                                  <select
+                                    aria-label="Satuan diskon pesanan edit"
+                                    value={editMeta.orderDiscountType || 'PERCENT'}
+                                    onChange={e => {
+                                      const v = e.target.value;
+                                      const nextType: 'NOMINAL' | 'PERCENT' = (v === 'NOMINAL' || v === 'Rp') ? 'NOMINAL' : 'PERCENT';
+                                      updateEditMeta({ orderDiscountType: nextType });
+                                    }}
+                                    className="w-16 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1.5 text-xs font-medium bg-white"
+                                  >
+                                    <option value="NOMINAL">Rp</option>
+                                    <option value="PERCENT">%</option>
+                                  </select>
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
 
@@ -3366,7 +3365,7 @@ export default function PosWorkspace({
 
                             {/* Notes & discount item */}
                             {editMode === 'edit' && !editSaving && !editConflict ? (
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
                                 <div>
                                   <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Catatan Item</label>
                                   <input
@@ -3374,37 +3373,62 @@ export default function PosWorkspace({
                                     maxLength={1000}
                                     value={line.notes ?? ''}
                                     onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
-                                    className="w-full border border-gray-200 rounded p-1 bg-white"
+                                    className="w-full border border-gray-200 rounded-lg px-2 py-1 bg-white text-xs"
                                   />
                                 </div>
-                                <div>
-                                  <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Item</label>
-                                  <select
-                                    value={line.discount_type ?? ''}
-                                    onChange={e => updateEditCartItemMeta(idx, {
-                                      discount_type: (e.target.value === '' ? null : e.target.value as 'NOMINAL' | 'PERCENT'),
-                                    })}
-                                    className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
-                                  >
-                                    <option value="">—</option>
-                                    <option value="NOMINAL">NOMINAL</option>
-                                    <option value="PERCENT">PERCENT</option>
-                                  </select>
-                                </div>
-                                {line.discount_type !== null && (
+                                {canDiscountPos && (
                                   <div>
-                                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">
-                                      {line.discount_type === 'PERCENT' ? 'Nilai (%)' : 'Nilai (IDR)'}
-                                    </label>
-                                    <input
-                                      type="number"
-                                      min={0}
-                                      value={line.discount_value ?? ''}
-                                      onChange={e => updateEditCartItemMeta(idx, {
-                                        discount_value: e.target.value === '' ? null : Number(e.target.value),
-                                      })}
-                                      className="w-full border border-gray-200 rounded p-1 bg-white text-xs"
-                                    />
+                                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Diskon Item</label>
+                                    <div className="flex items-center gap-1.5">
+                                      <div className="flex items-center flex-1 min-w-0 border border-gray-200 rounded-lg bg-white overflow-hidden">
+                                        <span className="px-2 py-1 text-[11px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
+                                          {(line.discount_type ?? 'PERCENT') === 'NOMINAL' ? 'Rp' : '%'}
+                                        </span>
+                                        <input
+                                          aria-label={`Nilai diskon item ${line.name}`}
+                                          type="number"
+                                          min={0}
+                                          max={(line.discount_type ?? 'PERCENT') === 'PERCENT' ? 100 : undefined}
+                                          value={line.discount_value ?? ''}
+                                          onChange={e => {
+                                            const raw = e.target.value;
+                                            if (raw.trim() === '') {
+                                              updateEditCartItemMeta(idx, {
+                                                discount_type: null,
+                                                discount_value: null,
+                                              });
+                                            } else {
+                                              updateEditCartItemMeta(idx, {
+                                                discount_type: line.discount_type ?? 'PERCENT',
+                                                discount_value: Number(raw),
+                                              });
+                                            }
+                                          }}
+                                          placeholder="0"
+                                          className="w-full min-w-0 px-2 py-1 text-xs bg-white focus:outline-hidden"
+                                        />
+                                      </div>
+                                      <select
+                                        aria-label={`Satuan diskon item ${line.name}`}
+                                        value={line.discount_type ?? 'PERCENT'}
+                                        onChange={e => {
+                                          const v = e.target.value;
+                                          const nextType: 'NOMINAL' | 'PERCENT' | null =
+                                            (v === 'NOMINAL' || v === 'Rp')
+                                              ? 'NOMINAL'
+                                              : (v === 'PERCENT' || v === '%')
+                                                ? 'PERCENT'
+                                                : null;
+                                          updateEditCartItemMeta(idx, {
+                                            discount_type: nextType,
+                                          });
+                                        }}
+                                        className="w-16 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs font-medium bg-white"
+                                      >
+                                        <option value="NOMINAL">Rp</option>
+                                        <option value="PERCENT">%</option>
+                                      </select>
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -3424,34 +3448,10 @@ export default function PosWorkspace({
                           </div>
                         ))}
 
-                        {/* Tambah menu baru (hanya edit mode, dan cart belum kosong) */}
-                        {editMode === 'edit' && !editSaving && !editConflict && (
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1">Tambah Menu</label>
-                            <select
-                              value=""
-                              onChange={e => {
-                                const sel = posMenu.find(m => String(m.id) === e.target.value);
-                                if (sel) addNewEditCartLine(sel);
-                              }}
-                              className="w-full sm:w-64 border border-gray-300 rounded-lg p-2 text-xs bg-white cursor-pointer"
-                            >
-                              <option value="" disabled>— pilih menu —</option>
-                              {posMenu.map(m => {
-                                const alreadyInCart = (editCart ?? []).some(l => l.menuItemId === m.id);
-                                return (
-                                  <option key={m.id} value={m.id}>
-                                    {m.name} ({m.item_code ?? ''}){alreadyInCart ? '  [sudah ada]' : ''}
-                                  </option>
-                                );
-                              })}
-                            </select>
-                            {editCart && editCart.length > 0 && (
-                              <p className="text-[10px] text-gray-400 mt-0.5">
-                                Menambahkan menu yang sudah ada akan membuat baris baru (badge BARU); item existing tidak diubah otomatis.
-                              </p>
-                            )}
-                          </div>
+                        {editMode === 'edit' && !editSaving && !editConflict && editCart && editCart.length > 0 && (
+                          <p className="text-[10px] text-gray-400">
+                            Klik kartu menu di sebelah kiri untuk menambahkan item baru (badge BARU); item existing tidak diubah otomatis.
+                          </p>
                         )}
 
                         {/* Preview total edit */}
@@ -3492,10 +3492,36 @@ export default function PosWorkspace({
                         {/* Blok: semua item dihapus */}
                         {editCart !== null && editCart.length === 0 && editMode === 'edit' && (
                           <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
-                            Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau tekan "Kembali ke Riwayat".
+                            Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau batalkan edit pesanan.
                           </div>
                         )}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Aksi Simpan & Bayar berdampingan di bawah rincian total (hanya mode edit / OPEN) */}
+                  {editMode === 'edit' && !editConflict && (
+                    <div className="flex gap-2 pt-2 border-t border-gray-100">
+                      {(!editSuccess || hasUnsavedEditChanges) && (
+                        <button
+                          type="button"
+                          onClick={() => void saveEditedOrder()}
+                          disabled={editSaving || editLoading || editConflict !== null || editIdentityUnresolved !== null || (editCart !== null && editCart.length === 0)}
+                          className="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-purple-900 text-white hover:bg-purple-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-xs cursor-pointer"
+                        >
+                          {editSaving ? 'Menyimpan…' : (hasUnsavedEditChanges ? 'Simpan Perubahan' : 'Simpan')}
+                        </button>
+                      )}
+                      {onOpenCashPayment && editingOrder !== null && editingOrder.status === 'OPEN' && (
+                        <button
+                          type="button"
+                          onClick={() => void handleEditPay()}
+                          disabled={editSaving || editLoading || editPayPending || editIdentityUnresolved !== null || editAmbiguous}
+                          className="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-xs cursor-pointer"
+                        >
+                          {editPayPending ? 'Menunggu simpan…' : 'Bayar'}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -3709,25 +3735,30 @@ export default function PosWorkspace({
                             {/* Input angka diskon langsung (placeholder 0, default satuan %).
                                 Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
                                 (01→1, 0050→50) dilakukan pada onChange. */}
-                            <input
-                              aria-label={`Nilai diskon ${item.name}`}
-                              type="text"
-                              inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
-                              value={discountInput}
-                              disabled={draftLocked}
-                              onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
-                              onChange={e => {
-                                if (!canMutateDraft()) return;
-                                const t = (discountType || 'PERCENT') as PosDiscountType;
-                                const val = normalizeDiscountInput(e.target.value, t);
-                                // Saat user mengetik nilai, set juga discountType secara eksplisit
-                                // agar effectiveDiscount tidak gagal mengenali diskon
-                                // (type=''+input='1000' tidak bisa di-aktifkan).
-                                changeLine(item.id, { discountType: t, discountInput: val });
-                              }}
-                              className="w-24 border border-gray-200 rounded p-1 text-xs"
-                              placeholder="0"
-                            />
+                            <div className="flex items-center border border-gray-200 rounded bg-white px-2 py-1 w-28">
+                              <span className="text-xs text-gray-500 mr-1 select-none">
+                                {discountType === 'PERCENT' ? '%' : 'Rp'}
+                              </span>
+                              <input
+                                aria-label={`Nilai diskon ${item.name}`}
+                                type="text"
+                                inputMode={discountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                                value={discountInput}
+                                disabled={draftLocked}
+                                onFocus={() => { /* select-on-focus via select-all */ (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                                onChange={e => {
+                                  if (!canMutateDraft()) return;
+                                  const t = (discountType || 'PERCENT') as PosDiscountType;
+                                  const val = normalizeDiscountInput(e.target.value, t);
+                                  // Saat user mengetik nilai, set juga discountType secara eksplisit
+                                  // agar effectiveDiscount tidak gagal mengenali diskon
+                                  // (type=''+input='1000' tidak bisa di-aktifkan).
+                                  changeLine(item.id, { discountType: t, discountInput: val });
+                                }}
+                                className="w-full text-xs outline-none bg-transparent"
+                                placeholder="0"
+                              />
+                            </div>
                             <select
                               aria-label={`Satuan diskon ${item.name}`}
                               value={discountType === 'PERCENT' ? '%' : 'Rp'}
@@ -3744,7 +3775,7 @@ export default function PosWorkspace({
                                   changeLine(item.id, { discountType: newType });
                                 }
                               }}
-                              className="w-14 border border-gray-200 rounded p-1 text-xs"
+                              className="w-16 border border-gray-200 rounded p-1 text-xs bg-white"
                             >
                               <option value="Rp">Rp</option>
                               <option value="%">%</option>
@@ -3765,7 +3796,8 @@ export default function PosWorkspace({
             )}
             </div>
 
-            {/* Total & Checkout */}
+            {/* Total & Checkout (CREATE only — disembunyikan saat membuka order existing) */}
+            {editingOrder === null && (
             <div className="border-t border-gray-100 pt-3 space-y-2">
               <div className="flex justify-between text-xs text-gray-500">
                 <span>Subtotal</span>
@@ -3777,26 +3809,31 @@ export default function PosWorkspace({
                   {/* Input angka diskon langsung + pilihan satuan Rp / %.
                       Nilai kosong / 0 = tanpa diskon. Keputusan #7: toggle
                       satuan me-reset nilai ke kosong. */}
-                  <input
-                    aria-label="Nilai diskon pesanan"
-                    type="text"
-                    inputMode={orderDiscountType === 'PERCENT' ? 'decimal' : 'numeric'}
-                    value={orderDiscountInput}
-                    disabled={draftLocked}
-                    onFocus={() => { (document.activeElement as HTMLInputElement | null)?.select?.(); }}
-                    onChange={e => {
-                      if (!canMutateDraft()) return;
-                      const t = (orderDiscountType || 'PERCENT') as PosDiscountType;
-                      const val = normalizeDiscountInput(e.target.value, t);
-                      // Set discountType eksplisit saat user mengetik nilai agar
-                      // effectiveDiscount mengenali diskon (type='' + input='1000'
-                      // tidak aktif bila type tidak diset).
-                      setOrderDiscountType(t);
-                      setOrderDiscountInput(val);
-                    }}
-                    className="w-28 border border-gray-200 rounded p-1 text-xs"
-                    placeholder="0"
-                  />
+                  <div className="flex items-center border border-gray-200 rounded bg-white px-2 py-1 flex-1">
+                    <span className="text-xs text-gray-500 mr-1 select-none font-normal">
+                      {orderDiscountType === 'PERCENT' ? '%' : 'Rp'}
+                    </span>
+                    <input
+                      aria-label="Nilai diskon pesanan"
+                      type="text"
+                      inputMode={orderDiscountType === 'PERCENT' ? 'decimal' : 'numeric'}
+                      value={orderDiscountInput}
+                      disabled={draftLocked}
+                      onFocus={() => { (document.activeElement as HTMLInputElement | null)?.select?.(); }}
+                      onChange={e => {
+                        if (!canMutateDraft()) return;
+                        const t = (orderDiscountType || 'PERCENT') as PosDiscountType;
+                        const val = normalizeDiscountInput(e.target.value, t);
+                        // Set discountType eksplisit saat user mengetik nilai agar
+                        // effectiveDiscount mengenali diskon (type='' + input='1000'
+                        // tidak aktif bila type tidak diset).
+                        setOrderDiscountType(t);
+                        setOrderDiscountInput(val);
+                      }}
+                      className="w-full text-xs outline-none bg-transparent font-normal"
+                      placeholder="0"
+                    />
+                  </div>
                   <select
                     aria-label="Satuan diskon pesanan"
                     value={orderDiscountType === 'PERCENT' ? '%' : 'Rp'}
@@ -3810,7 +3847,7 @@ export default function PosWorkspace({
                         setOrderDiscountInput('');
                       }
                     }}
-                    className="w-14 border border-gray-200 rounded p-1 text-xs"
+                    className="w-16 border border-gray-200 rounded p-1 text-xs bg-white font-normal"
                   >
                     <option value="Rp">Rp</option>
                     <option value="%">%</option>
@@ -4080,6 +4117,7 @@ export default function PosWorkspace({
                 </>
               )}
             </div>
+            )}
           </div>
         </div>
       ) : (

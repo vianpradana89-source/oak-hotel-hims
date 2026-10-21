@@ -205,7 +205,7 @@ export default function PosModal({
 
   return (
     <div
-      className="fixed inset-0 z-[80] flex items-stretch sm:items-center sm:justify-center bg-black/50 sm:bg-slate-900/60 sm:p-6"
+      className="fixed inset-0 z-[80] flex items-stretch sm:items-center sm:justify-center bg-black/50 sm:bg-slate-900/60 sm:p-3 lg:p-4"
       data-pos-modal-overlay="true"
       data-pos-pay-cash-modal-present={payCashModalPresent || undefined}
       onMouseDown={(e) => {
@@ -224,7 +224,7 @@ export default function PosModal({
         role="dialog"
         aria-modal="true"
         aria-label="Point of Sale"
-        className="relative bg-slate-100 w-full h-full sm:h-[92vh] sm:max-w-6xl sm:rounded-2xl flex flex-col overflow-hidden focus:outline-none shadow-2xl"
+        className="relative bg-slate-100 w-full h-full sm:w-[96vw] sm:max-w-[1600px] sm:h-[95vh] sm:rounded-2xl flex flex-col overflow-hidden focus:outline-none shadow-2xl"
       >
         {/* Header modal: judul + tombol tutup eksplisit */}
         <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 bg-white border-b border-gray-200">
