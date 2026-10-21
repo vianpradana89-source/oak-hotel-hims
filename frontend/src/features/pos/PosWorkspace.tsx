@@ -349,8 +349,8 @@ export default function PosWorkspace({
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [cart, setCart] = useState<PosCartLine[]>([]);
-  const [tableNumber, setTableNumber] = useState('Table 1');
-  const [guestName, setGuestName] = useState('Walk-in Guest');
+  const [tableNumber, setTableNumber] = useState('');
+  const [guestName, setGuestName] = useState(() => guestNameInitial ?? '');
   const [guestPhone, setGuestPhone] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
   const [orderDiscountType, setOrderDiscountType] = useState<PosDiscountType>('PERCENT');
@@ -2816,134 +2816,100 @@ export default function PosWorkspace({
   }, [handleSaveOrder, onOpenCashPayment]);
 
   return (
-    <div className="space-y-6 pb-12">
-      {/* Header Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-gray-200/80 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider bg-purple-50 text-purple-800 border border-purple-200/60 uppercase">
-              Departemen Operasional POS
-            </span>
-            <span className="text-xs text-gray-400">•</span>
-            <span className="text-xs text-gray-500">Property #{propertyId || 1}</span>
-          </div>
-
-          {/* Konteks reservasi — hanya tampil bila POS dibuka dari reservasi */}
-          {reservationId != null && (
-            <div className="flex flex-wrap items-center gap-1.5 mb-2">
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                {reservationLabel || `Reservasi #${reservationId}`}
-              </span>
-              {guestNameInitial && (
-                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
-                  Tamu: {guestNameInitial}
-                </span>
-              )}
-              {roomNumberInitial && (
-                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
-                  Kamar {roomNumberInitial}
-                </span>
-              )}
-            </div>
-          )}
-
-          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Point of Sale (POS) &amp; F&amp;B</h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Workspace operasional kasir restoran, pesanan meja tamu hotel, dan penjualan langsung.
-          </p>
-        </div>
-
-          <div className="flex items-center gap-2">
-            {onRefresh && (
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={busy}
-                className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Refresh Data"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
-            )}
-            {/* Tombol demo order hanya muncul bila parent menyediakan aksi (halaman penuh).
-                Di modal, onCreateDemoOrder tidak diteruskan → tidak menghasilkan transaksi nyata. */}
-            {onCreateDemoOrder && !busy && (
-              <button
-                type="button"
-                onClick={onCreateDemoOrder}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                [Demo] Buat Order Contoh
-              </button>
-            )}
-          </div>
-      </div>
-
+    <div className="flex flex-col flex-1 min-h-0 gap-3 pb-6 lg:pb-0 lg:h-full lg:overflow-hidden">
       {/* KPI Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
+      <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
           <div className="text-xs text-gray-500 font-medium">Menu Aktif</div>
-          <div className="text-2xl font-black text-gray-900 mt-1">{posMenu.length}</div>
+          <div className="text-xl sm:text-2xl font-black text-gray-900 mt-0.5">{posMenu.length}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">Item makanan &amp; minuman</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
+        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
           <div className="text-xs text-gray-500 font-medium">Total Pesanan</div>
-          <div className="text-2xl font-black text-purple-700 mt-1">{posOrders.length}</div>
+          <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{posOrders.length}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">Order tercatat</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
+        <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
           <div className="text-xs text-gray-500 font-medium">Total Transaksi POS</div>
-          <div className="text-2xl font-black text-emerald-700 mt-1">{formatIDR(totalOrdersAmount)}</div>
+          <div className="text-xl sm:text-2xl font-black text-emerald-700 mt-0.5">{formatIDR(totalOrdersAmount)}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">Akumulasi penjualan</div>
         </div>
       </div>
 
       {/* View Selector Tabs */}
-      <div className="flex gap-2 border-b border-gray-200 pb-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab('register')}
-          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-            activeTab === 'register'
-              ? 'bg-purple-900 text-white shadow-xs'
-              : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-          }`}
-        >
-          Kasir &amp; Menu POS
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
-            if (editSubmittingRef.current || editDetailInFlightRef.current) {
-              alert('Tunggu request selesai sebelum berpindah tab.'); return;
-            }
-            if (editingOrder !== null && hasUnsavedEditChanges) {
-              if (!confirm('Ada perubahan edit yang belum disimpan. Draft dipertahankan — lanjutkan?')) return;
-            }
-            setActiveTab('orders');
-          }}
-          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-            activeTab === 'orders'
-              ? 'bg-purple-900 text-white shadow-xs'
-              : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
-          }`}
-        >
-          Riwayat Order ({posOrders.length})
-        </button>
+      <div className="shrink-0 flex items-center justify-between gap-2 border-b border-gray-200 pb-2 flex-wrap">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('register')}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              activeTab === 'register'
+                ? 'bg-purple-900 text-white shadow-xs'
+                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+            }`}
+          >
+            Kasir &amp; Menu POS
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
+              if (editSubmittingRef.current || editDetailInFlightRef.current) {
+                alert('Tunggu request selesai sebelum berpindah tab.'); return;
+              }
+              if (editingOrder !== null && hasUnsavedEditChanges) {
+                if (!confirm('Ada perubahan edit yang belum disimpan. Draft dipertahankan — lanjutkan?')) return;
+              }
+              setActiveTab('orders');
+            }}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              activeTab === 'orders'
+                ? 'bg-purple-900 text-white shadow-xs'
+                : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+            }`}
+          >
+            Riwayat Order ({posOrders.length})
+          </button>
+        </div>
+
+        {(reservationId != null || (onCreateDemoOrder && !busy)) && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {reservationId != null && (
+              <>
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                  {reservationLabel || `Reservasi #${reservationId}`}
+                </span>
+                {guestNameInitial && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-50 text-stone-700 border border-stone-200">
+                    Tamu: {guestNameInitial}
+                  </span>
+                )}
+                {roomNumberInitial && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                    Kamar {roomNumberInitial}
+                  </span>
+                )}
+              </>
+            )}
+            {onCreateDemoOrder && !busy && (
+              <button
+                type="button"
+                onClick={onCreateDemoOrder}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+              >
+                [Demo] Buat Order Contoh
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {activeTab === 'register' ? (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start lg:items-stretch lg:flex-1 lg:min-h-0 lg:overflow-hidden">
           {/* Left: Menu Picker (7 cols on desktop) */}
-          <div className="lg:col-span-7 space-y-4">
+          <div className="lg:col-span-7 flex flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-hidden">
             {/* Search & Category Filter */}
-            <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-xs space-y-3">
+            <div className="shrink-0 bg-white border border-gray-200 rounded-2xl p-3.5 shadow-xs space-y-2.5">
               <div className="relative">
                 <svg className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -2987,65 +2953,67 @@ export default function PosWorkspace({
             </div>
 
             {/* Menu Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {filteredMenu.map((item) => {
-                const isEditSession = editMode !== 'create' && editingOrder !== null;
-                const catalogLocked = isEditSession ? !canMutateEditDraft() : draftLocked;
-                return (
-                <div
-                  key={item.id}
-                  onClick={() => {
-                    // POS-EDIT-1B (taf1): katalog menambah ke cart edit saat EDIT aktif
-                    if (editMode !== 'create' && editingOrder !== null) {
-                      if (!canMutateEditDraft()) return;
-                      addNewEditCartLine(item);
-                    } else {
-                      addToCart(item);
-                    }
-                  }}
-                  className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all group ${
-                    catalogLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
-                  }`}
-                >
-                  <div>
-                    <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
-                      {item.category_name || 'F&B'}
-                    </span>
-                    <h4 className="font-bold text-xs sm:text-sm text-gray-900 mt-1.5 group-hover:text-purple-900 transition-colors">
-                      {item.name}
-                    </h4>
-                    {item.item_code && (
-                      <div className="text-[10px] text-gray-400 font-mono mt-0.5">{item.item_code}</div>
-                    )}
+            <div className="lg:flex-1 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {filteredMenu.map((item) => {
+                  const isEditSession = editMode !== 'create' && editingOrder !== null;
+                  const catalogLocked = isEditSession ? !canMutateEditDraft() : draftLocked;
+                  return (
+                  <div
+                    key={item.id}
+                    onClick={() => {
+                      // POS-EDIT-1B (taf1): katalog menambah ke cart edit saat EDIT aktif
+                      if (editMode !== 'create' && editingOrder !== null) {
+                        if (!canMutateEditDraft()) return;
+                        addNewEditCartLine(item);
+                      } else {
+                        addToCart(item);
+                      }
+                    }}
+                    className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all group ${
+                      catalogLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
+                    }`}
+                  >
+                    <div>
+                      <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                        {item.category_name || 'F&B'}
+                      </span>
+                      <h4 className="font-bold text-xs sm:text-sm text-gray-900 mt-1.5 group-hover:text-purple-900 transition-colors">
+                        {item.name}
+                      </h4>
+                      {item.item_code && (
+                        <div className="text-[10px] text-gray-400 font-mono mt-0.5">{item.item_code}</div>
+                      )}
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between">
+                      <span className="font-extrabold text-xs sm:text-sm text-gray-900">
+                        {formatIDR(Number(item.price))}
+                      </span>
+                      <button
+                        type="button"
+                        className="p-1 rounded-lg bg-gray-100 group-hover:bg-purple-100 text-gray-600 group-hover:text-purple-800 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between">
-                    <span className="font-extrabold text-xs sm:text-sm text-gray-900">
-                      {formatIDR(Number(item.price))}
-                    </span>
-                    <button
-                      type="button"
-                      className="p-1 rounded-lg bg-gray-100 group-hover:bg-purple-100 text-gray-600 group-hover:text-purple-800 transition-colors"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           </div>
 
           {/* Right: Cart / Order Slip (5 cols on desktop) */}
-          <div className="lg:col-span-5 bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between h-fit space-y-4">
-            <div>
+          <div className="lg:col-span-5 bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-hidden gap-3">
+            <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
             {editingOrder !== null ? (
-              <div>
+              <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
 
-              <div className="bg-white border border-purple-200 rounded-2xl shadow-xs overflow-hidden">
+              <div className="bg-white border border-purple-200 rounded-2xl shadow-xs flex flex-col flex-1 min-h-0 overflow-hidden">
                 {/* Header panel */}
-                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-wrap gap-2">
+                <div className="shrink-0 px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
                     <span className="font-mono font-bold text-purple-900 text-sm">
                       {editingOrder.orderNumber}
@@ -3077,7 +3045,7 @@ export default function PosWorkspace({
                   </div>
                 </div>
 
-                <div className="p-4 space-y-4">
+                <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
 
                   {/* ── Konflik 409 (ORDER_VERSION_CONFLICT) ───────────────── */}
                   {editConflict && (
@@ -3190,6 +3158,7 @@ export default function PosWorkspace({
                               value={editMeta.guestName}
                               onChange={e => updateEditMeta({ guestName: e.target.value })}
                               className="w-full border border-gray-200 rounded-lg p-1.5"
+                              placeholder="Nama tamu (opsional)"
                             />
                           </div>
                           <div>
@@ -3453,49 +3422,51 @@ export default function PosWorkspace({
                             Klik kartu menu di sebelah kiri untuk menambahkan item baru (badge BARU); item existing tidak diubah otomatis.
                           </p>
                         )}
-
-                        {/* Preview total edit */}
-                        {editPreview && (
-                          <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs space-y-1">
-                            <div className="flex justify-between text-purple-700">
-                              <span>Estimasi Subtotal</span>
-                              <span>{formatIDR(editPreview.subtotal)}</span>
-                            </div>
-                            {editPreview.orderDiscount > 0 && (
-                              <div className="flex justify-between text-purple-600">
-                                <span>Diskon Order</span>
-                                <span>-{formatIDR(editPreview.orderDiscount)}</span>
-                              </div>
-                            )}
-                            {editPreview.serviceCharge > 0 && (
-                              <div className="flex justify-between text-purple-600">
-                                <span>Service Charge</span>
-                                <span>{formatIDR(editPreview.serviceCharge)}</span>
-                              </div>
-                            )}
-                            {editPreview.tax > 0 && (
-                              <div className="flex justify-between text-purple-600">
-                                <span>PBJT</span>
-                                <span>{formatIDR(editPreview.tax)}</span>
-                              </div>
-                            )}
-                            <div className="flex justify-between font-bold text-purple-900 pt-1 border-t border-purple-100">
-                              <span>Total Estimasi</span>
-                              <span>{formatIDR(editPreview.total)}</span>
-                            </div>
-                            <p className="text-[10px] text-purple-400 italic">
-                              Estimasi lokal. Total final dihitung server (harga DB + kalkulasi otoritatif).
-                            </p>
-                          </div>
-                        )}
-
-                        {/* Blok: semua item dihapus */}
-                        {editCart !== null && editCart.length === 0 && editMode === 'edit' && (
-                          <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
-                            Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau batalkan edit pesanan.
-                          </div>
-                        )}
                       </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer tetap EDIT: rincian total, alert item kosong, tombol Simpan & Bayar, loading */}
+                <div className="shrink-0 px-4 pb-4 pt-2 border-t border-gray-100 bg-white space-y-2">
+                  {!editConflict && editPreview && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs space-y-1">
+                      <div className="flex justify-between text-purple-700">
+                        <span>Estimasi Subtotal</span>
+                        <span>{formatIDR(editPreview.subtotal)}</span>
+                      </div>
+                      {editPreview.orderDiscount > 0 && (
+                        <div className="flex justify-between text-purple-600">
+                          <span>Diskon Order</span>
+                          <span>-{formatIDR(editPreview.orderDiscount)}</span>
+                        </div>
+                      )}
+                      {editPreview.serviceCharge > 0 && (
+                        <div className="flex justify-between text-purple-600">
+                          <span>Service Charge</span>
+                          <span>{formatIDR(editPreview.serviceCharge)}</span>
+                        </div>
+                      )}
+                      {editPreview.tax > 0 && (
+                        <div className="flex justify-between text-purple-600">
+                          <span>PBJT</span>
+                          <span>{formatIDR(editPreview.tax)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between font-bold text-purple-900 pt-1 border-t border-purple-100">
+                        <span>Total Estimasi</span>
+                        <span>{formatIDR(editPreview.total)}</span>
+                      </div>
+                      <p className="text-[10px] text-purple-400 italic">
+                        Estimasi lokal. Total final dihitung server (harga DB + kalkulasi otoritatif).
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Blok: semua item dihapus */}
+                  {!editConflict && editCart !== null && editCart.length === 0 && editMode === 'edit' && (
+                    <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
+                      Semua item dihapus. Simpan diblokir — kembalikan minimal 1 item atau batalkan edit pesanan.
                     </div>
                   )}
 
@@ -3537,17 +3508,19 @@ export default function PosWorkspace({
 
               </div>
             ) : (
-              <div>
-                <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+                <div className="shrink-0 flex items-center justify-between border-b border-gray-100 pb-2.5">
                   <h3 className="font-bold text-sm text-gray-900">Slip Pesanan</h3>
                   <span className="text-xs bg-purple-50 text-purple-700 font-semibold px-2 py-0.5 rounded-full">
                     {cart.reduce((c, l) => c + l.qty, 0)} Items
                   </span>
                 </div>
 
+                {/* Area isi tengah Slip Pesanan CREATE yang dapat digulir */}
+                <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 my-2">
                 {/* Table & Guest Form — terkunci saat pending/ambigu agar
                      payload replay tetap identik dengan snapshot */}
-                <div className={`my-3 space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
+                <div className={`space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
                   {/* ── Mode POS header: pilih tamu menginap ATAU pelanggan manual ── */}
                   {showGuestPicker && !pickedGuest && (
                     <div>
@@ -3565,7 +3538,7 @@ export default function PosWorkspace({
                           // Set guest_name dari reservasi — hanya bila draft masih kosong
                           // (tidak menyentuh draft yang sudah ada).
                           if (cart.length === 0 && idempotencySnapshotRef.current === null && !saving) {
-                            setGuestName(g.guest_name || 'Walk-in Guest');
+                            setGuestName(g.guest_name || '');
                           }
                         }}
                       />
@@ -3638,6 +3611,7 @@ export default function PosWorkspace({
                           value={tableNumber}
                           onChange={(e) => {if (canMutateDraft()) setTableNumber(e.target.value);}}
                           disabled={draftLocked}
+                          placeholder="Contoh: Meja 1"
                           className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                         />
                       </div>
@@ -3663,6 +3637,7 @@ export default function PosWorkspace({
                           value={guestName}
                           onChange={(e) => {if (canMutateDraft()) setGuestName(e.target.value);}}
                           disabled={draftLocked}
+                          placeholder="Nama tamu (opsional)"
                           className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                         />
                       </div>
@@ -3670,7 +3645,7 @@ export default function PosWorkspace({
                   </div>
                 </div>
 
-                <div className="space-y-2 mb-3">
+                <div className="space-y-2">
                   <label className="block text-xs font-semibold text-gray-600">Nomor WhatsApp untuk struk (opsional)
                     <input type="tel" maxLength={50} value={guestPhone} disabled={draftLocked}
                       onChange={e => {if (canMutateDraft()) setGuestPhone(e.target.value);}}
@@ -3684,7 +3659,7 @@ export default function PosWorkspace({
                 </div>
 
                 {/* Cart Items */}
-                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                <div className="space-y-2">
                   {cart.length === 0 ? (
                     <div className="py-8 text-center text-xs text-gray-400">
                       Klik item menu di samping untuk menambahkan pesanan.
@@ -3791,6 +3766,7 @@ export default function PosWorkspace({
                     ))
                   )}
                 </div>
+                </div>
 
               </div>
             )}
@@ -3798,7 +3774,7 @@ export default function PosWorkspace({
 
             {/* Total & Checkout (CREATE only — disembunyikan saat membuka order existing) */}
             {editingOrder === null && (
-            <div className="border-t border-gray-100 pt-3 space-y-2">
+            <div className="shrink-0 border-t border-gray-100 pt-3 space-y-2">
               <div className="flex justify-between text-xs text-gray-500">
                 <span>Subtotal</span>
                 <span>{formatIDR(cartSubtotal)}</span>
@@ -4122,11 +4098,11 @@ export default function PosWorkspace({
         </div>
       ) : (
         /* Orders History — POS-EDIT-1B.3 */
-        <div className="space-y-4">
+        <div className="flex flex-col flex-1 min-h-0 gap-3 lg:overflow-hidden">
 
           {/* POS-EDIT-1B (taf1): banner bila editor aktif di register */}
           {editingOrder !== null && (
-            <div className="rounded-lg p-3 bg-purple-50 border border-purple-200 text-purple-800 text-xs flex items-center justify-between gap-2">
+            <div className="shrink-0 rounded-lg p-3 bg-purple-50 border border-purple-200 text-purple-800 text-xs flex items-center justify-between gap-2">
               <span>Order <b>{editingOrder.orderNumber}</b> sedang di-edit di tab Kasir.</span>
               <button
                 type="button"
@@ -4140,8 +4116,8 @@ export default function PosWorkspace({
 
 
           {/* ── Tabel Riwayat (disembunyikan saat editor terbuka) ───────────── */}
-            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-xs">
-              <div className="overflow-x-auto">
+            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-xs flex flex-col flex-1 min-h-0">
+              <div className="overflow-x-auto lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
                 <table className="w-full text-left text-xs sm:text-sm">
                   <thead className="bg-gray-50/80 border-b border-gray-200 text-gray-600 font-semibold uppercase text-[11px] tracking-wider">
                     <tr>

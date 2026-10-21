@@ -226,7 +226,7 @@ export default function PosModal({
         aria-label="Point of Sale"
         className="relative bg-slate-100 w-full h-full sm:w-[96vw] sm:max-w-[1600px] sm:h-[95vh] sm:rounded-2xl flex flex-col overflow-hidden focus:outline-none shadow-2xl"
       >
-        {/* Header modal: judul + tombol tutup eksplisit */}
+        {/* Header modal: judul + tombol refresh + tombol tutup eksplisit */}
         <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 bg-white border-b border-gray-200">
           <div className="flex items-center gap-2 min-w-0">
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider bg-purple-50 text-purple-800 border border-purple-200/60 uppercase">
@@ -241,6 +241,29 @@ export default function PosModal({
               <span className="hidden sm:inline text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5 font-medium">
                 Draft belum disimpan
               </span>
+            )}
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (payCashModalPresentRef.current) return;
+                  if (!busy) onRefresh();
+                }}
+                disabled={busy || payCashModalPresent}
+                aria-label="Refresh Data"
+                title={
+                  payCashModalPresent
+                    ? 'Pembayaran CASH sedang berlangsung…'
+                    : busy
+                    ? 'Menunggu proses selesai…'
+                    : 'Refresh Data'
+                }
+                className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
             )}
             <button
               type="button"
@@ -268,7 +291,7 @@ export default function PosModal({
         </div>
 
         {/* Konten: scroll internal desktop; fullscreen mobile */}
-        <div className="flex-1 overflow-y-auto p-3 sm:p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden flex flex-col p-3 sm:p-4">
           {/* onCreateDemoOrder sengaja TIDAK diteruskan ke PosWorkspace di dalam modal
               agar tombol "Buat Order Contoh" tidak muncul dan tidak ada transaksi demo. */}
           <PosWorkspace

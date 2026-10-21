@@ -723,6 +723,180 @@ async function lifecycle() {
     });
     h.cleanup();
   }
+
+  // ── Regression: Nilai awal CREATE kosong, pindah tab mempertahankan draft, metadata existing, & Refresh di PosModal ─
+  {
+    let reqs = [];
+    h = harness(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') {
+        return json({
+          status: 'SUCCESS',
+          data: {
+            order: {
+              id: 55,
+              property_id: 7,
+              order_number: 'POS-55',
+              status: 'OPEN',
+              version: 2,
+              total_amount: 26000,
+              subtotal_amount: 26000,
+              table_number: 'VIP-2',
+              guest_name: 'Siti Aminah',
+              guest_phone: '08111222333',
+              notes: 'Pedas sedang',
+              discount_type: null,
+              discount_value: null,
+              discount_amount: 0,
+              discount_reason: null,
+              service_charge_percent_snapshot: 0,
+              service_charge_amount: 0,
+              tax_percent_snapshot: 0,
+              tax_amount: 0,
+            },
+            items: [
+              {
+                id: 501,
+                menu_item_id: 1,
+                quantity: 2,
+                unit_price: 13000,
+                subtotal_amount: 26000,
+                notes: 'hangat',
+                discount_type: null,
+                discount_value: null,
+                discount_amount: 0,
+                item_name_snapshot: 'Coffee',
+                item_code_snapshot: 'CF-01',
+              },
+            ],
+          },
+        }, 200);
+      }
+      const b = JSON.parse(init.body);
+      reqs.push(b);
+      return created(b);
+    }, {
+      posOrders: [
+        { id: 55, order_number: 'POS-55', status: 'OPEN', total_amount: '26000', table_number: 'VIP-2', guest_name: 'Siti Aminah' },
+      ],
+    });
+    await h.settle();
+
+    const findInputUnderLabel = (lblText) => {
+      const container = h.nodes().find(n => n.type === 'div' && Array.isArray(n.props.children) &&
+        n.props.children.some(c => c && c.type === 'label' && String(c.props?.children || '').includes(lblText)));
+      assert.ok(container, 'Missing container for label ' + lblText);
+      const inp = container.props.children.find(c => c && c.type === 'input');
+      assert.ok(inp, 'Missing input for label ' + lblText);
+      return inp;
+    };
+
+    check('CREATE initial values: Nomor Meja & Nama Tamu empty with placeholders, intro banner removed', () => {
+      const tableInp = findInputUnderLabel('Nomor Meja');
+      const guestInp = findInputUnderLabel('Nama Tamu');
+      assert.equal(tableInp.props.value, '', 'Nomor Meja awalnya kosong');
+      assert.equal(guestInp.props.value, '', 'Nama Tamu awalnya kosong');
+      assert.ok(typeof tableInp.props.placeholder === 'string' && tableInp.props.placeholder.length > 0, 'Placeholder Nomor Meja ada');
+      assert.ok(typeof guestInp.props.placeholder === 'string' && guestInp.props.placeholder.length > 0, 'Placeholder Nama Tamu ada');
+      const hasIntroText = h.nodes().some(n => typeof n.props?.children === 'string' &&
+        (n.props.children.includes('Departemen Operasional POS') || n.props.children.includes('Point of Sale (POS) & F&B')));
+      assert.equal(hasIntroText, false, 'Kotak pengantar tidak dirender di PosWorkspace');
+      const workspaceRefresh = h.nodes().find(n => n.type === 'button' && n.props['aria-label'] === 'Refresh Data');
+      assert.equal(workspaceRefresh, undefined, 'Tombol refresh tidak ada lagi di dalam PosWorkspace');
+    });
+
+    h.addItem();
+    await h.settle();
+    h.click('Simpan Pesanan');
+    await h.settle();
+    check('CREATE save with empty table/guest sends null (no Table 1 / Walk-in Guest default)', () => {
+      assert.equal(reqs.length, 1);
+      assert.equal(reqs[0].table_number, null, 'table_number adalah null saat kosong');
+      assert.equal(reqs[0].guest_name, null, 'guest_name adalah null saat kosong');
+    });
+
+    h.addItem();
+    findInputUnderLabel('Nomor Meja').props.onChange({ target: { value: 'Meja 7' } });
+    h.render();
+    findInputUnderLabel('Nama Tamu').props.onChange({ target: { value: 'Andi' } });
+    h.render();
+    h.labelled('Catatan pesanan', 'Tanpa es');
+    h.click('Riwayat Order (1)');
+    h.click('Kasir & Menu POS');
+    check('CREATE active draft preserved across tab switches', () => {
+      assert.equal(findInputUnderLabel('Nomor Meja').props.value, 'Meja 7', 'Nomor Meja tetap utuh');
+      assert.equal(findInputUnderLabel('Nama Tamu').props.value, 'Andi', 'Nama Tamu tetap utuh');
+      const noteNode = h.nodes().find(n => n.type === 'textarea');
+      assert.equal(noteNode.props.value, 'Tanpa es', 'Catatan pesanan tetap utuh');
+      assert.equal(h.nodes().some(n => n.props['aria-label'] === 'Catatan Coffee'), true, 'Item keranjang tetap utuh');
+    });
+
+    h.click('Riwayat Order (1)');
+    h.click('POS-55');
+    await h.settle();
+    check('EDIT existing order loads server metadata (table_number, guest_name, phone, notes)', () => {
+      assert.equal(findInputUnderLabel('Meja').props.value, 'VIP-2', 'Meja memuat metadata server');
+      assert.equal(findInputUnderLabel('Nama Tamu').props.value, 'Siti Aminah', 'Nama Tamu memuat metadata server');
+      assert.equal(findInputUnderLabel('No. WhatsApp').props.value, '08111222333', 'No. WhatsApp memuat metadata server');
+      assert.equal(findInputUnderLabel('Catatan Order').props.value, 'Pedas sedang', 'Catatan Order memuat metadata server');
+    });
+    h.cleanup();
+
+    const hGuest = harness(async (_url, init) => created(JSON.parse(init.body)), {
+      reservationId: 42,
+      guestNameInitial: 'Tamu Menginap VIP',
+      roomNumberInitial: '305',
+    });
+    await hGuest.settle();
+    check('CREATE with guestNameInitial populates Nama Tamu from reservation', () => {
+      const guestContainer = hGuest.nodes().find(n => n.type === 'div' && Array.isArray(n.props.children) &&
+        n.props.children.some(c => c && c.type === 'label' && String(c.props?.children || '').includes('Nama Tamu')));
+      const guestInp = guestContainer.props.children.find(c => c && c.type === 'input');
+      assert.equal(guestInp.props.value, 'Tamu Menginap VIP');
+    });
+    hGuest.cleanup();
+
+    const jsxModal = (type, p, key) => ({ type, props: p || {}, key });
+    const modalSlots = [];
+    let modalCursor = 0;
+    const modalReact = {
+      useRef(v) { const i = modalCursor++; if (!modalSlots[i]) modalSlots[i] = { current: v }; return modalSlots[i]; },
+      useEffect() {}, useCallback(fn) { return fn; },
+    };
+    const PosModal = load(compile('PosModal.tsx'), {
+      react: modalReact,
+      'react/jsx-runtime': { jsx: jsxModal, jsxs: jsxModal },
+      './PosWorkspace': { default: () => ({ type: 'div', props: { 'data-workspace': true } }) },
+    }).default;
+    let refreshed = 0;
+    modalCursor = 0;
+    const modalTree = PosModal({
+      open: true,
+      propertyId: 7,
+      posMenu: [],
+      posOrders: [],
+      busy: false,
+      payCashModalPresent: false,
+      onClose: () => {},
+      onRefresh: () => { refreshed++; },
+    });
+    const modalNodes = [];
+    (function walkModal(n) {
+      if (Array.isArray(n)) { n.forEach(walkModal); return; }
+      if (!n || typeof n !== 'object') return;
+      modalNodes.push(n);
+      walkModal(n.props?.children);
+    })(modalTree);
+    check('PosModal header places Refresh Data button to the left of Tutup POS with guard', () => {
+      const headerBtns = modalNodes.filter(n => n.type === 'button');
+      const refreshIdx = headerBtns.findIndex(b => b.props['aria-label'] === 'Refresh Data');
+      const closeIdx = headerBtns.findIndex(b => b.props['aria-label'] === 'Tutup POS');
+      assert.ok(refreshIdx >= 0, 'Tombol Refresh Data ada di header PosModal');
+      assert.ok(closeIdx > refreshIdx, 'Tombol Refresh Data berada di sebelah kiri tombol Tutup POS');
+      assert.ok(typeof headerBtns[refreshIdx].props.title === 'string' && headerBtns[refreshIdx].props.title.length > 0, 'Tooltip Refresh Data tersedia');
+      headerBtns[refreshIdx].props.onClick();
+      assert.equal(refreshed, 1, 'Klik Refresh Data memanggil onRefresh');
+    });
+  }
 }
 (async()=>{if(!contractOnly)await lifecycle();console.log(`\n[RESULT] ${pass} PASS, 0 FAIL${contractOnly?' (contract only; component lifecycle not run)':''}`);})()
  .catch(error=>{console.error('[FAIL]',error);process.exitCode=1;});
