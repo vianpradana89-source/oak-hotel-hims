@@ -730,9 +730,9 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
             isNew = false;
             payloadItemIds.add(itemId);
           } else {
-            // Item baru → cek is_active + harga & snapshot identitas dari DB
+            // Item baru → cek is_active + is_sellable_pos + harga & snapshot identitas dari DB
             const menuItemRes = await client.query(
-              `SELECT id, price, is_active, name, item_code FROM pos_menu_items
+              `SELECT id, price, is_active, is_sellable_pos, name, item_code FROM pos_menu_items
                WHERE id = $1 AND property_id = $2`,
               [mmi, propertyId]
             );
@@ -755,7 +755,26 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
               txnActive = false;
               return;
             }
-            unitPrice = Number(miRow.price);
+            if (miRow.is_sellable_pos === false || miRow.is_sellable_pos === 'false') {
+              res.status(400).json({
+                status: 'ERROR', code: 'MENU_ITEM_NOT_SELLABLE',
+                message: `items[${i}]: menu item ${mmi} tidak dijual di POS (produk internal) — tidak dapat ditambahkan`
+              });
+              await client.query('ROLLBACK');
+              txnActive = false;
+              return;
+            }
+            const parsedMenuPrice = miRow.price === null || miRow.price === undefined ? NaN : Number(miRow.price);
+            if (!Number.isFinite(parsedMenuPrice) || parsedMenuPrice < 0 || !Number.isSafeInteger(parsedMenuPrice)) {
+              res.status(400).json({
+                status: 'ERROR', code: 'MENU_ITEM_PRICE_INVALID',
+                message: `items[${i}]: menu item ${mmi} tidak memiliki harga jual POS yang valid`
+              });
+              await client.query('ROLLBACK');
+              txnActive = false;
+              return;
+            }
+            unitPrice = parsedMenuPrice;
             isNew = true;
             // Snapshot identitas menu berasal dari row DB yang sudah
             // dipastikan milik properti ini (WHERE property_id = $2).

@@ -174,9 +174,22 @@ export async function initializeDatabase(pool: Pool) {
       item_code VARCHAR(50),
       name VARCHAR(100) NOT NULL,
       description TEXT,
-      price DECIMAL(12,2) NOT NULL DEFAULT 0,
+      price DECIMAL(12,2),
       is_active BOOLEAN DEFAULT TRUE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      is_sellable_pos BOOLEAN NOT NULL DEFAULT TRUE,
+      product_type VARCHAR(30),
+      product_kind VARCHAR(30),
+      base_unit VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_pos_menu_items_product_type
+        CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD')),
+      CONSTRAINT chk_pos_menu_items_product_kind
+        CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')),
+      CONSTRAINT chk_pos_menu_items_base_unit_non_empty
+        CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)),
+      CONSTRAINT chk_pos_menu_items_price_sellable
+        CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL))
     );
 
     CREATE TABLE IF NOT EXISTS pos_orders (
@@ -783,6 +796,37 @@ export async function initializeDatabase(pool: Pool) {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_code ON pos_menu_items(property_id, item_code) WHERE item_code IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pmc_property ON pos_menu_categories(property_id);
     CREATE INDEX IF NOT EXISTS idx_pmi_property ON pos_menu_items(property_id);
+
+    -- Product Master Stage 1 additive schema (idempotent for existing DBs)
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_sellable_pos BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_type VARCHAR(30);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_kind VARCHAR(30);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS base_unit VARCHAR(50);
+    ALTER TABLE pos_menu_items ALTER COLUMN price DROP NOT NULL;
+    ALTER TABLE pos_menu_items ALTER COLUMN price DROP DEFAULT;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_type') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
+          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_kind') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_kind
+          CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_base_unit_non_empty') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_base_unit_non_empty
+          CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_price_sellable') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_price_sellable
+          CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL)) NOT VALID;
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pmi_property_sellable_active ON pos_menu_items(property_id, is_active, is_sellable_pos);
+    CREATE INDEX IF NOT EXISTS idx_pmi_property_product_type ON pos_menu_items(property_id, product_type);
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$

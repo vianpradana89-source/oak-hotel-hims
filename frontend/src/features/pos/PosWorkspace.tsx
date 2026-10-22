@@ -9,8 +9,22 @@ export interface PosMenuItem {
   item_code?: string;
   name: string;
   category_name?: string;
-  price: number | string;
+  price: number | string | null;
   is_available?: boolean;
+  is_active?: boolean;
+  is_sellable_pos?: boolean;
+}
+
+export function isSellablePosMenuItem(
+  item: PosMenuItem | null | undefined
+): item is PosMenuItem & { price: number | string } {
+  if (!item) return false;
+  if (item.is_active === false || item.is_available === false) return false;
+  if (item.is_sellable_pos === false) return false;
+  if (item.price === null || item.price === undefined) return false;
+  if (typeof item.price === 'string' && item.price.trim() === '') return false;
+  const numPrice = Number(item.price);
+  return Number.isFinite(numPrice) && numPrice >= 0 && Math.floor(numPrice) === numPrice;
 }
 
 export interface PosOrderItem {
@@ -847,6 +861,7 @@ export default function PosWorkspace({
    */
   const addNewEditCartLine = useCallback(
     (menuItem: PosMenuItem): void => {
+      if (!isSellablePosMenuItem(menuItem)) return;
       if (!canMutateEditDraft()) return;
       // P3: tandai draft berubah sinkron (baris item baru ditambahkan).
       markEditDraftChanged();
@@ -2244,16 +2259,20 @@ export default function PosWorkspace({
     onUnresolvedChange?.(isUnresolved);
   }, [ambiguous, editAmbiguous, onUnresolvedChange]);
 
+  const sellablePosMenu = useMemo(() => {
+    return posMenu.filter(isSellablePosMenuItem);
+  }, [posMenu]);
+
   const categories = useMemo(() => {
     const set = new Set<string>();
-    posMenu.forEach((m) => {
+    sellablePosMenu.forEach((m) => {
       if (m.category_name) set.add(m.category_name);
     });
     return Array.from(set);
-  }, [posMenu]);
+  }, [sellablePosMenu]);
 
   const filteredMenu = useMemo(() => {
-    return posMenu.filter((item) => {
+    return sellablePosMenu.filter((item) => {
       const matchSearch =
         searchQuery === '' ||
         item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -2261,7 +2280,7 @@ export default function PosWorkspace({
       const matchCat = selectedCategory === 'ALL' || item.category_name === selectedCategory;
       return matchSearch && matchCat;
     });
-  }, [posMenu, searchQuery, selectedCategory]);
+  }, [sellablePosMenu, searchQuery, selectedCategory]);
 
   /**
    * Draft terkunci saat request pending (`saving`/`busy`) ATAU hasil ambigu —
@@ -2273,6 +2292,7 @@ export default function PosWorkspace({
   const draftLocked = saving || busy || ambiguous;
 
   const addToCart = (item: PosMenuItem) => {
+    if (!isSellablePosMenuItem(item)) return;
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
     setCart((prev) => {
       const idx = prev.findIndex((p) => p.item.id === item.id);
@@ -2819,7 +2839,7 @@ export default function PosWorkspace({
     <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
         <div className="text-xs text-gray-500 font-medium">Menu Aktif</div>
-        <div className="text-xl sm:text-2xl font-black text-gray-900 mt-0.5">{posMenu.length}</div>
+        <div className="text-xl sm:text-2xl font-black text-gray-900 mt-0.5">{sellablePosMenu.length}</div>
         <div className="text-[11px] text-gray-400 mt-0.5">Item makanan &amp; minuman</div>
       </div>
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">

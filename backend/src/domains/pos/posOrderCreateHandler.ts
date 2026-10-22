@@ -624,21 +624,31 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       // konsisten untuk: input pricing canonical, persist pos_order_items
       // (unit_price + nama/kode), dan kalkulasi order total. Tidak ada
       // pembacaan menu kedua — eliminasi risiko drift harga konkuren.
-      const activeMenuItems: Array<{ id: any; price: any; name: any; item_code: any; property_id: any }> = [];
+      const activeMenuItems: Array<{ id: any; price: any; name: any; item_code: any; property_id: any; is_sellable_pos?: any }> = [];
       for (const item of items) {
         const menuItem = await client.query(
-          'SELECT id, price, name, item_code, property_id FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
+          'SELECT id, price, name, item_code, property_id, is_sellable_pos FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
           [item.menu_item_id]
         );
         if (!hasRows(menuItem)) {
           await client.query('ROLLBACK');
           return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
         }
-        if (Number(menuItem.rows[0].property_id) !== propertyId) {
+        const mRow = menuItem.rows[0];
+        if (Number(mRow.property_id) !== propertyId) {
           await client.query('ROLLBACK');
           return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_MENU_ITEM', message: `Menu item ${item.menu_item_id} belongs to a different property` });
         }
-        activeMenuItems.push(menuItem.rows[0]);
+        if (mRow.is_sellable_pos === false || mRow.is_sellable_pos === 'false') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_SELLABLE', message: `Menu item ${item.menu_item_id} is not sellable in POS` });
+        }
+        const mPrice = mRow.price === null || mRow.price === undefined ? NaN : Number(mRow.price);
+        if (!Number.isFinite(mPrice) || mPrice < 0 || !Number.isSafeInteger(mPrice)) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ status: 'ERROR', code: 'MENU_ITEM_PRICE_INVALID', message: `Menu item ${item.menu_item_id} has no valid selling price` });
+        }
+        activeMenuItems.push(mRow);
       }
 
       // ─── Step 5b: Baca pricing settings properti (STRICT, tanpa coercion) ──

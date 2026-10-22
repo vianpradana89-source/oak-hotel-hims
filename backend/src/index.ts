@@ -1,4 +1,4 @@
-﻿// backend/src/index.ts
+// backend/src/index.ts
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
@@ -164,6 +164,18 @@ import { createUsersRouter } from './domains/users/usersRouter';
 import { createRolePermissionsRouter } from './domains/settings/rolePermissionsRouter';
 import { createAccessControlRouter } from './domains/settings/accessControlRouter';
 import { createOperationalAccessGuard } from './domains/settings/operationalAccessGuard';
+import { hasAnyEffectivePermission } from './domains/settings/accessControlService';
+import {
+  parseProductTypeInput,
+  parseProductKindInput,
+  parseBaseUnitInput,
+  parseIsSellablePosInput,
+  parsePriceInput,
+  validateEffectiveSellablePrice,
+  parseProductTypeQueryFilter,
+  formatPosMenuItemRow,
+  createPosMenuItemPatchHandler,
+} from './domains/pos/productMasterStage1';
 
 const app: any = express();
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -5245,41 +5257,105 @@ app.get('/api/pos/menu', async (req, res) => {
     const statusFilterRaw = String(req.query.status || '').trim().toLowerCase();
     const statusFilter = statusFilterRaw === 'inactive' || statusFilterRaw === 'all' ? statusFilterRaw : 'active';
 
-    const categories = await pool.query('SELECT * FROM pos_menu_categories WHERE property_id = $1 ORDER BY id', [propertyId]);
-    let itemsQuery: string;
-    let itemParams: any[];
-    if (statusFilter === 'all') {
-      itemsQuery = `
-        SELECT mi.*, pmc.name AS category_name
-        FROM pos_menu_items mi
-        LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
-        WHERE mi.property_id = $1
-        ORDER BY mi.id
-      `;
-      itemParams = [propertyId];
-    } else if (statusFilter === 'inactive') {
-      itemsQuery = `
-        SELECT mi.*, pmc.name AS category_name
-        FROM pos_menu_items mi
-        LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
-        WHERE mi.is_active = FALSE AND mi.property_id = $1
-        ORDER BY mi.id
-      `;
-      itemParams = [propertyId];
-    } else {
-      // Default: active only.
-      itemsQuery = `
-        SELECT mi.*, pmc.name AS category_name
-        FROM pos_menu_items mi
-        LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
-        WHERE mi.is_active = TRUE AND mi.property_id = $1
-        ORDER BY mi.id
-      `;
-      itemParams = [propertyId];
+    const scopeRaw = req.query.scope !== undefined ? String(req.query.scope).trim().toLowerCase() : '';
+    if (scopeRaw !== '' && scopeRaw !== 'pos' && scopeRaw !== 'master') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid scope parameter (use pos or master)' });
     }
-    const items = await pool.query(itemsQuery, itemParams);
+    const isMasterScope = scopeRaw === 'master';
 
-    res.json({ status: 'OK', data: { categories: categories.rows, items: items.rows, status_filter: statusFilter } });
+    const includeInternalRaw = req.query.include_internal !== undefined ? String(req.query.include_internal).trim().toLowerCase() : '';
+    const includeInternal = includeInternalRaw === 'true' || includeInternalRaw === '1';
+
+    const sellableRaw = req.query.sellable !== undefined ? String(req.query.sellable).trim().toLowerCase() : '';
+    if (sellableRaw !== '' && sellableRaw !== 'true' && sellableRaw !== 'false' && sellableRaw !== 'all') {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid sellable parameter (use true, false, or all)' });
+    }
+
+    const parsedProductType = parseProductTypeQueryFilter(req.query.product_type);
+    if (!parsedProductType.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedProductType.code, message: parsedProductType.message });
+    }
+    const productTypeFilter = parsedProductType.filter;
+
+    // Akses seluruh master (scope=master, produk nonaktif/all, produk internal, atau filter tipe produk)
+    // wajib memiliki permission Master Produk (view); izin POS saja hanya boleh membaca katalog kasir aktif.
+    const requiresMasterProductPermission =
+      isMasterScope ||
+      includeInternal ||
+      statusFilter !== 'active' ||
+      sellableRaw === 'all' ||
+      sellableRaw === 'false' ||
+      productTypeFilter !== 'ALL';
+
+    if (requiresMasterProductPermission && (req as any).user?.id) {
+      const canViewMasterProduct = await hasAnyEffectivePermission(
+        pool,
+        propertyId,
+        Number((req as any).user.id),
+        ['Master Produk'],
+        'view'
+      );
+      if (!canViewMasterProduct) {
+        return res.status(403).json({
+          status: 'ERROR',
+          code: 'FORBIDDEN',
+          message: "Akses ditolak. Akun Anda tidak memiliki hak akses VIEW pada 'Master Produk'.",
+        });
+      }
+    }
+
+    const sellableFilter: 'true' | 'false' | 'all' =
+      sellableRaw === 'true' || sellableRaw === 'false' || sellableRaw === 'all'
+        ? sellableRaw
+        : isMasterScope || includeInternal || statusFilter !== 'active'
+          ? 'all'
+          : 'true';
+
+    const categories = await pool.query('SELECT * FROM pos_menu_categories WHERE property_id = $1 ORDER BY id', [propertyId]);
+
+    const whereConditions: string[] = ['mi.property_id = $1'];
+    const itemParams: any[] = [propertyId];
+
+    if (statusFilter === 'active') {
+      whereConditions.push('mi.is_active = TRUE');
+    } else if (statusFilter === 'inactive') {
+      whereConditions.push('mi.is_active = FALSE');
+    }
+
+    if (sellableFilter === 'true') {
+      whereConditions.push('COALESCE(mi.is_sellable_pos, TRUE) = TRUE');
+      whereConditions.push('mi.price IS NOT NULL');
+    } else if (sellableFilter === 'false') {
+      whereConditions.push('COALESCE(mi.is_sellable_pos, TRUE) = FALSE');
+    }
+
+    if (productTypeFilter === 'UNSET') {
+      whereConditions.push('mi.product_type IS NULL');
+    } else if (productTypeFilter !== 'ALL') {
+      itemParams.push(productTypeFilter);
+      whereConditions.push(`mi.product_type = $${itemParams.length}`);
+    }
+
+    const itemsQuery = `
+      SELECT mi.*, pmc.name AS category_name
+      FROM pos_menu_items mi
+      LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
+      WHERE ${whereConditions.join(' AND ')}
+      ORDER BY mi.id
+    `;
+    const items = await pool.query(itemsQuery, itemParams);
+    const formattedItems = items.rows.map((row: any) => formatPosMenuItemRow(row));
+
+    res.json({
+      status: 'OK',
+      data: {
+        categories: categories.rows,
+        items: formattedItems,
+        status_filter: statusFilter,
+        sellable_filter: sellableFilter,
+        product_type_filter: productTypeFilter,
+      },
+    });
   } catch (err: any) {
     const statusCode = err.statusCode || 500;
     res.status(statusCode).json({
@@ -5292,14 +5368,38 @@ app.get('/api/pos/menu', async (req, res) => {
 
 app.post('/api/pos/menu/items', async (req, res) => {
   try {
-    const { property_id, name, item_code, category_name, category_id, price, description } = req.body || {};
-    if (!property_id || price === undefined) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id and price are required' });
+    const {
+      property_id,
+      name,
+      item_code,
+      category_name,
+      category_id,
+      price,
+      description,
+      is_active,
+      is_sellable_pos,
+      product_type,
+      product_kind,
+      base_unit,
+    } = req.body || {};
+    if (!property_id) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
     }
     const propId = Number(property_id);
     if (!Number.isInteger(propId) || propId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
     }
+
+    const parsedSellable = parseIsSellablePosInput(is_sellable_pos);
+    if (!parsedSellable.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedSellable.code, message: parsedSellable.message });
+    }
+    const effectiveSellablePos = parsedSellable.provided ? parsedSellable.value : true;
+
+    if (effectiveSellablePos && price === undefined) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id and price are required' });
+    }
+
     // name wajib string nonkosong (bukan object/array/boolean/null).
     if (typeof name !== 'string' || name.trim() === '') {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be a non-empty string' });
@@ -5333,14 +5433,46 @@ app.post('/api/pos/menu/items', async (req, res) => {
     } else {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'description must be a string or null' });
     }
-    // Validasi harga (pertahankan tahap pertama): finite >= 0.
-    if (typeof price === 'boolean' || Array.isArray(price) || (price !== null && typeof price === 'object')) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number' });
+
+    // Validasi harga: Rupiah utuh (>= 0) wajib untuk produk jual; boleh null/omitted untuk produk internal.
+    const parsedPrice = parsePriceInput(price);
+    if (!parsedPrice.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedPrice.code, message: parsedPrice.message });
     }
-    const priceNum = Number(price);
-    if (price === null || (typeof price === 'string' && price.trim() === '') || !Number.isFinite(priceNum) || priceNum < 0) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number >= 0' });
+    const rawEffectivePrice = parsedPrice.provided ? parsedPrice.value : null;
+    const priceCheck = validateEffectiveSellablePrice(effectiveSellablePos, rawEffectivePrice);
+    if (!priceCheck.ok) {
+      return res.status(400).json({ status: 'ERROR', code: priceCheck.code, message: priceCheck.message });
     }
+    const priceVal = priceCheck.price;
+
+    // Validasi atribut Tahap 1: product_type, product_kind, base_unit, is_active
+    const parsedProductType = parseProductTypeInput(product_type);
+    if (!parsedProductType.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedProductType.code, message: parsedProductType.message });
+    }
+    const productTypeVal = parsedProductType.provided ? parsedProductType.value : null;
+
+    const parsedProductKind = parseProductKindInput(product_kind);
+    if (!parsedProductKind.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedProductKind.code, message: parsedProductKind.message });
+    }
+    const productKindVal = parsedProductKind.provided ? parsedProductKind.value : null;
+
+    const parsedBaseUnit = parseBaseUnitInput(base_unit);
+    if (!parsedBaseUnit.ok) {
+      return res.status(400).json({ status: 'ERROR', code: parsedBaseUnit.code, message: parsedBaseUnit.message });
+    }
+    const baseUnitVal = parsedBaseUnit.provided ? parsedBaseUnit.value : null;
+
+    let isActiveVal = true;
+    if (is_active !== undefined) {
+      if (typeof is_active !== 'boolean') {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'is_active must be a boolean' });
+      }
+      isActiveVal = is_active;
+    }
+
     // category_id (jika dikirim) wajib integer positif atau null.
     let resolvedCategoryId: number | null = null;
     if (category_id !== undefined) {
@@ -5431,13 +5563,29 @@ app.post('/api/pos/menu/items', async (req, res) => {
       }
 
       const insertRes = await client.query(
-        `INSERT INTO pos_menu_items (property_id, category_id, item_code, name, description, price, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, TRUE) RETURNING *`,
-        [propId, finalCategoryId, code, propName, desc, priceNum]
+        `INSERT INTO pos_menu_items (
+           property_id, category_id, item_code, name, description,
+           price, is_active, is_sellable_pos, product_type, product_kind, base_unit
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING *`,
+        [
+          propId,
+          finalCategoryId,
+          code,
+          propName,
+          desc,
+          priceVal,
+          isActiveVal,
+          effectiveSellablePos,
+          productTypeVal,
+          productKindVal,
+          baseUnitVal,
+        ]
       );
       await client.query('COMMIT');
       const row = insertRes.rows[0];
-      res.status(201).json({ status: 'OK', data: { ...row, category_name: finalCategoryName } });
+      res.status(201).json({ status: 'OK', data: formatPosMenuItemRow({ ...row, category_name: finalCategoryName }) });
       return;
     } catch (err: any) {
       try { await client.query('ROLLBACK'); } catch { /* already aborted */ }
@@ -5492,164 +5640,7 @@ app.delete('/api/pos/menu/items/:id', async (req, res) => {
 });
 
 // ── Master Produk: PATCH item (edit fields, active toggle) ──────────────────
-app.patch('/api/pos/menu/items/:id', async (req, res) => {
-  try {
-    const itemId = Number(req.params.id);
-    if (!Number.isInteger(itemId) || itemId <= 0) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid item id' });
-    }
-    const propertyIdRaw = req.query.property_id || req.body?.property_id;
-    if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
-    }
-    const propertyId = Number(propertyIdRaw);
-    if (!Number.isInteger(propertyId) || propertyId <= 0) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
-    }
-    await assertPropertyScope(req, propertyId);
-
-    const body = req.body || {};
-    // Build dynamic SET clause for only the fields present.
-    const setClauses: string[] = [];
-    const params: any[] = [];
-
-    if (body.name !== undefined) {
-      // name wajib string (bukan object/array/boolean/null) nonkosong.
-      if (typeof body.name !== 'string') {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be a non-empty string' });
-      }
-      const nameStr = body.name.trim();
-      if (!nameStr) {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be a non-empty string' });
-      }
-      if (nameStr.length > 100) {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be at most 100 characters' });
-      }
-      params.push(nameStr);
-      setClauses.push(`name = $${params.length}`);
-    }
-    if (body.item_code !== undefined) {
-      // item_code hanya string atau null; whitespace-only dinormalisasi null.
-      if (body.item_code !== null && typeof body.item_code !== 'string') {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'item_code must be a string or null' });
-      }
-      let codeStr: string | null;
-      if (body.item_code === null) {
-        codeStr = null;
-      } else {
-        const t = body.item_code.trim();
-        codeStr = t === '' ? null : t.toUpperCase();
-        if (codeStr !== null && codeStr.length > 50) {
-          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'item_code must be at most 50 characters' });
-        }
-      }
-      params.push(codeStr);
-      setClauses.push(`item_code = $${params.length}`);
-    }
-    if (body.description !== undefined) {
-      // description hanya string atau null.
-      if (body.description !== null && typeof body.description !== 'string') {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'description must be a string or null' });
-      }
-      if (body.description === null) {
-        params.push(null);
-      } else {
-        const t = body.description.trim();
-        params.push(t === '' ? null : t);
-      }
-      setClauses.push(`description = $${params.length}`);
-    }
-    if (body.price !== undefined) {
-      // Validasi harga (pertahankan tahap pertama).
-      if (typeof body.price === 'boolean' || Array.isArray(body.price) || (body.price !== null && typeof body.price === 'object')) {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number' });
-      }
-      if (body.price === null) {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number >= 0' });
-      }
-      const priceNum = Number(body.price);
-      if ((typeof body.price === 'string' && body.price.trim() === '') || !Number.isFinite(priceNum) || priceNum < 0) {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'price must be a finite number >= 0' });
-      }
-      params.push(priceNum);
-      setClauses.push(`price = $${params.length}`);
-    }
-    if (body.category_id !== undefined) {
-      // category_id hanya integer positif atau null (bukan string/objek).
-      if (body.category_id !== null) {
-        const cid = Number(body.category_id);
-        if (typeof body.category_id === 'string' && body.category_id.trim() === '') {
-          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'category_id must be a positive integer or null' });
-        }
-        if (!Number.isInteger(cid) || cid <= 0) {
-          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'category_id must be a positive integer or null' });
-        }
-        // Verifikasi kategori milik properti yang sama (sebelum mutasi).
-        const catCheck = await pool.query(
-          'SELECT id FROM pos_menu_categories WHERE id = $1 AND property_id = $2',
-          [cid, propertyId]
-        );
-        if ((catCheck.rowCount ?? 0) === 0) {
-          return res.status(400).json({ status: 'ERROR', code: 'CATEGORY_NOT_FOUND', message: 'category does not exist for this property' });
-        }
-        params.push(cid);
-      } else {
-        params.push(null);
-      }
-      setClauses.push(`category_id = $${params.length}`);
-    }
-    if (body.is_active !== undefined) {
-      if (typeof body.is_active !== 'boolean') {
-        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'is_active must be a boolean' });
-      }
-      params.push(body.is_active);
-      setClauses.push(`is_active = $${params.length}`);
-    }
-
-    if (setClauses.length === 0) {
-      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
-    }
-
-    // Item code duplicate check: jika item_code diset, pastikan tidak ada item lain
-    // di properti yang sama dengan kode yang sama. Ditangani melalui 23505 di bawah
-    // ATAU pre-check (untuk pesan eksplisit).
-    if (body.item_code !== undefined && body.item_code !== null && String(body.item_code).trim()) {
-      const dupCheck = await pool.query(
-        'SELECT id FROM pos_menu_items WHERE property_id = $1 AND item_code = $2 AND id != $3',
-        [propertyId, String(body.item_code).trim().toUpperCase(), itemId]
-      );
-      if ((dupCheck.rowCount ?? 0) > 0) {
-        return res.status(409).json({ status: 'ERROR', code: 'ITEM_CODE_DUPLICATE', message: 'item code already exists for this property' });
-      }
-    }
-
-    params.push(itemId, propertyId);
-    try {
-      const result = await pool.query(
-        `UPDATE pos_menu_items SET ${setClauses.join(', ')} WHERE id = $${params.length - 1} AND property_id = $${params.length} RETURNING *`,
-        params
-      );
-      if ((result.rowCount ?? 0) === 0) {
-        return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `menu item ${itemId} not found for property ${propertyId}` });
-      }
-      res.json({ status: 'OK', data: result.rows[0] });
-    } catch (updateErr: any) {
-      // Tangani concurrent code duplication via unique index (uq_pmi_property_code).
-      // HANYA jika 23505 dan constraint yang benar — bukan semua 23505 generik.
-      if (updateErr.code === '23505' && updateErr.constraint === 'uq_pmi_property_code') {
-        return res.status(409).json({ status: 'ERROR', code: 'ITEM_CODE_DUPLICATE', message: 'item code already exists for this property' });
-      }
-      throw updateErr;
-    }
-  } catch (err: any) {
-    const statusCode = err.statusCode || 500;
-    res.status(statusCode).json({
-      status: 'ERROR',
-      code: err.code || 'INTERNAL_ERROR',
-      message: statusCode === 500 ? 'Internal server error' : err.message
-    });
-  }
-});
+app.patch('/api/pos/menu/items/:id', createPosMenuItemPatchHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 
