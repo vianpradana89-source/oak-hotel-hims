@@ -22,16 +22,33 @@ const {
   parseProductTypeInput,
   parseProductKindInput,
   parseBaseUnitInput,
+  parseBarcodeInput,
   parseIsSellablePosInput,
   parsePriceInput,
   validateEffectiveSellablePrice,
   parseProductTypeQueryFilter,
   formatPosMenuItemRow,
   createPosMenuItemPatchHandler,
+  createPosMenuItemCreateHandler,
+  createPosMenuItemDeactivateHandler,
 } = require('../dist/domains/pos/productMasterStage1');
+const {
+  MAX_PRODUCT_PHOTO_BYTES,
+  isProductPhotoStorageKey,
+  hasValidImageSignature,
+  validateProductPhotoBuffer,
+  createProductPhotoUploadHandler,
+  createProductPhotoDeleteHandler,
+  createProductPhotoGetHandler,
+} = require('../dist/domains/pos/productPhotoStorage');
 const { createPosOrderCreateHandler } = require('../dist/domains/pos/posOrderCreateHandler');
 const { createPosOrderUpdateHandler } = require('../dist/domains/pos/posOrderUpdateHandler');
 const { runProductMasterStage1Migration } = require('../dist/db/migrations/product_master_stage1_v1');
+const {
+  runProductMasterMp02bMigration,
+  runProductMasterMp02bMigrationCli,
+} = require('../dist/db/migrations/product_master_mp02b_v1');
+const { OPERATIONAL_ACCESS_RULES } = require('../dist/domains/settings/operationalAccessGuard');
 
 let passed = 0;
 let failed = 0;
@@ -52,12 +69,22 @@ function makeMockRes() {
   return {
     statusCode: 200,
     body: null,
+    headers: {},
+    sentBuffer: null,
     status(code) {
       this.statusCode = code;
       return this;
     },
+    setHeader(name, value) {
+      this.headers[String(name).toLowerCase()] = value;
+      return this;
+    },
     json(payload) {
       this.body = payload;
+      return this;
+    },
+    send(payload) {
+      this.sentBuffer = payload;
       return this;
     },
   };
@@ -580,6 +607,21 @@ async function main() {
           return { rowCount: 0, rows: [] };
         }
 
+        if (normalizedSql === 'SELECT id FROM pos_menu_items WHERE property_id = $1 AND barcode = $2 AND id != $3') {
+          for (const candidate of rowsById.values()) {
+            if (
+              Number(candidate.property_id) === Number(params[0]) &&
+              candidate.barcode !== null &&
+              candidate.barcode !== undefined &&
+              candidate.barcode === params[1] &&
+              Number(candidate.id) !== Number(params[2])
+            ) {
+              return { rowCount: 1, rows: [{ id: candidate.id }] };
+            }
+          }
+          return { rowCount: 0, rows: [] };
+        }
+
         const updateMatch = normalizedSql.match(
           /^UPDATE pos_menu_items SET (.+) WHERE id = \$(\d+) AND property_id = \$(\d+) RETURNING \*$/
         );
@@ -949,6 +991,784 @@ async function main() {
     assert.strictEqual(res.body.data.product_type, 'FINISHED_GOOD');
     assert.strictEqual(res.body.data.product_kind, 'STANDARD');
     assert.strictEqual(res.body.data.base_unit, 'gelas');
+  });
+
+  // ── 7. MP-02B: Barcode & Foto Produk ───────────────────────────────────────
+  await test('T7.1 parseBarcodeInput memvalidasi string <= 100 karakter setelah trim dan mempertahankan nol awal', () => {
+    assert.strictEqual(parseBarcodeInput(undefined).provided, false);
+    assert.strictEqual(parseBarcodeInput(undefined).value, undefined);
+    assert.strictEqual(parseBarcodeInput(null).value, null);
+    assert.strictEqual(parseBarcodeInput('').value, null);
+    assert.strictEqual(parseBarcodeInput('   ').value, null);
+    assert.strictEqual(parseBarcodeInput('  0012345678905  ').value, '0012345678905');
+    assert.strictEqual(parseBarcodeInput('0000').value, '0000');
+
+    // Jangan menerima number agar nol awal tidak hilang diam-diam
+    assert.strictEqual(parseBarcodeInput(12345).ok, false);
+    assert.strictEqual(parseBarcodeInput('x'.repeat(101)).ok, false);
+    assert.strictEqual(parseBarcodeInput('x'.repeat(100)).value, 'x'.repeat(100));
+  });
+
+  await test('T7.2 formatPosMenuItemRow menyertakan barcode, has_photo, photo_url dan menyembunyikan photo_storage_key', () => {
+    const withPhoto = formatPosMenuItemRow({
+      id: 42,
+      property_id: 2,
+      name: 'Kopi Susu Botol',
+      price: 25000,
+      is_active: true,
+      is_sellable_pos: true,
+      barcode: '0089912345678',
+      photo_storage_key: 'branding/2/product-photos/42/11111111-2222-3333-4444-555555555555.png',
+      updated_at: '2026-10-22T08:00:00.000Z',
+    });
+    assert.strictEqual(withPhoto.barcode, '0089912345678');
+    assert.strictEqual(withPhoto.has_photo, true);
+    assert.ok(
+      withPhoto.photo_url.startsWith('/api/pos/menu/items/42/photo?property_id=2&v='),
+      `photo_url tidak sesuai: ${withPhoto.photo_url}`
+    );
+    assert.strictEqual('photo_storage_key' in withPhoto, false, 'photo_storage_key tidak boleh bocor ke respons API');
+
+    const withoutPhoto = formatPosMenuItemRow({
+      id: 43,
+      property_id: 2,
+      name: 'Teh Tawar',
+      price: 8000,
+      is_active: true,
+      is_sellable_pos: true,
+      barcode: null,
+      photo_storage_key: null,
+    });
+    assert.strictEqual(withoutPhoto.barcode, null);
+    assert.strictEqual(withoutPhoto.has_photo, false);
+    assert.strictEqual(withoutPhoto.photo_url, null);
+    assert.strictEqual('photo_storage_key' in withoutPhoto, false);
+  });
+
+  await test('T7.3 POST /api/pos/menu/items mendukung barcode (nol awal terjaga, tidak diisi dari SKU), kompatibel tanpa barcode, menolak duplikat per properti (termasuk nonaktif), & menolak photo_storage_key', async () => {
+    const existingRows = [
+      { id: 1, property_id: 1, item_code: 'INACT-01', name: 'Produk Lama Nonaktif', barcode: '0099887766', is_active: false },
+    ];
+    let nextId = 200;
+
+    const mockPool = {
+      async connect() {
+        return {
+          async query(sql, params = []) {
+            const norm = String(sql).replace(/\s+/g, ' ').trim();
+            if (norm === 'BEGIN' || norm === 'COMMIT' || norm === 'ROLLBACK') {
+              return { rowCount: 0, rows: [] };
+            }
+            if (norm.startsWith('SELECT id FROM properties')) {
+              return { rowCount: 1, rows: [{ id: params[0] }] };
+            }
+            if (norm === 'SELECT id FROM pos_menu_items WHERE property_id = $1 AND barcode = $2') {
+              const dup = existingRows.find(
+                (r) => Number(r.property_id) === Number(params[0]) && r.barcode === params[1]
+              );
+              return dup ? { rowCount: 1, rows: [{ id: dup.id }] } : { rowCount: 0, rows: [] };
+            }
+            if (norm.startsWith('INSERT INTO pos_menu_items')) {
+              const created = {
+                id: ++nextId,
+                property_id: params[0],
+                category_id: params[1],
+                item_code: params[2],
+                name: params[3],
+                description: params[4],
+                price: params[5],
+                is_active: params[6],
+                is_sellable_pos: params[7],
+                product_type: params[8],
+                product_kind: params[9],
+                base_unit: params[10],
+                barcode: params[11],
+                photo_storage_key: null,
+              };
+              existingRows.push(created);
+              return { rowCount: 1, rows: [created] };
+            }
+            throw new Error(`Unexpected SQL in POST test: ${norm}`);
+          },
+          release() {},
+        };
+      },
+    };
+
+    const createHandler = createPosMenuItemCreateHandler({
+      pool: mockPool,
+      assertPropertyScope: async () => {},
+    });
+
+    // 1) POST tanpa barcode -> kompatibel, barcode = null (tidak diisi dari SKU)
+    const resNoBarcode = makeMockRes();
+    await createHandler(
+      {
+        body: {
+          property_id: 1,
+          item_code: 'SKU-NO-BC',
+          name: 'Menu Tanpa Barcode',
+          price: 20000,
+        },
+      },
+      resNoBarcode
+    );
+    assert.strictEqual(resNoBarcode.statusCode, 201);
+    assert.strictEqual(resNoBarcode.body.data.item_code, 'SKU-NO-BC');
+    assert.strictEqual(resNoBarcode.body.data.barcode, null, 'Barcode tidak boleh diisi otomatis dari SKU');
+
+    // 2) POST dengan barcode berawalan nol -> nol awal dipertahankan
+    const resLeadingZero = makeMockRes();
+    await createHandler(
+      {
+        body: {
+          property_id: 1,
+          item_code: 'SKU-LZ',
+          name: 'Air Mineral Botol',
+          price: 10000,
+          barcode: '  0012345678905 ',
+        },
+      },
+      resLeadingZero
+    );
+    assert.strictEqual(resLeadingZero.statusCode, 201);
+    assert.strictEqual(resLeadingZero.body.data.barcode, '0012345678905');
+
+    // 3) POST dengan barcode yang sama milik produk nonaktif di properti yang sama -> 409 BARCODE_DUPLICATE
+    const resDupInactive = makeMockRes();
+    await createHandler(
+      {
+        body: {
+          property_id: 1,
+          name: 'Produk Bentrok Nonaktif',
+          price: 15000,
+          barcode: '0099887766',
+        },
+      },
+      resDupInactive
+    );
+    assert.strictEqual(resDupInactive.statusCode, 409);
+    assert.strictEqual(resDupInactive.body.code, 'BARCODE_DUPLICATE');
+
+    // 4) POST di properti berbeda dengan barcode yang sama -> diizinkan (unik per properti)
+    const resOtherProperty = makeMockRes();
+    await createHandler(
+      {
+        body: {
+          property_id: 2,
+          name: 'Produk Properti Kedua',
+          price: 15000,
+          barcode: '0099887766',
+        },
+      },
+      resOtherProperty
+    );
+    assert.strictEqual(resOtherProperty.statusCode, 201);
+    assert.strictEqual(resOtherProperty.body.data.barcode, '0099887766');
+
+    // 5) POST yang mencoba menyuntikkan photo_storage_key -> ditolak 400
+    const resInjectPhotoKey = makeMockRes();
+    await createHandler(
+      {
+        body: {
+          property_id: 1,
+          name: 'Produk Injeksi Key',
+          price: 15000,
+          photo_storage_key: 'branding/1/product-photos/1/hack.png',
+        },
+      },
+      resInjectPhotoKey
+    );
+    assert.strictEqual(resInjectPhotoKey.statusCode, 400);
+    assert.strictEqual(resInjectPhotoKey.body.code, 'VALIDATION_ERROR');
+  });
+
+  await test('T7.4 PATCH /api/pos/menu/items/:id mempertahankan barcode saat field dihilangkan, mengubah/menghapus barcode saat dikirim, menolak duplikat, & menolak photo_storage_key', async () => {
+    const { handler, rowsById } = createPatchItemHarness([
+      {
+        id: 301,
+        property_id: 1,
+        item_code: 'MN-301',
+        name: 'Kopi Tubruk',
+        price: 18000,
+        is_active: true,
+        is_sellable_pos: true,
+        barcode: '0011223344',
+        photo_storage_key: 'branding/1/product-photos/301/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png',
+      },
+      {
+        id: 302,
+        property_id: 1,
+        item_code: 'MN-302',
+        name: 'Produk Nonaktif Dengan Barcode',
+        price: 20000,
+        is_active: false,
+        is_sellable_pos: true,
+        barcode: '0055667788',
+        photo_storage_key: null,
+      },
+    ]);
+
+    // 1) Field barcode dihilangkan -> nilai barcode & foto tetap utuh
+    const resOmitted = makeMockRes();
+    await handler(
+      {
+        params: { id: '301' },
+        query: { property_id: '1' },
+        body: { name: 'Kopi Tubruk Spesial' },
+      },
+      resOmitted
+    );
+    assert.strictEqual(resOmitted.statusCode, 200);
+    assert.strictEqual(resOmitted.body.data.barcode, '0011223344');
+    assert.strictEqual(resOmitted.body.data.has_photo, true);
+
+    // 2) Update barcode baru dengan nol awal
+    const resUpdateBarcode = makeMockRes();
+    await handler(
+      {
+        params: { id: '301' },
+        query: { property_id: '1' },
+        body: { barcode: ' 0077889900 ' },
+      },
+      resUpdateBarcode
+    );
+    assert.strictEqual(resUpdateBarcode.statusCode, 200);
+    assert.strictEqual(resUpdateBarcode.body.data.barcode, '0077889900');
+    assert.strictEqual(rowsById.get(301).barcode, '0077889900');
+
+    // 3) Bentrok dengan barcode produk nonaktif (#302) -> 409 BARCODE_DUPLICATE
+    const resDup = makeMockRes();
+    await handler(
+      {
+        params: { id: '301' },
+        query: { property_id: '1' },
+        body: { barcode: '0055667788' },
+      },
+      resDup
+    );
+    assert.strictEqual(resDup.statusCode, 409);
+    assert.strictEqual(resDup.body.code, 'BARCODE_DUPLICATE');
+    assert.strictEqual(rowsById.get(301).barcode, '0077889900');
+
+    // 4) Kosongkan barcode dengan string kosong "" -> menjadi null
+    const resClearEmpty = makeMockRes();
+    await handler(
+      {
+        params: { id: '301' },
+        query: { property_id: '1' },
+        body: { barcode: '   ' },
+      },
+      resClearEmpty
+    );
+    assert.strictEqual(resClearEmpty.statusCode, 200);
+    assert.strictEqual(resClearEmpty.body.data.barcode, null);
+    assert.strictEqual(rowsById.get(301).barcode, null);
+
+    // 5) Tolak injeksi photo_storage_key pada PATCH
+    const resRejectPhotoKey = makeMockRes();
+    await handler(
+      {
+        params: { id: '301' },
+        query: { property_id: '1' },
+        body: { photo_storage_key: null },
+      },
+      resRejectPhotoKey
+    );
+    assert.strictEqual(resRejectPhotoKey.statusCode, 400);
+    assert.strictEqual(resRejectPhotoKey.body.code, 'VALIDATION_ERROR');
+  });
+
+  await test('T7.5 Menonaktifkan produk (PATCH is_active=false maupun DELETE /api/pos/menu/items/:id) mempertahankan foto dan barcode', async () => {
+    const initialRow = {
+      id: 350,
+      property_id: 1,
+      item_code: 'MN-350',
+      name: 'Matcha Latte',
+      price: 32000,
+      is_active: true,
+      is_sellable_pos: true,
+      barcode: '00350350',
+      photo_storage_key: 'branding/1/product-photos/350/12345678-1234-1234-1234-1234567890ab.webp',
+    };
+    const { handler: patchHandler, rowsById } = createPatchItemHarness([initialRow]);
+
+    // 1) Via PATCH { is_active: false }
+    const resPatchDeactivate = makeMockRes();
+    await patchHandler(
+      {
+        params: { id: '350' },
+        query: { property_id: '1' },
+        body: { is_active: false },
+      },
+      resPatchDeactivate
+    );
+    assert.strictEqual(resPatchDeactivate.statusCode, 200);
+    assert.strictEqual(resPatchDeactivate.body.data.is_active, false);
+    assert.strictEqual(resPatchDeactivate.body.data.barcode, '00350350');
+    assert.strictEqual(resPatchDeactivate.body.data.has_photo, true);
+    assert.strictEqual(rowsById.get(350).photo_storage_key, initialRow.photo_storage_key);
+
+    // 2) Via DELETE /api/pos/menu/items/:id
+    rowsById.get(350).is_active = true;
+    const deactivateQueries = [];
+    const deactivateHandler = createPosMenuItemDeactivateHandler({
+      pool: {
+        async query(sql, params) {
+          const norm = String(sql).replace(/\s+/g, ' ').trim();
+          deactivateQueries.push({ sql: norm, params });
+          const row = rowsById.get(Number(params[0]));
+          if (!row || Number(row.property_id) !== Number(params[1])) {
+            return { rowCount: 0, rows: [] };
+          }
+          row.is_active = false;
+          return { rowCount: 1, rows: [{ id: row.id }] };
+        },
+      },
+      assertPropertyScope: async () => {},
+    });
+
+    const resDeleteDeactivate = makeMockRes();
+    await deactivateHandler(
+      { params: { id: '350' }, query: { property_id: '1' } },
+      resDeleteDeactivate
+    );
+    assert.strictEqual(resDeleteDeactivate.statusCode, 200);
+    assert.strictEqual(
+      deactivateQueries[0].sql,
+      'UPDATE pos_menu_items SET is_active = FALSE WHERE id = $1 AND property_id = $2 RETURNING id'
+    );
+    assert.strictEqual(rowsById.get(350).is_active, false);
+    assert.strictEqual(rowsById.get(350).barcode, '00350350');
+    assert.strictEqual(rowsById.get(350).photo_storage_key, initialRow.photo_storage_key);
+  });
+
+  await test('T7.6 Validasi & Upload Foto (POST /api/pos/menu/items/:id/photo): magic bytes PNG/JPEG/WebP, batas 2 MB, hapus foto lama pasca-COMMIT, & cleanup aman saat gagal COMMIT', async () => {
+    const validPng = Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.alloc(32, 1),
+    ]);
+    const validJpeg = Buffer.from([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1]);
+    const validWebp = Buffer.concat([
+      Buffer.from('RIFF', 'ascii'),
+      Buffer.from([32, 0, 0, 0]),
+      Buffer.from('WEBP', 'ascii'),
+      Buffer.alloc(16, 0),
+    ]);
+
+    assert.strictEqual(hasValidImageSignature(validPng, 'image/png'), true);
+    assert.strictEqual(hasValidImageSignature(validJpeg, 'image/jpeg'), true);
+    assert.strictEqual(hasValidImageSignature(validWebp, 'image/webp'), true);
+    assert.strictEqual(hasValidImageSignature(Buffer.from('not-an-image'), 'image/png'), false);
+
+    // Tolak ukuran > 2 MB
+    const oversized = validateProductPhotoBuffer({
+      buffer: validPng,
+      mimetype: 'image/png',
+      size: MAX_PRODUCT_PHOTO_BYTES + 1,
+    });
+    assert.strictEqual(oversized.ok, false);
+    assert.strictEqual(oversized.code, 'PRODUCT_PHOTO_TOO_LARGE');
+
+    // Simulasi adapter storage in-memory
+    const storedFiles = new Map();
+    const deletedKeys = [];
+    const mockAdapter = {
+      async save(key, buffer, contentType) {
+        storedFiles.set(key, { buffer, contentType });
+      },
+      async read(key) {
+        return storedFiles.has(key) ? storedFiles.get(key).buffer : null;
+      },
+      async exists(key) {
+        return storedFiles.has(key);
+      },
+      async delete(key) {
+        deletedKeys.push(key);
+        storedFiles.delete(key);
+      },
+    };
+
+    const oldKey = 'branding/1/product-photos/401/11111111-1111-1111-1111-111111111111.png';
+    storedFiles.set(oldKey, { buffer: validPng, contentType: 'image/png' });
+
+    const dbRow = {
+      id: 401,
+      property_id: 1,
+      name: 'Nasi Ayam Geprek',
+      price: 28000,
+      is_active: true,
+      is_sellable_pos: true,
+      barcode: '00401',
+      photo_storage_key: oldKey,
+    };
+
+    let failCommitMode = null; // null | 'rollback_clean' | 'uncertain_persisted'
+
+    const mockPool = {
+      async query(sql) {
+        const norm = String(sql).replace(/\s+/g, ' ').trim();
+        if (norm.startsWith('SELECT id FROM pos_menu_items')) {
+          return { rowCount: 1, rows: [{ id: dbRow.id }] };
+        }
+        if (norm.startsWith('SELECT photo_storage_key FROM pos_menu_items')) {
+          return { rowCount: 1, rows: [{ photo_storage_key: dbRow.photo_storage_key }] };
+        }
+        throw new Error(`Unexpected pool.query: ${norm}`);
+      },
+      async connect() {
+        let stagedKey = dbRow.photo_storage_key;
+        return {
+          async query(sql, params = []) {
+            const norm = String(sql).replace(/\s+/g, ' ').trim();
+            if (norm === 'BEGIN' || norm === 'ROLLBACK') return { rowCount: 0, rows: [] };
+            if (norm.startsWith('SELECT id, photo_storage_key FROM pos_menu_items')) {
+              return { rowCount: 1, rows: [{ id: dbRow.id, photo_storage_key: dbRow.photo_storage_key }] };
+            }
+            if (norm.startsWith('UPDATE pos_menu_items SET photo_storage_key = $1')) {
+              stagedKey = params[0];
+              return { rowCount: 1, rows: [{ ...dbRow, photo_storage_key: stagedKey }] };
+            }
+            if (norm === 'COMMIT') {
+              if (failCommitMode === 'rollback_clean') {
+                throw new Error('Simulated DB connection drop before commit');
+              }
+              if (failCommitMode === 'uncertain_persisted') {
+                dbRow.photo_storage_key = stagedKey;
+                throw new Error('Simulated network timeout after DB commit persisted');
+              }
+              dbRow.photo_storage_key = stagedKey;
+              return { rowCount: 0, rows: [] };
+            }
+            throw new Error(`Unexpected client.query: ${norm}`);
+          },
+          release() {},
+        };
+      },
+    };
+
+    const uploadHandler = createProductPhotoUploadHandler({
+      pool: mockPool,
+      assertPropertyScope: async () => {},
+      storageAdapter: mockAdapter,
+    });
+
+    // 1) Upload sukses menggantikan foto lama: foto lama dihapus setelah COMMIT
+    const resUploadOk = makeMockRes();
+    await uploadHandler(
+      {
+        params: { id: '401' },
+        query: { property_id: '1' },
+        file: { buffer: validWebp, mimetype: 'image/webp', size: validWebp.length },
+      },
+      resUploadOk
+    );
+    assert.strictEqual(resUploadOk.statusCode, 200);
+    assert.strictEqual(resUploadOk.body.data.has_photo, true);
+    assert.ok(isProductPhotoStorageKey(dbRow.photo_storage_key, 1, 401));
+    assert.notStrictEqual(dbRow.photo_storage_key, oldKey);
+    assert.strictEqual(storedFiles.has(oldKey), false, 'Foto lama harus dihapus setelah COMMIT berhasil');
+    assert.strictEqual(storedFiles.has(dbRow.photo_storage_key), true, 'Foto baru harus tersimpan');
+
+    // 2) Upload gagal sebelum COMMIT (DB tidak mereferensikan key baru):
+    //    Foto aktif saat ini tetap aman, dan file baru yang yatim dihapus.
+    const activeKeyBeforeFail = dbRow.photo_storage_key;
+    failCommitMode = 'rollback_clean';
+    const resUploadRollback = makeMockRes();
+    await uploadHandler(
+      {
+        params: { id: '401' },
+        query: { property_id: '1' },
+        file: { buffer: validPng, mimetype: 'image/png', size: validPng.length },
+      },
+      resUploadRollback
+    );
+    assert.strictEqual(resUploadRollback.statusCode, 500);
+    assert.strictEqual(dbRow.photo_storage_key, activeKeyBeforeFail, 'Key DB tidak berubah saat transaksi gagal');
+    assert.strictEqual(storedFiles.has(activeKeyBeforeFail), true, 'Foto lama/aktif tidak boleh terhapus saat transaksi gagal');
+    assert.strictEqual(storedFiles.size, 1, 'File baru yang gagal ditautkan harus dibersihkan setelah verifikasi DB');
+
+    // 3) Upload error jaringan pasca-COMMIT (DB sudah mereferensikan key baru):
+    //    Pembacaan ulang DB mendeteksi currentKey === newKey sehingga file baru TIDAK dihapus!
+    failCommitMode = 'uncertain_persisted';
+    const resUploadUncertain = makeMockRes();
+    await uploadHandler(
+      {
+        params: { id: '401' },
+        query: { property_id: '1' },
+        file: { buffer: validJpeg, mimetype: 'image/jpeg', size: validJpeg.length },
+      },
+      resUploadUncertain
+    );
+    assert.strictEqual(resUploadUncertain.statusCode, 500);
+    assert.notStrictEqual(dbRow.photo_storage_key, activeKeyBeforeFail);
+    assert.strictEqual(
+      storedFiles.has(dbRow.photo_storage_key),
+      true,
+      'File baru yang sudah terlanjur tereferensi di DB tidak boleh dihapus oleh error handler'
+    );
+  });
+
+  await test('T7.7 Hapus Foto (DELETE) & Baca Foto (GET) beserta pembatasan akses POS vs Master Produk', async () => {
+    const validPng = Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.alloc(24, 7),
+    ]);
+    const keySellable = 'branding/1/product-photos/501/aaaaaaaa-1111-2222-3333-444444444444.png';
+    const keyNonPos = 'branding/1/product-photos/502/bbbbbbbb-1111-2222-3333-444444444444.png';
+
+    const storedFiles = new Map([
+      [keySellable, validPng],
+      [keyNonPos, validPng],
+    ]);
+    const mockAdapter = {
+      async save(k, b) { storedFiles.set(k, b); },
+      async read(k) { return storedFiles.get(k) || null; },
+      async exists(k) { return storedFiles.has(k); },
+      async delete(k) { storedFiles.delete(k); },
+    };
+
+    const items = new Map([
+      [501, { id: 501, property_id: 1, name: 'Menu POS Aktif', price: 25000, is_active: true, is_sellable_pos: true, photo_storage_key: keySellable }],
+      [502, { id: 502, property_id: 1, name: 'Bahan Baku Non-POS', price: null, is_active: true, is_sellable_pos: false, photo_storage_key: keyNonPos }],
+    ]);
+
+    const mockPool = {
+      async query(sql, params = []) {
+        const item = items.get(Number(params[0]));
+        if (!item || Number(item.property_id) !== Number(params[1])) return { rowCount: 0, rows: [] };
+        return { rowCount: 1, rows: [{ ...item }] };
+      },
+      async connect() {
+        return {
+          async query(sql, params = []) {
+            const norm = String(sql).replace(/\s+/g, ' ').trim();
+            if (norm === 'BEGIN' || norm === 'COMMIT' || norm === 'ROLLBACK') return { rowCount: 0, rows: [] };
+            if (norm.startsWith('SELECT id, photo_storage_key FROM pos_menu_items')) {
+              const item = items.get(Number(params[0]));
+              if (!item || Number(item.property_id) !== Number(params[1])) return { rowCount: 0, rows: [] };
+              return { rowCount: 1, rows: [{ id: item.id, photo_storage_key: item.photo_storage_key }] };
+            }
+            if (norm.startsWith('UPDATE pos_menu_items SET photo_storage_key = NULL')) {
+              const item = items.get(Number(params[0]));
+              item.photo_storage_key = null;
+              return { rowCount: 1, rows: [{ ...item }] };
+            }
+            throw new Error(`Unexpected SQL: ${norm}`);
+          },
+          release() {},
+        };
+      },
+    };
+
+    let hasMasterView = false;
+    const getHandler = createProductPhotoGetHandler({
+      pool: mockPool,
+      assertPropertyScope: async () => {},
+      canViewMasterProduct: async () => hasMasterView,
+      storageAdapter: mockAdapter,
+    });
+
+    // 1) Kasir POS (tanpa izin Master Produk) membaca foto produk POS aktif -> 200 OK
+    const resPosReadSellable = makeMockRes();
+    await getHandler({ params: { id: '501' }, query: { property_id: '1' } }, resPosReadSellable);
+    assert.strictEqual(resPosReadSellable.statusCode, 200);
+    assert.strictEqual(resPosReadSellable.headers['content-type'], 'image/png');
+    assert.strictEqual(resPosReadSellable.headers['cache-control'], 'private, no-store');
+    assert.deepStrictEqual(resPosReadSellable.sentBuffer, validPng);
+
+    // 2) Kasir POS (tanpa izin Master Produk) membaca foto produk non-POS -> 403 FORBIDDEN
+    const resPosReadNonPos = makeMockRes();
+    await getHandler({ params: { id: '502' }, query: { property_id: '1' } }, resPosReadNonPos);
+    assert.strictEqual(resPosReadNonPos.statusCode, 403);
+    assert.strictEqual(resPosReadNonPos.body.code, 'FORBIDDEN');
+
+    // 3) User dengan izin Master Produk membaca foto produk non-POS -> 200 OK
+    hasMasterView = true;
+    const resMasterReadNonPos = makeMockRes();
+    await getHandler({ params: { id: '502' }, query: { property_id: '1' } }, resMasterReadNonPos);
+    assert.strictEqual(resMasterReadNonPos.statusCode, 200);
+    assert.deepStrictEqual(resMasterReadNonPos.sentBuffer, validPng);
+
+    // 4) DELETE /api/pos/menu/items/:id/photo menghapus tautan DB dan file di storage
+    const deleteHandler = createProductPhotoDeleteHandler({
+      pool: mockPool,
+      assertPropertyScope: async () => {},
+      storageAdapter: mockAdapter,
+    });
+    const resDelete = makeMockRes();
+    await deleteHandler({ params: { id: '501' }, query: { property_id: '1' } }, resDelete);
+    assert.strictEqual(resDelete.statusCode, 200);
+    assert.strictEqual(resDelete.body.data.has_photo, false);
+    assert.strictEqual(resDelete.body.data.photo_url, null);
+    assert.strictEqual(storedFiles.has(keySellable), false);
+  });
+
+  await test('T7.8 Kontrak Migration MP-02B & Operational Access Rules untuk endpoint foto produk', async () => {
+    const executedSql = [];
+    const mockPool = {
+      async connect() {
+        return {
+          async query(sql) {
+            const text = typeof sql === 'string' ? sql.trim() : '';
+            executedSql.push(text);
+            if (text.includes('FROM information_schema.tables')) {
+              return { rowCount: 1, rows: [{ '?column?': 1 }] };
+            }
+            if (text.includes('FROM information_schema.columns')) {
+              return {
+                rowCount: 2,
+                rows: [
+                  { column_name: 'barcode', is_nullable: 'YES', character_maximum_length: 100 },
+                  { column_name: 'photo_storage_key', is_nullable: 'YES', character_maximum_length: null },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release() {},
+        };
+      },
+    };
+
+    await runProductMasterMp02bMigration(mockPool);
+    const joined = executedSql.join('\n');
+    assert.ok(joined.includes('ADD COLUMN IF NOT EXISTS barcode VARCHAR(100)'));
+    assert.ok(joined.includes('ADD COLUMN IF NOT EXISTS photo_storage_key TEXT'));
+    assert.ok(joined.includes('chk_pos_menu_items_barcode_non_empty'));
+    assert.ok(joined.includes('CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_barcode'));
+    assert.ok(joined.includes('ON pos_menu_items(property_id, barcode)'));
+    assert.ok(joined.includes('WHERE barcode IS NOT NULL'));
+
+    // Verifikasi OPERATIONAL_ACCESS_RULES memiliki rule khusus endpoint foto produk
+    const photoGetRule = OPERATIONAL_ACCESS_RULES.find(
+      (r) => r.pattern.test('/api/pos/menu/items/123/photo') && r.methods && r.methods.includes('GET')
+    );
+    const photoMutateRule = OPERATIONAL_ACCESS_RULES.find(
+      (r) => r.pattern.test('/api/pos/menu/items/123/photo') && r.methods && r.methods.includes('POST')
+    );
+    assert.ok(photoGetRule, 'Rule GET foto produk wajib terdaftar di OPERATIONAL_ACCESS_RULES');
+    assert.deepStrictEqual(photoGetRule.resources, ['POS', 'Master Produk']);
+    assert.strictEqual(photoGetRule.action, 'view');
+
+    assert.ok(photoMutateRule, 'Rule POST/DELETE foto produk wajib terdaftar di OPERATIONAL_ACCESS_RULES');
+    assert.deepStrictEqual(photoMutateRule.resources, ['Master Produk']);
+    assert.strictEqual(photoMutateRule.action, 'edit');
+  });
+
+  await test('T7.9 Runner CLI Migration MP-02B memanggil runProductMasterMp02bMigration(pool), menutup pool di semua jalur, & exit nonzero bila gagal (mock, tanpa DB live)', async () => {
+    const fs = require('fs');
+    const path = require('path');
+
+    // 1) Jalur sukses: menjalankan runProductMasterMp02bMigration(pool), menutup pool.end(), return 0
+    let okPoolEnded = false;
+    let okClientReleased = false;
+    const okExecutedSql = [];
+    const mockPoolSuccess = {
+      async connect() {
+        return {
+          async query(sql) {
+            const text = typeof sql === 'string' ? sql.trim() : '';
+            okExecutedSql.push(text);
+            if (text.includes('FROM information_schema.tables')) {
+              return { rowCount: 1, rows: [{ '?column?': 1 }] };
+            }
+            if (text.includes('FROM information_schema.columns')) {
+              return {
+                rowCount: 2,
+                rows: [
+                  { column_name: 'barcode', is_nullable: 'YES' },
+                  { column_name: 'photo_storage_key', is_nullable: 'YES' },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release() {
+            okClientReleased = true;
+          },
+        };
+      },
+      async end() {
+        okPoolEnded = true;
+      },
+    };
+
+    let okExitCode = null;
+    let okLoggedErr = null;
+    const okResult = await runProductMasterMp02bMigrationCli({
+      createPool: () => mockPoolSuccess,
+      onError: (err) => {
+        okLoggedErr = err;
+      },
+      setExitCode: (code) => {
+        okExitCode = code;
+      },
+    });
+    assert.strictEqual(okResult, 0);
+    assert.strictEqual(okExitCode, null);
+    assert.strictEqual(okLoggedErr, null);
+    assert.strictEqual(okClientReleased, true, 'Client harus di-release pada jalur sukses');
+    assert.strictEqual(okPoolEnded, true, 'pool.end() wajib dipanggil pada jalur sukses');
+    assert.ok(
+      okExecutedSql.some((s) => s.includes('ADD COLUMN IF NOT EXISTS photo_storage_key TEXT')),
+      'Runner wajib benar-benar memanggil runProductMasterMp02bMigration(pool)'
+    );
+
+    // 2) Jalur gagal: menutup pool.end() di finally, mencatat error, dan mengeset exit code nonzero (1)
+    let failPoolEnded = false;
+    let failClientReleased = false;
+    const mockPoolFail = {
+      async connect() {
+        return {
+          async query(sql) {
+            const text = typeof sql === 'string' ? sql.trim() : '';
+            if (text.includes('FROM information_schema.tables')) {
+              return { rowCount: 0, rows: [] }; // gagal prasyarat pos_menu_items
+            }
+            return { rowCount: 0, rows: [] };
+          },
+          release() {
+            failClientReleased = true;
+          },
+        };
+      },
+      async end() {
+        failPoolEnded = true;
+      },
+    };
+
+    let failExitCode = null;
+    let failLoggedErr = null;
+    const failResult = await runProductMasterMp02bMigrationCli({
+      createPool: () => mockPoolFail,
+      onError: (err) => {
+        failLoggedErr = err;
+      },
+      setExitCode: (code) => {
+        failExitCode = code;
+      },
+    });
+    assert.strictEqual(failResult, 1, 'Runner wajib mengembalikan kode nonzero (1) saat gagal');
+    assert.strictEqual(failExitCode, 1, 'Runner wajib mengeset exitCode nonzero (1) saat gagal');
+    assert.ok(failLoggedErr instanceof Error, 'Error kegagalan migrasi harus diteruskan ke handler error');
+    assert.match(failLoggedErr.message, /Prerequisite failed: table pos_menu_items does not exist/);
+    assert.strictEqual(failClientReleased, true, 'Client harus tetap di-release pada jalur gagal');
+    assert.strictEqual(failPoolEnded, true, 'pool.end() wajib tetap dipanggil pada jalur gagal');
+
+    // 3) Verifikasi entrypoint CLI require.main === module di dist/db/migrations/product_master_mp02b_v1.js
+    const compiledMigrationSrc = fs.readFileSync(
+      path.resolve(__dirname, '../dist/db/migrations/product_master_mp02b_v1.js'),
+      'utf8'
+    );
+    assert.ok(
+      compiledMigrationSrc.includes('require.main === module'),
+      'Modul migrasi terkompilasi wajib memiliki blok runner CLI require.main === module'
+    );
+    assert.ok(
+      compiledMigrationSrc.includes('runProductMasterMp02bMigrationCli()'),
+      'Blok require.main === module wajib memanggil runProductMasterMp02bMigrationCli()'
+    );
   });
 
   console.log(`\n=== Summary: ${passed} passed, ${failed} failed ===`);

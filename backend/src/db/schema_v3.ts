@@ -180,6 +180,8 @@ export async function initializeDatabase(pool: Pool) {
       product_type VARCHAR(30),
       product_kind VARCHAR(30),
       base_unit VARCHAR(50),
+      barcode VARCHAR(100),
+      photo_storage_key TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT chk_pos_menu_items_product_type
@@ -188,6 +190,8 @@ export async function initializeDatabase(pool: Pool) {
         CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')),
       CONSTRAINT chk_pos_menu_items_base_unit_non_empty
         CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)),
+      CONSTRAINT chk_pos_menu_items_barcode_non_empty
+        CHECK (barcode IS NULL OR (LENGTH(BTRIM(barcode)) >= 1 AND LENGTH(BTRIM(barcode)) <= 100)),
       CONSTRAINT chk_pos_menu_items_price_sellable
         CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL))
     );
@@ -803,6 +807,8 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_type VARCHAR(30);
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_kind VARCHAR(30);
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS base_unit VARCHAR(50);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(100);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS photo_storage_key TEXT;
     ALTER TABLE pos_menu_items ALTER COLUMN price DROP NOT NULL;
     ALTER TABLE pos_menu_items ALTER COLUMN price DROP DEFAULT;
 
@@ -819,12 +825,17 @@ export async function initializeDatabase(pool: Pool) {
         ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_base_unit_non_empty
           CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)) NOT VALID;
       END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_barcode_non_empty') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_barcode_non_empty
+          CHECK (barcode IS NULL OR (LENGTH(BTRIM(barcode)) >= 1 AND LENGTH(BTRIM(barcode)) <= 100)) NOT VALID;
+      END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_price_sellable') THEN
         ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_price_sellable
           CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL)) NOT VALID;
       END IF;
     END $$;
 
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_barcode ON pos_menu_items(property_id, barcode) WHERE barcode IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pmi_property_sellable_active ON pos_menu_items(property_id, is_active, is_sellable_pos);
     CREATE INDEX IF NOT EXISTS idx_pmi_property_product_type ON pos_menu_items(property_id, product_type);
 

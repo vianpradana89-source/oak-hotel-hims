@@ -14,6 +14,24 @@
  *    - Produk internal (is_sellable_pos = false) boleh memiliki price = null (tanpa harga jual) atau harga Rupiah utuh valid (>= 0).
  */
 
+import crypto from 'node:crypto';
+
+export {
+  MAX_PRODUCT_PHOTO_BYTES,
+  ALLOWED_PRODUCT_PHOTO_MIMES,
+  isProductPhotoStorageKey,
+  productPhotoMime,
+  hasValidImageSignature,
+  validateProductPhotoBuffer,
+  saveProductPhoto,
+  productPhotoExists,
+  readProductPhoto,
+  deleteProductPhoto,
+  createProductPhotoUploadHandler,
+  createProductPhotoDeleteHandler,
+  createProductPhotoGetHandler,
+} from './productPhotoStorage';
+
 export const PRODUCT_TYPES = ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD'] as const;
 export type ProductType = (typeof PRODUCT_TYPES)[number];
 
@@ -192,6 +210,41 @@ export function parseBaseUnitInput(raw: unknown): ParsedFieldResult<string | nul
 }
 
 /**
+ * Normalisasi input barcode pada POST/PATCH (MP-02B).
+ * - undefined -> provided: false, value: undefined
+ * - null atau string kosong/whitespace -> provided: true, value: null
+ * - string 1..100 karakter setelah trim -> provided: true, value: trimmed (mempertahankan nol awal & case)
+ * - selain string/null/undefined (termasuk number) -> ditolak agar nol awal tidak hilang
+ */
+export function parseBarcodeInput(raw: unknown): ParsedFieldResult<string | null> {
+  if (raw === undefined) {
+    return { ok: true, provided: false, value: undefined };
+  }
+  if (raw === null) {
+    return { ok: true, provided: true, value: null };
+  }
+  if (typeof raw !== 'string') {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'barcode harus berupa string (maksimal 100 karakter) atau null',
+    };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return { ok: true, provided: true, value: null };
+  }
+  if (trimmed.length > 100) {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'barcode maksimal 100 karakter',
+    };
+  }
+  return { ok: true, provided: true, value: trimmed };
+}
+
+/**
  * Validasi input is_sellable_pos pada POST/PATCH.
  * - undefined -> provided: false
  * - boolean -> provided: true, value: boolean
@@ -329,18 +382,30 @@ export function parseProductTypeQueryFilter(
  * - atribut klasifikasi/satuan yang null dipertahankan sebagai null (jangan menebak nilai default).
  */
 export function formatPosMenuItemRow(row: Record<string, any>) {
-  const rawPrice = row.price;
+  const { photo_storage_key, ...safeRow } = row;
+  const rawPrice = safeRow.price;
   const formattedPrice =
     rawPrice === null || rawPrice === undefined ? null : Number(rawPrice);
 
-  const productType: ProductType | null = row.product_type ?? null;
-  const productKind: ProductKind | null = row.product_kind ?? null;
-  const baseUnit: string | null = row.base_unit ?? null;
+  const productType: ProductType | null = safeRow.product_type ?? null;
+  const productKind: ProductKind | null = safeRow.product_kind ?? null;
+  const baseUnit: string | null = safeRow.base_unit ?? null;
+  const barcode: string | null =
+    safeRow.barcode === null || safeRow.barcode === undefined ? null : String(safeRow.barcode);
   const isSellablePos: boolean =
-    typeof row.is_sellable_pos === 'boolean' ? row.is_sellable_pos : true;
+    typeof safeRow.is_sellable_pos === 'boolean' ? safeRow.is_sellable_pos : true;
+
+  const hasPhoto = typeof photo_storage_key === 'string' && photo_storage_key.trim().length > 0;
+  const versionToken = hasPhoto
+    ? crypto.createHash('sha256').update(String(photo_storage_key)).digest('hex').slice(0, 8)
+    : '';
+  const photoUrl =
+    hasPhoto && safeRow.id != null && safeRow.property_id != null
+      ? `/api/pos/menu/items/${safeRow.id}/photo?property_id=${safeRow.property_id}&v=${versionToken}`
+      : null;
 
   return {
-    ...row,
+    ...safeRow,
     price: formattedPrice,
     is_sellable_pos: isSellablePos,
     product_type: productType,
@@ -348,6 +413,9 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
     product_kind: productKind,
     product_kind_label: productKind ? PRODUCT_KIND_LABELS[productKind] ?? 'Belum diatur' : 'Belum diatur',
     base_unit: baseUnit,
+    barcode,
+    has_photo: hasPhoto,
+    photo_url: photoUrl,
   };
 }
 
@@ -380,6 +448,13 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
       await deps.assertPropertyScope(req, propertyId);
 
       const body = req.body || {};
+      if (Object.prototype.hasOwnProperty.call(body, 'photo_storage_key') && body.photo_storage_key !== undefined) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'photo_storage_key dikelola oleh server melalui endpoint foto produk',
+        });
+      }
       // Build dynamic SET clause for only the fields present.
       const setClauses: string[] = [];
       const params: any[] = [];
@@ -532,6 +607,16 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         params.push(bu.value);
         setClauses.push(`base_unit = $${params.length}`);
       }
+      let parsedPatchBarcode: { provided: boolean; value: string | null } | null = null;
+      if (body.barcode !== undefined) {
+        const bc = parseBarcodeInput(body.barcode);
+        if (!bc.ok) {
+          return res.status(400).json({ status: 'ERROR', code: bc.code, message: bc.message });
+        }
+        parsedPatchBarcode = { provided: true, value: bc.value ?? null };
+        params.push(parsedPatchBarcode.value);
+        setClauses.push(`barcode = $${params.length}`);
+      }
       if (body.category_id !== undefined) {
         // category_id hanya integer positif atau null (bukan string/objek).
         if (body.category_id !== null) {
@@ -581,6 +666,16 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         }
       }
 
+      if (parsedPatchBarcode && parsedPatchBarcode.value !== null) {
+        const barcodeDupCheck = await deps.pool.query(
+          'SELECT id FROM pos_menu_items WHERE property_id = $1 AND barcode = $2 AND id != $3',
+          [propertyId, parsedPatchBarcode.value, itemId]
+        );
+        if ((barcodeDupCheck.rowCount ?? 0) > 0) {
+          return res.status(409).json({ status: 'ERROR', code: 'BARCODE_DUPLICATE', message: 'barcode already exists for this property' });
+        }
+      }
+
       params.push(itemId, propertyId);
       try {
         const result = await deps.pool.query(
@@ -592,13 +687,336 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         }
         res.json({ status: 'OK', data: formatPosMenuItemRow(result.rows[0]) });
       } catch (updateErr: any) {
-        // Tangani concurrent code duplication via unique index (uq_pmi_property_code).
+        // Tangani concurrent code duplication via unique index (uq_pmi_property_code / uq_pmi_property_barcode).
         // HANYA jika 23505 dan constraint yang benar — bukan semua 23505 generik.
         if (updateErr.code === '23505' && updateErr.constraint === 'uq_pmi_property_code') {
           return res.status(409).json({ status: 'ERROR', code: 'ITEM_CODE_DUPLICATE', message: 'item code already exists for this property' });
         }
+        if (updateErr.code === '23505' && updateErr.constraint === 'uq_pmi_property_barcode') {
+          return res.status(409).json({ status: 'ERROR', code: 'BARCODE_DUPLICATE', message: 'barcode already exists for this property' });
+        }
         throw updateErr;
       }
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: statusCode === 500 ? 'Internal server error' : err.message
+      });
+    }
+  };
+}
+
+export interface PosMenuItemCreateDeps {
+  pool: {
+    query?: (sql: string, params?: any[]) => Promise<any>;
+    connect: () => Promise<{
+      query: (sql: string, params?: any[]) => Promise<any>;
+      release: () => void;
+    }>;
+  };
+  assertPropertyScope: (req: any, propertyId: number) => Promise<void>;
+}
+
+/**
+ * Handler produksi untuk POST /api/pos/menu/items.
+ * Diekstrak agar dapat diuji langsung maupun dipasang pada Express app.
+ */
+export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
+  return async (req: any, res: any) => {
+    try {
+      const body = req.body || {};
+      if (Object.prototype.hasOwnProperty.call(body, 'photo_storage_key') && body.photo_storage_key !== undefined) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'photo_storage_key dikelola oleh server melalui endpoint foto produk',
+        });
+      }
+
+      const {
+        property_id,
+        name,
+        item_code,
+        category_name,
+        category_id,
+        price,
+        description,
+        is_active,
+        is_sellable_pos,
+        product_type,
+        product_kind,
+        base_unit,
+        barcode,
+      } = body;
+
+      if (!property_id) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      const propId = Number(property_id);
+      if (!Number.isInteger(propId) || propId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+      }
+
+      const parsedSellable = parseIsSellablePosInput(is_sellable_pos);
+      if (!parsedSellable.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedSellable.code, message: parsedSellable.message });
+      }
+      const effectiveSellablePos = parsedSellable.provided ? parsedSellable.value : true;
+
+      if (effectiveSellablePos && price === undefined) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id and price are required' });
+      }
+
+      if (typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be a non-empty string' });
+      }
+      const propName = name.trim();
+      if (propName.length > 100) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be at most 100 characters' });
+      }
+
+      let code: string | null;
+      if (item_code === undefined) {
+        code = `PRD-${Date.now().toString().slice(-4)}`;
+      } else if (item_code === null) {
+        code = null;
+      } else if (typeof item_code === 'string') {
+        const trimmed = item_code.trim();
+        code = trimmed === '' ? null : trimmed.toUpperCase();
+        if (code !== null && code.length > 50) {
+          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'item_code must be at most 50 characters' });
+        }
+      } else {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'item_code must be a string or null' });
+      }
+
+      let desc: string | null;
+      if (description === undefined || description === null) {
+        desc = null;
+      } else if (typeof description === 'string') {
+        const t = description.trim();
+        desc = t === '' ? null : t;
+      } else {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'description must be a string or null' });
+      }
+
+      const parsedPrice = parsePriceInput(price);
+      if (!parsedPrice.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedPrice.code, message: parsedPrice.message });
+      }
+      const rawEffectivePrice = parsedPrice.provided ? parsedPrice.value : null;
+      const priceCheck = validateEffectiveSellablePrice(effectiveSellablePos, rawEffectivePrice);
+      if (!priceCheck.ok) {
+        return res.status(400).json({ status: 'ERROR', code: priceCheck.code, message: priceCheck.message });
+      }
+      const priceVal = priceCheck.price;
+
+      const parsedProductType = parseProductTypeInput(product_type);
+      if (!parsedProductType.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedProductType.code, message: parsedProductType.message });
+      }
+      const productTypeVal = parsedProductType.provided ? parsedProductType.value : null;
+
+      const parsedProductKind = parseProductKindInput(product_kind);
+      if (!parsedProductKind.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedProductKind.code, message: parsedProductKind.message });
+      }
+      const productKindVal = parsedProductKind.provided ? parsedProductKind.value : null;
+
+      const parsedBaseUnit = parseBaseUnitInput(base_unit);
+      if (!parsedBaseUnit.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedBaseUnit.code, message: parsedBaseUnit.message });
+      }
+      const baseUnitVal = parsedBaseUnit.provided ? parsedBaseUnit.value : null;
+
+      // Barcode: opsional, pertahankan nol awal, jangan isi otomatis dari SKU/item_code.
+      const parsedBarcode = parseBarcodeInput(barcode);
+      if (!parsedBarcode.ok) {
+        return res.status(400).json({ status: 'ERROR', code: parsedBarcode.code, message: parsedBarcode.message });
+      }
+      const barcodeVal = parsedBarcode.provided ? parsedBarcode.value : null;
+
+      let isActiveVal = true;
+      if (is_active !== undefined) {
+        if (typeof is_active !== 'boolean') {
+          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'is_active must be a boolean' });
+        }
+        isActiveVal = is_active;
+      }
+
+      let resolvedCategoryId: number | null = null;
+      if (category_id !== undefined) {
+        if (category_id === null) {
+          resolvedCategoryId = null;
+        } else {
+          const cid = Number(category_id);
+          if (!Number.isInteger(cid) || cid <= 0) {
+            return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'category_id must be a positive integer or null' });
+          }
+          resolvedCategoryId = cid;
+        }
+      }
+
+      let categoryNameArg: string | null = null;
+      if (category_name !== undefined) {
+        if (category_name === null) {
+          categoryNameArg = null;
+        } else if (typeof category_name === 'string') {
+          const t = category_name.trim();
+          categoryNameArg = t === '' ? null : t;
+          if (categoryNameArg !== null && categoryNameArg.length > 100) {
+            return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'category_name must be at most 100 characters' });
+          }
+        } else {
+          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'category_name must be a string or null' });
+        }
+      }
+
+      await deps.assertPropertyScope(req, propId);
+
+      const client = await deps.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT id FROM properties WHERE id = $1 FOR UPDATE', [propId]);
+        let finalCategoryId: number | null;
+        let finalCategoryName: string | null = null;
+
+        if (category_id !== undefined) {
+          finalCategoryId = resolvedCategoryId;
+          if (finalCategoryId !== null) {
+            const catCheck = await client.query(
+              'SELECT id, name FROM pos_menu_categories WHERE id = $1 AND property_id = $2 FOR UPDATE',
+              [finalCategoryId, propId]
+            );
+            if ((catCheck.rowCount ?? 0) === 0) {
+              await client.query('ROLLBACK');
+              return res.status(400).json({ status: 'ERROR', code: 'CATEGORY_NOT_FOUND', message: 'category does not exist for this property' });
+            }
+            finalCategoryName = catCheck.rows[0].name;
+          }
+        } else if (categoryNameArg !== null) {
+          finalCategoryId = null;
+          const findCat = await client.query(
+            'SELECT id FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2) FOR UPDATE',
+            [propId, categoryNameArg]
+          );
+          if ((findCat.rowCount ?? 0) > 0) {
+            finalCategoryId = findCat.rows[0].id;
+            finalCategoryName = categoryNameArg;
+          } else {
+            const recheck = await client.query(
+              'SELECT id FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2)',
+              [propId, categoryNameArg]
+            );
+            if ((recheck.rowCount ?? 0) > 0) {
+              finalCategoryId = recheck.rows[0].id;
+            } else {
+              const newCat = await client.query(
+                'INSERT INTO pos_menu_categories (property_id, name) VALUES ($1, $2) RETURNING id',
+                [propId, categoryNameArg]
+              );
+              finalCategoryId = newCat.rows[0].id;
+            }
+            finalCategoryName = categoryNameArg;
+          }
+        } else {
+          finalCategoryId = null;
+        }
+
+        if (barcodeVal !== null) {
+          const barcodeDup = await client.query(
+            'SELECT id FROM pos_menu_items WHERE property_id = $1 AND barcode = $2',
+            [propId, barcodeVal]
+          );
+          if ((barcodeDup.rowCount ?? 0) > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              status: 'ERROR',
+              code: 'BARCODE_DUPLICATE',
+              message: 'barcode already exists for this property',
+            });
+          }
+        }
+
+        const insertRes = await client.query(
+          `INSERT INTO pos_menu_items (
+             property_id, category_id, item_code, name, description,
+             price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           RETURNING *`,
+          [
+            propId,
+            finalCategoryId,
+            code,
+            propName,
+            desc,
+            priceVal,
+            isActiveVal,
+            effectiveSellablePos,
+            productTypeVal,
+            productKindVal,
+            baseUnitVal,
+            barcodeVal,
+          ]
+        );
+        await client.query('COMMIT');
+        const row = insertRes.rows[0];
+        res.status(201).json({ status: 'OK', data: formatPosMenuItemRow({ ...row, category_name: finalCategoryName }) });
+        return;
+      } catch (err: any) {
+        try { await client.query('ROLLBACK'); } catch { /* already aborted */ }
+        if (err.code === '23505' && err.constraint === 'uq_pmi_property_code') {
+          return res.status(409).json({ status: 'ERROR', code: 'ITEM_CODE_DUPLICATE', message: 'item code already exists for this property' });
+        }
+        if (err.code === '23505' && err.constraint === 'uq_pmi_property_barcode') {
+          return res.status(409).json({ status: 'ERROR', code: 'BARCODE_DUPLICATE', message: 'barcode already exists for this property' });
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: statusCode === 500 ? 'Internal server error' : err.message
+      });
+    }
+  };
+}
+
+/**
+ * Handler produksi untuk DELETE /api/pos/menu/items/:id (soft-deactivate is_active = FALSE).
+ * Mempertahankan barcode dan photo_storage_key produk.
+ */
+export function createPosMenuItemDeactivateHandler(deps: PosMenuItemPatchDeps) {
+  return async (req: any, res: any) => {
+    try {
+      const itemId = Number(req.params?.id);
+      const propertyIdRaw = req.query?.property_id || req.body?.property_id;
+      if (!itemId) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid item id' });
+      }
+      if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      const propertyId = Number(propertyIdRaw);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+      }
+      await deps.assertPropertyScope(req, propertyId);
+      const updateResult = await deps.pool.query(
+        'UPDATE pos_menu_items SET is_active = FALSE WHERE id = $1 AND property_id = $2 RETURNING id',
+        [itemId, propertyId]
+      );
+      if ((updateResult.rowCount ?? 0) === 0) {
+        return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `menu item ${itemId} not found for property ${propertyId}` });
+      }
+      res.json({ status: 'OK', message: 'Item nonaktif' });
     } catch (err: any) {
       const statusCode = err.statusCode || 500;
       res.status(statusCode).json({

@@ -10,6 +10,7 @@ export type RoadmapProductKindCode = 'WEIGHED' | 'UNLIMITED' | 'SERVICE' | 'BUND
 export interface ProductItem {
   id: number;
   item_code?: string | null;
+  barcode?: string | null;
   name: string;
   category_id?: number | null;
   category_name?: string | null;
@@ -22,6 +23,8 @@ export interface ProductItem {
   product_kind_label?: string;
   base_unit?: string | null;
   description?: string | null;
+  has_photo?: boolean;
+  photo_url?: string | null;
 }
 
 export interface CategoryOption {
@@ -41,6 +44,7 @@ type SellableFilter = 'all' | 'sellable' | 'internal';
 
 export interface ProductFormState {
   code: string;
+  barcode: string;
   name: string;
   category: string;
   price: string;
@@ -53,6 +57,7 @@ export interface ProductFormState {
 
 export const EMPTY_PRODUCT_FORM: ProductFormState = {
   code: '',
+  barcode: '',
   name: '',
   category: '',
   price: '',
@@ -62,6 +67,45 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   baseUnit: '',
   isSellablePos: true,
 };
+
+export const PRODUCT_PHOTO_MAX_BYTES = 2 * 1024 * 1024;
+export const PRODUCT_PHOTO_ACCEPT = 'image/png,image/jpeg,image/webp';
+const ALLOWED_PHOTO_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+
+export function normalizeBarcodeDraft(raw: string | null | undefined): string | null | 'TOO_LONG' {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed === '') return null;
+  if (trimmed.length > 100) return 'TOO_LONG';
+  return trimmed;
+}
+
+export function matchesProductSearch(item: ProductItem, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === '') return true;
+  if (item.name && item.name.toLowerCase().includes(q)) return true;
+  if (item.item_code && item.item_code.toLowerCase().includes(q)) return true;
+  if (item.barcode && item.barcode.toLowerCase().includes(q)) return true;
+  return false;
+}
+
+export function validateProductPhotoFile(
+  file: { type?: string; size?: number; name?: string } | null | undefined
+): string | null {
+  if (!file) return 'File foto tidak ditemukan';
+  const mime = String(file.type || '').toLowerCase().trim();
+  if (!ALLOWED_PHOTO_MIMES.has(mime)) {
+    return 'Format foto harus PNG, JPEG, atau WebP';
+  }
+  const size = Number(file.size ?? 0);
+  if (!Number.isFinite(size) || size <= 0) {
+    return 'File foto kosong atau tidak valid';
+  }
+  if (size > PRODUCT_PHOTO_MAX_BYTES) {
+    return 'Ukuran foto maksimal 2 MB';
+  }
+  return null;
+}
 
 export const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }> = [
   { key: 'ALL', label: 'Semua Tipe' },
@@ -103,6 +147,7 @@ export function applyProductTypeChange(form: ProductFormState, nextType: string)
 export function buildEditProductForm(item: ProductItem): ProductFormState {
   return {
     code: item.item_code || '',
+    barcode: typeof item.barcode === 'string' ? item.barcode : '',
     name: item.name || '',
     category: item.category_id != null ? String(item.category_id) : '',
     // Simpan harga sebagai string agar 0 tampil "0", sedangkan null tampil "".
@@ -211,6 +256,68 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [editProduct, setEditProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
   const [categoryForm, setCategoryForm] = useState<{ mode: 'add' | 'rename'; id?: number; name: string }>({ mode: 'add', name: '' });
   const addNameInputRef = useRef<HTMLInputElement | null>(null);
+  const [addPhotoFile, setAddPhotoFile] = useState<File | null>(null);
+  const [addPhotoPreviewUrl, setAddPhotoPreviewUrl] = useState<string | null>(null);
+  const addPhotoPreviewUrlRef = useRef<string | null>(null);
+  addPhotoPreviewUrlRef.current = addPhotoPreviewUrl;
+  const [pendingCreatedItem, setPendingCreatedItem] = useState<{ id: number; name: string } | null>(null);
+  const [unconfirmedCreate, setUnconfirmedCreate] = useState<boolean>(false);
+  const [editPhotoFile, setEditPhotoFile] = useState<File | null>(null);
+  const [editPhotoPreviewUrl, setEditPhotoPreviewUrl] = useState<string | null>(null);
+  const editPhotoPreviewUrlRef = useRef<string | null>(null);
+  editPhotoPreviewUrlRef.current = editPhotoPreviewUrl;
+  const [editRemovePhoto, setEditRemovePhoto] = useState<boolean>(false);
+  const [photoBlobUrls, setPhotoBlobUrls] = useState<Record<string, string>>({});
+  const photoBlobUrlsRef = useRef<Record<string, string>>({});
+  photoBlobUrlsRef.current = photoBlobUrls;
+  const addGalleryInputRef = useRef<HTMLInputElement | null>(null);
+  const addCameraInputRef = useRef<HTMLInputElement | null>(null);
+  const editGalleryInputRef = useRef<HTMLInputElement | null>(null);
+  const editCameraInputRef = useRef<HTMLInputElement | null>(null);
+
+  const revokeObjectUrlSafe = useCallback((url: string | null | undefined) => {
+    if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  const createPreviewObjectUrl = useCallback((file: File): string => {
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      return URL.createObjectURL(file);
+    }
+    return `blob:preview-${file.name || 'photo'}`;
+  }, []);
+
+  const invalidatePhotoCache = useCallback((photoUrl: string | null | undefined, itemId?: number, pid?: number | null) => {
+    const urlsToClear = new Set<string>();
+    if (photoUrl) urlsToClear.add(photoUrl);
+    if (itemId != null && pid != null) {
+      urlsToClear.add(`/api/pos/menu/items/${itemId}/photo?property_id=${pid}`);
+    }
+    if (urlsToClear.size === 0) return;
+    for (const u of urlsToClear) {
+      const existingBlob = photoBlobUrlsRef.current[u];
+      if (existingBlob) {
+        revokeObjectUrlSafe(existingBlob);
+        delete photoBlobUrlsRef.current[u];
+      }
+    }
+    setPhotoBlobUrls((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const u of urlsToClear) {
+        if (u in next) {
+          delete next[u];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [revokeObjectUrlSafe]);
 
   // Dua generasi TERPISAH:
   //  - propGenRef: bertambah HANYA saat propertyId berubah (termasuk null, A→B→A).
@@ -224,9 +331,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   // closure handler submit. Handler mutasi membaca ref ini SETELAH guard.
   const ctxRef = useRef<{ propertyId: number | null; statusFilter: StatusFilter }>({ propertyId: null, statusFilter: 'active' });
 
-  const loadProducts = useCallback(async (status: StatusFilter = statusFilter, propertyOverride?: number | null) => {
+  const loadProducts = useCallback(async (
+    status: StatusFilter = statusFilter,
+    propertyOverride?: number | null
+  ): Promise<'ok' | 'stale' | 'error'> => {
     const pid = propertyOverride !== undefined ? propertyOverride : propertyId;
-    if (!pid) return;
+    if (!pid) return 'error';
     const fetchGen = ++fetchGenRef.current; // hanya fetch ini yang terproteksi
     const isStaleFetch = () => fetchGenRef.current !== fetchGen;
     try {
@@ -235,15 +345,22 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const res = await authenticatedFetch(`/api/pos/menu?property_id=${pid}&status=${status}&scope=master`);
       const json = await res.json().catch(() => null);
       // Guard fetch: diperiksa SETELAH res.json() dan SEBELUM menulis state.
-      if (isStaleFetch()) return;
+      if (isStaleFetch()) return 'stale';
       if (!res.ok) {
-        throw new Error((json as any)?.message || 'Gagal memuat katalog master produk');
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal memuat katalog master produk');
       }
-      setInternalItems((json as any)?.data?.items || []);
-      setCategories((json as any)?.data?.categories || []);
+      const rawItems = (json as any)?.data?.items;
+      if (!Array.isArray(rawItems)) {
+        throw new Error('Respons daftar produk dari server tidak valid');
+      }
+      const rawCategories = (json as any)?.data?.categories;
+      setInternalItems(rawItems);
+      setCategories(Array.isArray(rawCategories) ? rawCategories : []);
+      return 'ok';
     } catch (err: any) {
-      if (isStaleFetch()) return;
+      if (isStaleFetch()) return 'stale';
       setErrorMsg(err?.message || 'Gagal memuat katalog produk');
+      return 'error';
     } finally {
       if (!isStaleFetch()) setLoading(false);
     }
@@ -258,6 +375,21 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     propGenRef.current += 1;
     ctxRef.current = { propertyId, statusFilter: 'active' };
     setSaving(false);
+    setAddPhotoFile(null);
+    setAddPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      addPhotoPreviewUrlRef.current = null;
+      return null;
+    });
+    setPendingCreatedItem(null);
+    setUnconfirmedCreate(false);
+    setEditPhotoFile(null);
+    setEditPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      editPhotoPreviewUrlRef.current = null;
+      return null;
+    });
+    setEditRemovePhoto(false);
     if (!propertyId) {
       setInternalItems([]);
       setCategories([]);
@@ -320,6 +452,86 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const items = internalItems;
 
+  // Muat foto produk terlindungi menggunakan authenticatedFetch dan bersihkan URL.revokeObjectURL
+  useEffect(() => {
+    const activeUrls = new Set<string>();
+    for (const item of items) {
+      if (item.has_photo && typeof item.photo_url === 'string' && item.photo_url.trim() !== '') {
+        activeUrls.add(item.photo_url);
+      }
+    }
+    if (editingItem?.has_photo && typeof editingItem.photo_url === 'string' && editingItem.photo_url.trim() !== '') {
+      activeUrls.add(editingItem.photo_url);
+    }
+
+    let cancelled = false;
+    const currentSnapshot = photoBlobUrlsRef.current;
+
+    for (const existingUrl of Object.keys(currentSnapshot)) {
+      if (!activeUrls.has(existingUrl)) {
+        revokeObjectUrlSafe(currentSnapshot[existingUrl]);
+        delete currentSnapshot[existingUrl];
+        setPhotoBlobUrls((prev) => {
+          if (!(existingUrl in prev)) return prev;
+          const next = { ...prev };
+          delete next[existingUrl];
+          return next;
+        });
+      }
+    }
+
+    for (const photoUrl of activeUrls) {
+      if (currentSnapshot[photoUrl]) continue;
+      Promise.resolve(authenticatedFetch(photoUrl))
+        .then(async (res) => {
+          if (!res || !res.ok || typeof res.blob !== 'function') return;
+          const blob = await res.blob();
+          if (cancelled) return;
+          const objectUrl =
+            typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+              ? URL.createObjectURL(blob)
+              : `blob:mock-${photoUrl}`;
+          if (cancelled) {
+            revokeObjectUrlSafe(objectUrl);
+            return;
+          }
+          setPhotoBlobUrls((prev) => {
+            if (prev[photoUrl]) {
+              if (prev[photoUrl] !== objectUrl) {
+                revokeObjectUrlSafe(objectUrl);
+              }
+              return prev;
+            }
+            return { ...prev, [photoUrl]: objectUrl };
+          });
+        })
+        .catch(() => {
+          // Produk gagal muat thumbnail tetap dapat digunakan
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [items, editingItem, revokeObjectUrlSafe]);
+
+  useEffect(() => {
+    return () => {
+      if (addPhotoPreviewUrlRef.current) {
+        revokeObjectUrlSafe(addPhotoPreviewUrlRef.current);
+        addPhotoPreviewUrlRef.current = null;
+      }
+      if (editPhotoPreviewUrlRef.current) {
+        revokeObjectUrlSafe(editPhotoPreviewUrlRef.current);
+        editPhotoPreviewUrlRef.current = null;
+      }
+      const snapshot = photoBlobUrlsRef.current;
+      for (const blobUrl of Object.values(snapshot)) {
+        revokeObjectUrlSafe(blobUrl);
+      }
+    };
+  }, [revokeObjectUrlSafe]);
+
   const categoryNames = useMemo(
     () => categories.map((c) => c.name),
     [categories]
@@ -356,10 +568,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      const matchSearch =
-        searchQuery === '' ||
-        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (item.item_code && item.item_code.toLowerCase().includes(searchQuery.toLowerCase()));
+      const matchSearch = matchesProductSearch(item, searchQuery);
       const matchCategory =
         selectedCategory === 'ALL' ||
         (selectedCategory !== 'NONE'
@@ -383,7 +592,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const handleRefresh = async () => {
     const { propertyId: pid, statusFilter: sf } = ctxRef.current;
-    await loadProducts(sf, pid);
+    await loadProducts(sf, pid ?? propertyId);
     onRefresh?.();
   };
 
@@ -400,6 +609,80 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     return n;
   };
 
+  const selectAddPhoto = (file: File | null | undefined) => {
+    if (!file) return;
+    const err = validateProductPhotoFile(file);
+    if (err) {
+      setErrorMsg(err);
+      return;
+    }
+    setErrorMsg(null);
+    setAddPhotoFile(file);
+    setAddPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      const nextUrl = createPreviewObjectUrl(file);
+      addPhotoPreviewUrlRef.current = nextUrl;
+      return nextUrl;
+    });
+  };
+
+  const clearAddPhoto = () => {
+    setAddPhotoFile(null);
+    setAddPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      addPhotoPreviewUrlRef.current = null;
+      return null;
+    });
+    if (addGalleryInputRef.current) addGalleryInputRef.current.value = '';
+    if (addCameraInputRef.current) addCameraInputRef.current.value = '';
+  };
+
+  const selectEditPhoto = (file: File | null | undefined) => {
+    if (!file) return;
+    const err = validateProductPhotoFile(file);
+    if (err) {
+      setErrorMsg(err);
+      return;
+    }
+    setErrorMsg(null);
+    setEditPhotoFile(file);
+    setEditRemovePhoto(false);
+    setEditPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      const nextUrl = createPreviewObjectUrl(file);
+      editPhotoPreviewUrlRef.current = nextUrl;
+      return nextUrl;
+    });
+  };
+
+  const clearEditDraftPhoto = () => {
+    setEditPhotoFile(null);
+    setEditPhotoPreviewUrl((prev) => {
+      revokeObjectUrlSafe(prev);
+      editPhotoPreviewUrlRef.current = null;
+      return null;
+    });
+    if (editGalleryInputRef.current) editGalleryInputRef.current.value = '';
+    if (editCameraInputRef.current) editCameraInputRef.current.value = '';
+  };
+
+  const handleEditRemovePhotoClick = () => {
+    if (editPhotoFile) {
+      clearEditDraftPhoto();
+      if (editingItem?.has_photo) {
+        setEditRemovePhoto(true);
+      }
+      return;
+    }
+    if (editingItem?.has_photo) {
+      setEditRemovePhoto(true);
+    }
+  };
+
+  const handleUndoEditRemovePhoto = () => {
+    setEditRemovePhoto(false);
+  };
+
   // Snapshot submit: { pid, propGen, mutGen }. mutGen membedakan mutasi
   // berurutan agar finally request lama tidak mereset saving milik mutasi baru.
   const savingMutGen = useRef(0); // mutasi terakhir yang memegang saving
@@ -410,6 +693,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!capabilities.canCreate) return;
+    if (unconfirmedCreate && !pendingCreatedItem) {
+      setErrorMsg(
+        'Identitas produk belum terkonfirmasi karena respons server sebelumnya tidak memuat ID produk yang valid. Gunakan "Periksa Daftar Produk" untuk memeriksa daftar produk dan mencegah duplikasi.'
+      );
+      return;
+    }
     if (!propertyId || newProduct.name.trim() === '') {
       if (newProduct.name.trim() === '') setErrorMsg('Nama produk wajib diisi');
       return;
@@ -428,6 +717,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       setErrorMsg('Satuan dasar maksimal 50 karakter');
       return;
     }
+    const barcodeClean = normalizeBarcodeDraft(newProduct.barcode);
+    if (barcodeClean === 'TOO_LONG') {
+      setErrorMsg('Barcode maksimal 100 karakter');
+      return;
+    }
+    if (addPhotoFile) {
+      const photoErr = validateProductPhotoFile(addPhotoFile);
+      if (photoErr) {
+        setErrorMsg(photoErr);
+        return;
+      }
+    }
     // Snapshot submit SEBELUM await: propertyId + generation properti terkini.
     const targetPropertyId = propertyId;
     const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
@@ -435,27 +736,98 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setErrorMsg(null);
-      const res = await authenticatedFetch('/api/pos/menu/items', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: targetPropertyId,
-          name: newProduct.name.trim(),
-          item_code: newProduct.code.trim() === '' ? null : newProduct.code.trim().toUpperCase(),
-          category_id: newProduct.category === '' ? null : Number(newProduct.category) || null,
-          price: priceVal,
-          is_sellable_pos: newProduct.isSellablePos,
-          product_type: newProduct.productType === '' ? null : newProduct.productType,
-          product_kind: newProduct.productKind === '' ? null : newProduct.productKind,
-          base_unit: baseUnitClean === '' ? null : baseUnitClean,
-          description: newProduct.description.trim() === '' ? null : newProduct.description.trim()
-        })
-      });
-      const json = await res.json().catch(() => null);
-      if (stale()) return; // properti sudah berganti — abaikan respons submit lama
-      if (!res.ok) {
-        throw new Error((json as any)?.message || 'Gagal menyimpan produk master');
+      const productPayload = {
+        property_id: targetPropertyId,
+        name: newProduct.name.trim(),
+        item_code: newProduct.code.trim() === '' ? null : newProduct.code.trim().toUpperCase(),
+        barcode: barcodeClean,
+        category_id: newProduct.category === '' ? null : Number(newProduct.category) || null,
+        price: priceVal,
+        is_sellable_pos: newProduct.isSellablePos,
+        product_type: newProduct.productType === '' ? null : newProduct.productType,
+        product_kind: newProduct.productKind === '' ? null : newProduct.productKind,
+        base_unit: baseUnitClean === '' ? null : baseUnitClean,
+        description: newProduct.description.trim() === '' ? null : newProduct.description.trim(),
+      };
+
+      let targetItemId: number | null = pendingCreatedItem ? pendingCreatedItem.id : null;
+
+      if (targetItemId === null) {
+        const res = await authenticatedFetch('/api/pos/menu/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(productPayload),
+        });
+        const json = await res.json().catch(() => null);
+        if (stale()) return; // properti sudah berganti — abaikan respons submit lama
+        if (!res.ok) {
+          throw new Error((json as any)?.message || 'Gagal menyimpan produk master');
+        }
+        const rawId = (json as any)?.data?.id;
+        const createdId =
+          typeof rawId === 'number' || (typeof rawId === 'string' && rawId.trim() !== '')
+            ? Number(rawId)
+            : NaN;
+        if (!Number.isInteger(createdId) || createdId <= 0) {
+          setUnconfirmedCreate(true);
+          throw new Error(
+            `Respons server tidak memuat ID produk yang valid untuk "${newProduct.name.trim()}". Produk mungkin sudah tersimpan di server${
+              addPhotoFile ? ' namun foto belum diunggah' : ''
+            }. Draft dan foto tetap dipertahankan; gunakan "Periksa Daftar Produk" untuk memeriksa daftar produk tanpa membuat produk kedua.`
+          );
+        }
+        targetItemId = createdId;
+        setUnconfirmedCreate(false);
+        if (addPhotoFile) {
+          setPendingCreatedItem({ id: createdId, name: newProduct.name.trim() });
+        }
+      } else {
+        // Retry setelah produk sebelumnya sudah berhasil dibuat namun upload foto gagal:
+        // perbarui produk dengan PATCH pada ID yang sama agar TIDAK membuat produk kedua.
+        const res = await authenticatedFetch(`/api/pos/menu/items/${targetItemId}?property_id=${targetPropertyId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(productPayload),
+        });
+        const json = await res.json().catch(() => null);
+        if (stale()) return;
+        if (!res.ok) {
+          throw new Error((json as any)?.message || 'Gagal memperbarui data produk yang sudah dibuat');
+        }
+        setPendingCreatedItem({ id: targetItemId, name: newProduct.name.trim() });
       }
+
+      if (addPhotoFile && targetItemId !== null) {
+        try {
+          const formData = new FormData();
+          formData.append('photo', addPhotoFile);
+          const photoRes = await authenticatedFetch(
+            `/api/pos/menu/items/${targetItemId}/photo?property_id=${targetPropertyId}`,
+            {
+              method: 'POST',
+              body: formData,
+            }
+          );
+          const photoJson = await photoRes.json().catch(() => null);
+          if (stale()) return;
+          if (!photoRes.ok) {
+            const reason = (photoJson as any)?.message || 'Gagal mengunggah foto produk';
+            throw new Error(reason);
+          }
+          invalidatePhotoCache((photoJson as any)?.data?.photo_url, targetItemId, targetPropertyId);
+        } catch (photoErr: any) {
+          if (stale()) return;
+          throw new Error(
+            `Produk "${newProduct.name.trim()}" (#${targetItemId}) sudah tersimpan, tetapi unggah foto gagal: ${
+              photoErr?.message || 'Koneksi terputus'
+            }. Klik Simpan Produk untuk mencoba ulang tanpa membuat produk kedua.`
+          );
+        }
+      }
+
+      clearAddPhoto();
+      setPendingCreatedItem(null);
+      setUnconfirmedCreate(false);
       setSuccessMsg(`Produk "${newProduct.name.trim()}" berhasil ditambahkan ke katalog master.`);
       setShowAddModal(false);
       setShowAddOptional(false);
@@ -500,6 +872,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       setErrorMsg('Satuan dasar maksimal 50 karakter');
       return;
     }
+    const barcodeClean = normalizeBarcodeDraft(editProduct.barcode);
+    if (barcodeClean === 'TOO_LONG') {
+      setErrorMsg('Barcode maksimal 100 karakter');
+      return;
+    }
+    if (editPhotoFile) {
+      const photoErr = validateProductPhotoFile(editPhotoFile);
+      if (photoErr) {
+        setErrorMsg(photoErr);
+        return;
+      }
+    }
     const targetPropertyId = propertyId;
     const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
     const stale = () => isMutationStale(ctx);
@@ -510,6 +894,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         property_id: targetPropertyId,
         name: editProduct.name.trim(),
         item_code: editProduct.code.trim() === '' ? null : editProduct.code.trim().toUpperCase(),
+        barcode: barcodeClean,
         description: editProduct.description.trim() === '' ? null : editProduct.description.trim(),
         category_id: editProduct.category === '' ? null : Number(editProduct.category) || null,
         is_sellable_pos: editProduct.isSellablePos,
@@ -537,6 +922,59 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       if (!res.ok) {
         throw new Error((json as any)?.message || 'Gagal menyimpan perubahan produk');
       }
+      if ((json as any)?.data) {
+        setEditingItem((prev) => (prev ? { ...prev, ...((json as any).data as ProductItem) } : prev));
+      }
+
+      if (editPhotoFile) {
+        try {
+          const formData = new FormData();
+          formData.append('photo', editPhotoFile);
+          const photoRes = await authenticatedFetch(
+            `/api/pos/menu/items/${editingItem.id}/photo?property_id=${targetPropertyId}`,
+            {
+              method: 'POST',
+              body: formData,
+            }
+          );
+          const photoJson = await photoRes.json().catch(() => null);
+          if (stale()) return;
+          if (!photoRes.ok) {
+            throw new Error((photoJson as any)?.message || 'Gagal mengunggah foto produk');
+          }
+          invalidatePhotoCache(editingItem.photo_url || (photoJson as any)?.data?.photo_url, editingItem.id, targetPropertyId);
+        } catch (photoErr: any) {
+          if (stale()) return;
+          throw new Error(
+            `Data produk "${editProduct.name.trim()}" sudah diperbarui, tetapi gagal mengunggah foto: ${
+              photoErr?.message || 'Koneksi terputus'
+            }. Klik Simpan Perubahan untuk mencoba ulang.`
+          );
+        }
+      } else if (editRemovePhoto && editingItem.has_photo) {
+        try {
+          const delRes = await authenticatedFetch(
+            `/api/pos/menu/items/${editingItem.id}/photo?property_id=${targetPropertyId}`,
+            { method: 'DELETE' }
+          );
+          const delJson = await delRes.json().catch(() => null);
+          if (stale()) return;
+          if (!delRes.ok) {
+            throw new Error((delJson as any)?.message || 'Gagal menghapus foto produk');
+          }
+          invalidatePhotoCache(editingItem.photo_url, editingItem.id, targetPropertyId);
+        } catch (delErr: any) {
+          if (stale()) return;
+          throw new Error(
+            `Data produk "${editProduct.name.trim()}" sudah diperbarui, tetapi gagal menghapus foto: ${
+              delErr?.message || 'Koneksi terputus'
+            }. Klik Simpan Perubahan untuk mencoba ulang.`
+          );
+        }
+      }
+
+      clearEditDraftPhoto();
+      setEditRemovePhoto(false);
       setSuccessMsg(`Produk "${editProduct.name.trim()}" berhasil diperbarui.`);
       setEditingItem(null);
       setShowEditOptional(false);
@@ -590,6 +1028,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const openAddModal = () => {
     if (!capabilities.canCreate) return;
     setErrorMsg(null);
+    clearAddPhoto();
+    setPendingCreatedItem(null);
+    setUnconfirmedCreate(false);
     setNewProduct(createInitialAddProductForm(productTypeFilter));
     setShowAddOptional(false);
     setShowAddModal(true);
@@ -597,13 +1038,61 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const closeAddModal = () => {
     if (saving) return;
+    const shouldRefreshCatalog = pendingCreatedItem !== null || unconfirmedCreate;
+    clearAddPhoto();
+    setPendingCreatedItem(null);
+    setUnconfirmedCreate(false);
     setShowAddModal(false);
     setErrorMsg(null);
+    if (shouldRefreshCatalog) {
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      void loadProducts(curSf, curPid ?? propertyId);
+      onRefresh?.();
+    }
+  };
+
+  const handleInspectListAfterUnconfirmedCreate = async () => {
+    if (saving) return;
+    const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+    const targetPid = curPid ?? propertyId;
+    if (!targetPid) {
+      setErrorMsg('Properti belum dipilih. Tidak dapat memeriksa daftar produk.');
+      return;
+    }
+    const ctx = { pid: targetPid, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      const outcome = await loadProducts(curSf, targetPid);
+      if (stale()) return;
+      if (outcome !== 'ok') {
+        if (outcome === 'stale') {
+          setErrorMsg(
+            'Respons daftar produk sudah kedaluwarsa (basi). Silakan klik "Periksa Daftar Produk" lagi.'
+          );
+        }
+        return;
+      }
+      clearAddPhoto();
+      setPendingCreatedItem(null);
+      setUnconfirmedCreate(false);
+      setShowAddModal(false);
+      setShowAddOptional(false);
+      setNewProduct({ ...EMPTY_PRODUCT_FORM });
+      setErrorMsg(null);
+      onRefresh?.();
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) {
+        setSaving(false);
+      }
+    }
   };
 
   const openEdit = (item: ProductItem) => {
     if (!capabilities.canEdit) return;
     setErrorMsg(null);
+    clearEditDraftPhoto();
+    setEditRemovePhoto(false);
     const nextEditForm = buildEditProductForm(item);
     setEditProduct(nextEditForm);
     setShowEditOptional(Boolean(nextEditForm.code.trim() || nextEditForm.description.trim()));
@@ -612,6 +1101,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const closeEditModal = () => {
     if (saving) return;
+    clearEditDraftPhoto();
+    setEditRemovePhoto(false);
     setEditingItem(null);
     setErrorMsg(null);
   };
@@ -866,7 +1357,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             </svg>
             <input
               type="text"
-              placeholder="Cari nama produk atau kode SKU..."
+              placeholder="Cari nama produk, kode SKU, atau barcode..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
@@ -1000,13 +1491,36 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     return (
                       <tr key={item.id} className="hover:bg-gray-50/60 transition-colors">
                         <td className="py-3 px-4 font-mono font-medium text-gray-600">
-                          {item.item_code || `PRD-${String(item.id).padStart(4, '0')}`}
+                          <div>{item.item_code || `PRD-${String(item.id).padStart(4, '0')}`}</div>
+                          {item.barcode && (
+                            <div className="text-[11px] text-gray-400 font-mono mt-0.5">
+                              Barcode: {item.barcode}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 font-semibold text-gray-900">
-                          {item.name}
-                          {item.description && (
-                            <div className="text-[11px] text-gray-400 font-normal mt-0.5">{item.description}</div>
-                          )}
+                          <div className="flex items-center gap-3">
+                            {item.has_photo && item.photo_url && photoBlobUrls[item.photo_url] ? (
+                              <img
+                                src={photoBlobUrls[item.photo_url]}
+                                alt={item.name}
+                                className="w-10 h-10 rounded-lg object-cover border border-gray-200 shrink-0 bg-gray-100"
+                              />
+                            ) : (
+                              <div
+                                aria-hidden="true"
+                                className="w-10 h-10 rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center text-[10px] text-gray-400 shrink-0"
+                              >
+                                Foto
+                              </div>
+                            )}
+                            <div>
+                              <div>{item.name}</div>
+                              {item.description && (
+                                <div className="text-[11px] text-gray-400 font-normal mt-0.5">{item.description}</div>
+                              )}
+                            </div>
+                          </div>
                         </td>
                         <td className="py-3 px-4">
                           <div className="flex flex-col items-start gap-0.5">
@@ -1142,6 +1656,31 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
                     <span>{errorMsg}</span>
                     <button type="button" onClick={() => setErrorMsg(null)} className="font-bold hover:text-rose-900">✕</button>
+                  </div>
+                )}
+
+                {pendingCreatedItem && (
+                  <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs">
+                    Data produk <strong>{pendingCreatedItem.name}</strong> (#{pendingCreatedItem.id}) sudah tersimpan. Klik <strong>Simpan Produk</strong> untuk memperbarui data &amp; mengulang unggah foto tanpa membuat produk kedua.
+                  </div>
+                )}
+
+                {unconfirmedCreate && !pendingCreatedItem && (
+                  <div className="px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs space-y-2">
+                    <div>
+                      Identitas produk belum dapat dikonfirmasi dari respons server. Pengiriman ulang (POST kedua) dinonaktifkan agar tidak membuat produk ganda. Draft dan pilihan foto Anda tetap dipertahankan di form ini.
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Periksa daftar produk"
+                        onClick={handleInspectListAfterUnconfirmedCreate}
+                        className="px-3 py-1.5 text-xs font-semibold text-amber-900 bg-white hover:bg-amber-100 rounded-lg border border-amber-300 cursor-pointer disabled:opacity-50"
+                      >
+                        Periksa Daftar Produk
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1287,6 +1826,99 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 </div>
 
+                {/* 7. Barcode (Opsional) */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
+                  <input
+                    type="text"
+                    maxLength={100}
+                    aria-label="Barcode produk"
+                    placeholder="Contoh: 0012345678905 (pertahankan angka nol awal)"
+                    value={newProduct.barcode}
+                    onChange={(e) => setNewProduct({ ...newProduct, barcode: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                  />
+                  <div className="text-[11px] text-gray-400 mt-0.5">
+                    Unik per properti (maksimal 100 karakter). Tidak diisi otomatis dari SKU.
+                  </div>
+                </div>
+
+                {/* 8. Foto Produk (Opsional) */}
+                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-semibold text-gray-700">Foto Produk (Opsional)</label>
+                    <span className="text-[11px] text-gray-400">PNG, JPEG, WebP • Maks. 2 MB</span>
+                  </div>
+
+                  {addPhotoPreviewUrl && (
+                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
+                      <img
+                        src={addPhotoPreviewUrl}
+                        alt="Preview foto produk baru"
+                        className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-gray-800 truncate">
+                          {addPhotoFile?.name || 'Foto dipilih'}
+                        </div>
+                        <div className="text-[11px] text-emerald-700">
+                          Akan diunggah saat Simpan Produk
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Hapus foto produk"
+                        onClick={clearAddPhoto}
+                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
+                      >
+                        Hapus Foto
+                      </button>
+                    </div>
+                  )}
+
+                  <input
+                    ref={addGalleryInputRef}
+                    type="file"
+                    accept={PRODUCT_PHOTO_ACCEPT}
+                    data-photo-source="gallery"
+                    aria-label="Input file galeri tambah produk"
+                    onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
+                    className="hidden"
+                  />
+                  <input
+                    ref={addCameraInputRef}
+                    type="file"
+                    accept={PRODUCT_PHOTO_ACCEPT}
+                    capture="environment"
+                    data-photo-source="camera"
+                    aria-label="Input file kamera tambah produk"
+                    onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
+                    className="hidden"
+                  />
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Pilih foto dari galeri"
+                      onClick={() => addGalleryInputRef.current?.click()}
+                      className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
+                    >
+                      {addPhotoFile ? 'Ganti dari Galeri' : 'Pilih dari Galeri'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Ambil foto dari kamera"
+                      onClick={() => addCameraInputRef.current?.click()}
+                      className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
+                    >
+                      Ambil dari Kamera
+                    </button>
+                  </div>
+                </div>
+
                 {/* Bagian Opsional (SKU & Deskripsi) */}
                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
                   <button
@@ -1347,7 +1979,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || (unconfirmedCreate && !pendingCreatedItem)}
                   className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
                 >
                   {saving ? 'Menyimpan…' : 'Simpan Produk'}
@@ -1524,6 +2156,141 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     {editProduct.isSellablePos
                       ? 'Gunakan angka Rupiah utuh (>= 0). Kosong = tidak mengubah harga existing; 0 = Rp 0.'
                       : 'Kosongkan untuk menyimpan produk non-POS tanpa harga jual POS ("Belum diatur").'}
+                  </div>
+                </div>
+
+                {/* 7. Barcode (Opsional) */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
+                  <input
+                    type="text"
+                    maxLength={100}
+                    aria-label="Barcode produk"
+                    placeholder="Kosongkan untuk menghapus barcode (pertahankan angka nol awal)"
+                    value={editProduct.barcode}
+                    onChange={(e) => setEditProduct({ ...editProduct, barcode: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                  />
+                  <div className="text-[11px] text-gray-400 mt-0.5">
+                    Kosongkan nilai ini lalu simpan bila ingin menghapus barcode produk.
+                  </div>
+                </div>
+
+                {/* 8. Foto Produk (Opsional) */}
+                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-semibold text-gray-700">Foto Produk (Opsional)</label>
+                    <span className="text-[11px] text-gray-400">PNG, JPEG, WebP • Maks. 2 MB</span>
+                  </div>
+
+                  {editPhotoPreviewUrl ? (
+                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
+                      <img
+                        src={editPhotoPreviewUrl}
+                        alt="Preview foto produk pengganti"
+                        className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-gray-800 truncate">
+                          {editPhotoFile?.name || 'Foto baru dipilih'}
+                        </div>
+                        <div className="text-[11px] text-emerald-700">
+                          Foto baru akan diterapkan saat Simpan Perubahan
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Hapus foto produk"
+                        onClick={handleEditRemovePhotoClick}
+                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
+                      >
+                        Hapus Foto
+                      </button>
+                    </div>
+                  ) : editRemovePhoto ? (
+                    <div className="flex items-center justify-between gap-3 p-2.5 bg-amber-50 rounded-lg border border-amber-200">
+                      <div className="text-xs text-amber-900">
+                        Foto produk ditandai untuk dihapus saat <strong>Simpan Perubahan</strong>.
+                      </div>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Urungkan hapus foto"
+                        onClick={handleUndoEditRemovePhoto}
+                        className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-white hover:bg-amber-100 rounded-lg border border-amber-300 cursor-pointer shrink-0 disabled:opacity-50"
+                      >
+                        Urungkan Hapus Foto
+                      </button>
+                    </div>
+                  ) : editingItem.has_photo ? (
+                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
+                      {editingItem.photo_url && photoBlobUrls[editingItem.photo_url] ? (
+                        <img
+                          src={photoBlobUrls[editingItem.photo_url]}
+                          alt={editingItem.name}
+                          className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-14 h-14 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-[10px] text-gray-500 shrink-0">
+                          Foto
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-gray-800">Foto produk tersimpan</div>
+                        <div className="text-[11px] text-gray-500">Pilih foto baru untuk mengganti atau hapus foto.</div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Hapus foto produk"
+                        onClick={handleEditRemovePhotoClick}
+                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
+                      >
+                        Hapus Foto
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <input
+                    ref={editGalleryInputRef}
+                    type="file"
+                    accept={PRODUCT_PHOTO_ACCEPT}
+                    data-photo-source="gallery"
+                    aria-label="Input file galeri edit produk"
+                    onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
+                    className="hidden"
+                  />
+                  <input
+                    ref={editCameraInputRef}
+                    type="file"
+                    accept={PRODUCT_PHOTO_ACCEPT}
+                    capture="environment"
+                    data-photo-source="camera"
+                    aria-label="Input file kamera edit produk"
+                    onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
+                    className="hidden"
+                  />
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Pilih foto dari galeri"
+                      onClick={() => editGalleryInputRef.current?.click()}
+                      className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
+                    >
+                      {editPhotoFile || (!editRemovePhoto && editingItem.has_photo) ? 'Ganti dari Galeri' : 'Pilih dari Galeri'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Ambil foto dari kamera"
+                      onClick={() => editCameraInputRef.current?.click()}
+                      className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
+                    >
+                      Ambil dari Kamera
+                    </button>
                   </div>
                 </div>
 

@@ -64,6 +64,8 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/attendance/, resources: ['Employee Mobile'] },
 
   { pattern: /^\/api\/pos\/menu\/categories(\/|$)/, resources: ['Master Produk'] },
+  { pattern: /^\/api\/pos\/menu\/items\/[^/]+\/photo$/, resources: ['POS', 'Master Produk'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/menu\/items\/[^/]+\/photo$/, resources: ['Master Produk'], action: 'edit', methods: ['POST', 'DELETE'] },
   { pattern: /^\/api\/pos\/menu\/items/, resources: ['Master Produk'] },
   { pattern: /^\/api\/pos\/menu(\/|$)/, resources: ['POS', 'Master Produk'] },
   { pattern: /^\/api\/pos\/communication-settings$/, resources: ['POS', 'Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },

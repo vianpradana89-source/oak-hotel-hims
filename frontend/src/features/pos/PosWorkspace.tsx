@@ -7,12 +7,15 @@ import type { PosPayCashOrderContext } from './PosPayCashModal';
 export interface PosMenuItem {
   id: number;
   item_code?: string;
+  barcode?: string | null;
   name: string;
   category_name?: string;
   price: number | string | null;
   is_available?: boolean;
   is_active?: boolean;
   is_sellable_pos?: boolean;
+  has_photo?: boolean;
+  photo_url?: string | null;
 }
 
 export function isSellablePosMenuItem(
@@ -2272,11 +2275,13 @@ export default function PosWorkspace({
   }, [sellablePosMenu]);
 
   const filteredMenu = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
     return sellablePosMenu.filter((item) => {
       const matchSearch =
-        searchQuery === '' ||
-        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (item.item_code && item.item_code.toLowerCase().includes(searchQuery.toLowerCase()));
+        q === '' ||
+        item.name.toLowerCase().includes(q) ||
+        (item.item_code && item.item_code.toLowerCase().includes(q)) ||
+        (item.barcode && item.barcode.toLowerCase().includes(q));
       const matchCat = selectedCategory === 'ALL' || item.category_name === selectedCategory;
       return matchSearch && matchCat;
     });
@@ -2835,6 +2840,85 @@ export default function PosWorkspace({
     // handleSaveOrder.
   }, [handleSaveOrder, onOpenCashPayment]);
 
+  const [menuPhotoUrls, setMenuPhotoUrls] = useState<Record<string, string>>({});
+  const menuPhotoUrlsRef = useRef<Record<string, string>>({});
+  menuPhotoUrlsRef.current = menuPhotoUrls;
+
+  useEffect(() => {
+    const activeUrls = new Set<string>();
+    for (const item of sellablePosMenu) {
+      if (item.has_photo && typeof item.photo_url === 'string' && item.photo_url.trim() !== '') {
+        activeUrls.add(item.photo_url);
+      }
+    }
+
+    let cancelled = false;
+    const currentSnapshot = menuPhotoUrlsRef.current;
+
+    for (const existingUrl of Object.keys(currentSnapshot)) {
+      if (!activeUrls.has(existingUrl)) {
+        const blobUrl = currentSnapshot[existingUrl];
+        if (blobUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+          try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ }
+        }
+        setMenuPhotoUrls((prev) => {
+          if (!(existingUrl in prev)) return prev;
+          const next = { ...prev };
+          delete next[existingUrl];
+          return next;
+        });
+      }
+    }
+
+    for (const photoUrl of activeUrls) {
+      if (currentSnapshot[photoUrl]) continue;
+      const fetcher = authFetch ?? authenticatedFetch;
+      Promise.resolve(fetcher(photoUrl))
+        .then(async (res) => {
+          if (!res || !res.ok || typeof res.blob !== 'function') return;
+          const blob = await res.blob();
+          if (cancelled) return;
+          const objectUrl =
+            typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+              ? URL.createObjectURL(blob)
+              : `blob:mock-${photoUrl}`;
+          if (cancelled) {
+            if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+              try { URL.revokeObjectURL(objectUrl); } catch { /* ignore */ }
+            }
+            return;
+          }
+          setMenuPhotoUrls((prev) => {
+            if (prev[photoUrl]) {
+              if (prev[photoUrl] !== objectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+                try { URL.revokeObjectURL(objectUrl); } catch { /* ignore */ }
+              }
+              return prev;
+            }
+            return { ...prev, [photoUrl]: objectUrl };
+          });
+        })
+        .catch(() => {
+          // Produk tanpa foto / gagal muat foto tetap dapat digunakan di POS
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sellablePosMenu, authFetch]);
+
+  useEffect(() => {
+    return () => {
+      const snapshot = menuPhotoUrlsRef.current;
+      for (const blobUrl of Object.values(snapshot)) {
+        if (blobUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+          try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ }
+        }
+      }
+    };
+  }, []);
+
   const kpiCardsSection = (
     <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
@@ -3003,6 +3087,15 @@ export default function PosWorkspace({
                     }`}
                   >
                     <div>
+                      {item.has_photo && item.photo_url && menuPhotoUrls[item.photo_url] && (
+                        <div className="mb-2 w-full h-24 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
+                          <img
+                            src={menuPhotoUrls[item.photo_url]}
+                            alt={item.name}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      )}
                       <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
                         {item.category_name || 'F&B'}
                       </span>
