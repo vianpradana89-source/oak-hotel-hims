@@ -39,7 +39,7 @@ type StatusFilter = 'active' | 'inactive' | 'all';
 type ProductTypeFilter = 'ALL' | 'FINISHED_GOOD' | 'SEMI_FINISHED' | 'RAW_MATERIAL' | 'UNSET';
 type SellableFilter = 'all' | 'sellable' | 'internal';
 
-interface ProductFormState {
+export interface ProductFormState {
   code: string;
   name: string;
   category: string;
@@ -51,7 +51,7 @@ interface ProductFormState {
   isSellablePos: boolean;
 }
 
-const EMPTY_PRODUCT_FORM: ProductFormState = {
+export const EMPTY_PRODUCT_FORM: ProductFormState = {
   code: '',
   name: '',
   category: '',
@@ -63,7 +63,7 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   isSellablePos: true,
 };
 
-const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }> = [
+export const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }> = [
   { key: 'ALL', label: 'Semua Tipe' },
   { key: 'FINISHED_GOOD', label: 'Produk Jadi' },
   { key: 'SEMI_FINISHED', label: 'Setengah Jadi' },
@@ -71,7 +71,53 @@ const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }> = [
   { key: 'UNSET', label: 'Belum diatur' },
 ];
 
+export const PRODUCT_TYPE_CHOICES: Array<{ value: ProductTypeCode; label: string; hint: string }> = [
+  { value: 'FINISHED_GOOD', label: 'Produk Jadi', hint: 'Siap disajikan / dijual' },
+  { value: 'SEMI_FINISHED', label: 'Setengah Jadi', hint: 'Olahan antara / prep' },
+  { value: 'RAW_MATERIAL', label: 'Bahan Baku', hint: 'Bahan mentah / stok dasar' },
+];
+
 const COMMON_BASE_UNITS = ['Porsi', 'Pcs', 'Gelas', 'Botol', 'Kaleng', 'Cup', 'Pack', 'Box', 'Kg', 'Gram', 'Liter', 'Ml'];
+
+export function resolveInitialProductTypeFromTab(tab: ProductTypeFilter): string {
+  if (tab === 'FINISHED_GOOD' || tab === 'SEMI_FINISHED' || tab === 'RAW_MATERIAL') {
+    return tab;
+  }
+  return '';
+}
+
+export function createInitialAddProductForm(tab: ProductTypeFilter): ProductFormState {
+  return {
+    ...EMPTY_PRODUCT_FORM,
+    productType: resolveInitialProductTypeFromTab(tab),
+  };
+}
+
+export function applyProductTypeChange(form: ProductFormState, nextType: string): ProductFormState {
+  return {
+    ...form,
+    productType: nextType,
+  };
+}
+
+export function buildEditProductForm(item: ProductItem): ProductFormState {
+  return {
+    code: item.item_code || '',
+    name: item.name || '',
+    category: item.category_id != null ? String(item.category_id) : '',
+    // Simpan harga sebagai string agar 0 tampil "0", sedangkan null tampil "".
+    price: item.price === 0 ? '0' : item.price != null ? String(item.price) : '',
+    description: item.description || '',
+    productType: item.product_type || '',
+    productKind: item.product_kind || '',
+    baseUnit: item.base_unit || '',
+    isSellablePos: item.is_sellable_pos !== false,
+  };
+}
+
+export function formatPosSellabilityBadge(isSellablePos?: boolean | null): string {
+  return isSellablePos === false ? 'Tidak dijual di POS' : 'Dijual di POS';
+}
 
 export function formatIDR(amount: number): string {
   return new Intl.NumberFormat('id-ID', {
@@ -155,6 +201,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [sellableFilter, setSellableFilter] = useState<SellableFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showAddOptional, setShowAddOptional] = useState(false);
+  const [showEditOptional, setShowEditOptional] = useState(false);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [editingItem, setEditingItem] = useState<ProductItem | null>(null);
   const [saving, setSaving] = useState(false);
@@ -162,6 +210,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [newProduct, setNewProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
   const [editProduct, setEditProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
   const [categoryForm, setCategoryForm] = useState<{ mode: 'add' | 'rename'; id?: number; name: string }>({ mode: 'add', name: '' });
+  const addNameInputRef = useRef<HTMLInputElement | null>(null);
 
   // Dua generasi TERPISAH:
   //  - propGenRef: bertambah HANYA saat propertyId berubah (termasuk null, A→B→A).
@@ -214,6 +263,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       setCategories([]);
       setEditingItem(null);
       setShowAddModal(false);
+      setShowAddOptional(false);
+      setShowEditOptional(false);
       setShowCategoryModal(false);
       setSelectedCategory('ALL');
       setProductTypeFilter('ALL');
@@ -228,6 +279,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setEditProduct({ ...EMPTY_PRODUCT_FORM });
     setEditingItem(null);
     setShowAddModal(false);
+    setShowAddOptional(false);
+    setShowEditOptional(false);
     setShowCategoryModal(false);
     setSelectedCategory('ALL');
     setProductTypeFilter('ALL');
@@ -238,6 +291,15 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setLoading(true);
     void loadProducts('active', propertyId);
   }, [propertyId]); // sengaja hanya propertyId; loadProducts di deps karena useMemo
+
+  // Fokus otomatis ke input Nama Produk saat modal tambah dibuka.
+  useEffect(() => {
+    if (!showAddModal) return;
+    const timer = window.setTimeout(() => {
+      addNameInputRef.current?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [showAddModal]);
 
   // Respons API adalah SATU-SATUNYA sumber data tabel. initialItems dari parent
   // TIDAK disinkronkan ke state (seeding awal saja via useState di atas).
@@ -396,6 +458,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       }
       setSuccessMsg(`Produk "${newProduct.name.trim()}" berhasil ditambahkan ke katalog master.`);
       setShowAddModal(false);
+      setShowAddOptional(false);
       setNewProduct({ ...EMPTY_PRODUCT_FORM });
       // Refresh memakai konteks TERKINI dari ref, bukan closure submit lama.
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
@@ -456,7 +519,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       };
       // Harga:
       // - Bila diisi angka valid (termasuk 0), kirim angka tersebut.
-      // - Bila dikosongkan dan produk adalah internal (isSellablePos = false), kirim null.
+      // - Bila dikosongkan dan produk adalah non-POS (isSellablePos = false), kirim null.
       // - Bila dikosongkan dan produk jual (isSellablePos = true) yang sudah punya harga,
       //   tidak mengirim field price (preservasi harga lama sesuai kontrak).
       if (priceVal !== null) {
@@ -476,6 +539,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       }
       setSuccessMsg(`Produk "${editProduct.name.trim()}" berhasil diperbarui.`);
       setEditingItem(null);
+      setShowEditOptional(false);
       // Refresh memakai konteks TERKINI dari ref, bukan closure submit lama.
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
       await loadProducts(curSf, curPid);
@@ -523,21 +587,33 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     }
   };
 
+  const openAddModal = () => {
+    if (!capabilities.canCreate) return;
+    setErrorMsg(null);
+    setNewProduct(createInitialAddProductForm(productTypeFilter));
+    setShowAddOptional(false);
+    setShowAddModal(true);
+  };
+
+  const closeAddModal = () => {
+    if (saving) return;
+    setShowAddModal(false);
+    setErrorMsg(null);
+  };
+
   const openEdit = (item: ProductItem) => {
     if (!capabilities.canEdit) return;
-    setEditProduct({
-      code: item.item_code || '',
-      name: item.name || '',
-      category: item.category_id != null ? String(item.category_id) : '',
-      // Simpan harga sebagai string agar 0 tampil "0", sedangkan null tampil "".
-      price: item.price === 0 ? '0' : item.price != null ? String(item.price) : '',
-      description: item.description || '',
-      productType: item.product_type || '',
-      productKind: item.product_kind || '',
-      baseUnit: item.base_unit || '',
-      isSellablePos: item.is_sellable_pos !== false,
-    });
+    setErrorMsg(null);
+    const nextEditForm = buildEditProductForm(item);
+    setEditProduct(nextEditForm);
+    setShowEditOptional(Boolean(nextEditForm.code.trim() || nextEditForm.description.trim()));
     setEditingItem(item);
+  };
+
+  const closeEditModal = () => {
+    if (saving) return;
+    setEditingItem(null);
+    setErrorMsg(null);
   };
 
   // ── Kategori: tambah / rename / hapus ──────────────────────────────────────
@@ -650,7 +726,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   };
 
   return (
-    <div className="space-y-6 pb-12">
+    <div className="relative space-y-6 pb-24 sm:pb-28">
       <datalist id="oak-product-base-units">
         {COMMON_BASE_UNITS.map((u) => (
           <option key={u} value={u} />
@@ -696,27 +772,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               Kelola Kategori
             </button>
           )}
-          {capabilities.canCreate && (
-            <button
-              type="button"
-              onClick={() => {
-                setNewProduct({
-                  ...EMPTY_PRODUCT_FORM,
-                  productType:
-                    productTypeFilter !== 'ALL' && productTypeFilter !== 'UNSET'
-                      ? productTypeFilter
-                      : '',
-                });
-                setShowAddModal(true);
-              }}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-              </svg>
-              Tambah Produk
-            </button>
-          )}
         </div>
       </div>
 
@@ -759,10 +814,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           </div>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Produk Internal (Non-POS)</div>
+          <div className="text-xs text-gray-500 font-medium">Produk non-POS</div>
           <div className="text-2xl font-black text-slate-700 mt-1">{stats.internalCount}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">
-            Bahan baku / setengah jadi / internal (disembunyikan dari kasir)
+            Tidak dijual di POS (disembunyikan dari katalog kasir)
           </div>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
@@ -872,7 +927,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             {([
               { key: 'all', label: 'Semua' },
               { key: 'sellable', label: 'Dijual di POS' },
-              { key: 'internal', label: 'Internal (Non-POS)' },
+              { key: 'internal', label: 'Tidak dijual di POS' },
             ] as const).map((opt) => (
               <button
                 key={opt.key}
@@ -983,7 +1038,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                               : 'bg-slate-100 text-slate-600 border-slate-200'
                           }`}>
-                            {isSellable ? 'Ya (POS)' : 'Internal'}
+                            {formatPosSellabilityBadge(isSellable)}
                           </span>
                         </td>
                         <td className="py-3 px-4 text-right">
@@ -1044,32 +1099,141 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         </div>
       )}
 
+      {/* Floating Add Product Button */}
+      {capabilities.canCreate && (
+        <button
+          type="button"
+          aria-label="Tambah produk"
+          title="Tambah produk"
+          onClick={openAddModal}
+          className="fixed bottom-6 right-6 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full bg-emerald-700 hover:bg-emerald-800 active:scale-95 text-white shadow-lg shadow-emerald-900/25 border border-emerald-600/40 transition-all cursor-pointer focus:outline-hidden focus:ring-4 focus:ring-emerald-500/30"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 5v14m7-7H5" />
+          </svg>
+        </button>
+      )}
+
       {/* Add Product Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 border border-gray-200 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-bold text-gray-900 mb-1">Tambah Produk Baru</h3>
-            <p className="text-xs text-gray-500 mb-4">Daftarkan produk jadi, setengah jadi, atau bahan baku ke master produk properti.</p>
-
-            {errorMsg && (
-              <div className="mb-4 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
-                <span>{errorMsg}</span>
-                <button type="button" onClick={() => setErrorMsg(null)} className="font-bold hover:text-rose-900">✕</button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full border border-gray-200 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="shrink-0 px-6 pt-5 pb-4 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Tambah Produk Baru</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Daftarkan produk jadi, setengah jadi, atau bahan baku ke master produk properti.
+                </p>
               </div>
-            )}
+              <button
+                type="button"
+                onClick={closeAddModal}
+                disabled={saving}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Tutup modal tambah produk"
+              >
+                ✕
+              </button>
+            </div>
 
-            <form onSubmit={handleAddProduct} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <form onSubmit={handleAddProduct} className="flex flex-col flex-1 min-h-0">
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                {errorMsg && (
+                  <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+                    <span>{errorMsg}</span>
+                    <button type="button" onClick={() => setErrorMsg(null)} className="font-bold hover:text-rose-900">✕</button>
+                  </div>
+                )}
+
+                {/* 1. Nama Produk */}
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
                   <input
+                    ref={addNameInputRef}
+                    autoFocus
                     type="text"
-                    placeholder="Contoh: FNB-001"
-                    value={newProduct.code}
-                    onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                    required
+                    placeholder="Contoh: Nasi Goreng Spesial / Beras Pandan Wangi"
+                    value={newProduct.name}
+                    onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                   />
                 </div>
+
+                {/* 2. Kategori */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                  <select
+                    value={newProduct.category}
+                    onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                  >
+                    <option value="">— Tanpa Kategori —</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={String(c.id)}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 3. Tipe Produk & Jenis Produk */}
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
+                      <button
+                        type="button"
+                        onClick={() => setNewProduct(applyProductTypeChange(newProduct, ''))}
+                        className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                          newProduct.productType === ''
+                            ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
+                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+                        }`}
+                      >
+                        Belum diatur
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                      {PRODUCT_TYPE_CHOICES.map((choice) => {
+                        const selected = newProduct.productType === choice.value;
+                        return (
+                          <button
+                            key={choice.value}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => setNewProduct(applyProductTypeChange(newProduct, choice.value))}
+                            className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
+                              selected
+                                ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
+                                : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            <div className="text-xs font-bold">{choice.label}</div>
+                            <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
+                    <select
+                      value={newProduct.productKind}
+                      onChange={(e) => setNewProduct({ ...newProduct, productKind: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                    >
+                      <option value="">— Belum diatur —</option>
+                      <option value="STANDARD">Biasa</option>
+                      <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
+                      <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
+                      <option value="SERVICE" disabled>Jasa (Roadmap)</option>
+                      <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
+                      <option value="FORMULA" disabled>Formula (Roadmap)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* 4. Satuan Dasar */}
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar</label>
                   <input
@@ -1082,125 +1246,100 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
                   />
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Nasi Goreng Spesial / Beras Pandan Wangi"
-                  value={newProduct.name}
-                  onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Tipe Produk</label>
-                  <select
-                    value={newProduct.productType}
-                    onChange={(e) => setNewProduct({ ...newProduct, productType: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Belum diatur —</option>
-                    <option value="FINISHED_GOOD">Produk Jadi</option>
-                    <option value="SEMI_FINISHED">Setengah Jadi</option>
-                    <option value="RAW_MATERIAL">Bahan Baku</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
-                  <select
-                    value={newProduct.productKind}
-                    onChange={(e) => setNewProduct({ ...newProduct, productKind: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Belum diatur —</option>
-                    <option value="STANDARD">Biasa</option>
-                    <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
-                    <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
-                    <option value="SERVICE" disabled>Jasa (Roadmap)</option>
-                    <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
-                    <option value="FORMULA" disabled>Formula (Roadmap)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
-                <select
-                  value={newProduct.category}
-                  onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="">— Tanpa Kategori —</option>
-                  {categories.map((c) => (
-                    <option key={c.id} value={String(c.id)}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Pengaturan eksplisit Dijual di POS */}
-              <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={newProduct.isSellablePos}
-                    onChange={(e) => setNewProduct({ ...newProduct, isSellablePos: e.target.checked })}
-                    className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                  />
-                  <div>
-                    <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
-                    <div className="text-[11px] text-gray-500">
-                      Matikan untuk produk internal seperti bahan baku atau barang setengah jadi yang tidak dijual langsung di kasir POS.
+                {/* 5. Dijual di POS */}
+                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newProduct.isSellablePos}
+                      onChange={(e) => setNewProduct({ ...newProduct, isSellablePos: e.target.checked })}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
+                    />
+                    <div>
+                      <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
+                      <div className="text-[11px] text-gray-500">
+                        Matikan untuk produk non-POS seperti bahan baku atau barang setengah jadi yang tidak dijual langsung di kasir POS.
+                      </div>
                     </div>
-                  </div>
-                </label>
-              </div>
+                  </label>
+                </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Harga Jual (IDR) {newProduct.isSellablePos ? '*' : '(Opsional untuk Produk Internal)'}
-                </label>
-                <input
-                  type="number"
-                  required={newProduct.isSellablePos}
-                  min="0"
-                  step="1"
-                  placeholder={newProduct.isSellablePos ? 'Contoh: 45000 (isi 0 secara eksplisit bila Rp 0)' : 'Kosongkan bila tidak memiliki harga jual POS'}
-                  value={newProduct.price}
-                  onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                />
-                <div className="text-[11px] text-gray-400 mt-0.5">
-                  {newProduct.isSellablePos
-                    ? 'Wajib berupa Rupiah utuh (>= 0). Isi 0 secara eksplisit bila harga Rp 0.'
-                    : 'Produk internal boleh disimpan tanpa harga jual (ditampilkan "Belum diatur").'}
+                {/* 6. Harga Jual (IDR) */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Harga Jual (IDR) {newProduct.isSellablePos ? '*' : '(Opsional untuk Produk non-POS)'}
+                  </label>
+                  <input
+                    type="number"
+                    required={newProduct.isSellablePos}
+                    min="0"
+                    step="1"
+                    placeholder={newProduct.isSellablePos ? 'Contoh: 45000 (isi 0 secara eksplisit bila Rp 0)' : 'Kosongkan bila tidak dijual di POS'}
+                    value={newProduct.price}
+                    onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                  />
+                  <div className="text-[11px] text-gray-400 mt-0.5">
+                    {newProduct.isSellablePos
+                      ? 'Wajib berupa Rupiah utuh (>= 0). Isi 0 secara eksplisit bila harga Rp 0.'
+                      : 'Produk non-POS boleh disimpan tanpa harga jual (ditampilkan "Belum diatur").'}
+                  </div>
+                </div>
+
+                {/* Bagian Opsional (SKU & Deskripsi) */}
+                <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
+                  <button
+                    type="button"
+                    aria-expanded={showAddOptional}
+                    onClick={() => setShowAddOptional((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>Detail Opsional (Kode SKU &amp; Deskripsi)</span>
+                      {(newProduct.code.trim() !== '' || newProduct.description.trim() !== '') && (
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                          Terisi
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-gray-400 text-[11px]">{showAddOptional ? 'Sembunyikan ▲' : 'Tampilkan ▼'}</span>
+                  </button>
+                  {showAddOptional && (
+                    <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                        <input
+                          type="text"
+                          placeholder="Contoh: FNB-001"
+                          value={newProduct.code}
+                          onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
+                        <textarea
+                          rows={2}
+                          placeholder="Keterangan singkat komposisi, spesifikasi, atau sajian..."
+                          value={newProduct.description}
+                          onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-[11px] text-gray-400 bg-gray-50/80 border border-gray-200/70 rounded-lg px-3 py-2">
+                  Konversi kemasan, stok awal, HPP, dan mutasi stok akan diaktifkan pada tahap inventori berikutnya.
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
-                <textarea
-                  rows={2}
-                  placeholder="Keterangan singkat komposisi, spesifikasi, atau sajian..."
-                  value={newProduct.description}
-                  onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <div className="text-[11px] text-gray-400 bg-gray-50/80 border border-gray-200/70 rounded-lg px-3 py-2">
-                Konversi kemasan, stok awal, HPP, dan mutasi stok akan diaktifkan pada tahap inventori berikutnya.
-              </div>
-
-              <div className="flex justify-end gap-2 pt-4 border-t border-gray-100 sticky bottom-0 bg-white">
+              <div className="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-white">
                 <button
                   type="button"
-                  onClick={() => { setShowAddModal(false); setErrorMsg(null); }}
+                  onClick={closeAddModal}
                   disabled={saving}
                   className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer disabled:opacity-50"
                 >
@@ -1221,29 +1360,121 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
       {/* Edit Product Modal */}
       {editingItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 border border-gray-200 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-bold text-gray-900 mb-1">Edit Produk</h3>
-            <p className="text-xs text-gray-500 mb-4">Ubah data dan klasifikasi produk "{editingItem.name}".</p>
-
-            {errorMsg && (
-              <div className="mb-4 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
-                <span>{errorMsg}</span>
-                <button type="button" onClick={() => setErrorMsg(null)} className="font-bold hover:text-rose-900">✕</button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full border border-gray-200 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="shrink-0 px-6 pt-5 pb-4 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Edit Produk</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Ubah data dan klasifikasi produk &ldquo;{editingItem.name}&rdquo;.
+                </p>
               </div>
-            )}
+              <button
+                type="button"
+                onClick={closeEditModal}
+                disabled={saving}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Tutup modal edit produk"
+              >
+                ✕
+              </button>
+            </div>
 
-            <form onSubmit={handleEditSave} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <form onSubmit={handleEditSave} className="flex flex-col flex-1 min-h-0">
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                {errorMsg && (
+                  <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+                    <span>{errorMsg}</span>
+                    <button type="button" onClick={() => setErrorMsg(null)} className="font-bold hover:text-rose-900">✕</button>
+                  </div>
+                )}
+
+                {/* 1. Nama Produk */}
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
                   <input
                     type="text"
-                    value={editProduct.code}
-                    onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                    required
+                    value={editProduct.name}
+                    onChange={(e) => setEditProduct({ ...editProduct, name: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                   />
                 </div>
+
+                {/* 2. Kategori */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                  <select
+                    value={editProduct.category}
+                    onChange={(e) => setEditProduct({ ...editProduct, category: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                  >
+                    <option value="">— Tanpa Kategori —</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={String(c.id)}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 3. Tipe Produk & Jenis Produk */}
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
+                      <button
+                        type="button"
+                        onClick={() => setEditProduct(applyProductTypeChange(editProduct, ''))}
+                        className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                          editProduct.productType === ''
+                            ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
+                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+                        }`}
+                      >
+                        Belum diatur
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                      {PRODUCT_TYPE_CHOICES.map((choice) => {
+                        const selected = editProduct.productType === choice.value;
+                        return (
+                          <button
+                            key={choice.value}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => setEditProduct(applyProductTypeChange(editProduct, choice.value))}
+                            className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
+                              selected
+                                ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
+                                : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            <div className="text-xs font-bold">{choice.label}</div>
+                            <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
+                    <select
+                      value={editProduct.productKind}
+                      onChange={(e) => setEditProduct({ ...editProduct, productKind: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                    >
+                      <option value="">— Belum diatur —</option>
+                      <option value="STANDARD">Biasa</option>
+                      <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
+                      <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
+                      <option value="SERVICE" disabled>Jasa (Roadmap)</option>
+                      <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
+                      <option value="FORMULA" disabled>Formula (Roadmap)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* 4. Satuan Dasar */}
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar</label>
                   <input
@@ -1256,118 +1487,93 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
                   />
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
-                <input
-                  type="text"
-                  required
-                  value={editProduct.name}
-                  onChange={(e) => setEditProduct({ ...editProduct, name: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Tipe Produk</label>
-                  <select
-                    value={editProduct.productType}
-                    onChange={(e) => setEditProduct({ ...editProduct, productType: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Belum diatur —</option>
-                    <option value="FINISHED_GOOD">Produk Jadi</option>
-                    <option value="SEMI_FINISHED">Setengah Jadi</option>
-                    <option value="RAW_MATERIAL">Bahan Baku</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
-                  <select
-                    value={editProduct.productKind}
-                    onChange={(e) => setEditProduct({ ...editProduct, productKind: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Belum diatur —</option>
-                    <option value="STANDARD">Biasa</option>
-                    <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
-                    <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
-                    <option value="SERVICE" disabled>Jasa (Roadmap)</option>
-                    <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
-                    <option value="FORMULA" disabled>Formula (Roadmap)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
-                <select
-                  value={editProduct.category}
-                  onChange={(e) => setEditProduct({ ...editProduct, category: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="">— Tanpa Kategori —</option>
-                  {categories.map((c) => (
-                    <option key={c.id} value={String(c.id)}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Pengaturan eksplisit Dijual di POS */}
-              <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={editProduct.isSellablePos}
-                    onChange={(e) => setEditProduct({ ...editProduct, isSellablePos: e.target.checked })}
-                    className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                  />
-                  <div>
-                    <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
-                    <div className="text-[11px] text-gray-500">
-                      Matikan bila produk ini merupakan bahan baku atau produk internal yang tidak dijual langsung di kasir POS.
+                {/* 5. Dijual di POS */}
+                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editProduct.isSellablePos}
+                      onChange={(e) => setEditProduct({ ...editProduct, isSellablePos: e.target.checked })}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
+                    />
+                    <div>
+                      <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
+                      <div className="text-[11px] text-gray-500">
+                        Matikan bila produk ini merupakan bahan baku atau produk non-POS yang tidak dijual langsung di kasir POS.
+                      </div>
                     </div>
-                  </div>
-                </label>
-              </div>
+                  </label>
+                </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Harga Jual (IDR) {editProduct.isSellablePos ? '' : '(Opsional untuk Produk Internal)'}
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  placeholder={editProduct.isSellablePos ? 'Rupiah utuh >= 0' : 'Kosong = tanpa harga jual (Belum diatur)'}
-                  value={editProduct.price}
-                  onChange={(e) => setEditProduct({ ...editProduct, price: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                />
-                <div className="text-[11px] text-gray-400 mt-0.5">
-                  {editProduct.isSellablePos
-                    ? 'Gunakan angka Rupiah utuh (>= 0). Kosong = tidak mengubah harga existing; 0 = Rp 0.'
-                    : 'Kosongkan untuk menyimpan produk internal tanpa harga jual POS ("Belum diatur").'}
+                {/* 6. Harga Jual (IDR) */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Harga Jual (IDR) {editProduct.isSellablePos ? '' : '(Opsional untuk Produk non-POS)'}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder={editProduct.isSellablePos ? 'Rupiah utuh >= 0' : 'Kosong = tanpa harga jual (Belum diatur)'}
+                    value={editProduct.price}
+                    onChange={(e) => setEditProduct({ ...editProduct, price: e.target.value })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                  />
+                  <div className="text-[11px] text-gray-400 mt-0.5">
+                    {editProduct.isSellablePos
+                      ? 'Gunakan angka Rupiah utuh (>= 0). Kosong = tidak mengubah harga existing; 0 = Rp 0.'
+                      : 'Kosongkan untuk menyimpan produk non-POS tanpa harga jual POS ("Belum diatur").'}
+                  </div>
+                </div>
+
+                {/* Bagian Opsional (SKU & Deskripsi) */}
+                <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
+                  <button
+                    type="button"
+                    aria-expanded={showEditOptional}
+                    onClick={() => setShowEditOptional((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>Detail Opsional (Kode SKU &amp; Deskripsi)</span>
+                      {(editProduct.code.trim() !== '' || editProduct.description.trim() !== '') && (
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                          Terisi
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-gray-400 text-[11px]">{showEditOptional ? 'Sembunyikan ▲' : 'Tampilkan ▼'}</span>
+                  </button>
+                  {showEditOptional && (
+                    <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                        <input
+                          type="text"
+                          value={editProduct.code}
+                          onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
+                        <textarea
+                          rows={2}
+                          value={editProduct.description}
+                          onChange={(e) => setEditProduct({ ...editProduct, description: e.target.value })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk</label>
-                <textarea
-                  rows={2}
-                  value={editProduct.description}
-                  onChange={(e) => setEditProduct({ ...editProduct, description: e.target.value })}
-                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-4 border-t border-gray-100 sticky bottom-0 bg-white">
+              <div className="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-white">
                 <button
                   type="button"
-                  onClick={() => { setEditingItem(null); setErrorMsg(null); }}
+                  onClick={closeEditModal}
                   disabled={saving}
                   className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer disabled:opacity-50"
                 >
