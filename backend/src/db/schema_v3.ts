@@ -183,6 +183,7 @@ export async function initializeDatabase(pool: Pool) {
       canonical_base_unit_code VARCHAR(20),
       barcode VARCHAR(100),
       photo_storage_key TEXT,
+      track_stock BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT chk_pos_menu_items_product_type
@@ -841,6 +842,10 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_pmi_property_product_type ON pos_menu_items(property_id, product_type);
 
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
+      ON pos_menu_items(property_id, track_stock)
+      WHERE track_stock = TRUE;
     DO $$
     BEGIN
       ALTER TABLE pos_menu_items DROP CONSTRAINT IF EXISTS chk_pos_menu_items_canonical_base_unit;
@@ -1136,6 +1141,140 @@ export async function initializeDatabase(pool: Pool) {
       BEFORE UPDATE ON stock_locations
       FOR EACH ROW
       EXECUTE FUNCTION trg_fn_guard_stock_location_identity();
+    /* MP-04B Batch 1: Inventory ledger tables, projection and append-only invariants */
+    CREATE TABLE IF NOT EXISTS stock_operations (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      operation_type VARCHAR(50) NOT NULL,
+      operation_key VARCHAR(100) NOT NULL,
+      payload_fingerprint VARCHAR(128) NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_operations_prop_key'
+          AND conrelid = 'stock_operations'::regclass
+      ) THEN
+        ALTER TABLE stock_operations
+          ADD CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_type
+      ON stock_operations(property_id, operation_type);
+
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id BIGSERIAL PRIMARY KEY,
+      operation_id BIGINT NOT NULL REFERENCES stock_operations(id),
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      packaging_code VARCHAR(30),
+      packaging_label VARCHAR(60),
+      quantity_delta NUMERIC(12, 3) NOT NULL,
+      base_unit_code VARCHAR(20) NOT NULL,
+      unit_cost NUMERIC(14, 2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_property_product_location
+      ON stock_movements(property_id, product_id, location_id);
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_operation_id
+      ON stock_movements(operation_id);
+
+    CREATE TABLE IF NOT EXISTS stock_balances (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0),
+      CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_stock_balance_non_negative'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_balances_product_location'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_balances_property_product
+      ON stock_balances(property_id, product_id);
+
+    CREATE TABLE IF NOT EXISTS stock_cutover_windows (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      cutover_at TIMESTAMPTZ NOT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'OPEN',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_cutover_prop_active'
+          AND conrelid = 'stock_cutover_windows'::regclass
+      ) THEN
+        ALTER TABLE stock_cutover_windows
+          ADD CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status);
+      END IF;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION trg_fn_stock_movements_append_only()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Perubahan (UPDATE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Penghapusan (DELETE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Pembersihan (TRUNCATE) pada stock_movements dilarang';
+      END IF;
+      RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_append_only ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_append_only
+      BEFORE UPDATE OR DELETE ON stock_movements
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_no_truncate ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_no_truncate
+      BEFORE TRUNCATE ON stock_movements
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b1_v1')
+    ON CONFLICT (version) DO NOTHING;
+
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$
