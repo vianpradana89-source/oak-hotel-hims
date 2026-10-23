@@ -868,6 +868,9 @@ export interface ProductLockCheckResult {
   isLocked: boolean;
   activePackagingCount: number;
   hasInventoryOrMinibarUsage: boolean;
+  hasStockMovements?: boolean;
+  lockCode?: 'BASE_UNIT_LOCKED_BY_USAGE' | 'BASE_UNIT_LOCKED_BY_STOCK' | null;
+  lockedReason?: 'ACTIVE_PACKAGING' | 'MINIBAR_USAGE' | 'STOCK_MOVEMENTS' | null;
 }
 
 /**
@@ -935,6 +938,14 @@ export async function checkProductBaseUnitLockStatus(
     // Tabel opsional yang terkonfirmasi belum ada (to_regclass === null) boleh dilewati,
     // tetapi kegagalan query tidak boleh dianggap "belum digunakan" (fail-closed -> 503 USAGE_CHECK_FAILED).
     let hasInventoryOrMinibarUsage = false;
+    let lockCode: 'BASE_UNIT_LOCKED_BY_USAGE' | 'BASE_UNIT_LOCKED_BY_STOCK' | null = null;
+    let lockedReason: 'ACTIVE_PACKAGING' | 'MINIBAR_USAGE' | 'STOCK_MOVEMENTS' | null = null;
+
+    if (activePackagingCount > 0) {
+      lockedReason = 'ACTIVE_PACKAGING';
+      lockCode = 'BASE_UNIT_LOCKED_BY_USAGE';
+    }
+
     const optRegRes = await queryable.query(
       `SELECT to_regclass('public.room_type_minibar_standard') AS rtms_reg,
               to_regclass('public.minibar_baseline_verification') AS mbv_reg,
@@ -950,7 +961,13 @@ export async function checkProductBaseUnitLockStatus(
          ) AS used`,
         [propertyId, menuItemId]
       );
-      if (rtmsCheck?.rows?.[0]?.used) hasInventoryOrMinibarUsage = true;
+      if (rtmsCheck?.rows?.[0]?.used) {
+        hasInventoryOrMinibarUsage = true;
+        if (!lockedReason) {
+          lockedReason = 'MINIBAR_USAGE';
+          lockCode = 'BASE_UNIT_LOCKED_BY_USAGE';
+        }
+      }
     }
     if (!hasInventoryOrMinibarUsage && optRow.mbv_reg) {
       const mbvCheck = await queryable.query(
@@ -959,7 +976,13 @@ export async function checkProductBaseUnitLockStatus(
          ) AS used`,
         [propertyId, menuItemId]
       );
-      if (mbvCheck?.rows?.[0]?.used) hasInventoryOrMinibarUsage = true;
+      if (mbvCheck?.rows?.[0]?.used) {
+        hasInventoryOrMinibarUsage = true;
+        if (!lockedReason) {
+          lockedReason = 'MINIBAR_USAGE';
+          lockCode = 'BASE_UNIT_LOCKED_BY_USAGE';
+        }
+      }
     }
     if (!hasInventoryOrMinibarUsage && optRow.mse_reg) {
       const mseCheck = await queryable.query(
@@ -968,7 +991,13 @@ export async function checkProductBaseUnitLockStatus(
          ) AS used`,
         [propertyId, menuItemId]
       );
-      if (mseCheck?.rows?.[0]?.used) hasInventoryOrMinibarUsage = true;
+      if (mseCheck?.rows?.[0]?.used) {
+        hasInventoryOrMinibarUsage = true;
+        if (!lockedReason) {
+          lockedReason = 'MINIBAR_USAGE';
+          lockCode = 'BASE_UNIT_LOCKED_BY_USAGE';
+        }
+      }
     }
     if (!hasInventoryOrMinibarUsage && optRow.mirl_reg) {
       const mirlCheck = await queryable.query(
@@ -977,14 +1006,49 @@ export async function checkProductBaseUnitLockStatus(
          ) AS used`,
         [propertyId, menuItemId]
       );
-      if (mirlCheck?.rows?.[0]?.used) hasInventoryOrMinibarUsage = true;
+      if (mirlCheck?.rows?.[0]?.used) {
+        hasInventoryOrMinibarUsage = true;
+        if (!lockedReason) {
+          lockedReason = 'MINIBAR_USAGE';
+          lockCode = 'BASE_UNIT_LOCKED_BY_USAGE';
+        }
+      }
     }
+
+    // Pemeriksaan mutasi stok (R-01 MP-04B):
+    // Jika produk sudah memiliki mutasi stok pada stock_movements (termasuk saldo awal 0),
+    // laporkan satuan terkunci (BASE_UNIT_LOCKED_BY_STOCK).
+    let hasStockMovements = false;
+    const smRegRes = await queryable.query(
+      `SELECT to_regclass('public.stock_movements') AS sm_reg`
+    );
+    if (smRegRes?.rows?.[0]?.sm_reg) {
+      const smCheck = await queryable.query(
+        `SELECT EXISTS (
+           SELECT 1 FROM stock_movements WHERE product_id = $1 LIMIT 1
+         ) AS used`,
+        [menuItemId]
+      );
+      if (smCheck?.rows?.[0]?.used) {
+        hasStockMovements = true;
+        hasInventoryOrMinibarUsage = true;
+        if (!lockedReason) {
+          lockedReason = 'STOCK_MOVEMENTS';
+          lockCode = 'BASE_UNIT_LOCKED_BY_STOCK';
+        }
+      }
+    }
+
+    const isLocked = activePackagingCount > 0 || hasInventoryOrMinibarUsage || hasStockMovements;
 
     return {
       schemaReady: true,
-      isLocked: activePackagingCount > 0 || hasInventoryOrMinibarUsage,
+      isLocked,
       activePackagingCount,
       hasInventoryOrMinibarUsage,
+      hasStockMovements,
+      lockCode,
+      lockedReason,
     };
   } catch (err: any) {
     if (err?.code === 'SCHEMA_NOT_READY' || err?.code === 'USAGE_CHECK_FAILED') {
@@ -1118,6 +1182,25 @@ export async function fetchPropertyPackagingsByItem(
           if (Number.isInteger(idNum) && idNum > 0) {
             lockedByMinibarItemIds.add(idNum);
           }
+        }
+      }
+    }
+
+    // Periksa juga mutasi stok pada stock_movements (R-01)
+    const smRegRes = await queryable.query(
+      `SELECT to_regclass('public.stock_movements') AS sm_reg`
+    );
+    if (smRegRes?.rows?.[0]?.sm_reg) {
+      const smItems = await queryable.query(
+        `SELECT DISTINCT product_id
+           FROM stock_movements
+          WHERE property_id = $1`,
+        [propertyId]
+      );
+      for (const smRow of smItems?.rows || []) {
+        const idNum = Number(smRow.product_id);
+        if (Number.isInteger(idNum) && idNum > 0) {
+          lockedByMinibarItemIds.add(idNum);
         }
       }
     }

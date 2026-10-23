@@ -185,6 +185,10 @@ import {
   createStockLocationCreateHandler,
   createStockLocationPatchHandler,
 } from './domains/pos/productMasterStage1';
+import {
+  createStockOpeningBalanceHandler,
+  createStockBalancesHandler,
+} from './domains/pos/stockInventoryService';
 
 const app: any = express();
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -5461,6 +5465,10 @@ app.get('/api/pos/stock-locations/room-candidates', createStockLocationRoomCandi
 app.get('/api/pos/stock-locations', createStockLocationListHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock-locations', createStockLocationCreateHandler({ pool, assertPropertyScope }));
 app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool, assertPropertyScope }));
+
+// ── Master Produk: Manajemen Stok & Saldo Awal (MP-04B) ──────────────────────
+app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 

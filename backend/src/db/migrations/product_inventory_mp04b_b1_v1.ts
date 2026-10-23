@@ -179,7 +179,75 @@ export const PRODUCT_INVENTORY_MP04B_B1_STEPS: MigrationStep[] = [
     `,
   },
   {
-    id: '07_record_schema_migrations_version',
+    id: '07_upgrade_pos_menu_item_base_unit_guard_trigger',
+    description: 'Upgrade pos_menu_items base unit guard trigger to check stock_movements (R-01)',
+    sql: `
+      CREATE OR REPLACE FUNCTION trg_fn_guard_pos_menu_item_base_unit()
+      RETURNS TRIGGER AS $$
+      DECLARE
+        v_has_minibar_usage BOOLEAN := FALSE;
+        v_has_stock_movements BOOLEAN := FALSE;
+      BEGIN
+        IF TG_OP = 'UPDATE' AND (
+          OLD.canonical_base_unit_code IS DISTINCT FROM NEW.canonical_base_unit_code OR
+          OLD.base_unit IS DISTINCT FROM NEW.base_unit
+        ) THEN
+          IF EXISTS (
+            SELECT 1 FROM product_packaging_conversions ppc
+            WHERE ppc.property_id = NEW.property_id
+              AND ppc.menu_item_id = NEW.id
+              AND ppc.is_active = TRUE
+          ) THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah selama produk memiliki kemasan aktif';
+          END IF;
+
+          IF to_regclass('public.stock_movements') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM stock_movements WHERE product_id = $1)'
+              INTO v_has_stock_movements USING NEW.id;
+            IF v_has_stock_movements THEN
+              RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_STOCK: Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok';
+            END IF;
+          END IF;
+
+          IF to_regclass('public.room_type_minibar_standard') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM room_type_minibar_standard WHERE property_id = $1 AND menu_item_id = $2)'
+              INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+            IF v_has_minibar_usage THEN
+              RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk digunakan pada standar minibar kamar';
+            END IF;
+          END IF;
+
+          IF to_regclass('public.minibar_baseline_verification') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_baseline_verification WHERE property_id = $1 AND menu_item_id = $2)'
+              INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+            IF v_has_minibar_usage THEN
+              RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada verifikasi baseline minibar';
+            END IF;
+          END IF;
+
+          IF to_regclass('public.minibar_stay_event') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_stay_event WHERE property_id = $1 AND menu_item_id = $2)'
+              INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+            IF v_has_minibar_usage THEN
+              RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada riwayat stay event minibar';
+            END IF;
+          END IF;
+
+          IF to_regclass('public.minibar_inspection_report_line') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_inspection_report_line WHERE property_id = $1 AND menu_item_id = $2)'
+              INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+            IF v_has_minibar_usage THEN
+              RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada laporan inspeksi minibar';
+            END IF;
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    id: '08_record_schema_migrations_version',
     description: 'Record product_inventory_mp04b_b1_v1 in schema_migrations table',
     sql: `
       CREATE TABLE IF NOT EXISTS schema_migrations (

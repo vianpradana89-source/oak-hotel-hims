@@ -822,11 +822,14 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
           });
           if (unitMutation.isUnitChanging && lockCheck.isLocked) {
             await client.query('ROLLBACK');
+            const errCode = lockCheck.lockCode || (lockCheck.hasStockMovements ? 'BASE_UNIT_LOCKED_BY_STOCK' : 'BASE_UNIT_LOCKED_BY_USAGE');
+            const message = lockCheck.hasStockMovements
+              ? 'Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok'
+              : 'Satuan dasar tidak dapat diubah karena produk sudah memiliki kemasan aktif atau penggunaan stok';
             return res.status(409).json({
               status: 'ERROR',
-              code: 'BASE_UNIT_LOCKED_BY_USAGE',
-              message:
-                'Satuan dasar tidak dapat diubah karena produk sudah memiliki kemasan aktif atau penggunaan stok',
+              code: errCode,
+              message,
             });
           }
 

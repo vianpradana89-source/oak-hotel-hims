@@ -933,6 +933,7 @@ export async function initializeDatabase(pool: Pool) {
       v_is_equivalent_promotion BOOLEAN := FALSE;
       v_is_unit_changing BOOLEAN := FALSE;
       v_has_minibar_usage BOOLEAN := FALSE;
+      v_has_stock_movements BOOLEAN := FALSE;
     BEGIN
       v_is_initial_assignment := (
         OLD.canonical_base_unit_code IS NULL
@@ -1012,6 +1013,14 @@ export async function initializeDatabase(pool: Pool) {
             INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
           IF v_has_minibar_usage THEN
             RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada laporan inspeksi minibar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.stock_movements') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM stock_movements WHERE product_id = $1)'
+            INTO v_has_stock_movements USING NEW.id;
+          IF v_has_stock_movements THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_STOCK: Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok';
           END IF;
         END IF;
       END IF;
