@@ -1284,6 +1284,75 @@ export async function initializeDatabase(pool: Pool) {
     VALUES ('product_inventory_mp04b_b1_v1')
     ON CONFLICT (version) DO NOTHING;
 
+    /* MP-04B Batch 3: Purchase line bindings & receipt tracking */
+    CREATE TABLE IF NOT EXISTS stock_purchase_line_bindings (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      transaction_id INTEGER NOT NULL,
+      transaction_line_id INTEGER NOT NULL,
+      line_type VARCHAR(30) NOT NULL DEFAULT 'STOCK',
+      product_id INTEGER REFERENCES pos_menu_items(id),
+      destination_location_id INTEGER REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      ordered_quantity NUMERIC(12, 3) NOT NULL,
+      received_quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      base_unit_code VARCHAR(20) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE')),
+      CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0),
+      CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_purchase_line_binding'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_type'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_quantities'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_tx
+      ON stock_purchase_line_bindings(property_id, transaction_id);
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_prod
+      ON stock_purchase_line_bindings(property_id, product_id);
+
+    ALTER TABLE stock_operations
+      ADD COLUMN IF NOT EXISTS transaction_id BIGINT,
+      ADD COLUMN IF NOT EXISTS notes TEXT,
+      ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_tx
+      ON stock_operations(property_id, transaction_id)
+      WHERE transaction_id IS NOT NULL;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b3_v1')
+    ON CONFLICT (version) DO NOTHING;
+
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$

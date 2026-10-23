@@ -200,6 +200,7 @@ const PURCHASE_RECEIVING_STATUSES: ReceivingStatus[] = [
   'BELUM_DITERIMA',
   'DITERIMA_SEBAGIAN',
   'DITERIMA',
+  'DITERIMA_LENGKAP',
 ];
 
 function purchaseValidationError(message: string): Error {

@@ -59,7 +59,7 @@ export function isReportingEligible(sheet: OperationalSheet): boolean {
 
 export type VerificationStatus = 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
 
-export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA';
+export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA' | 'DITERIMA_LENGKAP';
 
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 
