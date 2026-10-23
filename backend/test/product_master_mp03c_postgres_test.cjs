@@ -344,6 +344,7 @@ function buildFixtureSchemaSql() {
 
   const properties = extractCreateTableBlock(schemaV2, 'properties', 'schema_v2.ts');
   const rooms = extractCreateTableBlock(schemaV2, 'rooms', 'schema_v2.ts');
+  const roomTypes = extractCreateTableBlock(schemaV2, 'room_types', 'schema_v2.ts');
   const categories = extractCreateTableBlock(schemaV3, 'pos_menu_categories', 'schema_v3.ts');
   let menuItems = extractCreateTableBlock(schemaV3, 'pos_menu_items', 'schema_v3.ts');
 
@@ -359,6 +360,11 @@ function buildFixtureSchemaSql() {
     properties,
     rooms,
     'ALTER TABLE rooms ADD COLUMN IF NOT EXISTS property_id INTEGER;',
+    // room_type_id & room_types diperlukan handler kandidat kamar.
+    // SENGAJA tidak ada kolom rooms.type: fixture harus mencerminkan skema
+    // staging yang menolak query lama dengan SQLSTATE 42703.
+    roomTypes,
+    'ALTER TABLE rooms ADD COLUMN IF NOT EXISTS room_type_id INTEGER;',
     `CREATE INDEX IF NOT EXISTS mp03c_test_rooms_property_idx ON rooms(property_id);`,
     categories,
     'ALTER TABLE pos_menu_categories ADD COLUMN IF NOT EXISTS property_id INTEGER;',
@@ -764,11 +770,12 @@ async function main() {
       await workPool.query(sql);
       const { rows } = await workPool.query(
         `SELECT table_name FROM information_schema.tables
-          WHERE table_schema='public' AND table_name IN ('properties','rooms','pos_menu_categories','pos_menu_items')
+          WHERE table_schema='public'
+            AND table_name IN ('properties','rooms','room_types','pos_menu_categories','pos_menu_items')
           ORDER BY table_name`
       );
       const names = rows.map((r) => r.table_name);
-      if (names.length !== 4) throw new Error(`Tabel prasyarat tidak lengkap: ${names.join(', ')}`);
+      if (names.length !== 5) throw new Error(`Tabel prasyarat tidak lengkap: ${names.join(', ')}`);
       const col = await workPool.query(
         `SELECT 1 FROM information_schema.columns
           WHERE table_schema='public' AND table_name='pos_menu_items' AND column_name='canonical_base_unit_code'`
@@ -776,7 +783,18 @@ async function main() {
       if (col.rowCount !== 0) {
         throw new Error('Baseline pra-MP-03C tidak valid: kolom canonical_base_unit_code sudah ada sebelum migrasi.');
       }
-      return { tables: names, canonicalColumnPresentBeforeMigration: false };
+      const legacyTypeCol = await workPool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='rooms' AND column_name='type'`
+      );
+      if (legacyTypeCol.rowCount !== 0) {
+        throw new Error('Fixture tidak valid: kolom legacy rooms.type seharusnya belum ada.');
+      }
+      return {
+        tables: names,
+        canonicalColumnPresentBeforeMigration: false,
+        legacyRoomsTypeColumnPresent: false,
+      };
     });
 
     // ── Migrasi #1 ──────────────────────────────────────────────────────────
@@ -1387,6 +1405,227 @@ async function main() {
         throw new Error(`ROOM_MINIBAR tanpa room_id tidak ditolak 23514: ${JSON.stringify(withoutRoomErr)}`);
       }
       return { warehouseWithRoom: withRoomErr.code, minibarWithoutRoom: withoutRoomErr.code };
+    }, 30000);
+
+    // ── Kandidat kamar: kompatibilitas kolom rooms.type ────────────────────
+    // Bug produksi: COALESCE(rt.name, r.type) -> SQLSTATE 42703 karena skema
+    // staging tidak memiliki kolom rooms.type. Fixture di bawah SENGAJA tidak
+    // membuat kolom itu, lalu membuktikannya lewat information_schema dan
+    // lewat kegagalan nyata query lama di PostgreSQL.
+    const candFixture = await step('fixture: room_types & kamar kandidat (tanpa kolom rooms.type)', async () => {
+      const absent = await workPool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='rooms' AND column_name='type'`
+      );
+      if (absent.rowCount !== 0) {
+        throw new Error('rooms.type sudah ada sebelum skenario kandidat; fixture tidak sah.');
+      }
+
+      const rt = await workPool.query(
+        `INSERT INTO room_types (property_id, name, code)
+         VALUES ($1, 'Deluxe King Canonical', 'DLX-K')
+         RETURNING id`,
+        [fixtureIds.propertyA]
+      );
+      const roomTypeId = Number(rt.rows[0].id);
+
+      const inserted = await workPool.query(
+        `INSERT INTO rooms (property_id, room_number, name, status, room_type_id)
+         VALUES ($1, 'MPA-103', 'Kamar 103', 'VACANT_CLEAN', NULL),
+                ($1, 'MPA-104', 'Kamar 104', 'VACANT_CLEAN', $2),
+                ($1, 'MPA-105', 'Kamar 105', 'VACANT_CLEAN', $2),
+                ($1, 'MPA-106', 'Kamar 106', 'VACANT_CLEAN', NULL),
+                ($1, 'MPA-107', 'Kamar 107', 'VACANT_CLEAN', $2)
+         RETURNING id, room_number`,
+        [fixtureIds.propertyA, roomTypeId]
+      );
+      const byNumber = Object.fromEntries(inserted.rows.map((r) => [String(r.room_number), Number(r.id)]));
+
+      const inactiveLoc = await workPool.query(
+        `INSERT INTO stock_locations (property_id, code, name, location_type, room_id, is_active)
+         VALUES ($1, 'MBR-CAND-E', 'Minibar Nonaktif 105', 'ROOM_MINIBAR', $2, FALSE)
+         RETURNING id, code`,
+        [fixtureIds.propertyA, byNumber['MPA-105']]
+      );
+
+      return {
+        roomTypeId,
+        roomTypeName: 'Deluxe King Canonical',
+        rooms: byNumber,
+        inactiveMinibarId: Number(inactiveLoc.rows[0].id),
+        inactiveMinibarCode: String(inactiveLoc.rows[0].code),
+        roomsTypeColumnPresent: false,
+      };
+    });
+
+    await scenario('room-candidates: rooms tanpa kolom type -> 200 & memakai room_types.name', async () => {
+      const col = await workPool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='rooms' AND column_name='type'`
+      );
+      if (col.rowCount !== 0) {
+        throw new Error('Skenario tidak sah: kolom rooms.type sudah ada, ketiadaan kolom tidak terbukti.');
+      }
+
+      // Bukti bahwa fixture benar-benar mereproduksi kegagalan staging:
+      // query lama (baseline) harus ditolak PostgreSQL dengan 42703.
+      const legacyErr = await captureSqlError(
+        workPool,
+        `SELECT r.id, COALESCE(rt.name, r.type) AS room_type_name
+           FROM rooms r
+           LEFT JOIN room_types rt ON rt.id = r.room_type_id
+          WHERE r.property_id = $1
+          ORDER BY r.room_number ASC, r.id ASC`,
+        [fixtureIds.propertyA]
+      );
+      if (!legacyErr || legacyErr.code !== '42703') {
+        throw new Error(`Query lama seharusnya gagal 42703 (undefined_column): ${JSON.stringify(legacyErr)}`);
+      }
+
+      const handler = loadedProd.units.createStockLocationRoomCandidatesHandler(depsFor(workPool));
+      const res = await invoke(handler, makeReq({ query: { property_id: String(fixtureIds.propertyA) } }));
+      if (res.statusCode !== 200) {
+        throw new Error(`Endpoint kandidat gagal: status=${res.statusCode} body=${JSON.stringify(res.body)}`);
+      }
+      const rows = Array.isArray(res.body?.data?.rooms) ? res.body.data.rooms : [];
+      const findRoom = (n) => rows.find((r) => r.room_number === n);
+
+      const r104 = findRoom('MPA-104');
+      if (!r104) throw new Error('Kamar MPA-104 tidak muncul pada daftar kandidat.');
+      if (r104.room_type_name !== candFixture.roomTypeName) {
+        throw new Error(`room_type_name=${JSON.stringify(r104.room_type_name)}, diharapkan ${JSON.stringify(candFixture.roomTypeName)}`);
+      }
+      if (r104.room_type_id !== candFixture.roomTypeId) {
+        throw new Error(`room_type_id=${r104.room_type_id}, diharapkan ${candFixture.roomTypeId}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(r104, 'status')) {
+        throw new Error('Respons kandidat membocorkan field operasional status kamar.');
+      }
+      if (Object.prototype.hasOwnProperty.call(r104, 'type')) {
+        throw new Error('Respons kandidat membocorkan kolom legacy type.');
+      }
+
+      // Scope properti tetap: properti B tidak boleh menerima kamar properti A.
+      const resB = await invoke(handler, makeReq({ query: { property_id: String(fixtureIds.propertyB) } }));
+      if (resB.statusCode !== 200) {
+        throw new Error(`Endpoint kandidat properti B gagal: status=${resB.statusCode}`);
+      }
+      const rowsB = Array.isArray(resB.body?.data?.rooms) ? resB.body.data.rooms : [];
+      if (rowsB.some((r) => r.room_number === 'MPA-104')) {
+        throw new Error('Scope properti bocor: kamar properti A muncul pada respons properti B.');
+      }
+      const rB = rowsB.find((r) => r.room_number === 'MPB-201');
+      if (!rB) throw new Error('Kamar MPB-201 (properti B) tidak muncul pada respons properti B.');
+
+      return {
+        legacyQuerySqlState: legacyErr.code,
+        roomsTypeColumnPresent: false,
+        roomTypeNameFromCanonical: r104.room_type_name,
+        propertyScope: 'ok',
+      };
+    }, 30000);
+
+    await scenario('room-candidates: nama kanonik null & tanpa kolom type -> room_type_name null', async () => {
+      const col = await workPool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='rooms' AND column_name='type'`
+      );
+      if (col.rowCount !== 0) {
+        throw new Error('Kolom rooms.type sudah ada; skenario null tidak valid.');
+      }
+
+      const handler = loadedProd.units.createStockLocationRoomCandidatesHandler(depsFor(workPool));
+      const res = await invoke(handler, makeReq({ query: { property_id: String(fixtureIds.propertyA) } }));
+      if (res.statusCode !== 200) {
+        throw new Error(`Endpoint kandidat gagal: status=${res.statusCode} body=${JSON.stringify(res.body)}`);
+      }
+      const r103 = (res.body?.data?.rooms || []).find((r) => r.room_number === 'MPA-103');
+      if (!r103) throw new Error('Kamar MPA-103 tidak muncul pada daftar kandidat.');
+      if (r103.room_type_id !== null) {
+        throw new Error(`Fixture tidak sah: room_type_id MPA-103=${JSON.stringify(r103.room_type_id)}, harus null.`);
+      }
+      if (r103.room_type_name !== null) {
+        throw new Error(`room_type_name=${JSON.stringify(r103.room_type_name)}, diharapkan null.`);
+      }
+      return { roomTypeId: null, roomTypeName: null, roomsTypeColumnPresent: false };
+    }, 30000);
+
+    await scenario('room-candidates: kamar terikat lokasi minibar nonaktif tetap tidak tersedia', async () => {
+      const handler = loadedProd.units.createStockLocationRoomCandidatesHandler(depsFor(workPool));
+      const res = await invoke(handler, makeReq({ query: { property_id: String(fixtureIds.propertyA) } }));
+      if (res.statusCode !== 200) {
+        throw new Error(`Endpoint kandidat gagal: status=${res.statusCode}`);
+      }
+      const rows = res.body?.data?.rooms || [];
+      const r105 = rows.find((r) => r.room_number === 'MPA-105');
+      if (!r105) throw new Error('Kamar MPA-105 tidak muncul pada daftar kandidat.');
+      if (r105.existing_stock_location_id !== candFixture.inactiveMinibarId) {
+        throw new Error(`existing_stock_location_id=${r105.existing_stock_location_id}, diharapkan ${candFixture.inactiveMinibarId}`);
+      }
+      if (r105.existing_stock_location_code !== candFixture.inactiveMinibarCode) {
+        throw new Error(`existing_stock_location_code=${JSON.stringify(r105.existing_stock_location_code)}, diharapkan ${JSON.stringify(candFixture.inactiveMinibarCode)}`);
+      }
+      if (r105.existing_stock_location_is_active !== false) {
+        throw new Error(`existing_stock_location_is_active=${r105.existing_stock_location_is_active}, diharapkan false.`);
+      }
+      if (r105.existing_location_is_active !== false) {
+        throw new Error(`existing_location_is_active=${r105.existing_location_is_active}, diharapkan false (alias).`);
+      }
+      if (r105.is_available_for_minibar !== false) {
+        throw new Error('Kamar dengan lokasi minibar nonaktif harus tetap is_available_for_minibar=false.');
+      }
+      return {
+        roomNumber: r105.room_number,
+        existingStockLocationId: r105.existing_stock_location_id,
+        existingStockLocationIsActive: r105.existing_stock_location_is_active,
+        isAvailableForMinibar: r105.is_available_for_minibar,
+      };
+    }, 30000);
+
+    await scenario('room-candidates: fallback legacy rooms.type saat nama kanonik null', async () => {
+      // Kolom legacy HANYA dibuat di database container test (bukan source/migrasi)
+      // untuk membuktikan fallback to_jsonb masih bekerja bila kolom tersedia.
+      await workPool.query('ALTER TABLE rooms ADD COLUMN IF NOT EXISTS type VARCHAR(100)');
+      const col = await workPool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='rooms' AND column_name='type'`
+      );
+      if (col.rowCount !== 1) {
+        throw new Error('Gagal menyiapkan kolom legacy rooms.type pada container test.');
+      }
+      await workPool.query(`UPDATE rooms SET type = 'Legacy Twin' WHERE id = $1`, [candFixture.rooms['MPA-106']]);
+      await workPool.query(`UPDATE rooms SET type = 'Legacy Ignored' WHERE id = $1`, [candFixture.rooms['MPA-107']]);
+
+      const handler = loadedProd.units.createStockLocationRoomCandidatesHandler(depsFor(workPool));
+      const res = await invoke(handler, makeReq({ query: { property_id: String(fixtureIds.propertyA) } }));
+      if (res.statusCode !== 200) {
+        throw new Error(`Endpoint kandidat gagal: status=${res.statusCode} body=${JSON.stringify(res.body)}`);
+      }
+      const rows = res.body?.data?.rooms || [];
+      const findRoom = (n) => rows.find((r) => r.room_number === n);
+
+      const r106 = findRoom('MPA-106');
+      if (!r106) throw new Error('Kamar MPA-106 tidak muncul pada daftar kandidat.');
+      if (r106.room_type_name !== 'Legacy Twin') {
+        throw new Error(`Fallback legacy gagal: room_type_name=${JSON.stringify(r106.room_type_name)}, diharapkan "Legacy Twin".`);
+      }
+
+      const r107 = findRoom('MPA-107');
+      if (!r107) throw new Error('Kamar MPA-107 tidak muncul pada daftar kandidat.');
+      if (r107.room_type_name !== candFixture.roomTypeName) {
+        throw new Error(`room_types.name harus diprioritaskan: room_type_name=${JSON.stringify(r107.room_type_name)}, diharapkan ${JSON.stringify(candFixture.roomTypeName)}.`);
+      }
+
+      const r103 = findRoom('MPA-103');
+      if (!r103 || r103.room_type_name !== null) {
+        throw new Error(`Tanpa nama kanonik & legacy NULL harus tetap null: ${JSON.stringify(r103 && r103.room_type_name)}`);
+      }
+
+      return {
+        legacyFallback: r106.room_type_name,
+        canonicalPriority: r107.room_type_name,
+        noValue: r103.room_type_name,
+      };
     }, 30000);
   } catch (err) {
     fatal = {

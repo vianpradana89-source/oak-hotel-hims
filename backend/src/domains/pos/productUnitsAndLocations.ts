@@ -2169,7 +2169,7 @@ export function createStockLocationRoomCandidatesHandler(deps: ProductMasterMp03
         `SELECT r.id AS room_id,
                 r.room_number,
                 r.room_type_id,
-                COALESCE(rt.name, r.type) AS room_type_name,
+                COALESCE(rt.name, to_jsonb(r)->>'type') AS room_type_name,
                 sl.id AS existing_stock_location_id,
                 sl.code AS existing_stock_location_code,
                 sl.is_active AS existing_stock_location_is_active

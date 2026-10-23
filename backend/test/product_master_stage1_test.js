@@ -2798,6 +2798,7 @@ async function main() {
     ];
     const locations = [];
     let nextLocId = 1;
+    let lastRoomCandidatesSql = null;
 
     const mockPool = {
       async query(sql, params = []) {
@@ -2820,6 +2821,7 @@ async function main() {
           norm.includes('LEFT JOIN room_types rt ON rt.id = r.room_type_id') &&
           norm.includes('LEFT JOIN stock_locations sl')
         ) {
+          lastRoomCandidatesSql = norm;
           const pid = Number(params[0]);
           const rows = rooms
             .filter((r) => r.property_id === pid)
@@ -2832,7 +2834,9 @@ async function main() {
                 room_id: r.id,
                 room_number: r.room_number,
                 room_type_id: r.room_type_id,
-                room_type_name: rt ? rt.name : r.type,
+                // Meniru COALESCE(rt.name, to_jsonb(r)->>'type'): kunci legacy
+                // 'type' hanya dipakai bila ada, tanpa bergantung pada kolomnya.
+                room_type_name: rt ? rt.name : r.type !== undefined ? r.type : null,
                 existing_stock_location_id: loc ? loc.id : null,
                 existing_stock_location_code: loc ? loc.code : null,
                 existing_stock_location_is_active: loc ? Boolean(loc.is_active) : null,
@@ -3077,6 +3081,20 @@ async function main() {
     assert.strictEqual(cand101.is_available_for_minibar, false);
     assert.strictEqual(cand102.room_type_name, 'Standard Twin Fallback');
     assert.strictEqual(cand102.is_available_for_minibar, true);
+
+    // 9b) Kompatibilitas skema: query kandidat kamar tidak boleh bergantung pada
+    //     kolom rooms.type (di staging PostgreSQL menolak dengan SQLSTATE 42703).
+    //     Prioritas tetap room_types.name; fallback legacy dibaca lewat to_jsonb
+    //     sehingga tetap bekerja bila kolom tersedia dan menjadi NULL bila tidak.
+    assert.ok(
+      lastRoomCandidatesSql && lastRoomCandidatesSql.includes("to_jsonb(r)->>'type'"),
+      'Query kandidat kamar wajib memakai to_jsonb(r)->>\'type\' sebagai fallback legacy'
+    );
+    assert.strictEqual(
+      /\br\.type\b/.test(lastRoomCandidatesSql || ''),
+      false,
+      'Query kandidat kamar tidak boleh mereferensikan kolom rooms.type (SQLSTATE 42703)'
+    );
   });
 
   await test('T8.7 MP-03C: Kontrak Migration MP-03C, Kesetaraan schema_v3.ts & Migration Runner, serta Operational Access Rules', async () => {
