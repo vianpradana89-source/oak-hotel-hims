@@ -188,6 +188,8 @@ import {
 import {
   createStockOpeningBalanceHandler,
   createStockBalancesHandler,
+  createPurchaseReceiptHandler,
+  createPurchaseReceiptsQueryHandler,
 } from './domains/pos/stockInventoryService';
 
 const app: any = express();
@@ -5469,6 +5471,8 @@ app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool
 // ── Master Produk: Manajemen Stok & Saldo Awal (MP-04B) ──────────────────────
 app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/purchase-receipt', createPurchaseReceiptHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/purchase-receipts', createPurchaseReceiptsQueryHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 
