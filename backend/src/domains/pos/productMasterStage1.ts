@@ -32,6 +32,70 @@ export {
   createProductPhotoGetHandler,
 } from './productPhotoStorage';
 
+import {
+  SYSTEM_CANONICAL_UNITS,
+  CANONICAL_UNIT_CODES,
+  UNIT_DIMENSIONS,
+  STOCK_LOCATION_TYPES,
+  getCanonicalUnitByCode,
+  matchCanonicalUnitByText,
+  isTextEquivalentToCanonicalUnit,
+  milliToDecimalString,
+  parseStrictDecimalString,
+  parsePackagingFactorInput,
+  parseCanonicalQuantityInput,
+  convertPackagingToBaseQuantity,
+  convertIntraDimensionQuantity,
+  resolveCreateProductUnitInput,
+  resolvePatchProductUnitMutation,
+  checkProductBaseUnitLockStatus,
+  formatPackagingConversionRow,
+  fetchPropertyPackagingsByItem,
+  createProductPackagingListHandler,
+  createProductPackagingCreateHandler,
+  createProductPackagingPatchHandler,
+  createStockLocationRoomCandidatesHandler,
+  createStockLocationListHandler,
+  createStockLocationCreateHandler,
+  createStockLocationPatchHandler,
+  type CanonicalUnitDefinition,
+  type UnitDimension,
+  type FormattedPackagingConversion,
+  type StockLocationType,
+} from './productUnitsAndLocations';
+
+export {
+  SYSTEM_CANONICAL_UNITS,
+  CANONICAL_UNIT_CODES,
+  UNIT_DIMENSIONS,
+  STOCK_LOCATION_TYPES,
+  getCanonicalUnitByCode,
+  matchCanonicalUnitByText,
+  isTextEquivalentToCanonicalUnit,
+  milliToDecimalString,
+  parseStrictDecimalString,
+  parsePackagingFactorInput,
+  parseCanonicalQuantityInput,
+  convertPackagingToBaseQuantity,
+  convertIntraDimensionQuantity,
+  resolveCreateProductUnitInput,
+  resolvePatchProductUnitMutation,
+  checkProductBaseUnitLockStatus,
+  formatPackagingConversionRow,
+  fetchPropertyPackagingsByItem,
+  createProductPackagingListHandler,
+  createProductPackagingCreateHandler,
+  createProductPackagingPatchHandler,
+  createStockLocationRoomCandidatesHandler,
+  createStockLocationListHandler,
+  createStockLocationCreateHandler,
+  createStockLocationPatchHandler,
+  type CanonicalUnitDefinition,
+  type UnitDimension,
+  type FormattedPackagingConversion,
+  type StockLocationType,
+};
+
 export const PRODUCT_TYPES = ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD'] as const;
 export type ProductType = (typeof PRODUCT_TYPES)[number];
 
@@ -404,6 +468,17 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
       ? `/api/pos/menu/items/${safeRow.id}/photo?property_id=${safeRow.property_id}&v=${versionToken}`
       : null;
 
+  const canonicalCodeRaw =
+    safeRow.canonical_base_unit_code === null || safeRow.canonical_base_unit_code === undefined
+      ? null
+      : String(safeRow.canonical_base_unit_code).trim().toUpperCase();
+  const canonicalUnitDef = canonicalCodeRaw ? getCanonicalUnitByCode(canonicalCodeRaw) : null;
+  const isBaseUnitLocked =
+    typeof safeRow.is_base_unit_locked === 'boolean' ? safeRow.is_base_unit_locked : false;
+  const packagingConversions = Array.isArray(safeRow.packaging_conversions)
+    ? safeRow.packaging_conversions
+    : [];
+
   return {
     ...safeRow,
     price: formattedPrice,
@@ -413,6 +488,10 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
     product_kind: productKind,
     product_kind_label: productKind ? PRODUCT_KIND_LABELS[productKind] ?? 'Belum diatur' : 'Belum diatur',
     base_unit: baseUnit,
+    canonical_base_unit_code: canonicalUnitDef ? canonicalUnitDef.code : null,
+    base_unit_dimension: canonicalUnitDef ? canonicalUnitDef.dimension : null,
+    is_base_unit_locked: isBaseUnitLocked,
+    packaging_conversions: packagingConversions,
     barcode,
     has_photo: hasPhoto,
     photo_url: photoUrl,
@@ -422,6 +501,10 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
 export interface PosMenuItemPatchDeps {
   pool: {
     query: (sql: string, params?: any[]) => Promise<any>;
+    connect?: () => Promise<{
+      query: (sql: string, params?: any[]) => Promise<any>;
+      release: () => void;
+    }>;
   };
   assertPropertyScope: (req: any, propertyId: number) => Promise<void>;
 }
@@ -599,13 +682,41 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         params.push(pk.value);
         setClauses.push(`product_kind = $${params.length}`);
       }
-      if (body.base_unit !== undefined) {
-        const bu = parseBaseUnitInput(body.base_unit);
-        if (!bu.ok) {
-          return res.status(400).json({ status: 'ERROR', code: bu.code, message: bu.message });
+      const hasCanonicalUnitField =
+        Object.prototype.hasOwnProperty.call(body, 'canonical_base_unit_code') &&
+        body.canonical_base_unit_code !== undefined;
+      const hasLegacyBaseUnitField =
+        Object.prototype.hasOwnProperty.call(body, 'base_unit') && body.base_unit !== undefined;
+      const hasAnyUnitField = hasCanonicalUnitField || hasLegacyBaseUnitField;
+
+      if (hasAnyUnitField) {
+        const preUnitCheck = resolvePatchProductUnitMutation({
+          existingBaseUnit: null,
+          existingCanonicalCode: null,
+          body,
+        });
+        if (!preUnitCheck.ok) {
+          return res.status(preUnitCheck.status).json({
+            status: 'ERROR',
+            code: preUnitCheck.code,
+            message: preUnitCheck.error,
+          });
         }
-        params.push(bu.value);
-        setClauses.push(`base_unit = $${params.length}`);
+        if (typeof deps.pool.connect !== 'function') {
+          if (hasCanonicalUnitField) {
+            params.push(preUnitCheck.base_unit);
+            setClauses.push(`base_unit = $${params.length}`);
+            params.push(preUnitCheck.canonical_base_unit_code);
+            setClauses.push(`canonical_base_unit_code = $${params.length}`);
+          } else if (hasLegacyBaseUnitField) {
+            const bu = parseBaseUnitInput(body.base_unit);
+            if (!bu.ok) {
+              return res.status(400).json({ status: 'ERROR', code: bu.code, message: bu.message });
+            }
+            params.push(bu.value);
+            setClauses.push(`base_unit = $${params.length}`);
+          }
+        }
       }
       let parsedPatchBarcode: { provided: boolean; value: string | null } | null = null;
       if (body.barcode !== undefined) {
@@ -649,7 +760,7 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         setClauses.push(`is_active = $${params.length}`);
       }
 
-      if (setClauses.length === 0) {
+      if (setClauses.length === 0 && !hasAnyUnitField) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
       }
 
@@ -673,6 +784,98 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         );
         if ((barcodeDupCheck.rowCount ?? 0) > 0) {
           return res.status(409).json({ status: 'ERROR', code: 'BARCODE_DUPLICATE', message: 'barcode already exists for this property' });
+        }
+      }
+
+      if (hasAnyUnitField && typeof deps.pool.connect === 'function') {
+        const client = await deps.pool.connect();
+        try {
+          await client.query('BEGIN');
+          const itemLockRes = await client.query(
+            'SELECT * FROM pos_menu_items WHERE id = $1 AND property_id = $2 FOR UPDATE',
+            [itemId, propertyId]
+          );
+          if ((itemLockRes.rowCount ?? 0) === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({
+              status: 'ERROR',
+              code: 'NOT_FOUND',
+              message: `menu item ${itemId} not found for property ${propertyId}`,
+            });
+          }
+          const lockedRow = itemLockRes.rows[0];
+          const unitMutation = resolvePatchProductUnitMutation({
+            existingBaseUnit: lockedRow.base_unit ?? null,
+            existingCanonicalCode: lockedRow.canonical_base_unit_code ?? null,
+            body,
+          });
+          if (!unitMutation.ok) {
+            await client.query('ROLLBACK');
+            return res.status(unitMutation.status).json({
+              status: 'ERROR',
+              code: unitMutation.code,
+              message: unitMutation.error,
+            });
+          }
+          const lockCheck = await checkProductBaseUnitLockStatus(client, propertyId, itemId, {
+            forMutation: unitMutation.isUnitChanging,
+          });
+          if (unitMutation.isUnitChanging && lockCheck.isLocked) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              status: 'ERROR',
+              code: 'BASE_UNIT_LOCKED_BY_USAGE',
+              message:
+                'Satuan dasar tidak dapat diubah karena produk sudah memiliki kemasan aktif atau penggunaan stok',
+            });
+          }
+
+          params.push(unitMutation.base_unit);
+          setClauses.push(`base_unit = $${params.length}`);
+          params.push(unitMutation.canonical_base_unit_code);
+          setClauses.push(`canonical_base_unit_code = $${params.length}`);
+
+          if (setClauses.length === 0) {
+            await client.query('COMMIT');
+            return res.json({
+              status: 'OK',
+              data: formatPosMenuItemRow({
+                ...lockedRow,
+                is_base_unit_locked: lockCheck.isLocked,
+              }),
+            });
+          }
+
+          params.push(itemId, propertyId);
+          const result = await client.query(
+            `UPDATE pos_menu_items SET ${setClauses.join(', ')} WHERE id = $${params.length - 1} AND property_id = $${params.length} RETURNING *`,
+            params
+          );
+          if ((result.rowCount ?? 0) === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({
+              status: 'ERROR',
+              code: 'NOT_FOUND',
+              message: `menu item ${itemId} not found for property ${propertyId}`,
+            });
+          }
+          await client.query('COMMIT');
+          const updatedRow = {
+            ...result.rows[0],
+            is_base_unit_locked: lockCheck.isLocked,
+          };
+          return res.json({ status: 'OK', data: formatPosMenuItemRow(updatedRow) });
+        } catch (txErr: any) {
+          try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+          if (txErr.code === '23505' && txErr.constraint === 'uq_pmi_property_code') {
+            return res.status(409).json({ status: 'ERROR', code: 'ITEM_CODE_DUPLICATE', message: 'item code already exists for this property' });
+          }
+          if (txErr.code === '23505' && txErr.constraint === 'uq_pmi_property_barcode') {
+            return res.status(409).json({ status: 'ERROR', code: 'BARCODE_DUPLICATE', message: 'barcode already exists for this property' });
+          }
+          throw txErr;
+        } finally {
+          client.release();
         }
       }
 
@@ -825,11 +1028,12 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
       }
       const productKindVal = parsedProductKind.provided ? parsedProductKind.value : null;
 
-      const parsedBaseUnit = parseBaseUnitInput(base_unit);
-      if (!parsedBaseUnit.ok) {
-        return res.status(400).json({ status: 'ERROR', code: parsedBaseUnit.code, message: parsedBaseUnit.message });
+      const resolvedUnit = resolveCreateProductUnitInput(body);
+      if (!resolvedUnit.ok) {
+        return res.status(resolvedUnit.status).json({ status: 'ERROR', code: resolvedUnit.code, message: resolvedUnit.error });
       }
-      const baseUnitVal = parsedBaseUnit.provided ? parsedBaseUnit.value : null;
+      const baseUnitVal = resolvedUnit.base_unit;
+      const canonicalBaseUnitVal = resolvedUnit.canonical_base_unit_code;
 
       // Barcode: opsional, pertahankan nol awal, jangan isi otomatis dari SKU/item_code.
       const parsedBarcode = parseBarcodeInput(barcode);
@@ -940,31 +1144,63 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
           }
         }
 
-        const insertRes = await client.query(
-          `INSERT INTO pos_menu_items (
-             property_id, category_id, item_code, name, description,
-             price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           RETURNING *`,
-          [
-            propId,
-            finalCategoryId,
-            code,
-            propName,
-            desc,
-            priceVal,
-            isActiveVal,
-            effectiveSellablePos,
-            productTypeVal,
-            productKindVal,
-            baseUnitVal,
-            barcodeVal,
-          ]
-        );
+        const insertRes =
+          canonicalBaseUnitVal !== null
+            ? await client.query(
+                `INSERT INTO pos_menu_items (
+                   property_id, category_id, item_code, name, description,
+                   price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode, canonical_base_unit_code
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 RETURNING *`,
+                [
+                  propId,
+                  finalCategoryId,
+                  code,
+                  propName,
+                  desc,
+                  priceVal,
+                  isActiveVal,
+                  effectiveSellablePos,
+                  productTypeVal,
+                  productKindVal,
+                  baseUnitVal,
+                  barcodeVal,
+                  canonicalBaseUnitVal,
+                ]
+              )
+            : await client.query(
+                `INSERT INTO pos_menu_items (
+                   property_id, category_id, item_code, name, description,
+                   price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 RETURNING *`,
+                [
+                  propId,
+                  finalCategoryId,
+                  code,
+                  propName,
+                  desc,
+                  priceVal,
+                  isActiveVal,
+                  effectiveSellablePos,
+                  productTypeVal,
+                  productKindVal,
+                  baseUnitVal,
+                  barcodeVal,
+                ]
+              );
         await client.query('COMMIT');
         const row = insertRes.rows[0];
-        res.status(201).json({ status: 'OK', data: formatPosMenuItemRow({ ...row, category_name: finalCategoryName }) });
+        res.status(201).json({
+          status: 'OK',
+          data: formatPosMenuItemRow({
+            canonical_base_unit_code: canonicalBaseUnitVal,
+            ...row,
+            category_name: finalCategoryName,
+          }),
+        });
         return;
       } catch (err: any) {
         try { await client.query('ROLLBACK'); } catch { /* already aborted */ }

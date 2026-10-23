@@ -6,6 +6,276 @@ import { getMasterProductCapabilities } from './productMasterPermissions';
 export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD';
 export type ProductKindCode = 'STANDARD';
 export type RoadmapProductKindCode = 'WEIGHED' | 'UNLIMITED' | 'SERVICE' | 'BUNDLE' | 'FORMULA';
+export type UnitDimension = 'COUNT' | 'WEIGHT' | 'VOLUME';
+export type StockLocationTypeCode =
+  | 'WAREHOUSE'
+  | 'KITCHEN'
+  | 'POS_OUTLET'
+  | 'HK_PANTRY'
+  | 'ROOM_MINIBAR';
+
+export interface CanonicalUnitOption {
+  code: string;
+  dimension: UnitDimension;
+  label_id: string;
+  aliases: readonly string[];
+  allow_decimal: boolean;
+  display_scale: 0 | 3;
+}
+
+export const SYSTEM_CANONICAL_UNITS: readonly CanonicalUnitOption[] = [
+  {
+    code: 'PCS',
+    dimension: 'COUNT',
+    label_id: 'Pcs',
+    aliases: ['pcs', 'pc', 'piece', 'pieces', 'buah', 'biji', 'unit'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'PORSI',
+    dimension: 'COUNT',
+    label_id: 'Porsi',
+    aliases: ['porsi', 'portion', 'serving'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'GELAS',
+    dimension: 'COUNT',
+    label_id: 'Gelas',
+    aliases: ['gelas', 'glass'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'CUP',
+    dimension: 'COUNT',
+    label_id: 'Cup',
+    aliases: ['cup', 'cangkir'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'BOTOL',
+    dimension: 'COUNT',
+    label_id: 'Botol',
+    aliases: ['botol', 'btl', 'bottle'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'KALENG',
+    dimension: 'COUNT',
+    label_id: 'Kaleng',
+    aliases: ['kaleng', 'can', 'klg'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'PACK',
+    dimension: 'COUNT',
+    label_id: 'Pack',
+    aliases: ['pack', 'pak', 'bungkus', 'bks', 'sachet'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'BOX',
+    dimension: 'COUNT',
+    label_id: 'Box',
+    aliases: ['box', 'kotak', 'dus', 'karton', 'carton', 'ctn'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'ROLL',
+    dimension: 'COUNT',
+    label_id: 'Roll',
+    aliases: ['roll', 'gulung'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'SET',
+    dimension: 'COUNT',
+    label_id: 'Set',
+    aliases: ['set', 'pasang', 'pair'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'LEMBAR',
+    dimension: 'COUNT',
+    label_id: 'Lembar',
+    aliases: ['lembar', 'lbr', 'sheet'],
+    allow_decimal: false,
+    display_scale: 0,
+  },
+  {
+    code: 'KG',
+    dimension: 'WEIGHT',
+    label_id: 'Kg',
+    aliases: ['kg', 'kilogram', 'kilo'],
+    allow_decimal: true,
+    display_scale: 3,
+  },
+  {
+    code: 'GRAM',
+    dimension: 'WEIGHT',
+    label_id: 'Gram',
+    aliases: ['g', 'gr', 'gram', 'grams'],
+    allow_decimal: true,
+    display_scale: 3,
+  },
+  {
+    code: 'LITER',
+    dimension: 'VOLUME',
+    label_id: 'Liter',
+    aliases: ['l', 'lt', 'ltr', 'liter', 'litre'],
+    allow_decimal: true,
+    display_scale: 3,
+  },
+  {
+    code: 'ML',
+    dimension: 'VOLUME',
+    label_id: 'mL',
+    aliases: ['ml', 'milliliter', 'millilitre', 'cc'],
+    allow_decimal: true,
+    display_scale: 3,
+  },
+];
+
+export const STOCK_LOCATION_TYPE_OPTIONS: Array<{ value: StockLocationTypeCode; label: string }> = [
+  { value: 'WAREHOUSE', label: 'Gudang Utama / Penyimpanan (WAREHOUSE)' },
+  { value: 'KITCHEN', label: 'Dapur / Produksi F&B (KITCHEN)' },
+  { value: 'POS_OUTLET', label: 'Titik Stok Outlet Kasir / Bar / Resto (POS_OUTLET)' },
+  { value: 'HK_PANTRY', label: 'Pantry Housekeeping (HK_PANTRY)' },
+  { value: 'ROOM_MINIBAR', label: 'Minibar Kamar Tamu (ROOM_MINIBAR)' },
+];
+
+export function formatStockLocationTypeLabel(type: string | null | undefined): string {
+  if (!type) return 'Belum diatur';
+  const matched = STOCK_LOCATION_TYPE_OPTIONS.find((opt) => opt.value === type.toUpperCase());
+  return matched ? matched.label : type;
+}
+
+export function getCanonicalUnitByCode(
+  code: string | null | undefined,
+  catalog: readonly CanonicalUnitOption[] = SYSTEM_CANONICAL_UNITS
+): CanonicalUnitOption | null {
+  if (!code || typeof code !== 'string') return null;
+  const upper = code.trim().toUpperCase();
+  return catalog.find((u) => u.code === upper) || null;
+}
+
+export function matchCanonicalUnitByText(
+  raw: string | null | undefined,
+  catalog: readonly CanonicalUnitOption[] = SYSTEM_CANONICAL_UNITS
+): CanonicalUnitOption | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const normalized = raw.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!normalized) return null;
+  for (const unit of catalog) {
+    if (
+      unit.code.toLowerCase() === normalized ||
+      unit.label_id.toLowerCase() === normalized ||
+      unit.aliases.some((a) => a.toLowerCase() === normalized)
+    ) {
+      return unit;
+    }
+  }
+  return null;
+}
+
+export function validatePackagingFactorDraft(
+  rawFactor: string | null | undefined,
+  baseUnitCode: string | null | undefined,
+  catalog: readonly CanonicalUnitOption[] = SYSTEM_CANONICAL_UNITS
+): { valid: true; normalizedFactor: string } | { valid: false; message: string } {
+  const unit = getCanonicalUnitByCode(baseUnitCode, catalog);
+  if (!unit) {
+    return { valid: false, message: 'Satuan dasar kanonik produk belum valid' };
+  }
+  const trimmed = typeof rawFactor === 'string' ? rawFactor.trim() : '';
+  if (!trimmed) {
+    return { valid: false, message: 'Faktor konversi ke satuan dasar wajib diisi' };
+  }
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    return { valid: false, message: 'Faktor konversi harus berupa angka positif menggunakan titik desimal' };
+  }
+  const [intPart, fracPart = ''] = trimmed.split('.');
+  if (fracPart.length > 3) {
+    return { valid: false, message: 'Faktor konversi maksimal 3 angka di belakang koma (presisi mili-unit)' };
+  }
+  const paddedFrac = (fracPart + '000').slice(0, 3);
+  const milli = BigInt(intPart) * 1000n + BigInt(paddedFrac);
+  if (milli <= 0n) {
+    return { valid: false, message: 'Faktor konversi harus lebih besar dari 0' };
+  }
+  if (milli > 100_000_000n) {
+    return { valid: false, message: 'Faktor konversi maksimal 100000 (atau 100000.000)' };
+  }
+  if (!unit.allow_decimal && milli % 1000n !== 0n) {
+    return {
+      valid: false,
+      message: `Satuan dasar diskrit (${unit.label_id}) wajib memakai faktor konversi bilangan bulat`,
+    };
+  }
+  return { valid: true, normalizedFactor: trimmed };
+}
+
+export interface PackagingConversionItem {
+  id: number;
+  property_id: number;
+  menu_item_id: number;
+  packaging_code: string;
+  packaging_label: string;
+  base_unit_code: string;
+  to_base_factor: string;
+  is_default_purchase: boolean;
+  is_active: boolean;
+  idempotency_key?: string | null;
+}
+
+export interface StockLocationItem {
+  id: number;
+  property_id: number;
+  code: string;
+  name: string;
+  location_type: StockLocationTypeCode;
+  room_id: number | null;
+  room_number?: string | null;
+  room_type_id?: number | null;
+  room_type_name?: string | null;
+  is_active: boolean;
+  notes?: string | null;
+}
+
+export interface RoomMinibarCandidate {
+  room_id: number;
+  room_number: string;
+  room_type_id: number | null;
+  room_type_name: string | null;
+  existing_stock_location_id?: number | null;
+  existing_stock_location_code?: string | null;
+  existing_stock_location_is_active?: boolean | null;
+  is_available_for_minibar?: boolean;
+  existing_location_id: number | null;
+  existing_location_code: string | null;
+  existing_location_is_active: boolean | null;
+}
+
+export interface UnconfirmedPackagingCreateState {
+  itemId: number;
+  propertyId: number;
+  idempotencyKey: string;
+  baseUnitCode: string;
+  packagingCode: string;
+  packagingLabel: string;
+  toBaseFactor: string;
+  isDefaultPurchase: boolean;
+}
 
 export interface ProductItem {
   id: number;
@@ -22,6 +292,13 @@ export interface ProductItem {
   product_kind?: ProductKindCode | string | null;
   product_kind_label?: string;
   base_unit?: string | null;
+  canonical_base_unit_code?: string | null;
+  canonical_base_unit_label?: string | null;
+  canonical_unit_dimension?: UnitDimension | null;
+  canonical_unit_allow_decimal?: boolean | null;
+  canonical_unit_scale?: number | null;
+  is_base_unit_locked?: boolean;
+  packaging_conversions?: PackagingConversionItem[];
   description?: string | null;
   has_photo?: boolean;
   photo_url?: string | null;
@@ -52,6 +329,7 @@ export interface ProductFormState {
   productType: string;
   productKind: string;
   baseUnit: string;
+  canonicalBaseUnitCode?: string;
   isSellablePos: boolean;
 }
 
@@ -65,6 +343,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   productType: '',
   productKind: 'STANDARD',
   baseUnit: '',
+  canonicalBaseUnitCode: '',
   isSellablePos: true,
 };
 
@@ -123,6 +402,16 @@ export const PRODUCT_TYPE_CHOICES: Array<{ value: ProductTypeCode; label: string
 
 const COMMON_BASE_UNITS = ['Porsi', 'Pcs', 'Gelas', 'Botol', 'Kaleng', 'Cup', 'Pack', 'Box', 'Kg', 'Gram', 'Liter', 'Ml'];
 
+let packagingIdempotencyCounter = 0;
+
+export function createPackagingIdempotencyKey(propertyId: number | null | undefined, itemId: number): string {
+  packagingIdempotencyCounter += 1;
+  const pid = propertyId ?? 0;
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `mp03c-pkg-p${pid}-i${itemId}-${ts}-${packagingIdempotencyCounter}-${rand}`;
+}
+
 export function resolveInitialProductTypeFromTab(tab: ProductTypeFilter): string {
   if (tab === 'FINISHED_GOOD' || tab === 'SEMI_FINISHED' || tab === 'RAW_MATERIAL') {
     return tab;
@@ -144,6 +433,53 @@ export function applyProductTypeChange(form: ProductFormState, nextType: string)
   };
 }
 
+export function applyCanonicalUnitSelection(
+  form: ProductFormState,
+  nextCanonicalCode: string,
+  catalog: readonly CanonicalUnitOption[] = SYSTEM_CANONICAL_UNITS
+): ProductFormState {
+  const cleanCode = nextCanonicalCode.trim().toUpperCase();
+  if (!cleanCode) {
+    return {
+      ...form,
+      canonicalBaseUnitCode: '',
+      baseUnit: '',
+    };
+  }
+  const unit = getCanonicalUnitByCode(cleanCode, catalog);
+  if (!unit) {
+    return {
+      ...form,
+      canonicalBaseUnitCode: '',
+    };
+  }
+  return {
+    ...form,
+    canonicalBaseUnitCode: unit.code,
+    baseUnit: unit.label_id,
+  };
+}
+
+export function applyBaseUnitTextChange(
+  form: ProductFormState,
+  nextBaseUnitText: string,
+  catalog: readonly CanonicalUnitOption[] = SYSTEM_CANONICAL_UNITS
+): ProductFormState {
+  const currentCode = form.canonicalBaseUnitCode ? form.canonicalBaseUnitCode.trim().toUpperCase() : '';
+  if (!currentCode) {
+    return {
+      ...form,
+      baseUnit: nextBaseUnitText,
+    };
+  }
+  const matched = matchCanonicalUnitByText(nextBaseUnitText, catalog);
+  return {
+    ...form,
+    baseUnit: nextBaseUnitText,
+    canonicalBaseUnitCode: matched && matched.code === currentCode ? currentCode : '',
+  };
+}
+
 export function buildEditProductForm(item: ProductItem): ProductFormState {
   return {
     code: item.item_code || '',
@@ -156,6 +492,7 @@ export function buildEditProductForm(item: ProductItem): ProductFormState {
     productType: item.product_type || '',
     productKind: item.product_kind || '',
     baseUnit: item.base_unit || '',
+    canonicalBaseUnitCode: item.canonical_base_unit_code || '',
     isSellablePos: item.is_sellable_pos !== false,
   };
 }
@@ -275,6 +612,61 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const editGalleryInputRef = useRef<HTMLInputElement | null>(null);
   const editCameraInputRef = useRef<HTMLInputElement | null>(null);
 
+  // ── MP-03C: State Kelola Kemasan Produk ──
+  const [packagingModalItem, setPackagingModalItem] = useState<ProductItem | null>(null);
+  const [packagingItems, setPackagingItems] = useState<PackagingConversionItem[]>([]);
+  const [packagingLoading, setPackagingLoading] = useState<boolean>(false);
+  const [packagingErrorMsg, setPackagingErrorMsg] = useState<string | null>(null);
+  const [packagingDraft, setPackagingDraft] = useState<{
+    packagingCode: string;
+    packagingLabel: string;
+    toBaseFactor: string;
+    isDefaultPurchase: boolean;
+    baseUnitCode: string;
+    idempotencyKey: string;
+  }>({
+    packagingCode: 'BOX',
+    packagingLabel: '',
+    toBaseFactor: '',
+    isDefaultPurchase: false,
+    baseUnitCode: '',
+    idempotencyKey: '',
+  });
+  const [unconfirmedPackagingCreate, setUnconfirmedPackagingCreate] =
+    useState<UnconfirmedPackagingCreateState | null>(null);
+  const [editingPackaging, setEditingPackaging] = useState<{
+    id: number;
+    packagingCode: string;
+    packagingLabel: string;
+    toBaseFactor: string;
+    isDefaultPurchase: boolean;
+    baseUnitCode: string;
+  } | null>(null);
+
+  // ── MP-03C: State Kelola Lokasi Stok & Minibar Kamar ──
+  const [canonicalUnitsCatalog, setCanonicalUnitsCatalog] = useState<readonly CanonicalUnitOption[]>(SYSTEM_CANONICAL_UNITS);
+  const [showStockLocationsModal, setShowStockLocationsModal] = useState<boolean>(false);
+  const [stockLocations, setStockLocations] = useState<StockLocationItem[]>([]);
+  const [roomCandidates, setRoomCandidates] = useState<RoomMinibarCandidate[]>([]);
+  const [stockLocationsLoading, setStockLocationsLoading] = useState<boolean>(false);
+  const [stockLocationErrorMsg, setStockLocationErrorMsg] = useState<string | null>(null);
+  const [stockLocationForm, setStockLocationForm] = useState<{
+    mode: 'add' | 'edit';
+    id?: number;
+    locationType: StockLocationTypeCode;
+    code: string;
+    name: string;
+    roomId: string;
+    notes: string;
+  }>({
+    mode: 'add',
+    locationType: 'WAREHOUSE',
+    code: '',
+    name: '',
+    roomId: '',
+    notes: '',
+  });
+
   const revokeObjectUrlSafe = useCallback((url: string | null | undefined) => {
     if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
       try {
@@ -354,8 +746,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         throw new Error('Respons daftar produk dari server tidak valid');
       }
       const rawCategories = (json as any)?.data?.categories;
+      const rawCanonicalUnits = (json as any)?.data?.canonical_units;
       setInternalItems(rawItems);
       setCategories(Array.isArray(rawCategories) ? rawCategories : []);
+      if (Array.isArray(rawCanonicalUnits) && rawCanonicalUnits.length > 0) {
+        setCanonicalUnitsCatalog(rawCanonicalUnits);
+      }
       return 'ok';
     } catch (err: any) {
       if (isStaleFetch()) return 'stale';
@@ -390,6 +786,15 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       return null;
     });
     setEditRemovePhoto(false);
+    setPackagingModalItem(null);
+    setPackagingItems([]);
+    setPackagingErrorMsg(null);
+    setUnconfirmedPackagingCreate(null);
+    setEditingPackaging(null);
+    setShowStockLocationsModal(false);
+    setStockLocations([]);
+    setRoomCandidates([]);
+    setStockLocationErrorMsg(null);
     if (!propertyId) {
       setInternalItems([]);
       setCategories([]);
@@ -736,7 +1141,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setErrorMsg(null);
-      const productPayload = {
+      const canonicalCodeClean = newProduct.canonicalBaseUnitCode
+        ? newProduct.canonicalBaseUnitCode.trim().toUpperCase()
+        : '';
+      const productPayload: Record<string, any> = {
         property_id: targetPropertyId,
         name: newProduct.name.trim(),
         item_code: newProduct.code.trim() === '' ? null : newProduct.code.trim().toUpperCase(),
@@ -749,6 +1157,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         base_unit: baseUnitClean === '' ? null : baseUnitClean,
         description: newProduct.description.trim() === '' ? null : newProduct.description.trim(),
       };
+      if (canonicalCodeClean !== '') {
+        productPayload.canonical_base_unit_code = canonicalCodeClean;
+      }
 
       let targetItemId: number | null = pendingCreatedItem ? pendingCreatedItem.id : null;
 
@@ -890,6 +1301,15 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setErrorMsg(null);
+      const canonicalCodeClean = editProduct.canonicalBaseUnitCode
+        ? editProduct.canonicalBaseUnitCode.trim().toUpperCase()
+        : '';
+      const origBaseUnit = typeof editingItem.base_unit === 'string' ? editingItem.base_unit.trim() : '';
+      const origCanonicalCode =
+        typeof editingItem.canonical_base_unit_code === 'string'
+          ? editingItem.canonical_base_unit_code.trim().toUpperCase()
+          : '';
+      const unitUnchanged = baseUnitClean === origBaseUnit && canonicalCodeClean === origCanonicalCode;
       const patch: Record<string, any> = {
         property_id: targetPropertyId,
         name: editProduct.name.trim(),
@@ -900,8 +1320,34 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         is_sellable_pos: editProduct.isSellablePos,
         product_type: editProduct.productType === '' ? null : editProduct.productType,
         product_kind: editProduct.productKind === '' ? null : editProduct.productKind,
-        base_unit: baseUnitClean === '' ? null : baseUnitClean,
       };
+      if (unitUnchanged) {
+        if (origCanonicalCode !== '' && origBaseUnit === '') {
+          // Produk memiliki canonical_base_unit_code tanpa teks base_unit;
+          // jangan mengirim base_unit: null agar tidak ditolak backend.
+        } else {
+          patch.base_unit = origBaseUnit === '' ? null : origBaseUnit;
+          if (origCanonicalCode !== '') {
+            patch.canonical_base_unit_code = origCanonicalCode;
+          }
+        }
+      } else if (canonicalCodeClean !== '') {
+        patch.canonical_base_unit_code = canonicalCodeClean;
+        patch.base_unit =
+          baseUnitClean === ''
+            ? getCanonicalUnitByCode(canonicalCodeClean, canonicalUnitsCatalog)?.label_id || canonicalCodeClean
+            : baseUnitClean;
+      } else if (baseUnitClean === '') {
+        // "Belum diatur": kedua field dikosongkan secara eksplisit.
+        patch.base_unit = null;
+        patch.canonical_base_unit_code = null;
+      } else {
+        // Satuan beralih ke teks legacy nonkosong (mis. BOTOL -> "ikat"):
+        // kirim base_unit saja dan HILANGKAN canonical_base_unit_code dari
+        // payload. Mengirim null bersamaan dengan teks legacy ditolak backend
+        // sebagai CONFLICTING_BASE_UNIT_FIELDS.
+        patch.base_unit = baseUnitClean;
+      }
       // Harga:
       // - Bila diisi angka valid (termasuk 0), kirim angka tersebut.
       // - Bila dikosongkan dan produk adalah non-POS (isSellablePos = false), kirim null.
@@ -1203,6 +1649,595 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setShowCategoryModal(true);
   };
 
+  // ── MP-03C: Kelola Kemasan Produk (Dialog Terpisah) ────────────────────────
+  const packagingFetchGenRef = useRef(0);
+
+  const loadPackagingsForItem = useCallback(async (
+    itemId: number,
+    propertyOverride?: number | null
+  ): Promise<{ status: 'ok'; items: PackagingConversionItem[] } | { status: 'stale' } | { status: 'error'; message: string }> => {
+    const pid = propertyOverride !== undefined ? propertyOverride : propertyId;
+    if (!pid) return { status: 'error', message: 'Properti belum dipilih' };
+    const fetchGen = ++packagingFetchGenRef.current;
+    const isStale = () => packagingFetchGenRef.current !== fetchGen;
+    try {
+      setPackagingLoading(true);
+      const res = await authenticatedFetch(`/api/pos/menu/items/${itemId}/packagings?property_id=${pid}`);
+      const json = await res.json().catch(() => null);
+      if (isStale()) return { status: 'stale' };
+      if (!res.ok) {
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal memuat daftar kemasan produk');
+      }
+      const rawItems = (json as any)?.data?.packagings ?? (json as any)?.data?.items;
+      if (!Array.isArray(rawItems)) {
+        throw new Error('Respons daftar kemasan dari server tidak valid');
+      }
+      setPackagingItems(rawItems);
+      const latestCanonicalCode = (json as any)?.data?.canonical_base_unit_code;
+      const latestLocked = (json as any)?.data?.is_base_unit_locked;
+      if (latestCanonicalCode !== undefined || latestLocked !== undefined) {
+        setPackagingModalItem((prev) =>
+          prev && prev.id === itemId
+            ? {
+                ...prev,
+                canonical_base_unit_code:
+                  latestCanonicalCode !== undefined ? latestCanonicalCode : prev.canonical_base_unit_code,
+                is_base_unit_locked:
+                  typeof latestLocked === 'boolean' ? latestLocked : prev.is_base_unit_locked,
+              }
+            : prev
+        );
+      }
+      return { status: 'ok', items: rawItems };
+    } catch (err: any) {
+      if (isStale()) return { status: 'stale' };
+      const msg = err?.message || 'Gagal memuat daftar kemasan produk';
+      setPackagingErrorMsg(msg);
+      return { status: 'error', message: msg };
+    } finally {
+      if (!isStale()) setPackagingLoading(false);
+    }
+  }, [propertyId]);
+
+  const openPackagingModal = (item: ProductItem) => {
+    const snapshotBaseUnit = item.canonical_base_unit_code ? item.canonical_base_unit_code.trim().toUpperCase() : '';
+    setPackagingModalItem(item);
+    setPackagingItems(Array.isArray(item.packaging_conversions) ? item.packaging_conversions : []);
+    setPackagingErrorMsg(null);
+    setUnconfirmedPackagingCreate(null);
+    setEditingPackaging(null);
+    setPackagingDraft({
+      packagingCode: 'BOX',
+      packagingLabel: '',
+      toBaseFactor: '',
+      isDefaultPurchase: false,
+      baseUnitCode: snapshotBaseUnit,
+      idempotencyKey: createPackagingIdempotencyKey(propertyId, item.id),
+    });
+    if (propertyId) {
+      return loadPackagingsForItem(item.id, propertyId);
+    }
+  };
+
+  const closePackagingModal = () => {
+    if (saving) return;
+    setPackagingModalItem(null);
+    setPackagingItems([]);
+    setPackagingErrorMsg(null);
+    setUnconfirmedPackagingCreate(null);
+    setEditingPackaging(null);
+  };
+
+  const handleCreatePackaging = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if ((!capabilities.canEdit && !capabilities.canCreate) || !packagingModalItem || !propertyId) return;
+
+    const targetItem = packagingModalItem;
+    const targetPropertyId = propertyId;
+
+    const activeBaseUnitCode = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.baseUnitCode
+      : packagingDraft.baseUnitCode.trim().toUpperCase();
+    const activeCode = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.packagingCode
+      : packagingDraft.packagingCode.trim().toUpperCase();
+    const activeLabel = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.packagingLabel
+      : packagingDraft.packagingLabel.trim();
+    const rawFactor = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.toBaseFactor
+      : packagingDraft.toBaseFactor;
+    const activeDefaultPurchase = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.isDefaultPurchase
+      : packagingDraft.isDefaultPurchase;
+    const activeIdempotencyKey = unconfirmedPackagingCreate
+      ? unconfirmedPackagingCreate.idempotencyKey
+      : packagingDraft.idempotencyKey || createPackagingIdempotencyKey(targetPropertyId, targetItem.id);
+
+    if (!activeBaseUnitCode) {
+      setPackagingErrorMsg('Tetapkan Satuan Dasar Kanonik pada produk ini terlebih dahulu sebelum menambahkan konversi kemasan.');
+      return;
+    }
+    if (!activeCode) {
+      setPackagingErrorMsg('Kode kemasan wajib diisi');
+      return;
+    }
+    if (!activeLabel) {
+      setPackagingErrorMsg('Label kemasan wajib diisi');
+      return;
+    }
+    const factorValidation = validatePackagingFactorDraft(rawFactor, activeBaseUnitCode, canonicalUnitsCatalog);
+    if (!factorValidation.valid) {
+      setPackagingErrorMsg(factorValidation.message);
+      return;
+    }
+    const activeFactor = factorValidation.normalizedFactor;
+
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setPackagingErrorMsg(null);
+      let res: Response;
+      try {
+        res = await authenticatedFetch(
+          `/api/pos/menu/items/${targetItem.id}/packagings?property_id=${targetPropertyId}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              property_id: targetPropertyId,
+              idempotency_key: activeIdempotencyKey,
+              packaging_code: activeCode,
+              packaging_label: activeLabel,
+              base_unit_code: activeBaseUnitCode,
+              to_base_factor: activeFactor,
+              is_default_purchase: activeDefaultPurchase,
+            }),
+          }
+        );
+      } catch (networkErr: any) {
+        if (stale()) return;
+        setUnconfirmedPackagingCreate({
+          itemId: targetItem.id,
+          propertyId: targetPropertyId,
+          idempotencyKey: activeIdempotencyKey,
+          baseUnitCode: activeBaseUnitCode,
+          packagingCode: activeCode,
+          packagingLabel: activeLabel,
+          toBaseFactor: activeFactor,
+          isDefaultPurchase: activeDefaultPurchase,
+        });
+        throw new Error(
+          `Koneksi terputus saat menyimpan kemasan "${activeLabel}" (${networkErr?.message || 'Network error'}). Status penyimpanan belum pasti; gunakan "Periksa Daftar Kemasan" atau "Ulangi Simpan Kemasan" dengan kunci idempotensi yang sama.`
+        );
+      }
+
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+
+      if (!res.ok) {
+        if (res.status >= 500) {
+          setUnconfirmedPackagingCreate({
+            itemId: targetItem.id,
+            propertyId: targetPropertyId,
+            idempotencyKey: activeIdempotencyKey,
+            baseUnitCode: activeBaseUnitCode,
+            packagingCode: activeCode,
+            packagingLabel: activeLabel,
+            toBaseFactor: activeFactor,
+            isDefaultPurchase: activeDefaultPurchase,
+          });
+        }
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal menyimpan konversi kemasan');
+      }
+
+      const rawId = (json as any)?.data?.id;
+      const createdId =
+        typeof rawId === 'number' || (typeof rawId === 'string' && rawId.trim() !== '')
+          ? Number(rawId)
+          : NaN;
+      if (!Number.isInteger(createdId) || createdId <= 0) {
+        setUnconfirmedPackagingCreate({
+          itemId: targetItem.id,
+          propertyId: targetPropertyId,
+          idempotencyKey: activeIdempotencyKey,
+          baseUnitCode: activeBaseUnitCode,
+          packagingCode: activeCode,
+          packagingLabel: activeLabel,
+          toBaseFactor: activeFactor,
+          isDefaultPurchase: activeDefaultPurchase,
+        });
+        throw new Error(
+          `Respons server tidak memuat ID kemasan yang valid untuk "${activeLabel}". Gunakan "Periksa Daftar Kemasan" atau "Ulangi Simpan Kemasan" tanpa mengganti kunci idempotensi.`
+        );
+      }
+
+      const nextBaseUnit =
+        (json as any)?.data?.base_unit_code ||
+        targetItem.canonical_base_unit_code ||
+        activeBaseUnitCode;
+      setUnconfirmedPackagingCreate(null);
+      setPackagingDraft({
+        packagingCode: 'BOX',
+        packagingLabel: '',
+        toBaseFactor: '',
+        isDefaultPurchase: false,
+        baseUnitCode: nextBaseUnit,
+        idempotencyKey: createPackagingIdempotencyKey(targetPropertyId, targetItem.id),
+      });
+      setSuccessMsg(`Kemasan "${activeLabel}" berhasil disimpan.`);
+      await loadPackagingsForItem(targetItem.id, targetPropertyId);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid ?? targetPropertyId);
+      if (stale()) return;
+      onRefresh?.();
+    } catch (err: any) {
+      if (!stale()) setPackagingErrorMsg(err?.message || 'Gagal menyimpan konversi kemasan');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
+  const handleInspectPackagingsAfterUnconfirmedCreate = async () => {
+    if (saving || !unconfirmedPackagingCreate) return;
+    const pendingOp = unconfirmedPackagingCreate;
+    const ctx = { pid: pendingOp.propertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setPackagingErrorMsg(null);
+      const outcome = await loadPackagingsForItem(pendingOp.itemId, pendingOp.propertyId);
+      if (stale()) return;
+      if (outcome.status !== 'ok') {
+        if (outcome.status === 'stale') {
+          setPackagingErrorMsg('Respons daftar kemasan sudah kedaluwarsa (basi). Silakan klik "Periksa Daftar Kemasan" lagi.');
+        }
+        return;
+      }
+      // Hanya baris dengan idempotency_key yang SAMA PERSIS yang membuktikan operasi ini sudah tersimpan.
+      // Baris dengan field serupa tetapi idempotency_key berbeda berasal dari operasi lain.
+      const matchedRow = outcome.items.find(
+        (row) =>
+          typeof row.idempotency_key === 'string' &&
+          row.idempotency_key.trim() === pendingOp.idempotencyKey &&
+          Number.isInteger(Number(row.id)) &&
+          Number(row.id) > 0
+      );
+      if (!matchedRow) {
+        setPackagingErrorMsg(
+          'Kemasan dengan identitas operasi ini belum terlihat pada daftar server. Karena GET tanpa baris hanya membuktikan baris belum terlihat saat pemeriksaan, kunci idempotensi tetap dipertahankan; gunakan "Ulangi Simpan Kemasan" untuk mengirim ulang secara aman tanpa duplikasi.'
+        );
+        return;
+      }
+      setUnconfirmedPackagingCreate(null);
+      setPackagingDraft({
+        packagingCode: 'BOX',
+        packagingLabel: '',
+        toBaseFactor: '',
+        isDefaultPurchase: false,
+        baseUnitCode: matchedRow.base_unit_code || pendingOp.baseUnitCode,
+        idempotencyKey: createPackagingIdempotencyKey(pendingOp.propertyId, pendingOp.itemId),
+      });
+      setPackagingErrorMsg(null);
+      setSuccessMsg(`Kemasan "${matchedRow.packaging_label}" terkonfirmasi sudah tersimpan.`);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid ?? pendingOp.propertyId);
+      if (stale()) return;
+      onRefresh?.();
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
+  const handleUpdatePackaging = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((!capabilities.canEdit && !capabilities.canCreate) || !packagingModalItem || !editingPackaging || !propertyId) return;
+    const labelClean = editingPackaging.packagingLabel.trim();
+    if (!labelClean) {
+      setPackagingErrorMsg('Label kemasan wajib diisi');
+      return;
+    }
+    const factorValidation = validatePackagingFactorDraft(editingPackaging.toBaseFactor, editingPackaging.baseUnitCode, canonicalUnitsCatalog);
+    if (!factorValidation.valid) {
+      setPackagingErrorMsg(factorValidation.message);
+      return;
+    }
+    const targetPropertyId = propertyId;
+    const targetItem = packagingModalItem;
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setPackagingErrorMsg(null);
+      const res = await authenticatedFetch(
+        `/api/pos/menu/items/${targetItem.id}/packagings/${editingPackaging.id}?property_id=${targetPropertyId}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: targetPropertyId,
+            packaging_label: labelClean,
+            to_base_factor: factorValidation.normalizedFactor,
+            is_default_purchase: editingPackaging.isDefaultPurchase,
+          }),
+        }
+      );
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) {
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal memperbarui kemasan');
+      }
+      setEditingPackaging(null);
+      setSuccessMsg(`Kemasan "${labelClean}" berhasil diperbarui.`);
+      await loadPackagingsForItem(targetItem.id, targetPropertyId);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid ?? targetPropertyId);
+      if (stale()) return;
+      onRefresh?.();
+    } catch (err: any) {
+      if (!stale()) setPackagingErrorMsg(err?.message || 'Gagal memperbarui kemasan');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
+  const handleTogglePackagingActive = async (pkg: PackagingConversionItem) => {
+    if ((!capabilities.canEdit && !capabilities.canCreate) || !packagingModalItem || !propertyId) return;
+    const nextActive = !pkg.is_active;
+    const targetPropertyId = propertyId;
+    const targetItem = packagingModalItem;
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setPackagingErrorMsg(null);
+      const res = await authenticatedFetch(
+        `/api/pos/menu/items/${targetItem.id}/packagings/${pkg.id}?property_id=${targetPropertyId}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: targetPropertyId,
+            is_active: nextActive,
+          }),
+        }
+      );
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) {
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal mengubah status kemasan');
+      }
+      setSuccessMsg(`Kemasan "${pkg.packaging_label}" berhasil ${nextActive ? 'diaktifkan' : 'dinonaktifkan'}.`);
+      await loadPackagingsForItem(targetItem.id, targetPropertyId);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid ?? targetPropertyId);
+      if (stale()) return;
+      onRefresh?.();
+    } catch (err: any) {
+      if (!stale()) setPackagingErrorMsg(err?.message || 'Gagal mengubah status kemasan');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
+  // ── MP-03C: Kelola Lokasi Stok & Minibar Kamar ─────────────────────────────
+  const stockLocFetchGenRef = useRef(0);
+
+  const loadStockLocationsAndCandidates = useCallback(async (
+    propertyOverride?: number | null
+  ): Promise<'ok' | 'stale' | 'error'> => {
+    const pid = propertyOverride !== undefined ? propertyOverride : propertyId;
+    if (!pid) return 'error';
+    const fetchGen = ++stockLocFetchGenRef.current;
+    const isStale = () => stockLocFetchGenRef.current !== fetchGen;
+    try {
+      setStockLocationsLoading(true);
+      setStockLocationErrorMsg(null);
+      const [locRes, roomRes] = await Promise.all([
+        authenticatedFetch(`/api/pos/stock-locations?property_id=${pid}&include_inactive=true`),
+        authenticatedFetch(`/api/pos/stock-locations/room-candidates?property_id=${pid}`),
+      ]);
+      const locJson = await locRes.json().catch(() => null);
+      const roomJson = await roomRes.json().catch(() => null);
+      if (isStale()) return 'stale';
+      if (!locRes.ok) {
+        throw new Error((locJson as any)?.message || (locJson as any)?.error || 'Gagal memuat daftar lokasi stok');
+      }
+      const rawLocs = (locJson as any)?.data?.locations ?? (locJson as any)?.data?.items;
+      if (!Array.isArray(rawLocs)) {
+        throw new Error('Respons daftar lokasi stok tidak valid');
+      }
+      setStockLocations(rawLocs);
+      if (!roomRes.ok) {
+        throw new Error(
+          (roomJson as any)?.message ||
+            (roomJson as any)?.error ||
+            'Gagal memuat daftar kandidat kamar minibar'
+        );
+      }
+      const rawRooms = (roomJson as any)?.data?.rooms ?? (roomJson as any)?.data?.items;
+      if (!Array.isArray(rawRooms)) {
+        throw new Error('Respons daftar kandidat kamar tidak valid');
+      }
+      setRoomCandidates(rawRooms);
+      return 'ok';
+    } catch (err: any) {
+      if (isStale()) return 'stale';
+      setStockLocationErrorMsg(err?.message || 'Gagal memuat lokasi stok');
+      return 'error';
+    } finally {
+      if (!isStale()) setStockLocationsLoading(false);
+    }
+  }, [propertyId]);
+
+  const openStockLocationsModal = () => {
+    if (!capabilities.canView && !capabilities.canCreate && !capabilities.canEdit && !capabilities.canManageCategory) return;
+    setStockLocationErrorMsg(null);
+    setStockLocationForm({
+      mode: 'add',
+      locationType: 'WAREHOUSE',
+      code: '',
+      name: '',
+      roomId: '',
+      notes: '',
+    });
+    setShowStockLocationsModal(true);
+    if (propertyId) {
+      return loadStockLocationsAndCandidates(propertyId);
+    }
+  };
+
+  const closeStockLocationsModal = () => {
+    if (saving) return;
+    setShowStockLocationsModal(false);
+    setStockLocationErrorMsg(null);
+  };
+
+  const openEditStockLocation = (loc: StockLocationItem) => {
+    setStockLocationErrorMsg(null);
+    setStockLocationForm({
+      mode: 'edit',
+      id: loc.id,
+      locationType: loc.location_type,
+      code: loc.code,
+      name: loc.name,
+      roomId: loc.room_id != null ? String(loc.room_id) : '',
+      notes: loc.notes || '',
+    });
+  };
+
+  const handleSaveStockLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((!capabilities.canCreate && !capabilities.canEdit) || !propertyId) return;
+    const codeClean = stockLocationForm.code.trim().toUpperCase();
+    const nameClean = stockLocationForm.name.trim();
+    if (!codeClean) {
+      setStockLocationErrorMsg('Kode lokasi stok wajib diisi');
+      return;
+    }
+    if (!nameClean) {
+      setStockLocationErrorMsg('Nama lokasi stok wajib diisi');
+      return;
+    }
+    const isRoomMinibar = stockLocationForm.locationType === 'ROOM_MINIBAR';
+    const roomIdVal = isRoomMinibar && stockLocationForm.roomId.trim() !== ''
+      ? Number(stockLocationForm.roomId)
+      : null;
+    if (isRoomMinibar && (!roomIdVal || !Number.isInteger(roomIdVal) || roomIdVal <= 0)) {
+      setStockLocationErrorMsg('Kamar fisik wajib dipilih untuk lokasi bertipe Minibar Kamar');
+      return;
+    }
+    if (isRoomMinibar && stockLocationForm.mode === 'add' && roomIdVal != null) {
+      const selectedCandidate = roomCandidates.find((r) => Number(r.room_id) === roomIdVal);
+      const existingLocId =
+        selectedCandidate?.existing_stock_location_id ?? selectedCandidate?.existing_location_id ?? null;
+      const existingLocCode =
+        selectedCandidate?.existing_stock_location_code ?? selectedCandidate?.existing_location_code ?? null;
+      if (
+        existingLocId != null ||
+        Boolean(existingLocCode) ||
+        selectedCandidate?.is_available_for_minibar === false
+      ) {
+        setStockLocationErrorMsg(
+          `Kamar ${selectedCandidate?.room_number || roomIdVal} sudah memiliki lokasi minibar (${existingLocCode || existingLocId})`
+        );
+        return;
+      }
+    }
+
+    const targetPropertyId = propertyId;
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setStockLocationErrorMsg(null);
+      const payload =
+        stockLocationForm.mode === 'add'
+          ? {
+              property_id: targetPropertyId,
+              code: codeClean,
+              name: nameClean,
+              location_type: stockLocationForm.locationType,
+              room_id: isRoomMinibar ? roomIdVal : null,
+              notes: stockLocationForm.notes.trim() === '' ? null : stockLocationForm.notes.trim(),
+            }
+          : {
+              property_id: targetPropertyId,
+              code: codeClean,
+              name: nameClean,
+              notes: stockLocationForm.notes.trim() === '' ? null : stockLocationForm.notes.trim(),
+            };
+      const url =
+        stockLocationForm.mode === 'add'
+          ? `/api/pos/stock-locations?property_id=${targetPropertyId}`
+          : `/api/pos/stock-locations/${stockLocationForm.id}?property_id=${targetPropertyId}`;
+      const method = stockLocationForm.mode === 'add' ? 'POST' : 'PATCH';
+      const res = await authenticatedFetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) {
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal menyimpan lokasi stok');
+      }
+      setSuccessMsg(
+        stockLocationForm.mode === 'add'
+          ? `Lokasi stok "${nameClean}" berhasil ditambahkan.`
+          : `Lokasi stok "${nameClean}" berhasil diperbarui.`
+      );
+      setStockLocationForm({
+        mode: 'add',
+        locationType: 'WAREHOUSE',
+        code: '',
+        name: '',
+        roomId: '',
+        notes: '',
+      });
+      await loadStockLocationsAndCandidates(targetPropertyId);
+    } catch (err: any) {
+      if (!stale()) setStockLocationErrorMsg(err?.message || 'Gagal menyimpan lokasi stok');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
+  const handleToggleStockLocationActive = async (loc: StockLocationItem) => {
+    if ((!capabilities.canCreate && !capabilities.canEdit) || !propertyId) return;
+    const nextActive = !loc.is_active;
+    const targetPropertyId = propertyId;
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setStockLocationErrorMsg(null);
+      const res = await authenticatedFetch(
+        `/api/pos/stock-locations/${loc.id}?property_id=${targetPropertyId}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: targetPropertyId,
+            is_active: nextActive,
+          }),
+        }
+      );
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) {
+        throw new Error((json as any)?.message || (json as any)?.error || 'Gagal mengubah status lokasi stok');
+      }
+      setSuccessMsg(`Lokasi stok "${loc.name}" berhasil ${nextActive ? 'diaktifkan' : 'dinonaktifkan'}.`);
+      await loadStockLocationsAndCandidates(targetPropertyId);
+    } catch (err: any) {
+      if (!stale()) setStockLocationErrorMsg(err?.message || 'Gagal mengubah status lokasi stok');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
   const getProductTypeBadgeClass = (productType?: string | null) => {
     switch (productType) {
       case 'FINISHED_GOOD':
@@ -1251,6 +2286,19 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
+          {(capabilities.canView || capabilities.canCreate || capabilities.canEdit || capabilities.canManageCategory) && (
+            <button
+              type="button"
+              aria-label="Kelola lokasi stok"
+              onClick={openStockLocationsModal}
+              className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-900 text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              {capabilities.canCreate || capabilities.canEdit ? 'Kelola Lokasi Stok' : 'Lihat Lokasi Stok'}
+            </button>
+          )}
           {capabilities.canManageCategory && (
             <button
               type="button"
@@ -1542,9 +2590,32 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                           </span>
                         </td>
                         <td className="py-3 px-4">
-                          <span className={item.base_unit ? 'font-medium text-gray-800' : 'text-xs text-gray-400 italic'}>
-                            {unitLabel}
-                          </span>
+                          <div className="flex flex-col items-start gap-1">
+                            <span className={item.base_unit ? 'font-medium text-gray-800' : 'text-xs text-gray-400 italic'}>
+                              {unitLabel}
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1">
+                              {item.canonical_base_unit_code && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  {item.canonical_base_unit_code}
+                                </span>
+                              )}
+                              {item.is_base_unit_locked && (
+                                <span
+                                  title="Satuan dasar terkunci karena kemasan atau pergerakan stok"
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200"
+                                >
+                                  Terkunci
+                                </span>
+                              )}
+                              {Array.isArray(item.packaging_conversions) &&
+                                item.packaging_conversions.filter((p) => p.is_active).length > 0 && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
+                                    {item.packaging_conversions.filter((p) => p.is_active).length} Kemasan
+                                  </span>
+                                )}
+                            </div>
+                          </div>
                         </td>
                         <td className="py-3 px-4 text-center">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
@@ -1574,6 +2645,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
                           {(capabilities.canEdit || capabilities.canToggleStatus) ? (
                             <>
+                              {(capabilities.canEdit || capabilities.canCreate) && (
+                                <button
+                                  type="button"
+                                  aria-label={`Kelola kemasan ${item.name}`}
+                                  onClick={() => openPackagingModal(item)}
+                                  disabled={saving}
+                                  className="text-xs text-sky-700 hover:text-sky-900 font-medium px-2 py-1 rounded hover:bg-sky-50 transition-colors cursor-pointer"
+                                >
+                                  Kemasan
+                                </button>
+                              )}
                               {capabilities.canEdit && (
                                 <button
                                   type="button"
@@ -1773,17 +2855,43 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 </div>
 
                 {/* 4. Satuan Dasar */}
-                <div>
+                <div className="space-y-2">
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar</label>
+                  <select
+                    aria-label="Pilih satuan dasar kanonik"
+                    value={newProduct.canonicalBaseUnitCode || ''}
+                    onChange={(e) => setNewProduct(applyCanonicalUnitSelection(newProduct, e.target.value, canonicalUnitsCatalog))}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                  >
+                    <option value="">— Belum diatur (Pilih Satuan Standar Kanonik) —</option>
+                    {canonicalUnitsCatalog.map((unit) => (
+                      <option key={unit.code} value={unit.code}>
+                        {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Pecahan 3 desimal' : 'Bilangan bulat'})
+                      </option>
+                    ))}
+                  </select>
                   <input
                     type="text"
                     list="oak-product-base-units"
                     maxLength={50}
                     placeholder="Contoh: Porsi, Pcs, Kg, Liter"
                     value={newProduct.baseUnit}
-                    onChange={(e) => setNewProduct({ ...newProduct, baseUnit: e.target.value })}
+                    onChange={(e) => setNewProduct(applyBaseUnitTextChange(newProduct, e.target.value, canonicalUnitsCatalog))}
                     className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
                   />
+                  <div className="text-[11px] text-gray-500">
+                    {newProduct.canonicalBaseUnitCode ? (
+                      <span className="text-emerald-800 font-medium">
+                        Terpetakan ke satuan kanonik: <strong>{newProduct.canonicalBaseUnitCode}</strong>
+                      </span>
+                    ) : newProduct.baseUnit.trim() !== '' ? (
+                      <span className="text-amber-700">
+                        Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
+                      </span>
+                    ) : (
+                      <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
+                    )}
+                  </div>
                 </div>
 
                 {/* 5. Dijual di POS */}
@@ -2107,17 +3215,62 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 </div>
 
                 {/* 4. Satuan Dasar */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar</label>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Buka kelola kemasan produk"
+                      onClick={() => openPackagingModal(editingItem)}
+                      className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      Kelola Kemasan
+                    </button>
+                  </div>
+                  <select
+                    aria-label="Pilih satuan dasar kanonik"
+                    disabled={saving || Boolean(editingItem.is_base_unit_locked)}
+                    value={editProduct.canonicalBaseUnitCode || ''}
+                    onChange={(e) => setEditProduct(applyCanonicalUnitSelection(editProduct, e.target.value, canonicalUnitsCatalog))}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <option value="">— Belum diatur (Pilih Satuan Standar Kanonik) —</option>
+                    {canonicalUnitsCatalog.map((unit) => (
+                      <option key={unit.code} value={unit.code}>
+                        {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Pecahan 3 desimal' : 'Bilangan bulat'})
+                      </option>
+                    ))}
+                  </select>
                   <input
                     type="text"
                     list="oak-product-base-units"
                     maxLength={50}
+                    disabled={saving || Boolean(editingItem.is_base_unit_locked)}
                     placeholder="Belum diatur (contoh: Porsi, Pcs, Kg)"
                     value={editProduct.baseUnit}
-                    onChange={(e) => setEditProduct({ ...editProduct, baseUnit: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                    onChange={(e) => setEditProduct(applyBaseUnitTextChange(editProduct, e.target.value, canonicalUnitsCatalog))}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
                   />
+                  {editingItem.is_base_unit_locked ? (
+                    <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
+                      Satuan dasar terkunci (<strong>{editingItem.canonical_base_unit_code || editingItem.base_unit}</strong>) karena produk sudah memiliki konversi kemasan atau pergerakan stok.
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-gray-500">
+                      {editProduct.canonicalBaseUnitCode ? (
+                        <span className="text-emerald-800 font-medium">
+                          Terpetakan ke satuan kanonik: <strong>{editProduct.canonicalBaseUnitCode}</strong>
+                        </span>
+                      ) : editProduct.baseUnit.trim() !== '' ? (
+                        <span className="text-amber-700">
+                          Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
+                        </span>
+                      ) : (
+                        <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 5. Dijual di POS */}
@@ -2453,6 +3606,639 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <div className="text-[11px] text-gray-400 mt-2">
                 Kategori yang masih dipakai produk tidak dapat dihapus.
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MP-03C: Product Packaging Conversions Modal (Dialog Terpisah) */}
+      {packagingModalItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full border border-gray-200 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="shrink-0 px-6 pt-5 pb-4 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">
+                  Kelola Kemasan Produk — {packagingModalItem.name}
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Satuan Dasar Kanonik Saat Ini:{' '}
+                  <strong className="font-mono text-emerald-800">
+                    {packagingModalItem.canonical_base_unit_code || packagingDraft.baseUnitCode || 'Belum ditetapkan'}
+                  </strong>
+                  {packagingModalItem.is_base_unit_locked ? ' (Terkunci)' : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closePackagingModal}
+                disabled={saving}
+                aria-label="Tutup modal kemasan produk"
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+              {packagingErrorMsg && (
+                <div className="px-3 py-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2">
+                  <span>{packagingErrorMsg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPackagingErrorMsg(null)}
+                    className="font-bold hover:text-rose-900 shrink-0"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {!packagingModalItem.canonical_base_unit_code && !packagingDraft.baseUnitCode && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs">
+                  Produk ini belum memiliki <strong>Satuan Dasar Kanonik</strong>. Silakan tetapkan satuan dasar kanonik terlebih dahulu pada form Edit Produk sebelum menambahkan konversi kemasan.
+                </div>
+              )}
+
+              {unconfirmedPackagingCreate && (
+                <div className="px-3.5 py-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs space-y-2.5">
+                  <div className="font-semibold">
+                    Status pembuatan kemasan &ldquo;{unconfirmedPackagingCreate.packagingLabel}&rdquo; (1 {unconfirmedPackagingCreate.packagingCode} = {unconfirmedPackagingCreate.toBaseFactor} {unconfirmedPackagingCreate.baseUnitCode}) belum terkonfirmasi dari server.
+                  </div>
+                  <div className="text-[11px] text-amber-800">
+                    Kunci idempotensi (<span className="font-mono">{unconfirmedPackagingCreate.idempotencyKey}</span>) dan snapshot satuan dasar (<span className="font-mono">{unconfirmedPackagingCreate.baseUnitCode}</span>) dipertahankan agar pengiriman ulang aman tanpa membuat baris ganda atau mengubah arti faktor.
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Periksa daftar kemasan"
+                      onClick={handleInspectPackagingsAfterUnconfirmedCreate}
+                      className="px-3 py-1.5 text-xs font-semibold text-amber-900 bg-white hover:bg-amber-100 rounded-lg border border-amber-300 cursor-pointer disabled:opacity-50"
+                    >
+                      Periksa Daftar Kemasan
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Ulangi simpan kemasan"
+                      onClick={() => handleCreatePackaging()}
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      Ulangi Simpan Kemasan
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Form Tambah atau Edit Kemasan */}
+              {editingPackaging ? (
+                <form onSubmit={handleUpdatePackaging} className="p-4 rounded-xl bg-sky-50/50 border border-sky-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-sky-900">
+                      Edit Kemasan ({editingPackaging.packagingCode} → {editingPackaging.baseUnitCode})
+                    </div>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      aria-label="Batal edit kemasan"
+                      onClick={() => setEditingPackaging(null)}
+                      className="text-xs text-gray-500 hover:text-gray-700 cursor-pointer"
+                    >
+                      Batal Edit
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Label Kemasan *</label>
+                      <input
+                        type="text"
+                        required
+                        maxLength={100}
+                        aria-label="Edit label kemasan"
+                        value={editingPackaging.packagingLabel}
+                        onChange={(e) =>
+                          setEditingPackaging((prev) => (prev ? { ...prev, packagingLabel: e.target.value } : prev))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Faktor ke {editingPackaging.baseUnitCode} *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        aria-label="Edit faktor konversi kemasan"
+                        value={editingPackaging.toBaseFactor}
+                        onChange={(e) =>
+                          setEditingPackaging((prev) => (prev ? { ...prev, toBaseFactor: e.target.value } : prev))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      aria-label="Edit jadikan kemasan beli default"
+                      checked={editingPackaging.isDefaultPurchase}
+                      onChange={(e) =>
+                        setEditingPackaging((prev) => (prev ? { ...prev, isDefaultPurchase: e.target.checked } : prev))
+                      }
+                      className="h-4 w-4 rounded border-gray-300 text-emerald-700"
+                    />
+                    <span>Jadikan kemasan pembelian default</span>
+                  </label>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => setEditingPackaging(null)}
+                      className="px-3 py-1.5 text-xs font-semibold text-gray-600 bg-white border border-gray-300 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={saving}
+                      aria-label="Simpan perubahan kemasan"
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      {saving ? 'Menyimpan…' : 'Simpan Perubahan Kemasan'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <form onSubmit={handleCreatePackaging} className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-gray-800">Tambah Konversi Kemasan Baru</div>
+                    <span className="text-[11px] font-mono text-gray-500">
+                      Snapshot Satuan Dasar: <strong>{packagingDraft.baseUnitCode || '—'}</strong>
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kode Kemasan *</label>
+                      <input
+                        type="text"
+                        list="oak-packaging-codes"
+                        maxLength={30}
+                        aria-label="Pilih kode kemasan"
+                        disabled={saving || Boolean(unconfirmedPackagingCreate)}
+                        placeholder="Contoh: BOX / KRT / DUS / PAK"
+                        value={packagingDraft.packagingCode}
+                        onChange={(e) =>
+                          setPackagingDraft((prev) => ({ ...prev, packagingCode: e.target.value.toUpperCase() }))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                      <datalist id="oak-packaging-codes">
+                        {['BOX', 'KRT', 'DUS', 'BAL', 'PAK', 'SLOP', 'IKAT', 'TRAY', 'JERIGEN', 'GALON'].map((c) => (
+                          <option key={c} value={c} />
+                        ))}
+                      </datalist>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Label Kemasan *</label>
+                      <input
+                        type="text"
+                        maxLength={100}
+                        aria-label="Label kemasan produk"
+                        disabled={saving || Boolean(unconfirmedPackagingCreate)}
+                        placeholder="Contoh: Karton 24 Botol"
+                        value={packagingDraft.packagingLabel}
+                        onChange={(e) =>
+                          setPackagingDraft((prev) => ({ ...prev, packagingLabel: e.target.value }))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Isi per Kemasan ({packagingDraft.baseUnitCode || 'Satuan Dasar'}) *
+                      </label>
+                      <input
+                        type="text"
+                        aria-label="Faktor konversi kemasan"
+                        disabled={saving || Boolean(unconfirmedPackagingCreate)}
+                        placeholder="Contoh: 24 atau 0.250"
+                        value={packagingDraft.toBaseFactor}
+                        onChange={(e) =>
+                          setPackagingDraft((prev) => ({ ...prev, toBaseFactor: e.target.value }))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        aria-label="Jadikan kemasan beli default"
+                        disabled={saving || Boolean(unconfirmedPackagingCreate)}
+                        checked={packagingDraft.isDefaultPurchase}
+                        onChange={(e) =>
+                          setPackagingDraft((prev) => ({ ...prev, isDefaultPurchase: e.target.checked }))
+                        }
+                        className="h-4 w-4 rounded border-gray-300 text-emerald-700"
+                      />
+                      <span>Jadikan kemasan pembelian default</span>
+                    </label>
+                    <button
+                      type="submit"
+                      aria-label="Tambah kemasan produk"
+                      disabled={saving || Boolean(unconfirmedPackagingCreate) || !packagingDraft.baseUnitCode}
+                      className="px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      {saving ? 'Menyimpan…' : 'Tambah Kemasan'}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Daftar Kemasan Produk */}
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-gray-700">Daftar Konversi Kemasan Terdaftar</div>
+                {packagingLoading ? (
+                  <div className="text-xs text-gray-400 py-4 text-center">Memuat daftar kemasan…</div>
+                ) : packagingItems.length === 0 ? (
+                  <div className="text-xs text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl">
+                    Belum ada konversi kemasan untuk produk ini.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 border border-gray-200 rounded-xl overflow-hidden">
+                    {packagingItems.map((pkg) => {
+                      const unitMismatch =
+                        Boolean(packagingModalItem.canonical_base_unit_code) &&
+                        pkg.base_unit_code !== packagingModalItem.canonical_base_unit_code;
+                      return (
+                        <div key={pkg.id} className="p-3 bg-white flex flex-wrap items-center justify-between gap-2">
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs font-bold text-gray-900">{pkg.packaging_code}</span>
+                              <span className="text-xs font-semibold text-gray-800">{pkg.packaging_label}</span>
+                              {pkg.is_default_purchase && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  Default Beli
+                                </span>
+                              )}
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                                  pkg.is_active
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-gray-100 text-gray-500 border-gray-200'
+                                }`}
+                              >
+                                {pkg.is_active ? 'Aktif' : 'Nonaktif'}
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-gray-600">
+                              1 {pkg.packaging_code} = {pkg.to_base_factor} {pkg.base_unit_code}
+                              {unitMismatch && (
+                                <span className="ml-2 text-rose-700 font-sans font-semibold">
+                                  (Ikatan satuan dasar berbeda dari satuan produk saat ini)
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={saving}
+                              aria-label={`Edit kemasan ${pkg.packaging_code}`}
+                              onClick={() =>
+                                setEditingPackaging({
+                                  id: pkg.id,
+                                  packagingCode: pkg.packaging_code,
+                                  packagingLabel: pkg.packaging_label,
+                                  toBaseFactor: pkg.to_base_factor,
+                                  isDefaultPurchase: pkg.is_default_purchase,
+                                  baseUnitCode: pkg.base_unit_code,
+                                })
+                              }
+                              className="px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 rounded cursor-pointer disabled:opacity-50"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              aria-label={`${pkg.is_active ? 'Nonaktifkan' : 'Aktifkan'} kemasan ${pkg.packaging_code}`}
+                              onClick={() => handleTogglePackagingActive(pkg)}
+                              className={`px-2 py-1 text-xs font-medium rounded cursor-pointer disabled:opacity-50 ${
+                                pkg.is_active
+                                  ? 'text-rose-600 hover:bg-rose-50'
+                                  : 'text-emerald-700 hover:bg-emerald-50'
+                              }`}
+                            >
+                              {pkg.is_active ? 'Nonaktifkan' : 'Aktifkan'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="shrink-0 flex justify-end px-6 py-4 border-t border-gray-100 bg-white">
+              <button
+                type="button"
+                onClick={closePackagingModal}
+                disabled={saving}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer disabled:opacity-50"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MP-03C: Stock Locations & Room Minibar Modal */}
+      {showStockLocationsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full border border-gray-200 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="shrink-0 px-6 pt-5 pb-4 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Kelola Lokasi Stok &amp; Minibar Kamar</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Gudang utama, gudang outlet, dapur/bar, serta lokasi minibar yang ditautkan ke kamar fisik Room Master.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeStockLocationsModal}
+                disabled={saving}
+                aria-label="Tutup modal lokasi stok"
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+              {stockLocationErrorMsg && (
+                <div className="px-3 py-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2">
+                  <span>{stockLocationErrorMsg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setStockLocationErrorMsg(null)}
+                    className="font-bold hover:text-rose-900 shrink-0"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {capabilities.canCreate || capabilities.canEdit ? (
+                <form onSubmit={handleSaveStockLocation} className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-gray-800">
+                      {stockLocationForm.mode === 'add' ? 'Tambah Lokasi Stok Baru' : `Edit Lokasi Stok (${stockLocationForm.code})`}
+                    </div>
+                    {stockLocationForm.mode === 'edit' && (
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Batal edit lokasi stok"
+                        onClick={() =>
+                          setStockLocationForm({
+                            mode: 'add',
+                            locationType: 'WAREHOUSE',
+                            code: '',
+                            name: '',
+                            roomId: '',
+                            notes: '',
+                          })
+                        }
+                        className="text-xs text-gray-500 hover:text-gray-700 cursor-pointer"
+                      >
+                        Batal Edit
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Tipe Lokasi *</label>
+                      <select
+                        aria-label="Pilih tipe lokasi stok"
+                        disabled={saving || stockLocationForm.mode === 'edit'}
+                        value={stockLocationForm.locationType}
+                        onChange={(e) => {
+                          const nextType = e.target.value as StockLocationTypeCode;
+                          setStockLocationForm((prev) => ({
+                            ...prev,
+                            locationType: nextType,
+                            roomId: nextType === 'ROOM_MINIBAR' ? prev.roomId : '',
+                          }));
+                        }}
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {STOCK_LOCATION_TYPE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {stockLocationForm.locationType === 'ROOM_MINIBAR' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Kamar Fisik Minibar *</label>
+                        <select
+                          aria-label="Pilih kamar minibar"
+                          disabled={saving || stockLocationForm.mode === 'edit'}
+                          value={stockLocationForm.roomId}
+                          onChange={(e) => {
+                            const selectedRoomId = e.target.value;
+                            const candidate = roomCandidates.find((r) => String(r.room_id) === selectedRoomId);
+                            setStockLocationForm((prev) => ({
+                              ...prev,
+                              roomId: selectedRoomId,
+                              code:
+                                prev.code.trim() === '' && candidate
+                                  ? `MB-${candidate.room_number}`
+                                  : prev.code,
+                              name:
+                                prev.name.trim() === '' && candidate
+                                  ? `Minibar Kamar ${candidate.room_number}`
+                                  : prev.name,
+                            }));
+                          }}
+                          className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2"
+                        >
+                          <option value="">— Pilih Kamar Fisik —</option>
+                          {roomCandidates.map((room) => {
+                            const existingCode = room.existing_stock_location_code ?? room.existing_location_code;
+                            const existingId = room.existing_stock_location_id ?? room.existing_location_id;
+                            const existingActive =
+                              room.existing_stock_location_is_active ?? room.existing_location_is_active;
+                            const isTaken =
+                              existingId != null ||
+                              Boolean(existingCode) ||
+                              room.is_available_for_minibar === false;
+                            return (
+                              <option key={room.room_id} value={String(room.room_id)} disabled={isTaken}>
+                                Kamar {room.room_number} {room.room_type_name ? `(${room.room_type_name})` : ''}
+                                {existingCode
+                                  ? ` — Terdaftar: ${existingCode}${existingActive === false ? ' [Nonaktif]' : ''}`
+                                  : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kode Lokasi *</label>
+                      <input
+                        type="text"
+                        maxLength={50}
+                        aria-label="Kode lokasi stok"
+                        disabled={saving}
+                        placeholder="Contoh: WH-MAIN / MB-101"
+                        value={stockLocationForm.code}
+                        onChange={(e) =>
+                          setStockLocationForm((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Lokasi *</label>
+                      <input
+                        type="text"
+                        maxLength={120}
+                        aria-label="Nama lokasi stok"
+                        disabled={saving}
+                        placeholder="Contoh: Gudang Utama / Minibar Kamar 101"
+                        value={stockLocationForm.name}
+                        onChange={(e) =>
+                          setStockLocationForm((prev) => ({ ...prev, name: e.target.value }))
+                        }
+                        className="w-full text-xs sm:text-sm bg-white border border-gray-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <input
+                      type="text"
+                      maxLength={250}
+                      aria-label="Catatan lokasi stok"
+                      disabled={saving}
+                      placeholder="Catatan lokasi (opsional)"
+                      value={stockLocationForm.notes}
+                      onChange={(e) =>
+                        setStockLocationForm((prev) => ({ ...prev, notes: e.target.value }))
+                      }
+                      className="flex-1 min-w-[200px] text-xs bg-white border border-gray-300 rounded-lg px-3 py-2"
+                    />
+                    <button
+                      type="submit"
+                      aria-label="Simpan lokasi stok"
+                      disabled={saving}
+                      className="px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      {saving
+                        ? 'Menyimpan…'
+                        : stockLocationForm.mode === 'add'
+                          ? 'Tambah Lokasi Stok'
+                          : 'Simpan Lokasi Stok'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs">
+                  Mode baca saja — Anda memiliki akses lihat lokasi stok dan kandidat kamar minibar.
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-gray-700">Daftar Lokasi Stok Properti</div>
+                {stockLocationsLoading ? (
+                  <div className="text-xs text-gray-400 py-4 text-center">Memuat lokasi stok…</div>
+                ) : stockLocations.length === 0 ? (
+                  <div className="text-xs text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl">
+                    Belum ada lokasi stok terdaftar di properti ini.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100 border border-gray-200 rounded-xl overflow-hidden">
+                    {stockLocations.map((loc) => (
+                      <div key={loc.id} className="p-3 bg-white flex flex-wrap items-center justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-bold text-gray-900">{loc.code}</span>
+                            <span className="text-xs font-semibold text-gray-800">{loc.name}</span>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                              {formatStockLocationTypeLabel(loc.location_type)}
+                            </span>
+                            {loc.room_number && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                Kamar {loc.room_number}
+                              </span>
+                            )}
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                                loc.is_active
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-gray-100 text-gray-500 border-gray-200'
+                              }`}
+                            >
+                              {loc.is_active ? 'Aktif' : 'Nonaktif'}
+                            </span>
+                          </div>
+                          {loc.notes && <div className="text-[11px] text-gray-500">{loc.notes}</div>}
+                        </div>
+                        {(capabilities.canCreate || capabilities.canEdit) && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={saving}
+                              aria-label={`Edit lokasi ${loc.code}`}
+                              onClick={() => openEditStockLocation(loc)}
+                              className="px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 rounded cursor-pointer disabled:opacity-50"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              aria-label={`${loc.is_active ? 'Nonaktifkan' : 'Aktifkan'} lokasi ${loc.code}`}
+                              onClick={() => handleToggleStockLocationActive(loc)}
+                              className={`px-2 py-1 text-xs font-medium rounded cursor-pointer disabled:opacity-50 ${
+                                loc.is_active
+                                  ? 'text-rose-600 hover:bg-rose-50'
+                                  : 'text-emerald-700 hover:bg-emerald-50'
+                              }`}
+                            >
+                              {loc.is_active ? 'Nonaktifkan' : 'Aktifkan'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="shrink-0 flex justify-end px-6 py-4 border-t border-gray-100 bg-white">
+              <button
+                type="button"
+                onClick={closeStockLocationsModal}
+                disabled={saving}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer disabled:opacity-50"
+              >
+                Tutup
+              </button>
             </div>
           </div>
         </div>

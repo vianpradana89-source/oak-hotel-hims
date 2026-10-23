@@ -1595,7 +1595,863 @@ console.log('  PASS  U6: Pilihan 3 tipe jelas, ganti tipe tidak menghapus field 
   );
   console.log('  PASS  U15: Cleanup unmount me-revoke Blob URL preview lokal pada modal Tambah dan modal Edit');
 
-  console.log('\n=== Semua test UI Master Produk Tahap 1, MP-02A, & MP-02B LULUS ===');
+  // =========================================================================
+  // 16. MP-03C (U16): Pemilih Satuan Dasar Kanonik, Kompatibilitas Produk Lama,
+  //     Penguncian is_base_unit_locked, & Pemisahan Simpan Produk vs Kemasan
+  // =========================================================================
+  const textOf = (node) => collectText(node).join('');
+  assert.equal(Array.from(PM.SYSTEM_CANONICAL_UNITS).length, 15);
+  assert.deepEqual(
+    Array.from(PM.SYSTEM_CANONICAL_UNITS, (u) => u.code),
+    ['PCS', 'PORSI', 'GELAS', 'CUP', 'BOTOL', 'KALENG', 'PACK', 'BOX', 'ROLL', 'SET', 'LEMBAR', 'KG', 'GRAM', 'LITER', 'ML']
+  );
+  assert.equal(PM.getCanonicalUnitByCode('KG')?.label_id, 'Kg');
+  assert.equal(PM.getCanonicalUnitByCode('BOTOL')?.dimension, 'COUNT');
+  const factor100kValid = PM.validatePackagingFactorDraft('100000', 'KG');
+  assert.equal(factor100kValid.valid, true);
+  assert.equal(factor100kValid.normalizedFactor, '100000');
+  const factorOver100k = PM.validatePackagingFactorDraft('100000.001', 'KG');
+  assert.equal(factorOver100k.valid, false);
+  assert.ok(
+    factorOver100k.message?.includes('100000'),
+    'Faktor > 100000.000 wajib ditolak di UI'
+  );
+
+  const legacyCustomUnitItem = {
+    id: 501,
+    item_code: 'MN-501',
+    barcode: null,
+    name: 'Daun Pisang Lipat',
+    category_id: 1,
+    category_name: 'Bahan',
+    price: null,
+    is_active: true,
+    is_sellable_pos: false,
+    product_type: 'RAW_MATERIAL',
+    product_kind: 'STANDARD',
+    base_unit: 'Ikat Daun Kustom',
+    canonical_base_unit_code: null,
+    is_base_unit_locked: false,
+  };
+  const legacyUnitForm = PM.buildEditProductForm(legacyCustomUnitItem);
+  assert.equal(legacyUnitForm.canonicalBaseUnitCode, '');
+  assert.equal(legacyUnitForm.baseUnit, 'Ikat Daun Kustom');
+
+  const lockedCanonicalItem = {
+    id: 502,
+    item_code: 'MN-502',
+    barcode: '8990000502',
+    name: 'Air Mineral Botol 600ml',
+    category_id: 1,
+    category_name: 'Minuman',
+    price: 10000,
+    is_active: true,
+    is_sellable_pos: true,
+    product_type: 'FINISHED_GOOD',
+    product_kind: 'STANDARD',
+    base_unit: 'Botol',
+    canonical_base_unit_code: 'BOTOL',
+    is_base_unit_locked: true,
+  };
+
+  const mp03cItems = [legacyCustomUnitItem, lockedCanonicalItem];
+  const u16Harness = createHarness({ canCreate: true, canEdit: true });
+  const u16PatchPayloads = [];
+  u16Harness.setFetchHandler(async (url, options = {}) => {
+    const urlStr = String(url);
+    const method = (options.method || 'GET').toUpperCase();
+    if (urlStr.includes('/api/pos/menu/items/501') && method === 'PATCH') {
+      const parsed = JSON.parse(options.body);
+      u16PatchPayloads.push(parsed);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'success',
+          data: {
+            ...legacyCustomUnitItem,
+            ...parsed,
+          },
+        }),
+      };
+    }
+    return undefined;
+  });
+  let u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  // Buka modal Tambah Produk -> pastikan pemilih satuan kanonik ada & tidak ada form kemasan inline
+  const u16AddBtn = findAllNodes(u16Tree, (n) => n.type === 'button' && n.props['aria-label'] === 'Tambah produk')[0];
+  u16AddBtn.props.onClick();
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16AddCanonicalSelect = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  assert.ok(u16AddCanonicalSelect, 'Modal Tambah Produk wajib memiliki dropdown Pilih satuan dasar kanonik');
+  assert.equal(
+    findAllNodes(u16Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Pilih kode kemasan').length,
+    0,
+    'Modal Tambah Produk tidak boleh menggabungkan form kemasan inline sebelum produk memiliki ID tersimpan'
+  );
+
+  // Pilih satuan kanonik 'KG' pada modal Tambah Produk -> mengisi canonicalBaseUnitCode='KG' & baseUnit='Kg'
+  u16AddCanonicalSelect.props.onChange({ target: { value: 'KG' } });
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+  const u16AddCanonicalSelectAfter = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  assert.equal(u16AddCanonicalSelectAfter.props.value, 'KG');
+
+  // Tutup modal Tambah Produk
+  const u16CloseAddBtn = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'button' && textOf(n).trim() === 'Batal'
+  )[0];
+  u16CloseAddBtn.props.onClick();
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  // Regresi Temuan #3a: Edit produk bersatuan legacy (id: 501), ubah hanya nama tanpa menyentuh dropdown satuan ->
+  // harus mempertahankan base_unit lama ('Ikat Daun Kustom') dan canonical_base_unit_code: null
+  const u16EditButtonsFirst = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'button' && textOf(n).trim() === 'Edit'
+  );
+  assert.equal(u16EditButtonsFirst.length, 2);
+  u16EditButtonsFirst[0].props.onClick();
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16EditNameInput = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'input' && n.props.value === 'Daun Pisang Lipat'
+  )[0];
+  assert.ok(u16EditNameInput, 'Input nama produk pada modal Edit harus ditemukan');
+  u16EditNameInput.props.onChange({ target: { value: 'Daun Pisang Lipat Segar' } });
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16EditFormPreserve = findAllNodes(u16Tree, (n) => n.type === 'form')[0];
+  await u16EditFormPreserve.props.onSubmit({ preventDefault: () => {} });
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.equal(u16PatchPayloads.length, 1);
+  assert.equal(u16PatchPayloads[0].name, 'Daun Pisang Lipat Segar');
+  assert.equal(
+    u16PatchPayloads[0].base_unit,
+    'Ikat Daun Kustom',
+    'Menyimpan field lain tanpa mengubah satuan harus mempertahankan base_unit legacy lama'
+  );
+  assert.equal(u16PatchPayloads[0].canonical_base_unit_code ?? null, null);
+
+  // Regresi Temuan #3b: Buka kembali Edit produk 501, pilih "Belum diatur" (value: '') ->
+  // harus benar-benar mengirim pengosongan satuan (base_unit: null, canonical_base_unit_code: null)
+  const u16EditButtonsSecond = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'button' && textOf(n).trim() === 'Edit'
+  );
+  u16EditButtonsSecond[0].props.onClick();
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16EditLegacySelect = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  // Pilih 'KG' terlebih dahulu lalu kembalikan ke '' ("Belum diatur") atau langsung pilih ''
+  u16EditLegacySelect.props.onChange({ target: { value: '' } });
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16EditFormClear = findAllNodes(u16Tree, (n) => n.type === 'form')[0];
+  await u16EditFormClear.props.onSubmit({ preventDefault: () => {} });
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.equal(u16PatchPayloads.length, 2);
+  assert.equal(
+    u16PatchPayloads[1].base_unit,
+    null,
+    'Memilih "Belum diatur" harus mengirim base_unit: null'
+  );
+  assert.equal(
+    u16PatchPayloads[1].canonical_base_unit_code,
+    null,
+    'Memilih "Belum diatur" harus mengirim canonical_base_unit_code: null'
+  );
+
+  // Buka modal Edit pada produk kedua yang terkunci (lockedCanonicalItem)
+  const u16EditButtons = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'button' && textOf(n).trim() === 'Edit'
+  );
+  assert.equal(u16EditButtons.length, 2);
+  u16EditButtons[1].props.onClick();
+  u16Tree = u16Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u16EditLockedSelect = findAllNodes(
+    u16Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  assert.ok(u16EditLockedSelect, 'Modal Edit wajib memiliki dropdown Pilih satuan dasar kanonik');
+  assert.equal(u16EditLockedSelect.props.value, 'BOTOL');
+  assert.equal(
+    u16EditLockedSelect.props.disabled,
+    true,
+    'Dropdown satuan dasar kanonik wajib disabled saat is_base_unit_locked = true'
+  );
+  assert.ok(
+    textOf(u16Tree).includes('Satuan dasar terkunci') &&
+      textOf(u16Tree).includes('karena produk sudah memiliki konversi kemasan atau pergerakan stok'),
+    'Modal Edit wajib menampilkan alasan penguncian satuan dasar'
+  );
+  console.log('  PASS  U16: Pemilih 15 satuan kanonik, batas 100000, kompatibilitas & pengosongan satuan legacy, serta penguncian is_base_unit_locked');
+
+  // =========================================================================
+  // 17. MP-03C (U17): Dialog Kelola Kemasan Produk Terpisah — Snapshot base_unit_code,
+  //     Idempotency Key Stabil, Penolakan Bukti Semu saat GET, & Retry Aman
+  // =========================================================================
+  const u17Harness = createHarness({ canCreate: true, canEdit: true });
+  let u17PackagingRows = [];
+  let u17PostMode = 'network_error';
+  let u17GetMode = 'ok';
+  const u17PostPayloads = [];
+
+  u17Harness.setFetchHandler(async (url, options = {}) => {
+    const urlStr = String(url);
+    const method = (options.method || 'GET').toUpperCase();
+    if (urlStr.includes('/api/pos/menu/items/502/packagings') && method === 'GET') {
+      if (u17GetMode === 'http_500') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ message: 'Gagal memuat daftar kemasan (simulasi 500)' }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'success',
+          data: {
+            canonical_base_unit_code: 'BOTOL',
+            is_base_unit_locked: true,
+            packagings: u17PackagingRows,
+          },
+        }),
+      };
+    }
+    if (urlStr.includes('/api/pos/menu/items/502/packagings') && method === 'POST') {
+      const parsedBody = JSON.parse(options.body);
+      u17PostPayloads.push(parsedBody);
+      if (u17PostMode === 'network_error') {
+        throw new Error('Network connection lost');
+      }
+      if (u17PostMode === 'missing_id') {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            status: 'success',
+            data: { packaging_code: parsedBody.packaging_code }, // tanpa id valid!
+          }),
+        };
+      }
+      const createdRow = {
+        id: 901,
+        property_id: 1,
+        menu_item_id: 502,
+        packaging_code: parsedBody.packaging_code,
+        packaging_label: parsedBody.packaging_label,
+        base_unit_code: parsedBody.base_unit_code,
+        to_base_factor: String(parsedBody.to_base_factor),
+        to_base_factor_milli: Number(parsedBody.to_base_factor) * 1000,
+        is_default_purchase: Boolean(parsedBody.is_default_purchase),
+        is_active: true,
+        idempotency_key: parsedBody.idempotency_key,
+      };
+      u17PackagingRows = [createdRow];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'success',
+          replayed: true,
+          data: createdRow,
+        }),
+      };
+    }
+    if (urlStr.includes('/api/pos/menu/items/502/packagings/901') && method === 'PATCH') {
+      const parsedPatch = JSON.parse(options.body);
+      u17PackagingRows = u17PackagingRows.map((r) =>
+        r.id === 901
+          ? {
+              ...r,
+              packaging_label: parsedPatch.packaging_label ?? r.packaging_label,
+              is_default_purchase: parsedPatch.is_default_purchase ?? r.is_default_purchase,
+              is_active: parsedPatch.is_active ?? r.is_active,
+            }
+          : r
+      );
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'success',
+          data: u17PackagingRows[0],
+        }),
+      };
+    }
+    return undefined;
+  });
+
+  let u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  const u17PkgBtn = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Kelola kemasan Air Mineral Botol 600ml'
+  )[0];
+  assert.ok(u17PkgBtn, 'Baris produk wajib memiliki tombol aksi Kemasan');
+
+  await u17PkgBtn.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.ok(
+    textOf(u17Tree).includes('Kelola Kemasan Produk — Air Mineral Botol 600ml'),
+    'Dialog kelola kemasan produk harus terbuka'
+  );
+
+  // Isi form tambah kemasan baru
+  const u17CodeInput = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Pilih kode kemasan')[0];
+  const u17LabelInput = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Label kemasan produk')[0];
+  const u17FactorInput = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Faktor konversi kemasan')[0];
+  const u17DefaultCheck = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Jadikan kemasan beli default')[0];
+
+  u17CodeInput.props.onChange({ target: { value: 'KRT' } });
+  u17LabelInput.props.onChange({ target: { value: 'Karton (24 Botol)' } });
+  u17FactorInput.props.onChange({ target: { value: '24' } });
+  u17DefaultCheck.props.onChange({ target: { checked: true } });
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+
+  // Submit pertama -> gagal network_error
+  const u17AddForm = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'form' && textOf(n).includes('Tambah Konversi Kemasan Baru')
+  )[0];
+  await u17AddForm.props.onSubmit({ preventDefault: () => {} });
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.equal(u17PostPayloads.length, 1);
+  const firstPkgPayload = u17PostPayloads[0];
+  assert.equal(firstPkgPayload.packaging_code, 'KRT');
+  assert.equal(firstPkgPayload.packaging_label, 'Karton (24 Botol)');
+  assert.equal(firstPkgPayload.base_unit_code, 'BOTOL', 'POST kemasan wajib menyertakan base_unit_code dari snapshot');
+  assert.equal(firstPkgPayload.to_base_factor, '24');
+  assert.equal(firstPkgPayload.is_default_purchase, true);
+  assert.equal(typeof firstPkgPayload.idempotency_key, 'string');
+  assert.ok(firstPkgPayload.idempotency_key.length >= 10, 'POST kemasan wajib menyertakan idempotency_key');
+
+  // Pastikan banner unconfirmed tampil dan input form terkunci agar key tidak berubah
+  const u17CheckBtn = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Periksa daftar kemasan'
+  )[0];
+  const u17RetryBtn = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan'
+  )[0];
+  assert.ok(u17CheckBtn && u17RetryBtn, 'Tombol Periksa Daftar Kemasan & Ulangi Simpan Kemasan wajib muncul saat hasil belum pasti');
+
+  // 17a: Jika GET mengembalikan HTTP 500 saat Periksa Daftar Kemasan -> tetap pertahankan unconfirmedPackagingCreate
+  u17GetMode = 'http_500';
+  await u17CheckBtn.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.ok(
+    findAllNodes(u17Tree, (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan')[0],
+    'Saat GET gagal 500, status unconfirmed wajib tetap dipertahankan'
+  );
+
+  // 17b: Jika GET mengembalikan baris dengan field mirip (KRT, faktor 24) tetapi idempotency_key BERBEDA ->
+  //      TIDAK BOLEH dianggap sebagai bukti keberhasilan operasi ini!
+  u17GetMode = 'ok';
+  u17PackagingRows = [
+    {
+      id: 888,
+      property_id: 1,
+      menu_item_id: 502,
+      packaging_code: 'KRT',
+      packaging_label: 'Karton (24 Botol)',
+      base_unit_code: 'BOTOL',
+      to_base_factor: '24',
+      to_base_factor_milli: 24000,
+      is_default_purchase: true,
+      is_active: true,
+      idempotency_key: 'pkg-other-different-operation-key',
+    },
+  ];
+  const u17CheckBtn2 = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Periksa daftar kemasan'
+  )[0];
+  await u17CheckBtn2.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.ok(
+    findAllNodes(u17Tree, (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan')[0],
+    'Kemiripan field dengan idempotency_key berbeda TIDAK BOLEH melepas status unconfirmed'
+  );
+  assert.ok(
+    textOf(u17Tree).includes(firstPkgPayload.idempotency_key),
+    'Pesan pemeriksaan harus tetap menampilkan idempotency_key operasi yang belum terlihat'
+  );
+
+  // 17c: Klik Ulangi Simpan Kemasan tetapi respons 201 tanpa data.id valid -> tetap pertahankan idempotency_key yang sama
+  u17PostMode = 'missing_id';
+  const u17RetryBtn2 = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan'
+  )[0];
+  await u17RetryBtn2.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.equal(u17PostPayloads.length, 2);
+  assert.equal(
+    u17PostPayloads[1].idempotency_key,
+    firstPkgPayload.idempotency_key,
+    'Retry wajib mengirim idempotency_key yang persis sama'
+  );
+  assert.equal(
+    u17PostPayloads[1].base_unit_code,
+    'BOTOL',
+    'Retry wajib mengirim base_unit_code snapshot yang persis sama'
+  );
+
+  // 17d: Klik Ulangi Simpan Kemasan dan backend mengembalikan 200/201 valid -> membersihkan unconfirmed & mereset form
+  u17PostMode = 'success';
+  const u17RetryBtn3 = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan'
+  )[0];
+  await u17RetryBtn3.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.equal(u17PostPayloads.length, 3);
+  assert.equal(u17PostPayloads[2].idempotency_key, firstPkgPayload.idempotency_key);
+  assert.equal(
+    findAllNodes(u17Tree, (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan').length,
+    0,
+    'Setelah retry terkonfirmasi sukses, banner unconfirmed harus hilang'
+  );
+
+  // 17e: Operasi tambah kemasan kedua -> network_error -> Periksa Daftar Kemasan menemukan baris dengan idempotency_key yang SAMA PERSIS -> konfirmasi sukses
+  u17PostMode = 'network_error';
+  const u17CodeInput2 = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Pilih kode kemasan')[0];
+  const u17LabelInput2 = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Label kemasan produk')[0];
+  const u17FactorInput2 = findAllNodes(u17Tree, (n) => n.type === 'input' && n.props['aria-label'] === 'Faktor konversi kemasan')[0];
+  u17CodeInput2.props.onChange({ target: { value: 'PAK' } });
+  u17LabelInput2.props.onChange({ target: { value: 'Pak 6 Botol' } });
+  u17FactorInput2.props.onChange({ target: { value: '6' } });
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u17AddForm2 = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'form' && textOf(n).includes('Tambah Konversi Kemasan Baru')
+  )[0];
+  await u17AddForm2.props.onSubmit({ preventDefault: () => {} });
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.equal(u17PostPayloads.length, 4);
+  const secondOpKey = u17PostPayloads[3].idempotency_key;
+  assert.notEqual(secondOpKey, firstPkgPayload.idempotency_key, 'Operasi baru harus memiliki idempotency_key baru');
+
+  // Simulasikan server sudah menyimpan operasi kedua dengan idempotency_key yang sama persis
+  u17PackagingRows = [
+    ...u17PackagingRows,
+    {
+      id: 902,
+      property_id: 1,
+      menu_item_id: 502,
+      packaging_code: 'PAK',
+      packaging_label: 'Pak 6 Botol',
+      base_unit_code: 'BOTOL',
+      to_base_factor: '6',
+      to_base_factor_milli: 6000,
+      is_default_purchase: false,
+      is_active: true,
+      idempotency_key: secondOpKey,
+    },
+  ];
+  const u17CheckBtnMatch = findAllNodes(
+    u17Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Periksa daftar kemasan'
+  )[0];
+  await u17CheckBtnMatch.props.onClick();
+  u17Tree = u17Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.equal(
+    findAllNodes(u17Tree, (n) => n.type === 'button' && n.props['aria-label'] === 'Ulangi simpan kemasan').length,
+    0,
+    'Saat GET menemukan baris dengan idempotency_key yang sama persis, status unconfirmed harus dibersihkan'
+  );
+  console.log('  PASS  U17: Dialog Kelola Kemasan Produk — base_unit_code snapshot, idempotency_key stabil, tolak bukti semu, & retry aman');
+
+  // =========================================================================
+  // 18. MP-03C (U18): Dialog Kelola Lokasi Stok & Minibar Kamar
+  //     (5 tipe lokasi kontrak, kamar terikat nonaktif disabled, error room-candidates tampil, & akses view-only)
+  // =========================================================================
+  assert.deepEqual(
+    Array.from(PM.STOCK_LOCATION_TYPE_OPTIONS, (o) => o.value),
+    ['WAREHOUSE', 'KITCHEN', 'POS_OUTLET', 'HK_PANTRY', 'ROOM_MINIBAR']
+  );
+
+  const u18Harness = createHarness({ canCreate: true, canEdit: true });
+  let u18Locations = [
+    {
+      id: 1,
+      property_id: 1,
+      code: 'WH-MAIN',
+      name: 'Gudang Utama Hotel',
+      location_type: 'WAREHOUSE',
+      room_id: null,
+      room_number: null,
+      room_type_name: null,
+      is_active: true,
+    },
+  ];
+  let u18RoomCandidatesMode = 'ok';
+  const u18RoomCandidates = [
+    {
+      room_id: 101,
+      room_number: '101',
+      room_type_id: 10,
+      room_type_name: 'Deluxe King',
+      existing_stock_location_id: null,
+      existing_stock_location_code: null,
+      existing_stock_location_is_active: null,
+      is_available_for_minibar: true,
+    },
+    {
+      room_id: 102,
+      room_number: '102',
+      room_type_id: 10,
+      room_type_name: 'Deluxe King',
+      existing_stock_location_id: 99,
+      existing_stock_location_code: 'MB-102-OLD',
+      existing_stock_location_is_active: false,
+      is_available_for_minibar: false,
+    },
+  ];
+  const u18PostBodies = [];
+  const u18PatchBodies = [];
+
+  u18Harness.setFetchHandler(async (url, options = {}) => {
+    const urlStr = String(url);
+    const method = (options.method || 'GET').toUpperCase();
+    if (urlStr.includes('/api/pos/stock-locations/room-candidates') && method === 'GET') {
+      if (u18RoomCandidatesMode === 'http_500') {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ message: 'Gagal memuat kandidat kamar minibar (500)' }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'success', data: { rooms: u18RoomCandidates } }),
+      };
+    }
+    if (urlStr.includes('/api/pos/stock-locations') && method === 'GET') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'success', data: { locations: u18Locations } }),
+      };
+    }
+    if (urlStr.includes('/api/pos/stock-locations') && method === 'POST') {
+      const body = JSON.parse(options.body);
+      u18PostBodies.push(body);
+      const createdLoc = {
+        id: 2,
+        property_id: 1,
+        code: body.code,
+        name: body.name,
+        location_type: body.location_type,
+        room_id: body.room_id ?? null,
+        room_number: body.room_id === 101 ? '101' : null,
+        room_type_name: body.room_id === 101 ? 'Deluxe King' : null,
+        is_active: true,
+      };
+      u18Locations = [...u18Locations, createdLoc];
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ status: 'success', data: createdLoc }),
+      };
+    }
+    if (urlStr.includes('/api/pos/stock-locations/1') && method === 'PATCH') {
+      const body = JSON.parse(options.body);
+      u18PatchBodies.push(body);
+      u18Locations = u18Locations.map((l) =>
+        l.id === 1 ? { ...l, name: body.name ?? l.name } : l
+      );
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'success', data: u18Locations[0] }),
+      };
+    }
+    return undefined;
+  });
+
+  let u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+  const u18OpenBtn = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Kelola lokasi stok'
+  )[0];
+  assert.ok(u18OpenBtn, 'Header Master Produk wajib memiliki tombol Kelola lokasi stok');
+
+  await u18OpenBtn.props.onClick();
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.ok(
+    textOf(u18Tree).includes('Kelola Lokasi Stok & Minibar Kamar'),
+    'Dialog kelola lokasi stok harus terbuka'
+  );
+
+  // Pastikan endpoint yang dipanggil adalah /api/pos/stock-locations dan /api/pos/stock-locations/room-candidates (bukan /api/rooms)
+  const u18CalledUrls = u18Harness.fetchCalls.map((c) => String(c.url));
+  assert.ok(u18CalledUrls.some((u) => u.includes('/api/pos/stock-locations?')));
+  assert.ok(u18CalledUrls.some((u) => u.includes('/api/pos/stock-locations/room-candidates?')));
+  assert.equal(
+    u18CalledUrls.some((u) => /\/api\/rooms(\?|$)/.test(u)),
+    false,
+    'UI lokasi stok tidak boleh memanggil /api/rooms milik Master Kamar'
+  );
+
+  // Pilih tipe ROOM_MINIBAR -> pastikan kamar 102 yang terikat ke lokasi nonaktif disabled -> pilih kamar 101 -> submit
+  const u18TypeSelect = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih tipe lokasi stok'
+  )[0];
+  u18TypeSelect.props.onChange({ target: { value: 'ROOM_MINIBAR' } });
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u18RoomSelect = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih kamar minibar'
+  )[0];
+  assert.ok(u18RoomSelect, 'Memilih tipe ROOM_MINIBAR wajib menampilkan dropdown Pilih kamar minibar');
+  const u18RoomOptions = findAllNodes(u18RoomSelect, (n) => n.type === 'option');
+  const opt101 = u18RoomOptions.find((o) => String(o.props.value) === '101');
+  const opt102 = u18RoomOptions.find((o) => String(o.props.value) === '102');
+  assert.equal(opt101.props.disabled, false, 'Kamar 101 yang belum terikat harus dapat dipilih');
+  assert.equal(
+    opt102.props.disabled,
+    true,
+    'Kamar 102 yang sudah terikat ke lokasi minibar nonaktif wajib disabled (tidak boleh dipilih kembali)'
+  );
+  assert.ok(
+    textOf(opt102).includes('MB-102-OLD') && textOf(opt102).includes('Nonaktif'),
+    'Opsi kamar 102 wajib menampilkan kode lokasi existing beserta penanda Nonaktif'
+  );
+
+  u18RoomSelect.props.onChange({ target: { value: '101' } });
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u18CreateForm = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'form' && textOf(n).includes('Tambah Lokasi Stok Baru')
+  )[0];
+  await u18CreateForm.props.onSubmit({ preventDefault: () => {} });
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.equal(u18PostBodies.length, 1);
+  assert.equal(u18PostBodies[0].location_type, 'ROOM_MINIBAR');
+  assert.equal(u18PostBodies[0].room_id, 101);
+  assert.equal(u18PostBodies[0].code, 'MB-101');
+  assert.equal(u18PostBodies[0].name, 'Minibar Kamar 101');
+
+  // Uji mode Edit Lokasi Stok -> tipe lokasi wajib disabled (identitas immutable) & PATCH hanya mengirim field mutable
+  const u18EditLocBtn = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Edit lokasi WH-MAIN'
+  )[0];
+  assert.ok(u18EditLocBtn, 'Tombol Edit lokasi WH-MAIN harus tersedia');
+  u18EditLocBtn.props.onClick();
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u18EditTypeSelect = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih tipe lokasi stok'
+  )[0];
+  assert.equal(
+    u18EditTypeSelect.props.disabled,
+    true,
+    'Dropdown tipe lokasi wajib disabled saat mengedit lokasi stok (identitas immutable)'
+  );
+  const u18NameInput = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'input' && n.props['aria-label'] === 'Nama lokasi stok'
+  )[0];
+  u18NameInput.props.onChange({ target: { value: 'Gudang Utama Hotel (Renovasi)' } });
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  const u18EditForm = findAllNodes(
+    u18Tree,
+    (n) => n.type === 'form' && textOf(n).includes('Edit Lokasi Stok (WH-MAIN)')
+  )[0];
+  await u18EditForm.props.onSubmit({ preventDefault: () => {} });
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+
+  assert.equal(u18PatchBodies.length, 1);
+  assert.equal(u18PatchBodies[0].name, 'Gudang Utama Hotel (Renovasi)');
+  assert.equal(u18PatchBodies[0].location_type, undefined, 'PATCH lokasi tidak boleh mengirim ulang location_type');
+  assert.equal(u18PatchBodies[0].room_id, undefined, 'PATCH lokasi tidak boleh mengirim ulang room_id');
+
+  // Uji kegagalan room-candidates (HTTP 500) -> tidak boleh ditelan diam-diam, wajib menampilkan pesan error
+  u18RoomCandidatesMode = 'http_500';
+  await u18OpenBtn.props.onClick();
+  u18Tree = u18Harness.render({ propertyId: 1, items: mp03cItems });
+  assert.ok(
+    textOf(u18Tree).includes('Gagal memuat kandidat kamar minibar (500)'),
+    'Kegagalan endpoint room-candidates wajib ditampilkan kepada pengguna dan tidak dianggap sukses'
+  );
+
+  // Uji pengguna dengan izin view-only Master Produk (canCreate: false, canEdit: false) ->
+  // tetap dapat membuka dialog lokasi stok dalam mode baca saja tanpa form tambah/edit
+  const u18ViewOnlyHarness = createHarness({ canCreate: false, canEdit: false });
+  u18ViewOnlyHarness.setFetchHandler(async (url, options = {}) => {
+    const urlStr = String(url);
+    const method = (options.method || 'GET').toUpperCase();
+    if (urlStr.includes('/api/pos/stock-locations') && method === 'GET') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'success', data: { locations: u18Locations } }),
+      };
+    }
+    return undefined;
+  });
+  let u18ViewTree = u18ViewOnlyHarness.render({ propertyId: 1, items: mp03cItems });
+  const u18ViewOpenBtn = findAllNodes(
+    u18ViewTree,
+    (n) => n.type === 'button' && n.props['aria-label'] === 'Kelola lokasi stok'
+  )[0];
+  assert.ok(u18ViewOpenBtn, 'Pengguna dengan izin view Master Produk wajib tetap melihat tombol lokasi stok');
+  assert.ok(textOf(u18ViewOpenBtn).includes('Lihat Lokasi Stok'));
+  await u18ViewOpenBtn.props.onClick();
+  u18ViewTree = u18ViewOnlyHarness.render({ propertyId: 1, items: mp03cItems });
+  assert.ok(textOf(u18ViewTree).includes('Gudang Utama Hotel (Renovasi)'));
+  assert.equal(
+    findAllNodes(u18ViewTree, (n) => n.type === 'form' && textOf(n).includes('Tambah Lokasi Stok Baru')).length,
+    0,
+    'Mode baca saja tidak boleh menampilkan form Tambah Lokasi Stok'
+  );
+  console.log('  PASS  U18: Dialog Lokasi Stok — 5 tipe lokasi kontrak, kamar nonaktif disabled, error room-candidates tampil, & mode view-only');
+
+  // =========================================================================
+  // 19. MP-03C (U19): Satuan kanonik yang TIDAK terkunci diubah menjadi teks
+  //     legacy nonkosong (BOTOL -> "ikat") wajib mengirim base_unit saja dan
+  //     MENGHILANGKAN properti canonical_base_unit_code dari payload (bukan
+  //     null, yang ditolak backend sebagai CONFLICTING_BASE_UNIT_FIELDS).
+  // =========================================================================
+  const unlockedCanonicalItem = {
+    id: 503,
+    item_code: 'MN-503',
+    barcode: '8990000503',
+    name: 'Teh Botol Sosro 450ml',
+    category_id: 1,
+    category_name: 'Minuman',
+    price: 8000,
+    is_active: true,
+    is_sellable_pos: true,
+    product_type: 'FINISHED_GOOD',
+    product_kind: 'STANDARD',
+    base_unit: 'Botol',
+    canonical_base_unit_code: 'BOTOL',
+    is_base_unit_locked: false,
+  };
+  const u19Harness = createHarness({ canCreate: true, canEdit: true });
+  const u19PatchPayloads = [];
+  u19Harness.setFetchHandler(async (url, options = {}) => {
+    const urlStr = String(url);
+    const method = (options.method || 'GET').toUpperCase();
+    if (urlStr.includes('/api/pos/menu/items/503') && method === 'PATCH') {
+      const parsed = JSON.parse(options.body);
+      u19PatchPayloads.push(parsed);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'success',
+          data: {
+            ...unlockedCanonicalItem,
+            ...parsed,
+          },
+        }),
+      };
+    }
+    return undefined;
+  });
+  let u19Tree = u19Harness.render({ propertyId: 1, items: [unlockedCanonicalItem] });
+
+  const u19EditBtn = findAllNodes(u19Tree, (n) => n.type === 'button' && textOf(n).trim() === 'Edit')[0];
+  assert.ok(u19EditBtn, 'Tombol Edit produk bersatuan kanonik tidak terkunci harus ditemukan');
+  u19EditBtn.props.onClick();
+  u19Tree = u19Harness.render({ propertyId: 1, items: [unlockedCanonicalItem] });
+
+  const u19CanonicalSelect = findAllNodes(
+    u19Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  assert.equal(u19CanonicalSelect.props.value, 'BOTOL');
+  assert.equal(
+    u19CanonicalSelect.props.disabled,
+    false,
+    'Produk dengan is_base_unit_locked = false wajib tetap dapat mengubah satuan dasar'
+  );
+
+  const u19BaseUnitInput = findAllNodes(u19Tree, (n) => n.type === 'input' && n.props.value === 'Botol')[0];
+  assert.ok(u19BaseUnitInput, 'Input teks satuan dasar "Botol" pada modal Edit harus ditemukan');
+  u19BaseUnitInput.props.onChange({ target: { value: 'ikat' } });
+  u19Tree = u19Harness.render({ propertyId: 1, items: [unlockedCanonicalItem] });
+
+  const u19CanonicalSelectAfter = findAllNodes(
+    u19Tree,
+    (n) => n.type === 'select' && n.props['aria-label'] === 'Pilih satuan dasar kanonik'
+  )[0];
+  assert.equal(
+    u19CanonicalSelectAfter.props.value,
+    '',
+    'Mengetik teks legacy yang tidak cocok harus melepas pemetaan ke satuan kanonik'
+  );
+
+  const u19EditForm = findAllNodes(u19Tree, (n) => n.type === 'form')[0];
+  await u19EditForm.props.onSubmit({ preventDefault: () => {} });
+  u19Tree = u19Harness.render({ propertyId: 1, items: [unlockedCanonicalItem] });
+
+  assert.equal(u19PatchPayloads.length, 1, 'Perubahan satuan BOTOL -> "ikat" wajib mengirim tepat satu PATCH');
+  assert.equal(
+    u19PatchPayloads[0].base_unit,
+    'ikat',
+    'Teks legacy baru wajib dikirim sebagai base_unit'
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(u19PatchPayloads[0], 'canonical_base_unit_code'),
+    false,
+    'Payload BOTOL -> "ikat" tidak boleh memiliki properti canonical_base_unit_code (null + teks legacy ditolak backend)'
+  );
+  assert.ok(
+    u19Harness.fetchCalls.some(
+      (c) =>
+        (c.options.method || 'GET').toUpperCase() === 'PATCH' &&
+        String(c.url).includes('/api/pos/menu/items/503')
+    ),
+    'PATCH perubahan satuan wajib menuju endpoint produk 503'
+  );
+  assert.ok(
+    textOf(u19Tree).includes('berhasil diperbarui'),
+    'Respons PATCH sukses wajib diproses normal: pesan sukses tampil'
+  );
+  assert.equal(
+    findAllNodes(u19Tree, (n) => n.type === 'form').length,
+    0,
+    'Modal Edit wajib tertutup setelah PATCH sukses'
+  );
+  console.log('  PASS  U19: Satuan kanonik tidak terkunci BOTOL -> teks legacy "ikat" mengirim base_unit tanpa canonical_base_unit_code');
+
+  console.log('\n=== Semua test UI Master Produk Tahap 1, MP-02A, MP-02B, & MP-03C LULUS ===');
 })().catch((err) => {
   console.error('TEST GAGAL:', err);
   process.exit(1);

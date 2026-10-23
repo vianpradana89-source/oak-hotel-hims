@@ -175,6 +175,15 @@ import {
   createProductPhotoUploadHandler,
   createProductPhotoDeleteHandler,
   createProductPhotoGetHandler,
+  SYSTEM_CANONICAL_UNITS,
+  fetchPropertyPackagingsByItem,
+  createProductPackagingListHandler,
+  createProductPackagingCreateHandler,
+  createProductPackagingPatchHandler,
+  createStockLocationRoomCandidatesHandler,
+  createStockLocationListHandler,
+  createStockLocationCreateHandler,
+  createStockLocationPatchHandler,
 } from './domains/pos/productMasterStage1';
 
 const app: any = express();
@@ -5344,7 +5353,21 @@ app.get('/api/pos/menu', async (req, res) => {
       ORDER BY mi.id
     `;
     const items = await pool.query(itemsQuery, itemParams);
-    const formattedItems = items.rows.map((row: any) => formatPosMenuItemRow(row));
+    const pkgMapRes = await fetchPropertyPackagingsByItem(pool, propertyId);
+    const formattedItems = items.rows.map((row: any) => {
+      const itemIdNum = Number(row.id);
+      const itemPackagings = pkgMapRes.byItemId.get(itemIdNum) || [];
+      const hasActivePkg = itemPackagings.some((p) => p.is_active);
+      const hasMinibarUsage = pkgMapRes.lockedByMinibarItemIds.has(itemIdNum);
+      const isBaseUnitLocked = !pkgMapRes.schemaReady
+        ? Boolean(row.base_unit || row.canonical_base_unit_code)
+        : hasActivePkg || hasMinibarUsage;
+      return formatPosMenuItemRow({
+        ...row,
+        is_base_unit_locked: isBaseUnitLocked,
+        packaging_conversions: itemPackagings,
+      });
+    });
 
     res.json({
       status: 'OK',
@@ -5354,6 +5377,7 @@ app.get('/api/pos/menu', async (req, res) => {
         status_filter: statusFilter,
         sellable_filter: sellableFilter,
         product_type_filter: productTypeFilter,
+        canonical_units: SYSTEM_CANONICAL_UNITS,
       },
     });
   } catch (err: any) {
@@ -5427,6 +5451,16 @@ app.delete(
   '/api/pos/menu/items/:id/photo',
   createProductPhotoDeleteHandler({ pool, assertPropertyScope })
 );
+
+// ── Master Produk: Kemasan Produk & Lokasi Stok (MP-03C) ────────────────────
+app.get('/api/pos/menu/items/:id/packagings', createProductPackagingListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/menu/items/:id/packagings', createProductPackagingCreateHandler({ pool, assertPropertyScope }));
+app.patch('/api/pos/menu/items/:id/packagings/:packagingId', createProductPackagingPatchHandler({ pool, assertPropertyScope }));
+
+app.get('/api/pos/stock-locations/room-candidates', createStockLocationRoomCandidatesHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock-locations', createStockLocationListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock-locations', createStockLocationCreateHandler({ pool, assertPropertyScope }));
+app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 
