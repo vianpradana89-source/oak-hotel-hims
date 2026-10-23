@@ -190,6 +190,12 @@ import {
   createStockBalancesHandler,
   createPurchaseReceiptHandler,
   createPurchaseReceiptsQueryHandler,
+  createStockAdjustmentHandler,
+  createStockAdjustmentsQueryHandler,
+  createStockOpnameHandler,
+  createStockOpnamesQueryHandler,
+  createStockTransferHandler,
+  createStockTransfersQueryHandler,
 } from './domains/pos/stockInventoryService';
 
 const app: any = express();
@@ -5473,6 +5479,14 @@ app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ po
 app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/purchase-receipt', createPurchaseReceiptHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/purchase-receipts', createPurchaseReceiptsQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/adjustments', createStockAdjustmentHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/adjustments', createStockAdjustmentsQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/opname', createStockOpnameHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/opnames', createStockOpnameHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opname', createStockOpnamesQueryHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opnames', createStockOpnamesQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/transfers', createStockTransferHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/transfers', createStockTransfersQueryHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 

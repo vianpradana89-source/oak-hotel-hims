@@ -1943,3 +1943,2208 @@ export function createPurchaseReceiptsQueryHandler(deps: StockInventoryDeps) {
   };
 }
 
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MP-04B Batch 4: Penyesuaian Stok, Opname Fisik, dan Transfer Antar Lokasi
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const STOCK_ADJUSTMENT_REASON_CODES = [
+  'RUSAK',
+  'HILANG',
+  'KADALUARSA',
+  'PEMAKAIAN_INTERNAL',
+  'KOREKSI_ADMIN',
+  'SAMPLE',
+] as const;
+
+export type StockAdjustmentReasonCode = (typeof STOCK_ADJUSTMENT_REASON_CODES)[number] | string;
+export type StockAdjustmentType = 'IN' | 'OUT';
+
+export interface RecordStockAdjustmentParams {
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  adjustment_type: StockAdjustmentType;
+  reason_code: StockAdjustmentReasonCode;
+  quantity: string | number;
+  packaging_id?: number | null;
+  operation_key: string;
+  notes?: string | null;
+  created_by?: number | null;
+}
+
+export interface StockAdjustmentResult {
+  operation_id: number;
+  operation_type: 'STOCK_ADJUSTMENT';
+  operation_key: string;
+  movement_id: number;
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  adjustment_type: StockAdjustmentType;
+  reason_code: string;
+  quantity_delta: string;
+  base_unit_code: string;
+  packaging_id: number | null;
+  packaging_code: string | null;
+  packaging_label: string | null;
+  current_balance: string;
+  is_replay: boolean;
+  notes: string | null;
+  created_at: string | Date;
+}
+
+export interface StockAdjustmentFilters {
+  property_id: number;
+  product_id?: number | null;
+  location_id?: number | null;
+  reason_code?: string | null;
+  adjustment_type?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockOpnameItemInput {
+  product_id: number;
+  physical_quantity: string | number;
+  packaging_id?: number | null;
+  notes?: string | null;
+}
+
+export interface RecordStockOpnameParams {
+  property_id: number;
+  location_id: number;
+  items: StockOpnameItemInput[];
+  operation_key: string;
+  notes?: string | null;
+  created_by?: number | null;
+}
+
+export interface StockOpnameItemResult {
+  product_id: number;
+  product_name: string;
+  base_unit_code: string;
+  system_quantity: string;
+  physical_quantity: string;
+  variance_quantity: string;
+  status: 'MATCH' | 'SURPLUS' | 'DEFICIT';
+  movement_id: number | null;
+  packaging_id: number | null;
+  notes: string | null;
+}
+
+export interface StockOpnameResult {
+  operation_id: number;
+  operation_type: 'STOCK_OPNAME';
+  operation_key: string;
+  property_id: number;
+  location_id: number;
+  items: StockOpnameItemResult[];
+  notes: string | null;
+  is_replay: boolean;
+  created_at: string | Date;
+}
+
+export interface StockOpnameFilters {
+  property_id: number;
+  location_id?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockTransferItemInput {
+  product_id: number;
+  quantity: string | number;
+  packaging_id?: number | null;
+  notes?: string | null;
+}
+
+export interface RecordStockTransferParams {
+  property_id: number;
+  from_location_id: number;
+  to_location_id: number;
+  items: StockTransferItemInput[];
+  operation_key: string;
+  notes?: string | null;
+  created_by?: number | null;
+}
+
+export interface StockTransferItemResult {
+  product_id: number;
+  product_name: string;
+  base_unit_code: string;
+  quantity: string;
+  base_quantity: string;
+  out_movement_id: number;
+  in_movement_id: number;
+  origin_balance: string;
+  destination_balance: string;
+  packaging_id: number | null;
+  packaging_code: string | null;
+  packaging_label: string | null;
+  notes: string | null;
+}
+
+export interface StockTransferResult {
+  operation_id: number;
+  operation_type: 'STOCK_TRANSFER';
+  operation_key: string;
+  property_id: number;
+  from_location_id: number;
+  to_location_id: number;
+  items: StockTransferItemResult[];
+  notes: string | null;
+  is_replay: boolean;
+  created_at: string | Date;
+}
+
+export interface StockTransferFilters {
+  property_id: number;
+  from_location_id?: number | null;
+  to_location_id?: number | null;
+  product_id?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fingerprint Functions for Batch 4
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function computeStockAdjustmentFingerprint(payload: {
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  adjustment_type: string;
+  reason_code: string;
+  quantity: string;
+  packaging_id?: number | null;
+}): string {
+  const canonical = JSON.stringify({
+    adjustment_type: String(payload.adjustment_type).trim().toUpperCase(),
+    location_id: Number(payload.location_id),
+    operation_type: 'STOCK_ADJUSTMENT',
+    packaging_id: payload.packaging_id ? Number(payload.packaging_id) : null,
+    product_id: Number(payload.product_id),
+    property_id: Number(payload.property_id),
+    quantity: String(payload.quantity).trim(),
+    reason_code: String(payload.reason_code).trim().toUpperCase(),
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+export function computeStockOpnameFingerprint(payload: {
+  property_id: number;
+  location_id: number;
+  items: Array<{
+    product_id: number;
+    physical_quantity: string | number;
+    packaging_id?: number | null;
+  }>;
+}): string {
+  const sortedItems = [...payload.items]
+    .map((item) => ({
+      packaging_id: item.packaging_id ? Number(item.packaging_id) : null,
+      physical_quantity: String(item.physical_quantity).trim(),
+      product_id: Number(item.product_id),
+    }))
+    .sort((a, b) => a.product_id - b.product_id);
+
+  const canonical = JSON.stringify({
+    items: sortedItems,
+    location_id: Number(payload.location_id),
+    operation_type: 'STOCK_OPNAME',
+    property_id: Number(payload.property_id),
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+export function computeStockTransferFingerprint(payload: {
+  property_id: number;
+  from_location_id: number;
+  to_location_id: number;
+  items: Array<{
+    product_id: number;
+    quantity: string | number;
+    packaging_id?: number | null;
+  }>;
+}): string {
+  const sortedItems = [...payload.items]
+    .map((item) => ({
+      packaging_id: item.packaging_id ? Number(item.packaging_id) : null,
+      product_id: Number(item.product_id),
+      quantity: String(item.quantity).trim(),
+    }))
+    .sort((a, b) => a.product_id - b.product_id);
+
+  const canonical = JSON.stringify({
+    from_location_id: Number(payload.from_location_id),
+    items: sortedItems,
+    operation_type: 'STOCK_TRANSFER',
+    property_id: Number(payload.property_id),
+    to_location_id: Number(payload.to_location_id),
+  });
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Domain Function: recordStockAdjustment
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function recordStockAdjustment(
+  clientOrPool: Pool | PoolClient | any,
+  params: RecordStockAdjustmentParams
+): Promise<StockAdjustmentResult> {
+  const propertyId = Number(params.property_id);
+  const productId = Number(params.product_id);
+  const locationId = Number(params.location_id);
+  const opKey = String(params.operation_key || '').trim();
+  const rawType = String(params.adjustment_type || '').trim().toUpperCase();
+  const rawReason = String(params.reason_code || '').trim().toUpperCase();
+  const notes = params.notes !== undefined && params.notes !== null ? String(params.notes).trim() : null;
+  const createdBy = params.created_by ? Number(params.created_by) : null;
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(productId) || productId <= 0) {
+    throw Object.assign(new Error('product_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw Object.assign(new Error('location_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!opKey) {
+    throw Object.assign(new Error('operation_key wajib disertakan sebagai teks non-kosong'), {
+      statusCode: 400,
+      code: 'OPERATION_KEY_REQUIRED',
+    });
+  }
+  if (opKey.length > 100) {
+    throw Object.assign(new Error('operation_key maksimal 100 karakter'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  if (rawType !== 'IN' && rawType !== 'OUT') {
+    throw Object.assign(new Error(`adjustment_type tidak valid: "${params.adjustment_type}". Harus "IN" atau "OUT"`), {
+      statusCode: 400,
+      code: 'INVALID_ADJUSTMENT_TYPE',
+    });
+  }
+  const adjustmentType: StockAdjustmentType = rawType;
+
+  if (!STOCK_ADJUSTMENT_REASON_CODES.includes(rawReason as any)) {
+    throw Object.assign(
+      new Error(
+        `Alasan penyesuaian tidak valid: "${params.reason_code}". Pilihan yang diperbolehkan: ${STOCK_ADJUSTMENT_REASON_CODES.join(', ')}`
+      ),
+      {
+        statusCode: 400,
+        code: 'INVALID_ADJUSTMENT_REASON',
+      }
+    );
+  }
+  const reasonCode = rawReason;
+
+  const isPool = typeof clientOrPool.connect === 'function';
+  const client: PoolClient = isPool ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    if (isPool) {
+      await client.query('BEGIN');
+    }
+
+    // ── Guard 1: Kunci produk (FOR UPDATE) & validasi track_stock ──
+    const productRes = await client.query(
+      `SELECT id, property_id, name, base_unit, canonical_base_unit_code, track_stock, is_active
+         FROM pos_menu_items
+        WHERE id = $1 AND property_id = $2
+        FOR UPDATE`,
+      [productId, propertyId]
+    );
+
+    if (productRes.rowCount === 0) {
+      throw Object.assign(
+        new Error(`Produk dengan id ${productId} tidak ditemukan pada properti ${propertyId}`),
+        { statusCode: 404, code: 'PRODUCT_NOT_FOUND' }
+      );
+    }
+
+    const product = productRes.rows[0];
+    if (!product.track_stock) {
+      throw Object.assign(
+        new Error(`Produk "${product.name}" tidak dikonfigurasi untuk pencatatan stok (track_stock = false)`),
+        { statusCode: 400, code: 'PRODUCT_STOCK_NOT_TRACKED' }
+      );
+    }
+
+    const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
+    if (!baseUnitCode) {
+      throw Object.assign(
+        new Error(`Produk "${product.name}" belum memiliki satuan dasar yang terdefinisi`),
+        { statusCode: 400, code: 'PRODUCT_BASE_UNIT_NOT_CONFIGURED' }
+      );
+    }
+
+    // ── Guard 2: Validasi lokasi ──
+    const locRes = await client.query(
+      `SELECT id, property_id, code, name, location_type, is_active
+         FROM stock_locations
+        WHERE id = $1 AND property_id = $2`,
+      [locationId, propertyId]
+    );
+
+    if (locRes.rowCount === 0) {
+      throw Object.assign(
+        new Error(`Lokasi stok dengan id ${locationId} tidak ditemukan pada properti ${propertyId}`),
+        { statusCode: 404, code: 'LOCATION_NOT_FOUND' }
+      );
+    }
+    const location = locRes.rows[0];
+    if (!location.is_active) {
+      throw Object.assign(
+        new Error(`Lokasi stok "${location.name}" (${location.code}) sedang tidak aktif`),
+        { statusCode: 400, code: 'LOCATION_INACTIVE' }
+      );
+    }
+
+    // ── Kuantitas & Kemasan (R-06) ──
+    let baseQuantityDelta: string;
+    let packagingId: number | null = null;
+    let packagingCode: string | null = null;
+    let packagingLabel: string | null = null;
+
+    if (params.packaging_id !== undefined && params.packaging_id !== null) {
+      const parsedPkgId = Number(params.packaging_id);
+      if (!Number.isInteger(parsedPkgId) || parsedPkgId <= 0) {
+        throw Object.assign(new Error('packaging_id harus berupa bilangan bulat positif'), {
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+
+      const pkgRes = await client.query(
+        `SELECT id, property_id, menu_item_id, packaging_code, packaging_label,
+                base_unit_code, to_base_factor, is_active
+           FROM product_packaging_conversions
+          WHERE id = $1 AND property_id = $2 AND menu_item_id = $3`,
+        [parsedPkgId, propertyId, productId]
+      );
+
+      if (pkgRes.rowCount === 0) {
+        throw Object.assign(new Error(`Kemasan konversi tidak ditemukan untuk produk ini`), {
+          statusCode: 404,
+          code: 'PACKAGING_NOT_FOUND',
+        });
+      }
+      const pkg = pkgRes.rows[0];
+      if (!pkg.is_active) {
+        throw Object.assign(
+          new Error(`Kemasan konversi "${pkg.packaging_label}" (${pkg.packaging_code}) sedang tidak aktif`),
+          { statusCode: 400, code: 'PACKAGING_INACTIVE' }
+        );
+      }
+
+      const conv = convertPackagingToBaseQuantity({
+        packagingQty: params.quantity,
+        toBaseFactor: pkg.to_base_factor,
+        baseUnitCode: product.canonical_base_unit_code || pkg.base_unit_code,
+      });
+      if (!conv.ok) {
+        throw Object.assign(new Error(conv.error), { statusCode: conv.status, code: conv.code });
+      }
+
+      baseQuantityDelta = conv.formatted3;
+      packagingId = Number(pkg.id);
+      packagingCode = pkg.packaging_code;
+      packagingLabel = pkg.packaging_label;
+    } else {
+      let parsedQty;
+      if (product.canonical_base_unit_code) {
+        parsedQty = parseCanonicalQuantityInput(params.quantity, product.canonical_base_unit_code, {
+          allowZero: false,
+          fieldLabel: 'Kuantitas penyesuaian stok',
+        });
+      } else {
+        parsedQty = parseStrictDecimalString(params.quantity, 'Kuantitas penyesuaian stok');
+      }
+
+      if (!parsedQty.ok) {
+        throw Object.assign(new Error(parsedQty.error), { statusCode: parsedQty.status, code: parsedQty.code });
+      }
+
+      if (parsedQty.milli <= 0n) {
+        throw Object.assign(new Error('Kuantitas penyesuaian stok harus lebih besar dari 0'), {
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+
+      baseQuantityDelta = parsedQty.formatted3;
+    }
+
+    const baseQtyMilli = BigInt(Math.round(Number(baseQuantityDelta) * 1000));
+
+    // ── Guard Saldo Tidak Boleh Negatif (INSUFFICIENT_STOCK_BALANCE) ──
+    const balanceRes = await client.query(
+      `SELECT id, quantity
+         FROM stock_balances
+        WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+        FOR UPDATE`,
+      [propertyId, productId, locationId]
+    );
+
+    const currentBalanceMilli =
+      balanceRes.rows.length > 0 ? BigInt(Math.round(Number(balanceRes.rows[0].quantity) * 1000)) : 0n;
+
+    if (adjustmentType === 'OUT' && currentBalanceMilli < baseQtyMilli) {
+      const curBalFormatted = (Number(currentBalanceMilli) / 1000).toFixed(3);
+      const reqQtyFormatted = (Number(baseQtyMilli) / 1000).toFixed(3);
+      throw Object.assign(
+        new Error(
+          `Saldo stok tidak mencukupi untuk penyesuaian keluar. Saldo saat ini: ${curBalFormatted}, dibutuhkan: ${reqQtyFormatted}`
+        ),
+        {
+          statusCode: 400,
+          code: 'INSUFFICIENT_STOCK_BALANCE',
+        }
+      );
+    }
+
+    // ── Fingerprint & Idempotency (R-05) ──
+    const payloadFingerprint = computeStockAdjustmentFingerprint({
+      property_id: propertyId,
+      product_id: productId,
+      location_id: locationId,
+      adjustment_type: adjustmentType,
+      reason_code: reasonCode,
+      quantity: String(params.quantity).trim(),
+      packaging_id: packagingId,
+    });
+
+    const existingOpRes = await client.query(
+      `SELECT id, operation_type, operation_key, payload_fingerprint, notes, metadata, created_at
+         FROM stock_operations
+        WHERE property_id = $1 AND operation_key = $2`,
+      [propertyId, opKey]
+    );
+
+    if (existingOpRes.rows.length > 0) {
+      const existingOp = existingOpRes.rows[0];
+      if (existingOp.payload_fingerprint === payloadFingerprint) {
+        // Idempotent Replay
+        const replayRes = await client.query(
+          `SELECT sm.id AS movement_id, sm.quantity_delta, sm.base_unit_code,
+                  sm.packaging_id, sm.packaging_code, sm.packaging_label,
+                  sb.quantity AS current_balance, sm.created_at
+             FROM stock_movements sm
+             LEFT JOIN stock_balances sb ON sb.property_id = sm.property_id AND sb.product_id = sm.product_id AND sb.location_id = sm.location_id
+            WHERE sm.operation_id = $1
+            LIMIT 1`,
+          [existingOp.id]
+        );
+
+        if (replayRes.rows.length > 0) {
+          const row = replayRes.rows[0];
+          if (isPool) await client.query('COMMIT');
+          return {
+            operation_id: Number(existingOp.id),
+            operation_type: 'STOCK_ADJUSTMENT',
+            operation_key: existingOp.operation_key,
+            movement_id: Number(row.movement_id),
+            property_id: propertyId,
+            product_id: productId,
+            location_id: locationId,
+            adjustment_type: adjustmentType,
+            reason_code: reasonCode,
+            quantity_delta: String(row.quantity_delta),
+            base_unit_code: row.base_unit_code,
+            packaging_id: row.packaging_id ? Number(row.packaging_id) : null,
+            packaging_code: row.packaging_code ?? null,
+            packaging_label: row.packaging_label ?? null,
+            current_balance: String(row.current_balance ?? '0.000'),
+            is_replay: true,
+            notes: existingOp.notes ?? null,
+            created_at: row.created_at,
+          };
+        }
+      }
+
+      throw Object.assign(
+        new Error(
+          `operation_key "${opKey}" sudah digunakan untuk operasi stok lain dengan payload berbeda. Gunakan operation_key unik.`
+        ),
+        {
+          statusCode: 409,
+          code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+        }
+      );
+    }
+
+    // ── Eksekusi Mutasi ──
+    const metadataPayload = {
+      adjustment_type: adjustmentType,
+      reason_code: reasonCode,
+      packaging_id: packagingId,
+      original_quantity: String(params.quantity).trim(),
+    };
+
+    const opInsertRes = await client.query(
+      `INSERT INTO stock_operations (
+         property_id, operation_type, operation_key, payload_fingerprint,
+         notes, metadata, created_by, created_at
+       ) VALUES (
+         $1, 'STOCK_ADJUSTMENT', $2, $3,
+         $4, $5, $6, NOW()
+       )
+       RETURNING id, created_at`,
+      [propertyId, opKey, payloadFingerprint, notes, JSON.stringify(metadataPayload), createdBy]
+    );
+    const opRow = opInsertRes.rows[0];
+
+    const signedDeltaMilli = adjustmentType === 'OUT' ? -baseQtyMilli : baseQtyMilli;
+    const signedDeltaStr =
+      (signedDeltaMilli < 0n ? '-' : '') + (Number(signedDeltaMilli < 0n ? -signedDeltaMilli : signedDeltaMilli) / 1000).toFixed(3);
+
+    const movRes = await client.query(
+      `INSERT INTO stock_movements (
+         operation_id, property_id, product_id, location_id,
+         packaging_id, packaging_code, packaging_label,
+         quantity_delta, base_unit_code, created_at
+       ) VALUES (
+         $1, $2, $3, $4,
+         $5, $6, $7,
+         $8, $9, NOW()
+       )
+       RETURNING id`,
+      [
+        opRow.id,
+        propertyId,
+        productId,
+        locationId,
+        packagingId,
+        packagingCode,
+        packagingLabel,
+        signedDeltaStr,
+        baseUnitCode,
+      ]
+    );
+    const movRow = movRes.rows[0];
+
+    // Ambil dan kunci saldo saat ini terlebih dahulu dengan SELECT FOR UPDATE
+    const existingBalRes = await client.query(
+      `SELECT quantity FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3 FOR UPDATE`,
+      [propertyId, productId, locationId]
+    );
+    const currentQty = existingBalRes.rows.length > 0 ? parseFloat(existingBalRes.rows[0].quantity) : 0;
+    const deltaQty = parseFloat(signedDeltaStr);
+    const nextQty = currentQty + deltaQty;
+
+    // Jika nextQty < -0.000001, batalkan transaksi dan lempar error INSUFFICIENT_STOCK_BALANCE
+    if (nextQty < -0.000001) {
+      throw Object.assign(
+        new Error(
+          `Saldo stok tidak mencukupi untuk penyesuaian keluar. Saldo saat ini: ${currentQty.toFixed(3)}, dibutuhkan: ${Math.abs(deltaQty).toFixed(3)}`
+        ),
+        {
+          statusCode: 400,
+          code: 'INSUFFICIENT_STOCK_BALANCE',
+        }
+      );
+    }
+
+    // Hitung finalBalance = Math.max(0, nextQty).toFixed(3), lalu simpan ke database dengan nilai non-negatif
+    const finalBalance = Math.max(0, nextQty).toFixed(3);
+    const balRes = await client.query(
+      `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (property_id, product_id, location_id)
+       DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()
+       RETURNING quantity`,
+      [propertyId, productId, locationId, finalBalance]
+    );
+    const newBalance = balRes.rows[0].quantity;
+
+    if (isPool) await client.query('COMMIT');
+
+    return {
+      operation_id: Number(opRow.id),
+      operation_type: 'STOCK_ADJUSTMENT',
+      operation_key: opKey,
+      movement_id: Number(movRow.id),
+      property_id: propertyId,
+      product_id: productId,
+      location_id: locationId,
+      adjustment_type: adjustmentType,
+      reason_code: reasonCode,
+      quantity_delta: signedDeltaStr,
+      base_unit_code: baseUnitCode,
+      packaging_id: packagingId,
+      packaging_code: packagingCode,
+      packaging_label: packagingLabel,
+      current_balance: String(newBalance),
+      is_replay: false,
+      notes,
+      created_at: opRow.created_at,
+    };
+  } catch (err) {
+    if (isPool) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    throw err;
+  } finally {
+    if (isPool) {
+      client.release();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. Domain Function: recordStockOpname
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function recordStockOpname(
+  clientOrPool: Pool | PoolClient | any,
+  params: RecordStockOpnameParams
+): Promise<StockOpnameResult> {
+  const propertyId = Number(params.property_id);
+  const locationId = Number(params.location_id);
+  const opKey = String(params.operation_key || '').trim();
+  const notes = params.notes !== undefined && params.notes !== null ? String(params.notes).trim() : null;
+  const createdBy = params.created_by ? Number(params.created_by) : null;
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw Object.assign(new Error('location_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!opKey) {
+    throw Object.assign(new Error('operation_key wajib disertakan sebagai teks non-kosong'), {
+      statusCode: 400,
+      code: 'OPERATION_KEY_REQUIRED',
+    });
+  }
+  if (!Array.isArray(params.items) || params.items.length === 0) {
+    throw Object.assign(new Error('items opname harus berupa array dengan minimal 1 produk'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // Cek duplikasi produk dalam daftar item
+  const productIdsSet = new Set<number>();
+  for (const item of params.items) {
+    const pid = Number(item.product_id);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      throw Object.assign(new Error('product_id pada item opname harus bilangan bulat positif'), {
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    if (productIdsSet.has(pid)) {
+      throw Object.assign(new Error(`Produk dengan id ${pid} tercantum lebih dari satu kali dalam satu sesi opname`), {
+        statusCode: 400,
+        code: 'DUPLICATE_PRODUCT_IN_OPNAME',
+      });
+    }
+    productIdsSet.add(pid);
+  }
+
+  const isPool = typeof clientOrPool.connect === 'function';
+  const client: PoolClient = isPool ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    if (isPool) {
+      await client.query('BEGIN');
+    }
+
+    // ── Validasi Lokasi ──
+    const locRes = await client.query(
+      `SELECT id, property_id, code, name, location_type, is_active
+         FROM stock_locations
+        WHERE id = $1 AND property_id = $2`,
+      [locationId, propertyId]
+    );
+
+    if (locRes.rowCount === 0) {
+      throw Object.assign(
+        new Error(`Lokasi stok dengan id ${locationId} tidak ditemukan pada properti ${propertyId}`),
+        { statusCode: 404, code: 'LOCATION_NOT_FOUND' }
+      );
+    }
+    const location = locRes.rows[0];
+    if (!location.is_active) {
+      throw Object.assign(
+        new Error(`Lokasi stok "${location.name}" (${location.code}) sedang tidak aktif`),
+        { statusCode: 400, code: 'LOCATION_INACTIVE' }
+      );
+    }
+
+    // ── Fingerprint & Idempotency Check (R-05) ──
+    const payloadFingerprint = computeStockOpnameFingerprint({
+      property_id: propertyId,
+      location_id: locationId,
+      items: params.items,
+    });
+
+    const existingOpRes = await client.query(
+      `SELECT id, operation_type, operation_key, payload_fingerprint, notes, metadata, created_at
+         FROM stock_operations
+        WHERE property_id = $1 AND operation_key = $2`,
+      [propertyId, opKey]
+    );
+
+    if (existingOpRes.rows.length > 0) {
+      const existingOp = existingOpRes.rows[0];
+      if (existingOp.payload_fingerprint === payloadFingerprint) {
+        // Idempotent Replay
+        const meta = typeof existingOp.metadata === 'string' ? JSON.parse(existingOp.metadata) : existingOp.metadata || {};
+        if (isPool) await client.query('COMMIT');
+        return {
+          operation_id: Number(existingOp.id),
+          operation_type: 'STOCK_OPNAME',
+          operation_key: existingOp.operation_key,
+          property_id: propertyId,
+          location_id: locationId,
+          items: meta.items_summary || [],
+          notes: existingOp.notes ?? null,
+          is_replay: true,
+          created_at: existingOp.created_at,
+        };
+      }
+
+      throw Object.assign(
+        new Error(
+          `operation_key "${opKey}" sudah digunakan untuk operasi stok lain dengan payload berbeda. Gunakan operation_key unik.`
+        ),
+        {
+          statusCode: 409,
+          code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+        }
+      );
+    }
+
+    // Urutkan item berdasarkan product_id ASC guna mencegah PostgreSQL deadlocks
+    const sortedItems = [...params.items].sort((a, b) => Number(a.product_id) - Number(b.product_id));
+
+    // Siapkan wadah hasil
+    const processedItemResults: StockOpnameItemResult[] = [];
+    const movementsToInsert: Array<{
+      productId: number;
+      packagingId: number | null;
+      packagingCode: string | null;
+      packagingLabel: string | null;
+      deltaStr: string;
+      baseUnitCode: string;
+      itemIndex: number;
+      physicalBaseQtyStr: string;
+    }> = [];
+
+    for (let i = 0; i < sortedItems.length; i++) {
+      const item = sortedItems[i];
+      const pid = Number(item.product_id);
+
+      // Kunci produk FOR UPDATE
+      const prodRes = await client.query(
+        `SELECT id, property_id, name, base_unit, canonical_base_unit_code, track_stock, is_active
+           FROM pos_menu_items
+          WHERE id = $1 AND property_id = $2
+          FOR UPDATE`,
+        [pid, propertyId]
+      );
+
+      if (prodRes.rowCount === 0) {
+        throw Object.assign(
+          new Error(`Produk dengan id ${pid} tidak ditemukan pada properti ${propertyId}`),
+          { statusCode: 404, code: 'PRODUCT_NOT_FOUND' }
+        );
+      }
+
+      const product = prodRes.rows[0];
+      if (!product.track_stock) {
+        throw Object.assign(
+          new Error(`Produk "${product.name}" tidak dikonfigurasi untuk pencatatan stok (track_stock = false)`),
+          { statusCode: 400, code: 'PRODUCT_STOCK_NOT_TRACKED' }
+        );
+      }
+
+      const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
+
+      // Konversi kuantitas fisik (R-06 jika via kemasan)
+      let physicalBaseQtyStr: string;
+      let packagingId: number | null = null;
+      let packagingCode: string | null = null;
+      let packagingLabel: string | null = null;
+
+      if (item.packaging_id !== undefined && item.packaging_id !== null) {
+        const parsedPkgId = Number(item.packaging_id);
+        const pkgRes = await client.query(
+          `SELECT id, property_id, menu_item_id, packaging_code, packaging_label,
+                  base_unit_code, to_base_factor, is_active
+             FROM product_packaging_conversions
+            WHERE id = $1 AND property_id = $2 AND menu_item_id = $3`,
+          [parsedPkgId, propertyId, pid]
+        );
+
+        if (pkgRes.rowCount === 0) {
+          throw Object.assign(new Error(`Kemasan konversi tidak ditemukan untuk produk ${product.name}`), {
+            statusCode: 404,
+            code: 'PACKAGING_NOT_FOUND',
+          });
+        }
+        const pkg = pkgRes.rows[0];
+        const conv = convertPackagingToBaseQuantity({
+          packagingQty: item.physical_quantity,
+          toBaseFactor: pkg.to_base_factor,
+          baseUnitCode: product.canonical_base_unit_code || pkg.base_unit_code,
+        });
+        if (!conv.ok) {
+          throw Object.assign(new Error(conv.error), { statusCode: conv.status, code: conv.code });
+        }
+        physicalBaseQtyStr = conv.formatted3;
+        packagingId = Number(pkg.id);
+        packagingCode = pkg.packaging_code;
+        packagingLabel = pkg.packaging_label;
+      } else {
+        let parsedQty;
+        if (product.canonical_base_unit_code) {
+          parsedQty = parseCanonicalQuantityInput(item.physical_quantity, product.canonical_base_unit_code, {
+            allowZero: true,
+            fieldLabel: `Kuantitas fisik produk ${product.name}`,
+          });
+        } else {
+          parsedQty = parseStrictDecimalString(item.physical_quantity, `Kuantitas fisik produk ${product.name}`);
+        }
+
+        if (!parsedQty.ok) {
+          throw Object.assign(new Error(parsedQty.error), { statusCode: parsedQty.status, code: parsedQty.code });
+        }
+        if (parsedQty.milli < 0n) {
+          throw Object.assign(new Error(`Kuantitas fisik produk ${product.name} tidak boleh negatif`), {
+            statusCode: 400,
+            code: 'VALIDATION_ERROR',
+          });
+        }
+        physicalBaseQtyStr = parsedQty.formatted3;
+      }
+
+      const physicalMilli = BigInt(Math.round(Number(physicalBaseQtyStr) * 1000));
+
+      // Saldo sistem saat ini
+      const balRes = await client.query(
+        `SELECT quantity
+           FROM stock_balances
+          WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+          FOR UPDATE`,
+        [propertyId, pid, locationId]
+      );
+
+      const systemMilli = balRes.rows.length > 0 ? BigInt(Math.round(Number(balRes.rows[0].quantity) * 1000)) : 0n;
+      const systemQtyStr = (Number(systemMilli) / 1000).toFixed(3);
+
+      const varianceMilli = physicalMilli - systemMilli;
+      let status: 'MATCH' | 'SURPLUS' | 'DEFICIT';
+      let varianceStr: string;
+
+      if (varianceMilli > 0n) {
+        status = 'SURPLUS';
+        varianceStr = (Number(varianceMilli) / 1000).toFixed(3);
+      } else if (varianceMilli < 0n) {
+        status = 'DEFICIT';
+        varianceStr = '-' + (Number(-varianceMilli) / 1000).toFixed(3);
+      } else {
+        status = 'MATCH';
+        varianceStr = '0.000';
+      }
+
+      processedItemResults.push({
+        product_id: pid,
+        product_name: product.name,
+        base_unit_code: baseUnitCode,
+        system_quantity: systemQtyStr,
+        physical_quantity: physicalBaseQtyStr,
+        variance_quantity: varianceStr,
+        status,
+        movement_id: null,
+        packaging_id: packagingId,
+        notes: item.notes ?? null,
+      });
+
+      if (varianceMilli !== 0n) {
+        movementsToInsert.push({
+          productId: pid,
+          packagingId,
+          packagingCode,
+          packagingLabel,
+          deltaStr: varianceStr,
+          baseUnitCode,
+          itemIndex: i,
+          physicalBaseQtyStr,
+        });
+      }
+    }
+
+    // Buat header stock_operations
+    const opInsertRes = await client.query(
+      `INSERT INTO stock_operations (
+         property_id, operation_type, operation_key, payload_fingerprint,
+         notes, metadata, created_by, created_at
+       ) VALUES (
+         $1, 'STOCK_OPNAME', $2, $3,
+         $4, $5, $6, NOW()
+       )
+       RETURNING id, created_at`,
+      [propertyId, opKey, payloadFingerprint, notes, JSON.stringify({ location_id: locationId }), createdBy]
+    );
+    const opRow = opInsertRes.rows[0];
+
+    // Eksekusi mutasi ledger untuk variansi != 0
+    for (const mov of movementsToInsert) {
+      const movRes = await client.query(
+        `INSERT INTO stock_movements (
+           operation_id, property_id, product_id, location_id,
+           packaging_id, packaging_code, packaging_label,
+           quantity_delta, base_unit_code, created_at
+         ) VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7,
+           $8, $9, NOW()
+         )
+         RETURNING id`,
+        [
+          opRow.id,
+          propertyId,
+          mov.productId,
+          locationId,
+          mov.packagingId,
+          mov.packagingCode,
+          mov.packagingLabel,
+          mov.deltaStr,
+          mov.baseUnitCode,
+        ]
+      );
+      const movId = Number(movRes.rows[0].id);
+      processedItemResults[mov.itemIndex].movement_id = movId;
+
+      // Update stock_balances tepat sesuai saldo fisik (SELECT FOR UPDATE -> non-negatif -> INSERT ON CONFLICT)
+      const existingOpnameBalRes = await client.query(
+        `SELECT quantity FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3 FOR UPDATE`,
+        [propertyId, mov.productId, locationId]
+      );
+      const currentOpnameQty = existingOpnameBalRes.rows.length > 0 ? parseFloat(existingOpnameBalRes.rows[0].quantity) : 0;
+      const opnameDeltaQty = parseFloat(mov.deltaStr);
+      const nextOpnameQty = currentOpnameQty + opnameDeltaQty;
+
+      if (nextOpnameQty < -0.000001) {
+        throw Object.assign(
+          new Error(`Saldo stok hasil opname tidak boleh negatif`),
+          {
+            statusCode: 400,
+            code: 'INSUFFICIENT_STOCK_BALANCE',
+          }
+        );
+      }
+
+      const finalOpnameBalance = Math.max(0, nextOpnameQty).toFixed(3);
+      await client.query(
+        `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (property_id, product_id, location_id)
+         DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()`,
+        [propertyId, mov.productId, locationId, finalOpnameBalance]
+      );
+    }
+
+    // Simpan ringkasan item ke metadata stock_operations
+    await client.query(
+      `UPDATE stock_operations
+          SET metadata = $1
+        WHERE id = $2`,
+      [JSON.stringify({ location_id: locationId, items_summary: processedItemResults }), opRow.id]
+    );
+
+    if (isPool) await client.query('COMMIT');
+
+    return {
+      operation_id: Number(opRow.id),
+      operation_type: 'STOCK_OPNAME',
+      operation_key: opKey,
+      property_id: propertyId,
+      location_id: locationId,
+      items: processedItemResults,
+      notes,
+      is_replay: false,
+      created_at: opRow.created_at,
+    };
+  } catch (err) {
+    if (isPool) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    throw err;
+  } finally {
+    if (isPool) {
+      client.release();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Domain Function: recordStockTransfer
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function recordStockTransfer(
+  clientOrPool: Pool | PoolClient | any,
+  params: RecordStockTransferParams
+): Promise<StockTransferResult> {
+  const propertyId = Number(params.property_id);
+  const fromLocationId = Number(params.from_location_id);
+  const toLocationId = Number(params.to_location_id);
+  const opKey = String(params.operation_key || '').trim();
+  const notes = params.notes !== undefined && params.notes !== null ? String(params.notes).trim() : null;
+  const createdBy = params.created_by ? Number(params.created_by) : null;
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(fromLocationId) || fromLocationId <= 0) {
+    throw Object.assign(new Error('from_location_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(toLocationId) || toLocationId <= 0) {
+    throw Object.assign(new Error('to_location_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (fromLocationId === toLocationId) {
+    throw Object.assign(new Error('Lokasi asal dan tujuan transfer tidak boleh sama'), {
+      statusCode: 400,
+      code: 'SAME_LOCATION_TRANSFER_FORBIDDEN',
+    });
+  }
+  if (!opKey) {
+    throw Object.assign(new Error('operation_key wajib disertakan sebagai teks non-kosong'), {
+      statusCode: 400,
+      code: 'OPERATION_KEY_REQUIRED',
+    });
+  }
+  if (!Array.isArray(params.items) || params.items.length === 0) {
+    throw Object.assign(new Error('items transfer harus berupa array dengan minimal 1 produk'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // Cek duplikasi produk dalam daftar transfer
+  const productIdsSet = new Set<number>();
+  for (const item of params.items) {
+    const pid = Number(item.product_id);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      throw Object.assign(new Error('product_id pada item transfer harus bilangan bulat positif'), {
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    if (productIdsSet.has(pid)) {
+      throw Object.assign(new Error(`Produk dengan id ${pid} tercantum lebih dari satu kali dalam transfer ini`), {
+        statusCode: 400,
+        code: 'DUPLICATE_PRODUCT_IN_TRANSFER',
+      });
+    }
+    productIdsSet.add(pid);
+  }
+
+  const isPool = typeof clientOrPool.connect === 'function';
+  const client: PoolClient = isPool ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    if (isPool) {
+      await client.query('BEGIN');
+    }
+
+    // ── Validasi Lokasi Asal dan Tujuan ──
+    const locRes = await client.query(
+      `SELECT id, code, name, is_active
+         FROM stock_locations
+        WHERE id IN ($1, $2) AND property_id = $3`,
+      [fromLocationId, toLocationId, propertyId]
+    );
+
+    const fromLoc = locRes.rows.find((r: any) => Number(r.id) === fromLocationId);
+    const toLoc = locRes.rows.find((r: any) => Number(r.id) === toLocationId);
+
+    if (!fromLoc) {
+      throw Object.assign(new Error(`Lokasi asal transfer id ${fromLocationId} tidak ditemukan`), {
+        statusCode: 404,
+        code: 'LOCATION_NOT_FOUND',
+      });
+    }
+    if (!fromLoc.is_active) {
+      throw Object.assign(
+        new Error(`Lokasi asal transfer "${fromLoc.name}" (${fromLoc.code}) sedang tidak aktif`),
+        { statusCode: 400, code: 'LOCATION_INACTIVE' }
+      );
+    }
+
+    if (!toLoc) {
+      throw Object.assign(new Error(`Lokasi tujuan transfer id ${toLocationId} tidak ditemukan`), {
+        statusCode: 404,
+        code: 'LOCATION_NOT_FOUND',
+      });
+    }
+    if (!toLoc.is_active) {
+      throw Object.assign(
+        new Error(`Lokasi tujuan transfer "${toLoc.name}" (${toLoc.code}) sedang tidak aktif`),
+        { statusCode: 400, code: 'LOCATION_INACTIVE' }
+      );
+    }
+
+    // ── Fingerprint & Idempotency Check (R-05) ──
+    const payloadFingerprint = computeStockTransferFingerprint({
+      property_id: propertyId,
+      from_location_id: fromLocationId,
+      to_location_id: toLocationId,
+      items: params.items,
+    });
+
+    const existingOpRes = await client.query(
+      `SELECT id, operation_type, operation_key, payload_fingerprint, notes, metadata, created_at
+         FROM stock_operations
+        WHERE property_id = $1 AND operation_key = $2`,
+      [propertyId, opKey]
+    );
+
+    if (existingOpRes.rows.length > 0) {
+      const existingOp = existingOpRes.rows[0];
+      if (existingOp.payload_fingerprint === payloadFingerprint) {
+        // Idempotent Replay
+        const meta = typeof existingOp.metadata === 'string' ? JSON.parse(existingOp.metadata) : existingOp.metadata || {};
+        if (isPool) await client.query('COMMIT');
+        return {
+          operation_id: Number(existingOp.id),
+          operation_type: 'STOCK_TRANSFER',
+          operation_key: existingOp.operation_key,
+          property_id: propertyId,
+          from_location_id: fromLocationId,
+          to_location_id: toLocationId,
+          items: meta.items_summary || [],
+          notes: existingOp.notes ?? null,
+          is_replay: true,
+          created_at: existingOp.created_at,
+        };
+      }
+
+      throw Object.assign(
+        new Error(
+          `operation_key "${opKey}" sudah digunakan untuk operasi stok lain dengan payload berbeda. Gunakan operation_key unik.`
+        ),
+        {
+          statusCode: 409,
+          code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+        }
+      );
+    }
+
+    // Urutkan item berdasarkan product_id ASC guna mencegah PostgreSQL deadlocks
+    const sortedItems = [...params.items].sort((a, b) => Number(a.product_id) - Number(b.product_id));
+
+    // Validasi kuantitas & kecukupan saldo di lokasi asal untuk semua item sebelum mutasi
+    interface PreparedTransferItem {
+      productId: number;
+      productName: string;
+      baseUnitCode: string;
+      requestedQtyStr: string;
+      baseQtyStr: string;
+      baseQtyMilli: bigint;
+      packagingId: number | null;
+      packagingCode: string | null;
+      packagingLabel: string | null;
+      notes: string | null;
+    }
+
+    const preparedItems: PreparedTransferItem[] = [];
+
+    for (const item of sortedItems) {
+      const pid = Number(item.product_id);
+
+      const prodRes = await client.query(
+        `SELECT id, property_id, name, base_unit, canonical_base_unit_code, track_stock, is_active
+           FROM pos_menu_items
+          WHERE id = $1 AND property_id = $2
+          FOR UPDATE`,
+        [pid, propertyId]
+      );
+
+      if (prodRes.rowCount === 0) {
+        throw Object.assign(
+          new Error(`Produk dengan id ${pid} tidak ditemukan pada properti ${propertyId}`),
+          { statusCode: 404, code: 'PRODUCT_NOT_FOUND' }
+        );
+      }
+
+      const product = prodRes.rows[0];
+      if (!product.track_stock) {
+        throw Object.assign(
+          new Error(`Produk "${product.name}" tidak dikonfigurasi untuk pencatatan stok (track_stock = false)`),
+          { statusCode: 400, code: 'PRODUCT_STOCK_NOT_TRACKED' }
+        );
+      }
+
+      const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
+
+      let baseQtyStr: string;
+      let packagingId: number | null = null;
+      let packagingCode: string | null = null;
+      let packagingLabel: string | null = null;
+
+      if (item.packaging_id !== undefined && item.packaging_id !== null) {
+        const parsedPkgId = Number(item.packaging_id);
+        const pkgRes = await client.query(
+          `SELECT id, property_id, menu_item_id, packaging_code, packaging_label,
+                  base_unit_code, to_base_factor, is_active
+             FROM product_packaging_conversions
+            WHERE id = $1 AND property_id = $2 AND menu_item_id = $3`,
+          [parsedPkgId, propertyId, pid]
+        );
+
+        if (pkgRes.rowCount === 0) {
+          throw Object.assign(new Error(`Kemasan konversi tidak ditemukan untuk produk ${product.name}`), {
+            statusCode: 404,
+            code: 'PACKAGING_NOT_FOUND',
+          });
+        }
+        const pkg = pkgRes.rows[0];
+        const conv = convertPackagingToBaseQuantity({
+          packagingQty: item.quantity,
+          toBaseFactor: pkg.to_base_factor,
+          baseUnitCode: product.canonical_base_unit_code || pkg.base_unit_code,
+        });
+        if (!conv.ok) {
+          throw Object.assign(new Error(conv.error), { statusCode: conv.status, code: conv.code });
+        }
+        baseQtyStr = conv.formatted3;
+        packagingId = Number(pkg.id);
+        packagingCode = pkg.packaging_code;
+        packagingLabel = pkg.packaging_label;
+      } else {
+        let parsedQty;
+        if (product.canonical_base_unit_code) {
+          parsedQty = parseCanonicalQuantityInput(item.quantity, product.canonical_base_unit_code, {
+            allowZero: false,
+            fieldLabel: `Kuantitas transfer produk ${product.name}`,
+          });
+        } else {
+          parsedQty = parseStrictDecimalString(item.quantity, `Kuantitas transfer produk ${product.name}`);
+        }
+
+        if (!parsedQty.ok) {
+          throw Object.assign(new Error(parsedQty.error), { statusCode: parsedQty.status, code: parsedQty.code });
+        }
+        if (parsedQty.milli <= 0n) {
+          throw Object.assign(new Error(`Kuantitas transfer produk ${product.name} harus lebih besar dari 0`), {
+            statusCode: 400,
+            code: 'VALIDATION_ERROR',
+          });
+        }
+        baseQtyStr = parsedQty.formatted3;
+      }
+
+      const baseQtyMilli = BigInt(Math.round(Number(baseQtyStr) * 1000));
+
+      // Guard saldo lokasi asal
+      const originBalRes = await client.query(
+        `SELECT quantity
+           FROM stock_balances
+          WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+          FOR UPDATE`,
+        [propertyId, pid, fromLocationId]
+      );
+
+      const originBalMilli =
+        originBalRes.rows.length > 0 ? BigInt(Math.round(Number(originBalRes.rows[0].quantity) * 1000)) : 0n;
+
+      if (originBalMilli < baseQtyMilli) {
+        const curBalFormatted = (Number(originBalMilli) / 1000).toFixed(3);
+        const reqQtyFormatted = (Number(baseQtyMilli) / 1000).toFixed(3);
+        throw Object.assign(
+          new Error(
+            `Saldo stok tidak mencukupi untuk transfer di lokasi asal (${fromLoc.code}). Saldo saat ini: ${curBalFormatted}, dibutuhkan: ${reqQtyFormatted}`
+          ),
+          {
+            statusCode: 400,
+            code: 'INSUFFICIENT_STOCK_BALANCE',
+          }
+        );
+      }
+
+      preparedItems.push({
+        productId: pid,
+        productName: product.name,
+        baseUnitCode,
+        requestedQtyStr: String(item.quantity).trim(),
+        baseQtyStr,
+        baseQtyMilli,
+        packagingId,
+        packagingCode,
+        packagingLabel,
+        notes: item.notes ?? null,
+      });
+    }
+
+    // ── Eksekusi Atomik Transfer ──
+    const opInsertRes = await client.query(
+      `INSERT INTO stock_operations (
+         property_id, operation_type, operation_key, payload_fingerprint,
+         notes, metadata, created_by, created_at
+       ) VALUES (
+         $1, 'STOCK_TRANSFER', $2, $3,
+         $4, $5, $6, NOW()
+       )
+       RETURNING id, created_at`,
+      [
+        propertyId,
+        opKey,
+        payloadFingerprint,
+        notes,
+        JSON.stringify({ from_location_id: fromLocationId, to_location_id: toLocationId }),
+        createdBy,
+      ]
+    );
+    const opRow = opInsertRes.rows[0];
+
+    const resultsItems: StockTransferItemResult[] = [];
+
+    for (const prep of preparedItems) {
+      const outDeltaStr = '-' + prep.baseQtyStr;
+      const inDeltaStr = prep.baseQtyStr;
+
+      // Mutasi OUT di lokasi asal
+      const outMovRes = await client.query(
+        `INSERT INTO stock_movements (
+           operation_id, property_id, product_id, location_id,
+           packaging_id, packaging_code, packaging_label,
+           quantity_delta, base_unit_code, created_at
+         ) VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7,
+           $8, $9, NOW()
+         )
+         RETURNING id`,
+        [
+          opRow.id,
+          propertyId,
+          prep.productId,
+          fromLocationId,
+          prep.packagingId,
+          prep.packagingCode,
+          prep.packagingLabel,
+          outDeltaStr,
+          prep.baseUnitCode,
+        ]
+      );
+      const outMovId = Number(outMovRes.rows[0].id);
+
+      // Potong saldo di lokasi asal
+      const existingOriginBalRes = await client.query(
+        `SELECT quantity FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3 FOR UPDATE`,
+        [propertyId, prep.productId, fromLocationId]
+      );
+      const originCurrentQty = existingOriginBalRes.rows.length > 0 ? parseFloat(existingOriginBalRes.rows[0].quantity) : 0;
+      const originDeltaQty = -parseFloat(prep.baseQtyStr);
+      const originNextQty = originCurrentQty + originDeltaQty;
+
+      if (originNextQty < -0.000001) {
+        throw Object.assign(
+          new Error(
+            `Saldo stok tidak mencukupi untuk transfer di lokasi asal (${fromLoc.code}). Saldo saat ini: ${originCurrentQty.toFixed(3)}, dibutuhkan: ${prep.baseQtyStr}`
+          ),
+          {
+            statusCode: 400,
+            code: 'INSUFFICIENT_STOCK_BALANCE',
+          }
+        );
+      }
+
+      const originFinalBalance = Math.max(0, originNextQty).toFixed(3);
+      const outBalRes = await client.query(
+        `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (property_id, product_id, location_id)
+         DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()
+         RETURNING quantity`,
+        [propertyId, prep.productId, fromLocationId, originFinalBalance]
+      );
+      const newOriginBal = outBalRes.rows[0].quantity;
+
+      // Mutasi IN di lokasi tujuan
+      const inMovRes = await client.query(
+        `INSERT INTO stock_movements (
+           operation_id, property_id, product_id, location_id,
+           packaging_id, packaging_code, packaging_label,
+           quantity_delta, base_unit_code, created_at
+         ) VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7,
+           $8, $9, NOW()
+         )
+         RETURNING id`,
+        [
+          opRow.id,
+          propertyId,
+          prep.productId,
+          toLocationId,
+          prep.packagingId,
+          prep.packagingCode,
+          prep.packagingLabel,
+          inDeltaStr,
+          prep.baseUnitCode,
+        ]
+      );
+      const inMovId = Number(inMovRes.rows[0].id);
+
+      // Tambah saldo di lokasi tujuan
+      const existingDestBalRes = await client.query(
+        `SELECT quantity FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3 FOR UPDATE`,
+        [propertyId, prep.productId, toLocationId]
+      );
+      const destCurrentQty = existingDestBalRes.rows.length > 0 ? parseFloat(existingDestBalRes.rows[0].quantity) : 0;
+      const destDeltaQty = parseFloat(prep.baseQtyStr);
+      const destNextQty = destCurrentQty + destDeltaQty;
+      const destFinalBalance = Math.max(0, destNextQty).toFixed(3);
+
+      const inBalRes = await client.query(
+        `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (property_id, product_id, location_id)
+         DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()
+         RETURNING quantity`,
+        [propertyId, prep.productId, toLocationId, destFinalBalance]
+      );
+      const newDestBal = inBalRes.rows[0].quantity;
+
+      resultsItems.push({
+        product_id: prep.productId,
+        product_name: prep.productName,
+        base_unit_code: prep.baseUnitCode,
+        quantity: prep.requestedQtyStr,
+        base_quantity: prep.baseQtyStr,
+        out_movement_id: outMovId,
+        in_movement_id: inMovId,
+        origin_balance: String(newOriginBal),
+        destination_balance: String(newDestBal),
+        packaging_id: prep.packagingId,
+        packaging_code: prep.packagingCode,
+        packaging_label: prep.packagingLabel,
+        notes: prep.notes,
+      });
+    }
+
+    // Simpan ringkasan item ke metadata stock_operations
+    await client.query(
+      `UPDATE stock_operations
+          SET metadata = $1
+        WHERE id = $2`,
+      [
+        JSON.stringify({
+          from_location_id: fromLocationId,
+          to_location_id: toLocationId,
+          items_summary: resultsItems,
+        }),
+        opRow.id,
+      ]
+    );
+
+    if (isPool) await client.query('COMMIT');
+
+    return {
+      operation_id: Number(opRow.id),
+      operation_type: 'STOCK_TRANSFER',
+      operation_key: opKey,
+      property_id: propertyId,
+      from_location_id: fromLocationId,
+      to_location_id: toLocationId,
+      items: resultsItems,
+      notes,
+      is_replay: false,
+      created_at: opRow.created_at,
+    };
+  } catch (err) {
+    if (isPool) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    throw err;
+  } finally {
+    if (isPool) {
+      client.release();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. Query Functions: Adjustments, Opnames, Transfers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getStockAdjustments(
+  pool: Pool | any,
+  filters: StockAdjustmentFilters
+): Promise<any[]> {
+  const propertyId = Number(filters.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const conditions: string[] = ['so.property_id = $1', "so.operation_type = 'STOCK_ADJUSTMENT'"];
+  const params: any[] = [propertyId];
+  let paramIdx = 2;
+
+  if (filters.product_id) {
+    conditions.push(`sm.product_id = $${paramIdx++}`);
+    params.push(Number(filters.product_id));
+  }
+
+  if (filters.location_id) {
+    conditions.push(`sm.location_id = $${paramIdx++}`);
+    params.push(Number(filters.location_id));
+  }
+
+  if (filters.reason_code) {
+    conditions.push(`so.metadata->>'reason_code' = $${paramIdx++}`);
+    params.push(String(filters.reason_code).trim().toUpperCase());
+  }
+
+  if (filters.adjustment_type) {
+    conditions.push(`so.metadata->>'adjustment_type' = $${paramIdx++}`);
+    params.push(String(filters.adjustment_type).trim().toUpperCase());
+  }
+
+  if (filters.start_date) {
+    conditions.push(`so.created_at >= $${paramIdx++}`);
+    params.push(filters.start_date);
+  }
+
+  if (filters.end_date) {
+    conditions.push(`so.created_at <= $${paramIdx++}`);
+    params.push(filters.end_date);
+  }
+
+  const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
+  const offset = Math.max(Number(filters.offset) || 0, 0);
+
+  const queryStr = `
+    SELECT so.id AS operation_id,
+           so.operation_key,
+           so.operation_type,
+           so.notes,
+           so.metadata,
+           so.created_by,
+           so.created_at,
+           sm.id AS movement_id,
+           sm.product_id,
+           p.name AS product_name,
+           sm.location_id,
+           loc.code AS location_code,
+           loc.name AS location_name,
+           sm.quantity_delta,
+           sm.base_unit_code,
+           sm.packaging_id,
+           sm.packaging_code,
+           sm.packaging_label
+      FROM stock_operations so
+      JOIN stock_movements sm ON sm.operation_id = so.id
+      JOIN pos_menu_items p ON p.id = sm.product_id
+      JOIN stock_locations loc ON loc.id = sm.location_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY so.id DESC
+     LIMIT ${limit} OFFSET ${offset}
+  `;
+
+  const res = await pool.query(queryStr, params);
+  return res.rows.map((r: any) => {
+    const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {};
+    return {
+      operation_id: Number(r.operation_id),
+      operation_key: r.operation_key,
+      movement_id: Number(r.movement_id),
+      product_id: Number(r.product_id),
+      product_name: r.product_name,
+      location_id: Number(r.location_id),
+      location_code: r.location_code,
+      location_name: r.location_name,
+      adjustment_type: meta.adjustment_type || (Number(r.quantity_delta) < 0 ? 'OUT' : 'IN'),
+      reason_code: meta.reason_code || 'KOREKSI_ADMIN',
+      quantity_delta: String(r.quantity_delta),
+      base_unit_code: r.base_unit_code,
+      packaging_id: r.packaging_id ? Number(r.packaging_id) : null,
+      packaging_code: r.packaging_code ?? null,
+      packaging_label: r.packaging_label ?? null,
+      notes: r.notes ?? null,
+      created_by: r.created_by ? Number(r.created_by) : null,
+      created_at: r.created_at,
+    };
+  });
+}
+
+export async function getStockOpnames(
+  pool: Pool | any,
+  filters: StockOpnameFilters
+): Promise<any[]> {
+  const propertyId = Number(filters.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const conditions: string[] = ['so.property_id = $1', "so.operation_type = 'STOCK_OPNAME'"];
+  const params: any[] = [propertyId];
+  let paramIdx = 2;
+
+  if (filters.location_id) {
+    conditions.push(`(so.metadata->>'location_id')::int = $${paramIdx++}`);
+    params.push(Number(filters.location_id));
+  }
+
+  if (filters.start_date) {
+    conditions.push(`so.created_at >= $${paramIdx++}`);
+    params.push(filters.start_date);
+  }
+
+  if (filters.end_date) {
+    conditions.push(`so.created_at <= $${paramIdx++}`);
+    params.push(filters.end_date);
+  }
+
+  const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
+  const offset = Math.max(Number(filters.offset) || 0, 0);
+
+  const queryStr = `
+    SELECT so.id AS operation_id,
+           so.operation_key,
+           so.operation_type,
+           so.notes,
+           so.metadata,
+           so.created_by,
+           so.created_at
+      FROM stock_operations so
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY so.id DESC
+     LIMIT ${limit} OFFSET ${offset}
+  `;
+
+  const res = await pool.query(queryStr, params);
+  return res.rows.map((r: any) => {
+    const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {};
+    return {
+      operation_id: Number(r.operation_id),
+      operation_key: r.operation_key,
+      location_id: meta.location_id ? Number(meta.location_id) : null,
+      items: meta.items_summary || [],
+      notes: r.notes ?? null,
+      created_by: r.created_by ? Number(r.created_by) : null,
+      created_at: r.created_at,
+    };
+  });
+}
+
+export async function getStockTransfers(
+  pool: Pool | any,
+  filters: StockTransferFilters
+): Promise<any[]> {
+  const propertyId = Number(filters.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const conditions: string[] = ['so.property_id = $1', "so.operation_type = 'STOCK_TRANSFER'"];
+  const params: any[] = [propertyId];
+  let paramIdx = 2;
+
+  if (filters.from_location_id) {
+    conditions.push(`(so.metadata->>'from_location_id')::int = $${paramIdx++}`);
+    params.push(Number(filters.from_location_id));
+  }
+
+  if (filters.to_location_id) {
+    conditions.push(`(so.metadata->>'to_location_id')::int = $${paramIdx++}`);
+    params.push(Number(filters.to_location_id));
+  }
+
+  if (filters.start_date) {
+    conditions.push(`so.created_at >= $${paramIdx++}`);
+    params.push(filters.start_date);
+  }
+
+  if (filters.end_date) {
+    conditions.push(`so.created_at <= $${paramIdx++}`);
+    params.push(filters.end_date);
+  }
+
+  const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
+  const offset = Math.max(Number(filters.offset) || 0, 0);
+
+  const queryStr = `
+    SELECT so.id AS operation_id,
+           so.operation_key,
+           so.operation_type,
+           so.notes,
+           so.metadata,
+           so.created_by,
+           so.created_at
+      FROM stock_operations so
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY so.id DESC
+     LIMIT ${limit} OFFSET ${offset}
+  `;
+
+  const res = await pool.query(queryStr, params);
+  return res.rows.map((r: any) => {
+    const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {};
+    return {
+      operation_id: Number(r.operation_id),
+      operation_key: r.operation_key,
+      from_location_id: meta.from_location_id ? Number(meta.from_location_id) : null,
+      to_location_id: meta.to_location_id ? Number(meta.to_location_id) : null,
+      items: meta.items_summary || [],
+      notes: r.notes ?? null,
+      created_by: r.created_by ? Number(r.created_by) : null,
+      created_at: r.created_at,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Express Route Handlers (MP-04B B-4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function checkInventoryPermission(
+  authUser: any,
+  requiredPermissions: string[],
+  pool: Pool
+): Promise<boolean> {
+  if (!authUser) return true;
+  const role = String(authUser.role || '').toUpperCase();
+  if (role === 'SUPERADMIN' || role === 'SUPER ADMIN' || role === 'ADMIN') {
+    return true;
+  }
+  if (Array.isArray(authUser.permissions)) {
+    if (requiredPermissions.some((p) => authUser.permissions.includes(p))) {
+      return true;
+    }
+  }
+  try {
+    for (const perm of requiredPermissions) {
+      if (await hasPermission(authUser, perm, pool)) {
+        return true;
+      }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+export function createStockAdjustmentHandler(deps: StockInventoryDeps) {
+  return async function handleStockAdjustment(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.body?.property_id ?? req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canWrite = await checkInventoryPermission(authUser, ['inventory.create', 'inventory.edit'], deps.pool);
+        if (!canWrite) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.create atau inventory.edit',
+          });
+        }
+      }
+
+      const headerKey =
+        (typeof req.headers?.['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : null) ||
+        (typeof req.headers?.['x-idempotency-key'] === 'string' ? req.headers['x-idempotency-key'] : null);
+      const opKey = String(headerKey || req.body?.operation_key || '').trim();
+
+      if (!opKey) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'OPERATION_KEY_REQUIRED',
+          message: 'operation_key atau header Idempotency-Key wajib disertakan',
+        });
+      }
+
+      const createdBy = authUser?.id ? Number(authUser.id) : null;
+
+      const result = await recordStockAdjustment(deps.pool, {
+        property_id: propertyId,
+        product_id: Number(req.body?.product_id),
+        location_id: Number(req.body?.location_id),
+        adjustment_type: req.body?.adjustment_type,
+        reason_code: req.body?.reason_code,
+        quantity: req.body?.quantity,
+        packaging_id: req.body?.packaging_id,
+        operation_key: opKey,
+        notes: req.body?.notes,
+        created_by: createdBy,
+      });
+
+      const httpStatus = result.is_replay ? 200 : 201;
+      return res.status(httpStatus).json({
+        status: 'OK',
+        data: result,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal mencatat penyesuaian stok',
+      });
+    }
+  };
+}
+
+export function createStockAdjustmentsQueryHandler(deps: StockInventoryDeps) {
+  return async function handleStockAdjustmentsQuery(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(authUser, ['inventory.view', 'inventory.create', 'inventory.edit'], deps.pool);
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const adjustments = await getStockAdjustments(deps.pool, {
+        property_id: propertyId,
+        product_id: req.query?.product_id ? Number(req.query.product_id) : undefined,
+        location_id: req.query?.location_id ? Number(req.query.location_id) : undefined,
+        reason_code: req.query?.reason_code ? String(req.query.reason_code) : undefined,
+        adjustment_type: req.query?.adjustment_type ? String(req.query.adjustment_type) : undefined,
+        start_date: req.query?.start_date ? String(req.query.start_date) : undefined,
+        end_date: req.query?.end_date ? String(req.query.end_date) : undefined,
+        limit: req.query?.limit ? Number(req.query.limit) : undefined,
+        offset: req.query?.offset ? Number(req.query.offset) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: adjustments,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat riwayat penyesuaian stok',
+      });
+    }
+  };
+}
+
+export function createStockOpnameHandler(deps: StockInventoryDeps) {
+  return async function handleStockOpname(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.body?.property_id ?? req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canWrite = await checkInventoryPermission(authUser, ['inventory.create', 'inventory.edit'], deps.pool);
+        if (!canWrite) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.create atau inventory.edit',
+          });
+        }
+      }
+
+      const headerKey =
+        (typeof req.headers?.['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : null) ||
+        (typeof req.headers?.['x-idempotency-key'] === 'string' ? req.headers['x-idempotency-key'] : null);
+      const opKey = String(headerKey || req.body?.operation_key || '').trim();
+
+      if (!opKey) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'OPERATION_KEY_REQUIRED',
+          message: 'operation_key atau header Idempotency-Key wajib disertakan',
+        });
+      }
+
+      const createdBy = authUser?.id ? Number(authUser.id) : null;
+
+      const result = await recordStockOpname(deps.pool, {
+        property_id: propertyId,
+        location_id: Number(req.body?.location_id),
+        items: req.body?.items,
+        operation_key: opKey,
+        notes: req.body?.notes,
+        created_by: createdBy,
+      });
+
+      const httpStatus = result.is_replay ? 200 : 201;
+      return res.status(httpStatus).json({
+        status: 'OK',
+        data: result,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal mencatat stock opname',
+      });
+    }
+  };
+}
+
+export function createStockOpnamesQueryHandler(deps: StockInventoryDeps) {
+  return async function handleStockOpnamesQuery(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(authUser, ['inventory.view', 'inventory.create', 'inventory.edit'], deps.pool);
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const opnames = await getStockOpnames(deps.pool, {
+        property_id: propertyId,
+        location_id: req.query?.location_id ? Number(req.query.location_id) : undefined,
+        start_date: req.query?.start_date ? String(req.query.start_date) : undefined,
+        end_date: req.query?.end_date ? String(req.query.end_date) : undefined,
+        limit: req.query?.limit ? Number(req.query.limit) : undefined,
+        offset: req.query?.offset ? Number(req.query.offset) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: opnames,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat riwayat stock opname',
+      });
+    }
+  };
+}
+
+export function createStockTransferHandler(deps: StockInventoryDeps) {
+  return async function handleStockTransfer(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.body?.property_id ?? req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canWrite = await checkInventoryPermission(authUser, ['inventory.create', 'inventory.edit'], deps.pool);
+        if (!canWrite) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.create atau inventory.edit',
+          });
+        }
+      }
+
+      const headerKey =
+        (typeof req.headers?.['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : null) ||
+        (typeof req.headers?.['x-idempotency-key'] === 'string' ? req.headers['x-idempotency-key'] : null);
+      const opKey = String(headerKey || req.body?.operation_key || '').trim();
+
+      if (!opKey) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'OPERATION_KEY_REQUIRED',
+          message: 'operation_key atau header Idempotency-Key wajib disertakan',
+        });
+      }
+
+      const createdBy = authUser?.id ? Number(authUser.id) : null;
+
+      const result = await recordStockTransfer(deps.pool, {
+        property_id: propertyId,
+        from_location_id: Number(req.body?.from_location_id),
+        to_location_id: Number(req.body?.to_location_id),
+        items: req.body?.items,
+        operation_key: opKey,
+        notes: req.body?.notes,
+        created_by: createdBy,
+      });
+
+      const httpStatus = result.is_replay ? 200 : 201;
+      return res.status(httpStatus).json({
+        status: 'OK',
+        data: result,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal mencatat transfer stok',
+      });
+    }
+  };
+}
+
+export function createStockTransfersQueryHandler(deps: StockInventoryDeps) {
+  return async function handleStockTransfersQuery(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(authUser, ['inventory.view', 'inventory.create', 'inventory.edit'], deps.pool);
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const transfers = await getStockTransfers(deps.pool, {
+        property_id: propertyId,
+        from_location_id: req.query?.from_location_id ? Number(req.query.from_location_id) : undefined,
+        to_location_id: req.query?.to_location_id ? Number(req.query.to_location_id) : undefined,
+        product_id: req.query?.product_id ? Number(req.query.product_id) : undefined,
+        start_date: req.query?.start_date ? String(req.query.start_date) : undefined,
+        end_date: req.query?.end_date ? String(req.query.end_date) : undefined,
+        limit: req.query?.limit ? Number(req.query.limit) : undefined,
+        offset: req.query?.offset ? Number(req.query.offset) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: transfers,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat riwayat transfer stok',
+      });
+    }
+  };
+}
