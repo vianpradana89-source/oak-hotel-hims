@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
+import PosInventoryWorkspace from '../posInventory/PosInventoryWorkspace';
 
 export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD';
 export type ProductKindCode = 'STANDARD';
@@ -576,6 +577,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [loading, setLoading] = useState<boolean>(!initialItems || initialItems.length === 0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [mainTab, setMainTab] = useState<'catalog' | 'inventory'>('catalog');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -2259,6 +2261,36 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         ))}
       </datalist>
 
+      {/* Top Module Subnav Tabs */}
+      <div className="flex items-center gap-2 bg-white p-1.5 rounded-2xl border border-gray-200/80 shadow-2xs">
+        <button
+          type="button"
+          onClick={() => setMainTab('catalog')}
+          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            mainTab === 'catalog'
+              ? 'bg-[#1b4332] text-white shadow-xs'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+          }`}
+        >
+          Katalog &amp; Master Produk
+        </button>
+        <button
+          type="button"
+          onClick={() => setMainTab('inventory')}
+          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            mainTab === 'inventory'
+              ? 'bg-[#1b4332] text-white shadow-xs'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+          }`}
+        >
+          Inventaris &amp; Saldo Stok POS
+        </button>
+      </div>
+
+      {mainTab === 'inventory' ? (
+        <PosInventoryWorkspace propertyId={propertyId} onRefreshParent={handleRefresh} />
+      ) : (
+        <>
       {/* Header Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-gray-200/80 shadow-xs">
         <div>
@@ -2708,6 +2740,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 5v14m7-7H5" />
           </svg>
         </button>
+      )}
+        </>
       )}
 
       {/* Add Product Modal */}

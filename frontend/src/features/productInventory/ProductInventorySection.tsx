@@ -1,23 +1,33 @@
 import { useState } from 'react';
 import RoomMasterPage from '../roomMaster/RoomMasterPage';
 import type { ActiveRoomReservation } from '../roomMaster/roomMasterTypes';
+import PosInventoryWorkspace from '../posInventory/PosInventoryWorkspace';
 
 interface Props {
   propertyId: number | null;
-  posMenuCount: number;
-  posOrderCount: number;
+  posMenuCount?: number;
+  posOrderCount?: number;
   onViewReservation: (reservation: ActiveRoomReservation) => void | Promise<void>;
 }
 
 // Produk & Inventori landing section: Kamar (Room Master) is the primary
-// operational view; the legacy POS summary remains available as a tab.
-export default function ProductInventorySection({ propertyId, posMenuCount, posOrderCount, onViewReservation }: Props) {
-  const [section, setSection] = useState<'kamar' | 'pos'>('kamar');
+// operational view; POS inventory management is available under the POS tab.
+export default function ProductInventorySection({ propertyId, onViewReservation }: Props) {
+  const [section, setSection] = useState<'pos' | 'kamar'>('pos');
 
   return (
     <div className="rm-page">
       <div className="rm-subnav-wrap">
         <div className="rm-subnav" role="tablist" aria-label="Produk & Inventori">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={section === 'pos'}
+            className={section === 'pos' ? 'active' : ''}
+            onClick={() => setSection('pos')}
+          >
+            Inventaris POS
+          </button>
           <button
             type="button"
             role="tab"
@@ -27,34 +37,13 @@ export default function ProductInventorySection({ propertyId, posMenuCount, posO
           >
             Kamar
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={section === 'pos'}
-            className={section === 'pos' ? 'active' : ''}
-            onClick={() => setSection('pos')}
-          >
-            POS
-          </button>
         </div>
       </div>
 
       {section === 'kamar' ? (
         <RoomMasterPage propertyId={propertyId} onViewReservation={onViewReservation} />
       ) : (
-        <div className="bg-white border rounded shadow-sm p-4">
-          <h3 className="font-bold text-lg mb-3">Produk &amp; Inventori</h3>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="border rounded p-3">
-              <div className="text-xs uppercase text-gray-500">Menu aktif</div>
-              <div className="text-2xl font-bold mt-2">{posMenuCount}</div>
-            </div>
-            <div className="border rounded p-3">
-              <div className="text-xs uppercase text-gray-500">Order hari ini</div>
-              <div className="text-2xl font-bold mt-2">{posOrderCount}</div>
-            </div>
-          </div>
-        </div>
+        <PosInventoryWorkspace propertyId={propertyId} />
       )}
     </div>
   );
