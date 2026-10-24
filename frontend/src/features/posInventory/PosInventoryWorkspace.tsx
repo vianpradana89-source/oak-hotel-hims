@@ -17,12 +17,17 @@ import StockLedgerDrawer from './StockLedgerDrawer';
 import StockAdjustmentModal from './StockAdjustmentModal';
 import StockOpnameModal from './StockOpnameModal';
 import StockTransferModal from './StockTransferModal';
+import PurchaseOrderSection from './PurchaseOrderSection';
+import GoodsReceiptSection from './GoodsReceiptSection';
+import SupplierSection from './SupplierSection';
+import type { PosPurchaseOrder } from './posPurchaseOrderApi';
 
 interface Props {
   propertyId: number | null;
   onRefreshParent?: () => void;
 }
 
+type ActiveInventoryTab = 'VALUATION' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'SUPPLIERS';
 type StockStatusFilter = 'ALL' | 'SAFE' | 'LOW' | 'OUT';
 
 function formatIDR(value: number | string): string {
@@ -52,6 +57,15 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
   const [adjustmentItem, setAdjustmentItem] = useState<InventoryValuationItem | null>(null);
   const [opnameItem, setOpnameItem] = useState<InventoryValuationItem | null>(null);
   const [transferItem, setTransferItem] = useState<InventoryValuationItem | null>(null);
+
+  // Active Tab & Sub-navigation
+  const [activeTab, setActiveTab] = useState<ActiveInventoryTab>('VALUATION');
+  const [grnPreselectedPo, setGrnPreselectedPo] = useState<PosPurchaseOrder | null>(null);
+
+  const handleOpenGrnForPo = (po: PosPurchaseOrder) => {
+    setGrnPreselectedPo(po);
+    setActiveTab('GOODS_RECEIPTS');
+  };
 
   // General action modal states (when clicking top action buttons)
   const [showGeneralAdjustmentModal, setShowGeneralAdjustmentModal] = useState<boolean>(false);
@@ -167,73 +181,142 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
             <span className="text-xs text-gray-500">Property #{activePropertyId}</span>
           </div>
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">
-            Manajemen Persediaan &amp; Valuasi Stok
+            {activeTab === 'VALUATION' && 'Manajemen Persediaan & Valuasi Stok'}
+            {activeTab === 'PURCHASE_ORDERS' && 'Purchase Order (PO) Bahan Baku'}
+            {activeTab === 'GOODS_RECEIPTS' && 'Penerimaan Barang (Goods Receipt / GRN)'}
+            {activeTab === 'SUPPLIERS' && 'Master Supplier & Vendor Bahan Baku'}
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Pemantauan saldo fisik per lokasi gudang/outlet, kartu stok kronologis, penyesuaian barang rusak/hilang, serta stock opname fisik.
+            {activeTab === 'VALUATION' &&
+              'Pemantauan saldo fisik per lokasi gudang/outlet, kartu stok kronologis, penyesuaian barang rusak/hilang, serta stock opname fisik.'}
+            {activeTab === 'PURCHASE_ORDERS' &&
+              'Pengelolaan pemesanan bahan baku ke supplier/vendor, tracking nomor PO, status pemesanan, dan estimasi biaya.'}
+            {activeTab === 'GOODS_RECEIPTS' &&
+              'Pencatatan barang masuk dari PO atau pembelian langsung, pembaruan stok fisik otomatis, dan kalkulasi Moving Average Cost.'}
+            {activeTab === 'SUPPLIERS' &&
+              'Pusat data vendor dan mitra penyedia bahan baku dan inventaris untuk operasional hotel & restoran.'}
           </p>
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              if (items.length > 0) setAdjustmentItem(items[0]);
-              else setShowGeneralAdjustmentModal(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-amber-300 bg-amber-50/80 hover:bg-amber-100 text-amber-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
-          >
-            <svg className="w-4 h-4 text-amber-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-            </svg>
-            Penyesuaian Stok
-          </button>
+        {/* Action Buttons (for Valuation tab) */}
+        {activeTab === 'VALUATION' && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (items.length > 0) setAdjustmentItem(items[0]);
+                else setShowGeneralAdjustmentModal(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-amber-300 bg-amber-50/80 hover:bg-amber-100 text-amber-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-amber-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              Penyesuaian Stok
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              if (items.length > 0) setOpnameItem(items[0]);
-              else setShowGeneralOpnameModal(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-purple-300 bg-purple-50/80 hover:bg-purple-100 text-purple-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
-          >
-            <svg className="w-4 h-4 text-purple-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-            </svg>
-            Opname Fisik
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (items.length > 0) setOpnameItem(items[0]);
+                else setShowGeneralOpnameModal(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-purple-300 bg-purple-50/80 hover:bg-purple-100 text-purple-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-purple-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+              Opname Fisik
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              if (items.length > 0) setTransferItem(items[0]);
-              else setShowGeneralTransferModal(true);
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-emerald-300 bg-emerald-50/80 hover:bg-emerald-100 text-emerald-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
-          >
-            <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-            </svg>
-            Transfer Stok
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (items.length > 0) setTransferItem(items[0]);
+                else setShowGeneralTransferModal(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-emerald-300 bg-emerald-50/80 hover:bg-emerald-100 text-emerald-900 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+              Transfer Stok
+            </button>
 
-          <button
-            type="button"
-            onClick={() => void loadData()}
-            disabled={loading}
-            className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer"
-            title="Refresh Data"
-          >
-            <svg className={`w-4 h-4 ${loading ? 'animate-spin text-emerald-700' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={() => void loadData()}
+              disabled={loading}
+              className="p-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer"
+              title="Refresh Data"
+            >
+              <svg className={`w-4 h-4 ${loading ? 'animate-spin text-emerald-700' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* KPI Overview Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+      {/* Sub-tab Navigation Bar */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-stone-200 pb-3">
+        <button
+          type="button"
+          onClick={() => setActiveTab('VALUATION')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold rounded-xl transition-all cursor-pointer ${
+            activeTab === 'VALUATION'
+              ? 'bg-[#1b4332] text-white shadow-sm ring-1 ring-[#1b4332]'
+              : 'bg-white text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200'
+          }`}
+        >
+          <span>📊</span>
+          <span>Saldo &amp; Valuasi Persediaan</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('PURCHASE_ORDERS')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold rounded-xl transition-all cursor-pointer ${
+            activeTab === 'PURCHASE_ORDERS'
+              ? 'bg-[#1b4332] text-white shadow-sm ring-1 ring-[#1b4332]'
+              : 'bg-white text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200'
+          }`}
+        >
+          <span>📋</span>
+          <span>Purchase Order (PO)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('GOODS_RECEIPTS')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold rounded-xl transition-all cursor-pointer ${
+            activeTab === 'GOODS_RECEIPTS'
+              ? 'bg-[#1b4332] text-white shadow-sm ring-1 ring-[#1b4332]'
+              : 'bg-white text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200'
+          }`}
+        >
+          <span>📥</span>
+          <span>Penerimaan Barang (GRN)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('SUPPLIERS')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold rounded-xl transition-all cursor-pointer ${
+            activeTab === 'SUPPLIERS'
+              ? 'bg-[#1b4332] text-white shadow-sm ring-1 ring-[#1b4332]'
+              : 'bg-white text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200'
+          }`}
+        >
+          <span>🏭</span>
+          <span>Master Supplier</span>
+        </button>
+      </div>
+
+      {activeTab === 'VALUATION' && (
+        <>
+          {/* KPI Overview Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         {/* Total Item SKU */}
         <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-2xs">
           <div className="text-xs text-gray-500 font-semibold">Total Item Persediaan</div>
@@ -518,6 +601,35 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
           </div>
         )}
       </div>
+        </>
+      )}
+
+      {/* Tab: Purchase Orders */}
+      {activeTab === 'PURCHASE_ORDERS' && (
+        <PurchaseOrderSection
+          propertyId={activePropertyId}
+          onOpenGrnForPo={handleOpenGrnForPo}
+          onNotifySuccess={handleActionSuccess}
+        />
+      )}
+
+      {/* Tab: Goods Receipts (GRN) */}
+      {activeTab === 'GOODS_RECEIPTS' && (
+        <GoodsReceiptSection
+          propertyId={activePropertyId}
+          preselectedPo={grnPreselectedPo}
+          onClearPreselectedPo={() => setGrnPreselectedPo(null)}
+          onNotifySuccess={handleActionSuccess}
+        />
+      )}
+
+      {/* Tab: Suppliers */}
+      {activeTab === 'SUPPLIERS' && (
+        <SupplierSection
+          propertyId={activePropertyId}
+          onNotifySuccess={handleActionSuccess}
+        />
+      )}
 
       {/* Stock Ledger Drawer */}
       <StockLedgerDrawer

@@ -211,6 +211,20 @@ import {
   createProductRecipeDeleteHandler,
   createRawMaterialsListHandler,
 } from './domains/pos/posProductRecipeService';
+import {
+  createPosSuppliersListHandler,
+  createPosSupplierGetHandler,
+  createPosSupplierCreateHandler,
+  createPosSupplierUpdateHandler,
+  createPosSupplierDeleteHandler,
+  createPosPurchaseOrdersListHandler,
+  createPosPurchaseOrderGetHandler,
+  createPosPurchaseOrderCreateHandler,
+  createPosPurchaseOrderStatusHandler,
+  createPosGoodsReceiptsListHandler,
+  createPosGoodsReceiptGetHandler,
+  createPosGoodsReceiptCreateHandler,
+} from './domains/pos/posPurchaseOrderHandlers';
 
 const app: any = express();
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -5518,6 +5532,22 @@ app.post('/api/pos/products/:id/recipe', createProductRecipeSaveHandler({ pool, 
 app.get('/api/pos/menu/items/:id/recipe', createProductRecipeGetHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/menu/items/:id/recipe', createProductRecipeSaveHandler({ pool, assertPropertyScope }));
 app.delete('/api/pos/recipes/:recipeId', createProductRecipeDeleteHandler({ pool, assertPropertyScope }));
+
+// ── Purchase Order & Goods Receipt (GRN) Bahan Baku POS (MP-04D) ────────────
+app.get('/api/pos/suppliers', createPosSuppliersListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/suppliers', createPosSupplierCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/suppliers/:id', createPosSupplierGetHandler({ pool, assertPropertyScope }));
+app.put('/api/pos/suppliers/:id', createPosSupplierUpdateHandler({ pool, assertPropertyScope }));
+app.delete('/api/pos/suppliers/:id', createPosSupplierDeleteHandler({ pool, assertPropertyScope }));
+
+app.get('/api/pos/purchase-orders', createPosPurchaseOrdersListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/purchase-orders', createPosPurchaseOrderCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/purchase-orders/:id', createPosPurchaseOrderGetHandler({ pool, assertPropertyScope }));
+app.patch('/api/pos/purchase-orders/:id/status', createPosPurchaseOrderStatusHandler({ pool, assertPropertyScope }));
+
+app.get('/api/pos/goods-receipts', createPosGoodsReceiptsListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/goods-receipts', createPosGoodsReceiptCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/goods-receipts/:id', createPosGoodsReceiptGetHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 
