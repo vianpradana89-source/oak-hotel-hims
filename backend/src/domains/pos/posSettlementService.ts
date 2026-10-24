@@ -47,6 +47,7 @@ import { projectPosOrderToTransaction } from '../transactions/transactionService
 import type { TransactionRow } from '../transactions/transactionTypes';
 import { computeRequestHash } from '../../utils/hash';
 import { propertyQrisImageExists } from '../propertyPaymentInstructions/qrisImageStorage';
+import { deductStockForPosSale, type PosSaleStockDeductionResult } from './stockInventoryService';
 
 // =============================================================================
 // Error type
@@ -122,6 +123,8 @@ export interface PayPosOrderInput extends PayPosOrderCashInput {
   paymentMethod?: string;
   /** Method-specific fields (cash_received for CASH, reference for non-CASH). */
   methodInput?: PosMethodSpecificInput;
+  /** Lokasi persediaan target untuk pemotongan stok (opsional). */
+  locationId?: number;
 }
 
 export interface PayPosOrderCashResult {
@@ -157,6 +160,8 @@ export interface PayPosOrderCashResult {
     source_type: string;
     source_id: string | null;
   };
+  /** Hasil pemotongan persediaan otomatis (jika ada item terlacak). */
+  stockDeduction?: PosSaleStockDeductionResult;
 }
 
 // Baris SALE minimal yang diambil dari DB (bukan dari projection objek)
@@ -633,6 +638,20 @@ export async function payPosOrder(
           expectedSaleId,
           paymentMethod
         );
+        let replayStockDeduction: PosSaleStockDeductionResult | undefined;
+        try {
+          replayStockDeduction = await deductStockForPosSale({
+            client: poolClient,
+            propertyId,
+            orderId,
+            locationId: input.locationId,
+            saleTransactionNo: saleRow.transaction_no,
+            actorUserId: input.actorUserId,
+            actorName: input.actorName,
+          });
+        } catch {
+          // replay lookup fallback
+        }
         await poolClient.query('COMMIT');
         return {
           settlement: {
@@ -654,6 +673,7 @@ export async function payPosOrder(
           },
           created: false,
           replayed: true,
+          stockDeduction: replayStockDeduction,
           sale: {
             id: saleRow.id,
             transaction_no: saleRow.transaction_no,
@@ -775,6 +795,28 @@ export async function payPosOrder(
       undefined,
       paymentMethod
     );
+
+        // 3b) Pemotongan persediaan otomatis untuk produk terlacak (MP-04B)
+    let stockDeduction: PosSaleStockDeductionResult | undefined;
+    try {
+      stockDeduction = await deductStockForPosSale({
+        client: poolClient,
+        propertyId,
+        orderId,
+        locationId: input.locationId,
+        saleTransactionNo: saleRow.transaction_no,
+        actorUserId: input.actorUserId,
+        actorName: input.actorName,
+      });
+    } catch (stockErr: any) {
+      if (stockErr?.code === 'INSUFFICIENT_STOCK_BALANCE') {
+        throw new PosSettlementError(422, 'INSUFFICIENT_STOCK_BALANCE', stockErr.message);
+      }
+      if (stockErr?.code === 'NO_STOCK_LOCATION') {
+        throw new PosSettlementError(400, 'NO_STOCK_LOCATION', stockErr.message);
+      }
+      throw stockErr;
+    }
 
     // 4) INSERT settlement dengan field metode spesifik
     const amountForSettlement = String(orderAmount);
@@ -906,6 +948,7 @@ export async function payPosOrder(
       },
       created: true,
       replayed: false,
+      stockDeduction,
       sale: {
         id: saleRow.id,
         transaction_no: saleRow.transaction_no,

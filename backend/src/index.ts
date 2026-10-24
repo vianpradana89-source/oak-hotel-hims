@@ -5913,6 +5913,7 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
   // Aktor dari user terautentikasi — TIDAK dari body klien.
   const actorName = req.user?.full_name || req.user?.username || null;
   const actorUserId = req.user?.id?.toString() || null;
+  const locationId = req.body.location_id ? Number(req.body.location_id) : undefined;
 
   let client: import('pg').PoolClient;
   try {
@@ -5932,6 +5933,7 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
       correlationId: undefined,
       paymentMethod,
       methodInput: Object.keys(methodInput).length > 0 ? methodInput : undefined,
+      locationId: Number.isInteger(locationId) && (locationId ?? 0) > 0 ? locationId : undefined,
     });
 
     const statusCode = result.created ? 201 : result.replayed ? 200 : 200;
@@ -5940,6 +5942,7 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
       data: {
         settlement: result.settlement,
         sale: result.sale,
+        stock_deduction: result.stockDeduction,
         created: result.created,
         replayed: result.replayed
       }

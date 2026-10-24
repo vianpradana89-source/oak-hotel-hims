@@ -5024,3 +5024,365 @@ export function createOpnameVarianceHandler(deps: StockInventoryDeps) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// POS Sale Automatic Stock Deduction (MP-04B E2E)
+// ---------------------------------------------------------------------------
+
+export interface DeductStockForPosSaleParams {
+  client: PoolClient;
+  propertyId: number;
+  orderId: number;
+  locationId?: number | null;
+  saleTransactionNo?: string | null;
+  actorUserId?: string | null;
+  actorName?: string | null;
+}
+
+export interface PosSaleStockDeductionItemResult {
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  movement_id: number;
+  quantity_delta: string;
+  previous_balance: string;
+  new_balance: string;
+  base_unit_code: string;
+}
+
+export interface PosSaleStockDeductionResult {
+  replayed: boolean;
+  operation_id?: number;
+  location_id?: number;
+  items_deducted: PosSaleStockDeductionItemResult[];
+  skipped_non_tracked: number;
+}
+
+/**
+ * Memotong saldo persediaan secara atomik saat pesanan POS diselesaikan (PAID / SETTLED).
+ * - Berjalan di dalam transaksi DB yang sama (menggunakan client yang diteruskan).
+ * - Menjaga idempotency per order via operation_key deterministik.
+ * - Memverifikasi ketersediaan saldo dengan row lock FOR UPDATE.
+ * - Mematuhi CHECK constraint chk_stock_balance_non_negative.
+ * - Mencatat stock_operations (POS_SALE) dan stock_movements (delta negatif).
+ */
+export async function deductStockForPosSale(
+  params: DeductStockForPosSaleParams
+): Promise<PosSaleStockDeductionResult> {
+  const { client, propertyId, orderId } = params;
+
+  // 1. Idempotency Check: apakah order ini sudah pernah dipotong stoknya
+  const operationKey = `POS-SALE-${propertyId}-${orderId}`;
+  const existingOpRes = await client.query(
+    `SELECT id, metadata FROM stock_operations
+      WHERE property_id = $1 AND operation_key = $2`,
+    [propertyId, operationKey]
+  );
+
+  if (existingOpRes.rows.length > 0) {
+    const existingOp = existingOpRes.rows[0];
+    const movRes = await client.query(
+      `SELECT sm.id AS movement_id, sm.product_id, sm.quantity_delta, sm.base_unit_code,
+              pmi.name AS product_name, sb.quantity AS current_balance
+         FROM stock_movements sm
+         JOIN pos_menu_items pmi ON pmi.id = sm.product_id
+         LEFT JOIN stock_balances sb ON sb.property_id = sm.property_id AND sb.product_id = sm.product_id AND sb.location_id = sm.location_id
+        WHERE sm.operation_id = $1
+        ORDER BY sm.id ASC`,
+      [existingOp.id]
+    );
+
+    return {
+      replayed: true,
+      operation_id: Number(existingOp.id),
+      location_id: existingOp.metadata?.location_id ? Number(existingOp.metadata.location_id) : undefined,
+      items_deducted: movRes.rows.map((r: any) => ({
+        product_id: Number(r.product_id),
+        product_name: r.product_name,
+        quantity: Math.abs(parseFloat(r.quantity_delta)),
+        movement_id: Number(r.movement_id),
+        quantity_delta: String(r.quantity_delta),
+        previous_balance: String(r.current_balance ?? '0.000'),
+        new_balance: String(r.current_balance ?? '0.000'),
+        base_unit_code: r.base_unit_code,
+      })),
+      skipped_non_tracked: 0,
+    };
+  }
+
+  // 2. Ambil baris pesanan dan cek flag track_stock / track_inventory
+  const itemsRes = await client.query(
+    `SELECT poi.id, poi.menu_item_id, poi.quantity,
+            pmi.name, pmi.track_stock, pmi.track_inventory,
+            pmi.base_unit, pmi.canonical_base_unit_code
+       FROM pos_order_items poi
+       JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+      WHERE poi.order_id = $1
+      ORDER BY poi.id ASC`,
+    [orderId]
+  );
+
+  const trackedItems = itemsRes.rows.filter(
+    (row: any) => row.track_stock === true || row.track_inventory === true
+  );
+  const skippedNonTracked = itemsRes.rows.length - trackedItems.length;
+
+  if (trackedItems.length === 0) {
+    return {
+      replayed: false,
+      items_deducted: [],
+      skipped_non_tracked: skippedNonTracked,
+    };
+  }
+
+  // 3. Resolusi lokasi persediaan target (outlet kasir / dapur / gudang)
+  let targetLocationId: number | null = null;
+  if (params.locationId && Number.isInteger(Number(params.locationId)) && Number(params.locationId) > 0) {
+    targetLocationId = Number(params.locationId);
+  } else {
+    // Ambil dari pos_orders.location_id jika tersedia
+    const orderLocRes = await client.query(
+      `SELECT location_id FROM pos_orders WHERE id = $1 AND property_id = $2`,
+      [orderId, propertyId]
+    );
+    if (orderLocRes.rows.length > 0 && orderLocRes.rows[0].location_id) {
+      targetLocationId = Number(orderLocRes.rows[0].location_id);
+    }
+  }
+
+  if (!targetLocationId) {
+    // Cari lokasi aktif default: POS_OUTLET > KITCHEN > BAR > WAREHOUSE
+    const defaultLocRes = await client.query(
+      `SELECT id FROM stock_locations
+        WHERE property_id = $1 AND is_active = TRUE
+        ORDER BY
+          CASE
+            WHEN location_type = 'POS_OUTLET' THEN 1
+            WHEN location_type = 'KITCHEN' THEN 2
+            WHEN location_type = 'BAR' THEN 3
+            WHEN location_type = 'WAREHOUSE' THEN 4
+            ELSE 5
+          END, id ASC
+        LIMIT 1`,
+      [propertyId]
+    );
+    if (defaultLocRes.rows.length > 0) {
+      targetLocationId = Number(defaultLocRes.rows[0].id);
+    }
+  }
+
+  if (!targetLocationId) {
+    throw Object.assign(
+      new Error(`Tidak ditemukan lokasi persediaan aktif pada properti #${propertyId} untuk pemotongan stok penjualan POS`),
+      {
+        statusCode: 400,
+        code: 'NO_STOCK_LOCATION',
+      }
+    );
+  }
+
+  // Validasi keaktifan lokasi stok
+  const locValRes = await client.query(
+    `SELECT id, is_active, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
+    [targetLocationId, propertyId]
+  );
+  if (locValRes.rowCount === 0) {
+    throw Object.assign(
+      new Error(`Lokasi stok #${targetLocationId} tidak ditemukan pada properti #${propertyId}`),
+      { statusCode: 404, code: 'LOCATION_NOT_FOUND' }
+    );
+  }
+  if (!locValRes.rows[0].is_active) {
+    throw Object.assign(
+      new Error(`Lokasi stok "${locValRes.rows[0].name}" sedang tidak aktif`),
+      { statusCode: 400, code: 'LOCATION_INACTIVE' }
+    );
+  }
+
+  // 4. Agregasi kuantitas item berdasarkan menu_item_id
+  const aggregatedMap = new Map<number, {
+    menu_item_id: number;
+    name: string;
+    quantity: number;
+    base_unit_code: string;
+  }>();
+
+  for (const it of trackedItems) {
+    const pId = Number(it.menu_item_id);
+    const qty = Number(it.quantity);
+    const existing = aggregatedMap.get(pId);
+    const unitCode = it.canonical_base_unit_code || it.base_unit || 'PCS';
+    if (existing) {
+      existing.quantity += qty;
+    } else {
+      aggregatedMap.set(pId, {
+        menu_item_id: pId,
+        name: it.name,
+        quantity: qty,
+        base_unit_code: unitCode,
+      });
+    }
+  }
+
+  // Urutkan berdasarkan menu_item_id menaik untuk mencegah deadlock saat konkuren
+  const sortedItems = Array.from(aggregatedMap.values()).sort((a, b) => a.menu_item_id - b.menu_item_id);
+
+  // 5. Kunci baris saldo stok (FOR UPDATE) dan verifikasi kecukupan saldo
+  const checkedItems: {
+    menu_item_id: number;
+    name: string;
+    quantity: number;
+    base_unit_code: string;
+    currentBalance: number;
+    unitCost: number | null;
+  }[] = [];
+
+  for (const item of sortedItems) {
+    const balRes = await client.query(
+      `SELECT quantity FROM stock_balances
+        WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+        FOR UPDATE`,
+      [propertyId, item.menu_item_id, targetLocationId]
+    );
+    const currentBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity) : 0;
+    if (currentBalance < item.quantity - 0.000001) {
+      const curFormatted = currentBalance.toFixed(3);
+      const reqFormatted = item.quantity.toFixed(3);
+      throw Object.assign(
+        new Error(
+          `Saldo persediaan tidak mencukupi untuk produk "${item.name}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}`
+        ),
+        {
+          statusCode: 422,
+          code: 'INSUFFICIENT_STOCK_BALANCE',
+          details: {
+            product_id: item.menu_item_id,
+            product_name: item.name,
+            current_balance: curFormatted,
+            required_quantity: reqFormatted,
+            location_id: targetLocationId,
+          },
+        }
+      );
+    }
+
+    // Cari unit cost terakhir jika tersedia untuk snapshot pergerakan
+    const costRes = await client.query(
+      `SELECT unit_cost FROM stock_movements
+        WHERE property_id = $1 AND product_id = $2 AND unit_cost IS NOT NULL AND unit_cost > 0
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [propertyId, item.menu_item_id]
+    );
+    const unitCost = costRes.rows.length > 0 ? parseFloat(costRes.rows[0].unit_cost) : null;
+
+    checkedItems.push({
+      ...item,
+      currentBalance,
+      unitCost,
+    });
+  }
+
+  // 6. Buat header stock_operations (tipe: POS_SALE)
+  const receiptNote = params.saleTransactionNo ? ` (Receipt: ${params.saleTransactionNo})` : '';
+  const notes = `Penjualan POS Order #${orderId}${receiptNote}`;
+  const metadata = {
+    pos_order_id: orderId,
+    transaction_no: params.saleTransactionNo || null,
+    location_id: targetLocationId,
+    actor_user_id: params.actorUserId || null,
+    actor_name: params.actorName || null,
+  };
+
+  const opRes = await client.query(
+    `INSERT INTO stock_operations (
+       property_id, operation_type, operation_key, payload_fingerprint,
+       notes, metadata, created_by, created_at
+     ) VALUES (
+       $1, 'POS_SALE', $2, $3,
+       $4, $5, $6, NOW()
+     )
+     RETURNING id, created_at`,
+    [
+      propertyId,
+      operationKey,
+      operationKey,
+      notes,
+      JSON.stringify(metadata),
+      params.actorUserId && Number.isInteger(Number(params.actorUserId)) ? Number(params.actorUserId) : null,
+    ]
+  );
+  const opId = Number(opRes.rows[0].id);
+
+  // 7. Catat stock_movements (delta negatif) dan perbarui stock_balances
+  const itemsDeducted: PosSaleStockDeductionItemResult[] = [];
+
+  for (const check of checkedItems) {
+    const deltaQty = -check.quantity;
+    const deltaStr = deltaQty.toFixed(3);
+    const nextBalance = Math.max(0, check.currentBalance + deltaQty);
+    const nextBalanceStr = nextBalance.toFixed(3);
+
+    const movRes = await client.query(
+      `INSERT INTO stock_movements (
+         operation_id, property_id, product_id, location_id,
+         packaging_id, packaging_code, packaging_label,
+         quantity_delta, base_unit_code, unit_cost, created_at
+       ) VALUES (
+         $1, $2, $3, $4,
+         NULL, NULL, NULL,
+         $5, $6, $7, NOW()
+       )
+       RETURNING id`,
+      [
+        opId,
+        propertyId,
+        check.menu_item_id,
+        targetLocationId,
+        deltaStr,
+        check.base_unit_code,
+        check.unitCost,
+      ]
+    );
+    const movId = Number(movRes.rows[0].id);
+
+    // Update stock_balances secara aman (mencegah pelanggaran constraint chk_stock_balance_non_negative)
+    const checkExisting = await client.query(
+      `SELECT id FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3`,
+      [propertyId, check.menu_item_id, targetLocationId]
+    );
+    if (checkExisting.rows.length > 0) {
+      await client.query(
+        `UPDATE stock_balances
+            SET quantity = $1, updated_at = NOW()
+          WHERE property_id = $2 AND product_id = $3 AND location_id = $4`,
+        [nextBalanceStr, propertyId, check.menu_item_id, targetLocationId]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())`,
+        [propertyId, check.menu_item_id, targetLocationId, nextBalanceStr]
+      );
+    }
+
+    itemsDeducted.push({
+      product_id: check.menu_item_id,
+      product_name: check.name,
+      quantity: check.quantity,
+      movement_id: movId,
+      quantity_delta: deltaStr,
+      previous_balance: check.currentBalance.toFixed(3),
+      new_balance: nextBalanceStr,
+      base_unit_code: check.base_unit_code,
+    });
+  }
+
+  return {
+    replayed: false,
+    operation_id: opId,
+    location_id: targetLocationId,
+    items_deducted: itemsDeducted,
+    skipped_non_tracked: skippedNonTracked,
+  };
+}
+
+

@@ -184,6 +184,7 @@ export async function initializeDatabase(pool: Pool) {
       barcode VARCHAR(100),
       photo_storage_key TEXT,
       track_stock BOOLEAN NOT NULL DEFAULT FALSE,
+      track_inventory BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT chk_pos_menu_items_product_type
@@ -843,6 +844,36 @@ export async function initializeDatabase(pool: Pool) {
 
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
+      ON pos_menu_items(property_id, track_inventory)
+      WHERE track_inventory = TRUE;
+
+    CREATE OR REPLACE FUNCTION sync_pos_menu_items_track_stock_inventory()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.track_inventory IS TRUE AND NEW.track_stock IS NOT TRUE THEN
+          NEW.track_stock := TRUE;
+        ELSIF NEW.track_stock IS TRUE AND NEW.track_inventory IS NOT TRUE THEN
+          NEW.track_inventory := TRUE;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.track_inventory IS DISTINCT FROM OLD.track_inventory THEN
+          NEW.track_stock := NEW.track_inventory;
+        ELSIF NEW.track_stock IS DISTINCT FROM OLD.track_stock THEN
+          NEW.track_inventory := NEW.track_stock;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_sync_pos_menu_items_track_stock_inventory ON pos_menu_items;
+    CREATE TRIGGER trg_sync_pos_menu_items_track_stock_inventory
+    BEFORE INSERT OR UPDATE OF track_stock, track_inventory ON pos_menu_items
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_pos_menu_items_track_stock_inventory();
     CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
       ON pos_menu_items(property_id, track_stock)
       WHERE track_stock = TRUE;
@@ -1425,6 +1456,8 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property ON pos_orders(property_id);
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property_status ON pos_orders(property_id, status);
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
   `);
 
   // GL accounts and journal property isolation (idempotent for existing DBs)
