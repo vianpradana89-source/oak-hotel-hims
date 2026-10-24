@@ -15,12 +15,18 @@
  *   - printedAt is captured ONCE per successful fetch for this modal session;
  *     a subsequent re-open produces a fresh timestamp.
  *   - Print: sets --thermal-width CSS var → window.print(). No popup.
+ *   - WhatsApp Digital Receipt: Direct dispatch via backend gateway & Web link fallback.
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Modal } from '../../design-system/Modal';
 import { useAuth } from '../auth/AuthContext';
-import { fetchPosReceipt } from '../pos/posReceiptApi';
+import {
+  fetchPosReceipt,
+  sendPosReceiptWhatsApp,
+  fetchPosReceiptWhatsAppLogs,
+  type PosWhatsAppReceiptLog,
+} from '../pos/posReceiptApi';
 import type { PosReceiptData } from '../pos/posReceiptTypes';
 import { buildPosReceiptWhatsAppUrl } from '../pos/posReceiptWhatsApp';
 import type { ThermalWidth } from './thermalReceiptTypes';
@@ -56,6 +62,12 @@ export default function PosThermalReceiptModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // WhatsApp dispatch state
+  const [waPhone, setWaPhone] = useState('');
+  const [isSendingWa, setIsSendingWa] = useState(false);
+  const [waSendFeedback, setWaSendFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [waLogs, setWaLogs] = useState<PosWhatsAppReceiptLog[]>([]);
+
   // Communication settings (runtime config for WhatsApp intro/closing).
   // Default: enabled, no custom intro/closing — mirrors the backend default
   // when no row exists in property_pos_communication_settings.
@@ -89,6 +101,10 @@ export default function PosThermalReceiptModal({
       setPrintedAt(null);
       setError(null);
       setLoading(false);
+      setWaPhone('');
+      setIsSendingWa(false);
+      setWaSendFeedback(null);
+      setWaLogs([]);
       setCommSettings({
         whatsapp_enabled: true,
         whatsapp_intro_message: null,
@@ -109,6 +125,7 @@ export default function PosThermalReceiptModal({
     const mySeq = ++seqRef.current;
     setLoading(true);
     setError(null);
+    setWaSendFeedback(null);
     fetchedKeyRef.current = key;
 
     fetchPosReceipt(orderId, propertyId, authFetch)
@@ -117,6 +134,9 @@ export default function PosThermalReceiptModal({
         if (mySeq !== seqRef.current) return;
         setReceipt(data);
         setPrintedAt(new Date().toISOString());
+        if (data.order?.guest_phone) {
+          setWaPhone(data.order.guest_phone);
+        }
       })
       .catch((err: unknown) => {
         if (mySeq !== seqRef.current) return;
@@ -128,6 +148,17 @@ export default function PosThermalReceiptModal({
       })
       .finally(() => {
         if (mySeq === seqRef.current) setLoading(false);
+      });
+
+    // Fetch existing WhatsApp dispatch logs
+    fetchPosReceiptWhatsAppLogs(orderId, propertyId, authFetch)
+      .then((logs) => {
+        if (mySeq === seqRef.current) {
+          setWaLogs(logs);
+        }
+      })
+      .catch(() => {
+        // Non-blocking log fetch error
       });
   }, [isOpen, orderId, propertyId, authFetch]);
 
@@ -150,7 +181,6 @@ export default function PosThermalReceiptModal({
       .then((res) => {
         if (cancelled || mySeq !== commSeqRef.current) return;
         if (!res.ok) {
-          // 401: auth layer handles; 403/404/500: log + fallback default
           console.warn(
             '[PosThermalReceiptModal] comm settings fetch failed:',
             res.status,
@@ -159,7 +189,6 @@ export default function PosThermalReceiptModal({
         }
         return res.json().then((json: Record<string, unknown>) => {
           if (cancelled || mySeq !== commSeqRef.current) return;
-          // Validate shape: only apply if all three fields have correct types
           const data = json?.data as Record<string, unknown> | null | undefined;
           if (data === null || data === undefined || typeof data !== 'object') return;
           const enabled = data.whatsapp_enabled;
@@ -183,7 +212,6 @@ export default function PosThermalReceiptModal({
         });
       })
       .catch((err: unknown) => {
-        // Network error — fail-open: keep whatsapp_enabled=true
         if (cancelled || mySeq !== commSeqRef.current) return;
         console.warn(
           '[PosThermalReceiptModal] comm settings network error:',
@@ -209,16 +237,52 @@ export default function PosThermalReceiptModal({
     onClose();
   }, [onClose]);
 
+  const handleSendWhatsAppReceipt = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const cleanPhone = waPhone.trim();
+    if (!cleanPhone) {
+      setWaSendFeedback({
+        type: 'error',
+        message: 'Masukkan nomor WhatsApp penerima.',
+      });
+      return;
+    }
+
+    setIsSendingWa(true);
+    setWaSendFeedback(null);
+
+    try {
+      const result = await sendPosReceiptWhatsApp(orderId, propertyId, cleanPhone, authFetch);
+      if (result.success) {
+        const masked = result.data?.recipient_phone_masked || cleanPhone;
+        setWaSendFeedback({
+          type: 'success',
+          message: `Struk berhasil dikirim via WhatsApp ke ${masked}`,
+        });
+        // Refresh logs
+        fetchPosReceiptWhatsAppLogs(orderId, propertyId, authFetch)
+          .then((logs) => setWaLogs(logs))
+          .catch(() => {});
+      } else {
+        setWaSendFeedback({
+          type: 'error',
+          message: result.error || 'Gagal mengirim struk via WhatsApp',
+        });
+      }
+    } catch (err: any) {
+      setWaSendFeedback({
+        type: 'error',
+        message: err.message || 'Terjadi kesalahan saat mengirim struk WhatsApp',
+      });
+    } finally {
+      setIsSendingWa(false);
+    }
+  };
+
   const canPrint =
     !loading && !error && receipt !== null && printedAt !== null;
 
-  // WhatsApp: nomor HANYA dari receipt.order.guest_phone (via helper).
-  // URL dihitung saat receipt valid; null jika nomor tidak ada/tidak valid.
-  //
-  // Intro/closing custom diambil dari communication settings (GET runtime
-  // config). Bila fetch gagal (403/404/500/network), fallback ke default
-  // runtime: whatsapp_enabled=true, intro=null, closing=null (fail-open).
-  // Hanya respons valid dengan whatsapp_enabled=false yang me-disable tombol.
+  // WhatsApp Web fallback
   const commSettings = commSettingsState;
   const whatsappOptions = {
     intro: commSettings.whatsapp_intro_message,
@@ -228,19 +292,19 @@ export default function PosThermalReceiptModal({
     receipt !== null && !loading && !error
       ? buildPosReceiptWhatsAppUrl(receipt, whatsappOptions)
       : null;
-  const canWhatsApp = whatsappUrl !== null && commSettings.whatsapp_enabled;
+  const canWhatsAppWeb = whatsappUrl !== null && commSettings.whatsapp_enabled;
 
-  const whatsappTooltip = !canWhatsApp
+  const whatsappWebTooltip = !canWhatsAppWeb
     ? !commSettings.whatsapp_enabled
       ? 'Pengiriman WhatsApp dinonaktifkan dari Pengaturan POS'
       : 'Nomor WhatsApp pelanggan tidak tersedia atau tidak valid'
-    : 'Kirim struk ke WhatsApp tamu';
+    : 'Buka tautan WhatsApp Web di tab baru';
 
-  const handleWhatsApp = useCallback(() => {
-    if (whatsappUrl && canWhatsApp) {
+  const handleWhatsAppWeb = useCallback(() => {
+    if (whatsappUrl && canWhatsAppWeb) {
       window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
     }
-  }, [whatsappUrl, canWhatsApp]);
+  }, [whatsappUrl, canWhatsAppWeb]);
 
   // ── Render ───────────────────────────────────────────────────────────
 
@@ -249,6 +313,8 @@ export default function PosThermalReceiptModal({
   const subtitle = receipt
     ? `No. Order: ${receipt.order.order_number}`
     : undefined;
+
+  const lastSentLog = waLogs.length > 0 ? waLogs[0] : null;
 
   const footer = (
     <div className="three-actions">
@@ -261,12 +327,12 @@ export default function PosThermalReceiptModal({
       </button>
       <button
         type="button"
-        onClick={handleWhatsApp}
+        onClick={handleWhatsAppWeb}
         className="three-btn-secondary"
-        disabled={!canWhatsApp}
-        title={whatsappTooltip}
+        disabled={!canWhatsAppWeb}
+        title={whatsappWebTooltip}
       >
-        WhatsApp
+        Buka WA Web
       </button>
       <button
         type="button"
@@ -280,7 +346,6 @@ export default function PosThermalReceiptModal({
   );
 
   // ── Portal print content ──────────────────────────────────────────────
-  // Rendered to document.body, hidden on screen, visible in @media print.
   const printPortalContent = canPrint && receipt && printedAt ? (
     <div id="thermal-print-target" className="thermal-print-root">
       <PosThermalReceiptContent
@@ -324,6 +389,68 @@ export default function PosThermalReceiptModal({
           </span>
         </div>
 
+        {/* WhatsApp Dispatch Panel */}
+        {!loading && !error && receipt && (
+          <div className="three-wa-panel">
+            <div className="three-wa-header">
+              <span className="three-wa-title">
+                <span>📱</span> Kirim Struk Digital WhatsApp
+              </span>
+              {!commSettings.whatsapp_enabled && (
+                <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: 500 }}>
+                  Fitur dinonaktifkan di pengaturan
+                </span>
+              )}
+            </div>
+
+            <form onSubmit={handleSendWhatsAppReceipt} className="three-wa-form">
+              <input
+                type="text"
+                className="three-wa-input"
+                placeholder="08xxx / 628xxx"
+                value={waPhone}
+                onChange={(e) => setWaPhone(e.target.value)}
+                disabled={isSendingWa || !commSettings.whatsapp_enabled}
+              />
+              <button
+                type="submit"
+                className="three-btn-wa"
+                disabled={isSendingWa || !commSettings.whatsapp_enabled || !waPhone.trim()}
+              >
+                {isSendingWa ? 'Mengirim...' : 'Kirim Struk WA'}
+              </button>
+            </form>
+
+            {waSendFeedback && (
+              <div
+                className={
+                  waSendFeedback.type === 'success'
+                    ? 'three-wa-feedback-success'
+                    : 'three-wa-feedback-error'
+                }
+              >
+                <span>{waSendFeedback.type === 'success' ? '✓' : '⚠️'}</span>
+                <span>{waSendFeedback.message}</span>
+              </div>
+            )}
+
+            {lastSentLog && !waSendFeedback && (
+              <div className="three-wa-logs-summary">
+                <span>ℹ️</span>
+                <span>
+                  Terakhir dikirim: {lastSentLog.status === 'SENT' ? 'Sukses' : 'Gagal'} ke{' '}
+                  {lastSentLog.recipient_phone_masked} (
+                  {new Date(lastSentLog.created_at).toLocaleTimeString('id-ID', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                  )
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Loading */}
         {loading && (
           <div className="three-loading">
@@ -363,6 +490,9 @@ export default function PosThermalReceiptModal({
                     if (mySeq !== seqRef.current) return;
                     setReceipt(data);
                     setPrintedAt(new Date().toISOString());
+                    if (data.order?.guest_phone) {
+                      setWaPhone(data.order.guest_phone);
+                    }
                   })
                   .catch((err: unknown) => {
                     if (mySeq !== seqRef.current) return;

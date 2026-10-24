@@ -1384,6 +1384,43 @@ export async function initializeDatabase(pool: Pool) {
     VALUES ('product_inventory_mp04b_b3_v1')
     ON CONFLICT (version) DO NOTHING;
 
+    -- MP-05A: WhatsApp Digital Receipt logs
+    CREATE TABLE IF NOT EXISTS pos_whatsapp_receipt_logs (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      order_id INTEGER NOT NULL REFERENCES pos_orders(id),
+      recipient_phone VARCHAR(50) NOT NULL,
+      recipient_phone_masked VARCHAR(50) NOT NULL,
+      message_content TEXT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'SENT',
+      gateway_response JSONB NULL,
+      error_message TEXT NULL,
+      sent_by_user_id INTEGER NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_wa_receipt_status'
+          AND conrelid = 'pos_whatsapp_receipt_logs'::regclass
+      ) THEN
+        ALTER TABLE pos_whatsapp_receipt_logs
+          ADD CONSTRAINT chk_pos_wa_receipt_status CHECK (status IN ('SENT', 'FAILED'));
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_wa_receipt_logs_order
+      ON pos_whatsapp_receipt_logs(order_id);
+
+    CREATE INDEX IF NOT EXISTS idx_pos_wa_receipt_logs_property
+      ON pos_whatsapp_receipt_logs(property_id, created_at DESC);
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_whatsapp_receipt_v1')
+    ON CONFLICT (version) DO NOTHING;
+
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$

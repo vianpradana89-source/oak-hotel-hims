@@ -277,3 +277,103 @@ export async function fetchPosReceipt(
   validateB41SnapshotFields(order);
   return data as PosReceiptData;
 }
+
+
+// ── WhatsApp Digital Receipt Dispatch ─────────────────────────────────────
+
+export interface SendPosReceiptWhatsAppResult {
+  success: boolean;
+  message: string;
+  data?: {
+    order_id: number | string;
+    recipient_phone: string;
+    recipient_phone_masked: string;
+    provider: string;
+    log_id?: number;
+  };
+  error?: string;
+  details?: any;
+}
+
+export interface PosWhatsAppReceiptLog {
+  id: number;
+  property_id: number;
+  order_id: number;
+  recipient_phone: string;
+  recipient_phone_masked: string;
+  message_content?: string;
+  status: 'SENT' | 'FAILED';
+  gateway_response?: any;
+  error_message?: string | null;
+  sent_by_user_id?: string | null;
+  created_at: string;
+}
+
+/**
+ * Dispatch digital receipt directly to customer's WhatsApp via backend gateway.
+ */
+export async function sendPosReceiptWhatsApp(
+  orderId: number,
+  propertyId: number,
+  phoneNumber: string,
+  authFetch: AuthFetch
+): Promise<SendPosReceiptWhatsAppResult> {
+  if (!isPositiveInt(orderId) || !isPositiveInt(propertyId)) {
+    throw new Error('orderId dan propertyId harus integer positif.');
+  }
+
+  const cleanPhone = phoneNumber.trim();
+  if (!cleanPhone) {
+    throw new Error('Nomor telepon WhatsApp penerima tidak boleh kosong.');
+  }
+
+  const url = `/api/pos/orders/${orderId}/send-receipt-wa`;
+  const res = await authFetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Property-Id': String(propertyId),
+    },
+    body: JSON.stringify({
+      property_id: propertyId,
+      phone_number: cleanPhone,
+    }),
+  });
+
+  const json = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const errorMsg = json?.error || json?.message || `Gagal mengirim struk via WhatsApp (HTTP ${res.status})`;
+    throw new Error(errorMsg);
+  }
+
+  return json as SendPosReceiptWhatsAppResult;
+}
+
+/**
+ * Fetch WhatsApp receipt delivery logs for a given order.
+ */
+export async function fetchPosReceiptWhatsAppLogs(
+  orderId: number,
+  propertyId: number,
+  authFetch: AuthFetch
+): Promise<PosWhatsAppReceiptLog[]> {
+  if (!isPositiveInt(orderId) || !isPositiveInt(propertyId)) {
+    throw new Error('orderId dan propertyId harus integer positif.');
+  }
+
+  const url = `/api/pos/orders/${orderId}/wa-receipt-logs?property_id=${propertyId}`;
+  const res = await authFetch(url, {
+    headers: {
+      'X-Property-Id': String(propertyId),
+    },
+  });
+
+  if (!res.ok) {
+    const json = await res.json().catch(() => null);
+    throw new Error(json?.error || `Gagal mengambil riwayat kirim WhatsApp (HTTP ${res.status})`);
+  }
+
+  const json = await res.json();
+  return (json?.data || []) as PosWhatsAppReceiptLog[];
+}

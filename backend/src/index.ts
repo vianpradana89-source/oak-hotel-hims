@@ -148,6 +148,10 @@ import { createPosOrderDetailHandler } from './domains/pos/posOrderDetailHandler
 import { createPosOrderUpdateHandler } from './domains/pos/posOrderUpdateHandler';
 import { createPosReceiptHandler } from './domains/pos/posReceiptHandler';
 import {
+  sendPosReceiptWhatsApp,
+  getWhatsAppReceiptLogs,
+} from './domains/pos/posWhatsappService';
+import {
   buildBookingChildStatusSummary,
   deriveBookingLifecycleStatus,
   buildBookingCompletionAuditPayload,
@@ -5988,6 +5992,119 @@ app.get('/api/pos/orders/:id/receipt', createPosReceiptHandler({
   release: (client) => client.release(),
   assertPropertyScope
 }));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POS WHATSAPP RECEIPT — POST /api/pos/orders/:id/send-receipt-wa
+// POS WHATSAPP RECEIPT LOGS — GET /api/pos/orders/:id/wa-receipt-logs
+// ─────────────────────────────────────────────────────────────────────────
+app.post('/api/pos/orders/:id/send-receipt-wa', async (req: any, res: any) => {
+  const orderId = parseInt(req.params.id, 10);
+  const rawPropertyId = req.body?.property_id || req.query?.property_id || req.headers['x-property-id'];
+  const phoneNumber = (req.body?.phone_number || req.body?.phoneNumber) as string;
+  const user = req.user;
+  const sentByUserId = user?.id ? parseInt(String(user.id), 10) : null;
+
+  if (isNaN(orderId) || orderId <= 0) {
+    return res.status(400).json({ success: false, error: 'Order ID is required and must be a positive integer' });
+  }
+
+  let propertyId = rawPropertyId ? parseInt(String(rawPropertyId), 10) : null;
+  if (!propertyId || isNaN(propertyId)) {
+    try {
+      const orderRes = await pool.query('SELECT property_id FROM pos_orders WHERE id = $1', [orderId]);
+      if (orderRes.rows.length > 0) {
+        propertyId = Number(orderRes.rows[0].property_id);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!propertyId || isNaN(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ success: false, error: 'Property ID is required and must be a positive integer' });
+  }
+
+  try {
+    assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    return res.status(403).json({ success: false, error: scopeErr.message || 'Property scope forbidden' });
+  }
+
+  try {
+    const result = await sendPosReceiptWhatsApp(pool, {
+      orderId,
+      propertyId,
+      phoneNumber: phoneNumber ? String(phoneNumber).trim() : null,
+      sentByUserId: sentByUserId && !isNaN(sentByUserId) ? sentByUserId : null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Struk berhasil dikirim via WhatsApp',
+      data: {
+        order_id: result.order_id,
+        recipient_phone: result.phone_number,
+        recipient_phone_masked: result.phone_number_masked,
+        status: result.status,
+        message_id: result.message_id,
+        sent_at: result.sent_at,
+      },
+    });
+  } catch (err: any) {
+    console.error('Error sending POS receipt via WhatsApp:', err);
+    const statusCode = err.statusCode || (err.message?.includes('tidak ditemukan') ? 404 : 400);
+    return res.status(statusCode).json({
+      success: false,
+      error: err.message || 'Internal server error while sending WhatsApp receipt',
+      details: err.data || null,
+    });
+  }
+});
+
+app.get('/api/pos/orders/:id/wa-receipt-logs', async (req: any, res: any) => {
+  const orderId = parseInt(req.params.id, 10);
+  const rawPropertyId = req.query?.property_id || req.headers['x-property-id'];
+
+  if (isNaN(orderId) || orderId <= 0) {
+    return res.status(400).json({ success: false, error: 'Order ID is required and must be a positive integer' });
+  }
+
+  let propertyId = rawPropertyId ? parseInt(String(rawPropertyId), 10) : null;
+  if (!propertyId || isNaN(propertyId)) {
+    try {
+      const orderRes = await pool.query('SELECT property_id FROM pos_orders WHERE id = $1', [orderId]);
+      if (orderRes.rows.length > 0) {
+        propertyId = Number(orderRes.rows[0].property_id);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!propertyId || isNaN(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ success: false, error: 'Property ID is required and must be a positive integer' });
+  }
+
+  try {
+    assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    return res.status(403).json({ success: false, error: scopeErr.message || 'Property scope forbidden' });
+  }
+
+  try {
+    const logs = await getWhatsAppReceiptLogs(pool, orderId, propertyId);
+    return res.status(200).json({
+      success: true,
+      data: logs,
+    });
+  } catch (err: any) {
+    console.error('Error fetching WhatsApp receipt logs:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error while fetching WhatsApp receipt logs',
+    });
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // POS ORDER DETAIL — GET /api/pos/orders/:id/detail
