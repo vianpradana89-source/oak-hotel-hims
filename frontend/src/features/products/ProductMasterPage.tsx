@@ -3,6 +3,7 @@ import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
 import PosInventoryWorkspace from '../posInventory/PosInventoryWorkspace';
+import ProductRecipeModal from './ProductRecipeModal';
 
 export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD';
 export type ProductKindCode = 'STANDARD';
@@ -668,6 +669,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     roomId: '',
     notes: '',
   });
+
+  // ── MP-04C: State Formula Resep / Bill of Materials (BOM) ──
+  const [recipeModalItem, setRecipeModalItem] = useState<ProductItem | null>(null);
+
+  const openRecipeModal = (item: ProductItem) => {
+    setRecipeModalItem(item);
+  };
+
+  const closeRecipeModal = () => {
+    setRecipeModalItem(null);
+  };
 
   const revokeObjectUrlSafe = useCallback((url: string | null | undefined) => {
     if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
@@ -2678,15 +2690,26 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                           {(capabilities.canEdit || capabilities.canToggleStatus) ? (
                             <>
                               {(capabilities.canEdit || capabilities.canCreate) && (
-                                <button
-                                  type="button"
-                                  aria-label={`Kelola kemasan ${item.name}`}
-                                  onClick={() => openPackagingModal(item)}
-                                  disabled={saving}
-                                  className="text-xs text-sky-700 hover:text-sky-900 font-medium px-2 py-1 rounded hover:bg-sky-50 transition-colors cursor-pointer"
-                                >
-                                  Kemasan
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    aria-label={`Formula resep BOM ${item.name}`}
+                                    onClick={() => openRecipeModal(item)}
+                                    disabled={saving}
+                                    className="text-xs text-amber-800 hover:text-amber-950 font-medium px-2 py-1 rounded hover:bg-amber-50 transition-colors cursor-pointer"
+                                  >
+                                    Resep
+                                  </button>
+                                  <button
+                                    type="button"
+                                    aria-label={`Kelola kemasan ${item.name}`}
+                                    onClick={() => openPackagingModal(item)}
+                                    disabled={saving}
+                                    className="text-xs text-sky-700 hover:text-sky-900 font-medium px-2 py-1 rounded hover:bg-sky-50 transition-colors cursor-pointer"
+                                  >
+                                    Kemasan
+                                  </button>
+                                </>
                               )}
                               {capabilities.canEdit && (
                                 <button
@@ -3252,15 +3275,26 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Buka kelola kemasan produk"
-                      onClick={() => openPackagingModal(editingItem)}
-                      className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
-                    >
-                      Kelola Kemasan
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Buka formula resep BOM produk"
+                        onClick={() => openRecipeModal(editingItem)}
+                        className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        Resep (BOM)
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Buka kelola kemasan produk"
+                        onClick={() => openPackagingModal(editingItem)}
+                        className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        Kelola Kemasan
+                      </button>
+                    </div>
                   </div>
                   <select
                     aria-label="Pilih satuan dasar kanonik"
@@ -4277,6 +4311,14 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           </div>
         </div>
       )}
+      {/* MP-04C Formula Resep / BOM Modal */}
+      <ProductRecipeModal
+        product={recipeModalItem}
+        propertyId={propertyId}
+        isOpen={Boolean(recipeModalItem)}
+        onClose={closeRecipeModal}
+        canEdit={capabilities.canEdit}
+      />
     </div>
   );
 }

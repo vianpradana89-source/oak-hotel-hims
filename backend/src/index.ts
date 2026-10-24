@@ -204,6 +204,13 @@ import {
   createInventoryValuationHandler,
   createOpnameVarianceHandler,
 } from './domains/pos/stockInventoryService';
+import {
+  createPosProductUomsHandler,
+  createProductRecipeGetHandler,
+  createProductRecipeSaveHandler,
+  createProductRecipeDeleteHandler,
+  createRawMaterialsListHandler,
+} from './domains/pos/posProductRecipeService';
 
 const app: any = express();
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -5502,6 +5509,15 @@ app.get('/api/pos/inventory/valuation-report', createInventoryValuationHandler({
 app.get('/api/pos/stock/valuation-report', createInventoryValuationHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/inventory/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
+
+// ── Master Resep & Bill of Materials (BOM) Bahan Baku POS (MP-04C) ──────────
+app.get('/api/pos/uoms', createPosProductUomsHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/raw-materials', createRawMaterialsListHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/products/:id/recipe', createProductRecipeGetHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/products/:id/recipe', createProductRecipeSaveHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/menu/items/:id/recipe', createProductRecipeGetHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/menu/items/:id/recipe', createProductRecipeSaveHandler({ pool, assertPropertyScope }));
+app.delete('/api/pos/recipes/:recipeId', createProductRecipeDeleteHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 

@@ -5047,6 +5047,7 @@ export interface PosSaleStockDeductionItemResult {
   previous_balance: string;
   new_balance: string;
   base_unit_code: string;
+  is_ingredient?: boolean;
 }
 
 export interface PosSaleStockDeductionResult {
@@ -5109,7 +5110,7 @@ export async function deductStockForPosSale(
     };
   }
 
-  // 2. Ambil baris pesanan dan cek flag track_stock / track_inventory
+  // 2. Ambil baris pesanan
   const itemsRes = await client.query(
     `SELECT poi.id, poi.menu_item_id, poi.quantity,
             pmi.name, pmi.track_stock, pmi.track_inventory,
@@ -5121,12 +5122,131 @@ export async function deductStockForPosSale(
     [orderId]
   );
 
-  const trackedItems = itemsRes.rows.filter(
-    (row: any) => row.track_stock === true || row.track_inventory === true
-  );
-  const skippedNonTracked = itemsRes.rows.length - trackedItems.length;
+  if (itemsRes.rows.length === 0) {
+    return {
+      replayed: false,
+      items_deducted: [],
+      skipped_non_tracked: 0,
+    };
+  }
 
-  if (trackedItems.length === 0) {
+  // Cek apakah item menu memiliki formula resep (Bill of Materials / BOM)
+  const menuItemIds = itemsRes.rows.map((r: any) => Number(r.menu_item_id));
+  const recipesByProduct = new Map<number, Array<{
+    recipe_id: number;
+    product_id: number;
+    ingredient_product_id: number;
+    recipe_quantity: number;
+    ingredient_name: string;
+    ingredient_track_stock: boolean;
+    ingredient_track_inventory: boolean;
+    ingredient_base_unit: string | null;
+    ingredient_canonical_unit: string | null;
+    uom_code: string | null;
+  }>>();
+
+  if (menuItemIds.length > 0) {
+    const recRes = await client.query(
+      `SELECT r.id AS recipe_id, r.product_id, r.ingredient_product_id, r.quantity AS recipe_quantity,
+              r.uom_id, i.name AS ingredient_name, i.track_stock AS ingredient_track_stock,
+              i.track_inventory AS ingredient_track_inventory,
+              i.base_unit AS ingredient_base_unit,
+              i.canonical_base_unit_code AS ingredient_canonical_unit,
+              u.code AS uom_code
+         FROM pos_product_recipes r
+         JOIN pos_menu_items i ON i.id = r.ingredient_product_id
+         LEFT JOIN pos_product_uoms u ON u.id = r.uom_id
+        WHERE r.property_id = $1 AND r.product_id = ANY($2::int[])
+        ORDER BY r.id ASC`,
+      [propertyId, menuItemIds]
+    );
+
+    for (const r of recRes.rows) {
+      const pid = Number(r.product_id);
+      if (!recipesByProduct.has(pid)) {
+        recipesByProduct.set(pid, []);
+      }
+      recipesByProduct.get(pid)!.push({
+        recipe_id: Number(r.recipe_id),
+        product_id: pid,
+        ingredient_product_id: Number(r.ingredient_product_id),
+        recipe_quantity: parseFloat(r.recipe_quantity),
+        ingredient_name: r.ingredient_name,
+        ingredient_track_stock: Boolean(r.ingredient_track_stock),
+        ingredient_track_inventory: Boolean(r.ingredient_track_inventory),
+        ingredient_base_unit: r.ingredient_base_unit,
+        ingredient_canonical_unit: r.ingredient_canonical_unit,
+        uom_code: r.uom_code,
+      });
+    }
+  }
+
+  // 3. Klasifikasi item pesanan:
+  // KASUS A: Memiliki Resep (BOM) -> potong bahan baku (ingredient_product_id)
+  // KASUS B: Tanpa Resep & Tracked -> potong item langsung (Finished Good Retail)
+  // KASUS C: Non-Tracked & Tanpa Resep -> lewati
+  const aggregatedMap = new Map<number, {
+    product_id: number;
+    name: string;
+    quantity: number;
+    base_unit_code: string;
+    is_ingredient: boolean;
+    source_notes: string[];
+  }>();
+
+  let skippedNonTracked = 0;
+
+  for (const item of itemsRes.rows) {
+    const pId = Number(item.menu_item_id);
+    const orderQty = Number(item.quantity);
+    const recipes = recipesByProduct.get(pId);
+
+    if (recipes && recipes.length > 0) {
+      // KASUS A: BOM Resep Bahan Baku
+      for (const ing of recipes) {
+        const ingId = ing.ingredient_product_id;
+        const requiredQty = orderQty * ing.recipe_quantity;
+        const unitCode = ing.ingredient_canonical_unit || ing.ingredient_base_unit || ing.uom_code || 'PCS';
+        const note = `BOM: ${orderQty}x ${item.name} (${ing.recipe_quantity} ${unitCode}/porsi)`;
+
+        const existing = aggregatedMap.get(ingId);
+        if (existing) {
+          existing.quantity += requiredQty;
+          existing.source_notes.push(note);
+        } else {
+          aggregatedMap.set(ingId, {
+            product_id: ingId,
+            name: ing.ingredient_name,
+            quantity: requiredQty,
+            base_unit_code: unitCode,
+            is_ingredient: true,
+            source_notes: [note],
+          });
+        }
+      }
+    } else if (item.track_stock === true || item.track_inventory === true) {
+      // KASUS B: Finished Good Retail langsung
+      const unitCode = item.canonical_base_unit_code || item.base_unit || 'PCS';
+      const existing = aggregatedMap.get(pId);
+      if (existing) {
+        existing.quantity += orderQty;
+      } else {
+        aggregatedMap.set(pId, {
+          product_id: pId,
+          name: item.name,
+          quantity: orderQty,
+          base_unit_code: unitCode,
+          is_ingredient: false,
+          source_notes: [`Penjualan produk langsung`],
+        });
+      }
+    } else {
+      // KASUS C: Non-Tracked
+      skippedNonTracked++;
+    }
+  }
+
+  if (aggregatedMap.size === 0) {
     return {
       replayed: false,
       items_deducted: [],
@@ -5134,7 +5254,7 @@ export async function deductStockForPosSale(
     };
   }
 
-  // 3. Resolusi lokasi persediaan target (outlet kasir / dapur / gudang)
+  // 4. Resolusi lokasi persediaan target (outlet kasir / dapur / gudang)
   let targetLocationId: number | null = null;
   if (params.locationId && Number.isInteger(Number(params.locationId)) && Number(params.locationId) > 0) {
     targetLocationId = Number(params.locationId);
@@ -5198,40 +5318,16 @@ export async function deductStockForPosSale(
     );
   }
 
-  // 4. Agregasi kuantitas item berdasarkan menu_item_id
-  const aggregatedMap = new Map<number, {
-    menu_item_id: number;
-    name: string;
-    quantity: number;
-    base_unit_code: string;
-  }>();
-
-  for (const it of trackedItems) {
-    const pId = Number(it.menu_item_id);
-    const qty = Number(it.quantity);
-    const existing = aggregatedMap.get(pId);
-    const unitCode = it.canonical_base_unit_code || it.base_unit || 'PCS';
-    if (existing) {
-      existing.quantity += qty;
-    } else {
-      aggregatedMap.set(pId, {
-        menu_item_id: pId,
-        name: it.name,
-        quantity: qty,
-        base_unit_code: unitCode,
-      });
-    }
-  }
-
-  // Urutkan berdasarkan menu_item_id menaik untuk mencegah deadlock saat konkuren
-  const sortedItems = Array.from(aggregatedMap.values()).sort((a, b) => a.menu_item_id - b.menu_item_id);
+  // Urutkan berdasarkan product_id menaik untuk mencegah deadlock saat konkurensi tinggi
+  const sortedItems = Array.from(aggregatedMap.values()).sort((a, b) => a.product_id - b.product_id);
 
   // 5. Kunci baris saldo stok (FOR UPDATE) dan verifikasi kecukupan saldo
   const checkedItems: {
-    menu_item_id: number;
+    product_id: number;
     name: string;
     quantity: number;
     base_unit_code: string;
+    is_ingredient: boolean;
     currentBalance: number;
     unitCost: number | null;
   }[] = [];
@@ -5241,7 +5337,7 @@ export async function deductStockForPosSale(
       `SELECT quantity FROM stock_balances
         WHERE property_id = $1 AND product_id = $2 AND location_id = $3
         FOR UPDATE`,
-      [propertyId, item.menu_item_id, targetLocationId]
+      [propertyId, item.product_id, targetLocationId]
     );
     const currentBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity) : 0;
     if (currentBalance < item.quantity - 0.000001) {
@@ -5249,17 +5345,18 @@ export async function deductStockForPosSale(
       const reqFormatted = item.quantity.toFixed(3);
       throw Object.assign(
         new Error(
-          `Saldo persediaan tidak mencukupi untuk produk "${item.name}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}`
+          `Saldo persediaan tidak mencukupi untuk ${item.is_ingredient ? 'bahan baku' : 'produk'} "${item.name}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}`
         ),
         {
           statusCode: 422,
           code: 'INSUFFICIENT_STOCK_BALANCE',
           details: {
-            product_id: item.menu_item_id,
+            product_id: item.product_id,
             product_name: item.name,
             current_balance: curFormatted,
             required_quantity: reqFormatted,
             location_id: targetLocationId,
+            is_ingredient: item.is_ingredient,
           },
         }
       );
@@ -5270,7 +5367,7 @@ export async function deductStockForPosSale(
       `SELECT unit_cost FROM stock_movements
         WHERE property_id = $1 AND product_id = $2 AND unit_cost IS NOT NULL AND unit_cost > 0
         ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [propertyId, item.menu_item_id]
+      [propertyId, item.product_id]
     );
     const unitCost = costRes.rows.length > 0 ? parseFloat(costRes.rows[0].unit_cost) : null;
 
@@ -5335,7 +5432,7 @@ export async function deductStockForPosSale(
       [
         opId,
         propertyId,
-        check.menu_item_id,
+        check.product_id,
         targetLocationId,
         deltaStr,
         check.base_unit_code,
@@ -5347,25 +5444,25 @@ export async function deductStockForPosSale(
     // Update stock_balances secara aman (mencegah pelanggaran constraint chk_stock_balance_non_negative)
     const checkExisting = await client.query(
       `SELECT id FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3`,
-      [propertyId, check.menu_item_id, targetLocationId]
+      [propertyId, check.product_id, targetLocationId]
     );
     if (checkExisting.rows.length > 0) {
       await client.query(
         `UPDATE stock_balances
             SET quantity = $1, updated_at = NOW()
           WHERE property_id = $2 AND product_id = $3 AND location_id = $4`,
-        [nextBalanceStr, propertyId, check.menu_item_id, targetLocationId]
+        [nextBalanceStr, propertyId, check.product_id, targetLocationId]
       );
     } else {
       await client.query(
         `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
          VALUES ($1, $2, $3, $4, NOW())`,
-        [propertyId, check.menu_item_id, targetLocationId, nextBalanceStr]
+        [propertyId, check.product_id, targetLocationId, nextBalanceStr]
       );
     }
 
     itemsDeducted.push({
-      product_id: check.menu_item_id,
+      product_id: check.product_id,
       product_name: check.name,
       quantity: check.quantity,
       movement_id: movId,
@@ -5373,6 +5470,7 @@ export async function deductStockForPosSale(
       previous_balance: check.currentBalance.toFixed(3),
       new_balance: nextBalanceStr,
       base_unit_code: check.base_unit_code,
+      is_ingredient: check.is_ingredient,
     });
   }
 

@@ -1421,6 +1421,100 @@ export async function initializeDatabase(pool: Pool) {
     VALUES ('pos_whatsapp_receipt_v1')
     ON CONFLICT (version) DO NOTHING;
 
+    -- MP-04C: Master Resep & Bill of Materials (BOM) Bahan Baku POS
+    CREATE TABLE IF NOT EXISTS pos_product_uoms (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(20) NOT NULL,
+      name VARCHAR(50) NOT NULL,
+      category VARCHAR(30) DEFAULT 'GENERAL',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_product_uoms_prop_code
+      ON pos_product_uoms (COALESCE(property_id, 0), UPPER(code));
+
+    INSERT INTO pos_product_uoms (property_id, code, name, category)
+    VALUES
+      (NULL, 'GRAM', 'Gram', 'WEIGHT'),
+      (NULL, 'KG', 'Kilogram', 'WEIGHT'),
+      (NULL, 'ML', 'Mililiter', 'VOLUME'),
+      (NULL, 'LITER', 'Liter', 'VOLUME'),
+      (NULL, 'PCS', 'Pieces', 'COUNT'),
+      (NULL, 'PORSI', 'Porsi', 'COUNT'),
+      (NULL, 'CUP', 'Cup', 'COUNT'),
+      (NULL, 'GELAS', 'Gelas', 'COUNT'),
+      (NULL, 'BOTOL', 'Botol', 'COUNT'),
+      (NULL, 'KALENG', 'Kaleng', 'COUNT'),
+      (NULL, 'PACK', 'Pack', 'COUNT'),
+      (NULL, 'BOX', 'Box', 'COUNT'),
+      (NULL, 'ROLL', 'Roll', 'COUNT'),
+      (NULL, 'SET', 'Set', 'COUNT'),
+      (NULL, 'LEMBAR', 'Lembar', 'COUNT')
+    ON CONFLICT DO NOTHING;
+
+    ALTER TABLE pos_menu_items
+      ADD COLUMN IF NOT EXISTS is_raw_material BOOLEAN NOT NULL DEFAULT FALSE;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_raw_material
+      ON pos_menu_items (property_id, is_raw_material)
+      WHERE is_raw_material = TRUE;
+
+    CREATE TABLE IF NOT EXISTS pos_product_recipes (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE CASCADE,
+      ingredient_product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE RESTRICT,
+      quantity NUMERIC(12, 4) NOT NULL,
+      uom_id INTEGER REFERENCES pos_product_uoms(id) ON DELETE SET NULL,
+      notes VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_quantity_positive'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_quantity_positive CHECK (quantity > 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_no_self_ref'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_no_self_ref CHECK (product_id <> ingredient_product_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_pos_product_recipes_prop_prod_ing'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT uq_pos_product_recipes_prop_prod_ing UNIQUE (property_id, product_id, ingredient_product_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_product
+      ON pos_product_recipes (property_id, product_id);
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_ingredient
+      ON pos_product_recipes (property_id, ingredient_product_id);
+
+    CREATE OR REPLACE VIEW pos_products AS
+      SELECT * FROM pos_menu_items;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_product_recipe_v1')
+    ON CONFLICT (version) DO NOTHING;
+
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$
