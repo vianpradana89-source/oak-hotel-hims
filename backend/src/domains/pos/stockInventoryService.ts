@@ -4148,3 +4148,879 @@ export function createStockTransfersQueryHandler(deps: StockInventoryDeps) {
     }
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MP-04B Batch 5: Laporan Mutasi Stok, Kartu Stok / Ledger, dan Valuasi Persediaan
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface StockLedgerFilterParams {
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface StockLedgerMovementItem {
+  movement_id: number;
+  operation_id: number;
+  operation_type: string;
+  operation_key: string;
+  transaction_id: number | null;
+  quantity_delta: string;
+  in_quantity: string;
+  out_quantity: string;
+  running_balance: string;
+  base_unit_code: string;
+  packaging_id: number | null;
+  packaging_code: string | null;
+  packaging_label: string | null;
+  unit_cost: string | null;
+  notes: string | null;
+  created_at: string | Date;
+}
+
+export interface StockLedgerCardResult {
+  property_id: number;
+  product: {
+    id: number;
+    name: string;
+    item_code: string | null;
+    base_unit_code: string;
+  };
+  location: {
+    id: number;
+    code: string;
+    name: string;
+    type: string;
+  };
+  date_range: {
+    start_date: string | null;
+    end_date: string | null;
+  };
+  opening_balance: string;
+  closing_balance: string;
+  current_system_balance: string;
+  total_in: string;
+  total_out: string;
+  movements: StockLedgerMovementItem[];
+}
+
+export interface InventoryValuationFilterParams {
+  property_id: number;
+  location_id?: number | null;
+  product_id?: number | null;
+  category_id?: number | null;
+  search?: string | null;
+}
+
+export interface InventoryValuationItem {
+  balance_id: number;
+  property_id: number;
+  product_id: number;
+  product_name: string;
+  product_item_code: string | null;
+  category_id: number | null;
+  category_name: string | null;
+  location_id: number;
+  location_code: string;
+  location_name: string;
+  location_type: string;
+  base_unit_code: string;
+  quantity: string;
+  unit_cost: string;
+  total_value: string;
+  updated_at: string | Date;
+}
+
+export interface InventoryValuationReportResult {
+  property_id: number;
+  filters: {
+    location_id: number | null;
+    product_id: number | null;
+    category_id: number | null;
+    search: string | null;
+  };
+  summary: {
+    total_items: number;
+    total_quantity: string;
+    total_valuation_value: string;
+  };
+  items: InventoryValuationItem[];
+}
+
+export interface OpnameVarianceFilterParams {
+  property_id: number;
+  location_id?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  status?: 'SURPLUS' | 'DEFICIT' | 'MATCH' | 'ALL' | string | null;
+}
+
+export interface OpnameVarianceItemReport {
+  operation_id: number;
+  operation_key: string;
+  location_id: number;
+  location_code?: string | null;
+  location_name?: string | null;
+  product_id: number;
+  product_name: string;
+  system_quantity: string;
+  physical_quantity: string;
+  variance_quantity: string;
+  status: 'SURPLUS' | 'DEFICIT' | 'MATCH';
+  movement_id: number | null;
+  unit_cost: string;
+  variance_value: string;
+  notes: string | null;
+  counted_at: string | Date;
+}
+
+export interface OpnameVarianceReportResult {
+  property_id: number;
+  filters: {
+    location_id: number | null;
+    start_date: string | null;
+    end_date: string | null;
+    status: string;
+  };
+  summary: {
+    total_sessions: number;
+    total_items_counted: number;
+    total_surplus_items: number;
+    total_deficit_items: number;
+    total_match_items: number;
+    total_surplus_qty: string;
+    total_deficit_qty: string;
+    net_variance_qty: string;
+    total_surplus_value: string;
+    total_deficit_value: string;
+    net_variance_value: string;
+  };
+  sessions: any[];
+  items: OpnameVarianceItemReport[];
+}
+
+export function parseAsiaJakartaDateBounds(startDateStr?: string | null, endDateStr?: string | null): {
+  startBound: string | null;
+  endBound: string | null;
+} {
+  let startBound: string | null = null;
+  let endBound: string | null = null;
+
+  if (startDateStr && typeof startDateStr === 'string' && startDateStr.trim()) {
+    const trimmed = startDateStr.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      startBound = `${trimmed}T00:00:00+07:00`;
+    } else {
+      startBound = trimmed;
+    }
+  }
+
+  if (endDateStr && typeof endDateStr === 'string' && endDateStr.trim()) {
+    const trimmed = endDateStr.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      endBound = `${trimmed}T23:59:59.999+07:00`;
+    } else {
+      endBound = trimmed;
+    }
+  }
+
+  return { startBound, endBound };
+}
+
+/**
+ * Kartu Stok (Stock Ledger Card)
+ * Menampilkan riwayat transaksi per produk di lokasi tertentu untuk rentang tanggal (Asia/Jakarta),
+ * mencakup opening balance, daftar mutasi kronologis, running balance, dan closing balance.
+ */
+export async function getStockLedgerCard(
+  pool: Pool,
+  params: StockLedgerFilterParams
+): Promise<StockLedgerCardResult> {
+  const propertyId = Number(params.property_id);
+  const productId = Number(params.product_id);
+  const locationId = Number(params.location_id);
+
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(productId) || productId <= 0) {
+    throw Object.assign(new Error('product_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw Object.assign(new Error('location_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // 1. Validasi produk & lokasi
+  const prodRes = await pool.query(
+    `SELECT id, property_id, name, item_code, canonical_base_unit_code, base_unit, track_stock
+       FROM pos_menu_items
+      WHERE id = $1 AND property_id = $2`,
+    [productId, propertyId]
+  );
+  if (prodRes.rowCount === 0) {
+    throw Object.assign(new Error(`Produk dengan id ${productId} tidak ditemukan`), {
+      statusCode: 404,
+      code: 'PRODUCT_NOT_FOUND',
+    });
+  }
+  const product = prodRes.rows[0];
+
+  const locRes = await pool.query(
+    `SELECT id, property_id, code, name, location_type
+       FROM stock_locations
+      WHERE id = $1 AND property_id = $2`,
+    [locationId, propertyId]
+  );
+  if (locRes.rowCount === 0) {
+    throw Object.assign(new Error(`Lokasi dengan id ${locationId} tidak ditemukan`), {
+      statusCode: 404,
+      code: 'LOCATION_NOT_FOUND',
+    });
+  }
+  const location = locRes.rows[0];
+
+  // 2. Saldo sistem saat ini
+  const balRes = await pool.query(
+    `SELECT quantity FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3`,
+    [propertyId, productId, locationId]
+  );
+  const currentSystemBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity).toFixed(3) : '0.000';
+
+  // 3. Batas Tanggal Asia/Jakarta
+  const { startBound, endBound } = parseAsiaJakartaDateBounds(params.start_date, params.end_date);
+
+  // 4. Opening Balance: Akumulasi seluruh pergerakan sebelum rentang tanggal
+  let openingBalance = '0.000';
+  if (startBound) {
+    const openRes = await pool.query(
+      `SELECT COALESCE(SUM(quantity_delta), 0) AS opening_balance
+         FROM stock_movements
+        WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+          AND created_at < $4::timestamptz`,
+      [propertyId, productId, locationId, startBound]
+    );
+    openingBalance = parseFloat(openRes.rows[0].opening_balance).toFixed(3);
+  }
+
+  // 5. Riwayat mutasi dalam rentang
+  const conditions: string[] = ['sm.property_id = $1', 'sm.product_id = $2', 'sm.location_id = $3'];
+  const queryParams: any[] = [propertyId, productId, locationId];
+  let pIdx = 4;
+
+  if (startBound) {
+    conditions.push(`sm.created_at >= $${pIdx++}::timestamptz`);
+    queryParams.push(startBound);
+  }
+  if (endBound) {
+    conditions.push(`sm.created_at <= $${pIdx++}::timestamptz`);
+    queryParams.push(endBound);
+  }
+
+  const movRes = await pool.query(
+    `SELECT
+       sm.id AS movement_id,
+       sm.operation_id,
+       so.operation_type,
+       so.operation_key,
+       so.transaction_id,
+       so.notes,
+       sm.quantity_delta,
+       sm.base_unit_code,
+       sm.packaging_id,
+       sm.packaging_code,
+       sm.packaging_label,
+       sm.unit_cost,
+       sm.created_at
+      FROM stock_movements sm
+      JOIN stock_operations so ON so.id = sm.operation_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY sm.created_at ASC, sm.id ASC`,
+    queryParams
+  );
+
+  let runningNum = parseFloat(openingBalance);
+  let totalIn = 0;
+  let totalOut = 0;
+
+  const movements: StockLedgerMovementItem[] = movRes.rows.map((row: any) => {
+    const delta = parseFloat(row.quantity_delta);
+    if (delta > 0) {
+      totalIn += delta;
+    } else if (delta < 0) {
+      totalOut += Math.abs(delta);
+    }
+    runningNum += delta;
+
+    return {
+      movement_id: Number(row.movement_id),
+      operation_id: Number(row.operation_id),
+      operation_type: row.operation_type,
+      operation_key: row.operation_key,
+      transaction_id: row.transaction_id ? Number(row.transaction_id) : null,
+      quantity_delta: delta >= 0 ? `+${delta.toFixed(3)}` : delta.toFixed(3),
+      in_quantity: delta > 0 ? delta.toFixed(3) : '0.000',
+      out_quantity: delta < 0 ? Math.abs(delta).toFixed(3) : '0.000',
+      running_balance: runningNum.toFixed(3),
+      base_unit_code: row.base_unit_code,
+      packaging_id: row.packaging_id ? Number(row.packaging_id) : null,
+      packaging_code: row.packaging_code ?? null,
+      packaging_label: row.packaging_label ?? null,
+      unit_cost: row.unit_cost !== null && row.unit_cost !== undefined ? parseFloat(row.unit_cost).toFixed(2) : null,
+      notes: row.notes ?? null,
+      created_at: row.created_at,
+    };
+  });
+
+  const closingBalance = runningNum.toFixed(3);
+
+  return {
+    property_id: propertyId,
+    product: {
+      id: Number(product.id),
+      name: product.name,
+      item_code: product.item_code ?? null,
+      base_unit_code: product.canonical_base_unit_code || product.base_unit || 'PCS',
+    },
+    location: {
+      id: Number(location.id),
+      code: location.code,
+      name: location.name,
+      type: location.location_type,
+    },
+    date_range: {
+      start_date: params.start_date || null,
+      end_date: params.end_date || null,
+    },
+    opening_balance: openingBalance,
+    closing_balance: closingBalance,
+    current_system_balance: currentSystemBalance,
+    total_in: totalIn.toFixed(3),
+    total_out: totalOut.toFixed(3),
+    movements,
+  };
+}
+
+/**
+ * Rekap Saldo & Valuasi Persediaan (Inventory Valuation Report)
+ * Menghitung kuantitas stok per lokasi, unit cost terkini, dan total nilai valuasi persediaan.
+ */
+export async function getInventoryValuationReport(
+  pool: Pool,
+  params: InventoryValuationFilterParams
+): Promise<InventoryValuationReportResult> {
+  const propertyId = Number(params.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const conditions: string[] = ['sb.property_id = $1'];
+  const queryParams: any[] = [propertyId];
+  let pIdx = 2;
+
+  if (params.location_id) {
+    conditions.push(`sb.location_id = $${pIdx++}`);
+    queryParams.push(Number(params.location_id));
+  }
+  if (params.product_id) {
+    conditions.push(`sb.product_id = $${pIdx++}`);
+    queryParams.push(Number(params.product_id));
+  }
+  if (params.category_id) {
+    conditions.push(`pmi.category_id = $${pIdx++}`);
+    queryParams.push(Number(params.category_id));
+  }
+  if (params.search && typeof params.search === 'string' && params.search.trim()) {
+    conditions.push(`(pmi.name ILIKE $${pIdx} OR pmi.item_code ILIKE $${pIdx})`);
+    queryParams.push(`%${params.search.trim()}%`);
+    pIdx++;
+  }
+
+  const queryStr = `
+    SELECT
+      sb.id AS balance_id,
+      sb.property_id,
+      sb.product_id,
+      pmi.name AS product_name,
+      pmi.item_code AS product_item_code,
+      COALESCE(pmi.canonical_base_unit_code, pmi.base_unit, 'PCS') AS base_unit_code,
+      pmi.category_id,
+      pc.name AS category_name,
+      pmi.price AS selling_price,
+      sb.location_id,
+      sl.code AS location_code,
+      sl.name AS location_name,
+      sl.location_type,
+      sb.quantity,
+      sb.updated_at,
+      COALESCE(
+        (
+          SELECT sm.unit_cost
+          FROM stock_movements sm
+          WHERE sm.property_id = sb.property_id
+            AND sm.product_id = sb.product_id
+            AND sm.unit_cost IS NOT NULL
+            AND sm.unit_cost > 0
+          ORDER BY sm.created_at DESC, sm.id DESC
+          LIMIT 1
+        ),
+        pmi.price,
+        0
+      ) AS unit_cost
+    FROM stock_balances sb
+    JOIN pos_menu_items pmi ON pmi.id = sb.product_id AND pmi.property_id = sb.property_id
+    JOIN stock_locations sl ON sl.id = sb.location_id AND sl.property_id = sb.property_id
+    LEFT JOIN pos_menu_categories pc ON pc.id = pmi.category_id AND pc.property_id = sb.property_id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY sl.code ASC, pmi.name ASC
+  `;
+
+  const res = await pool.query(queryStr, queryParams);
+
+  let sumQuantity = 0;
+  let sumValue = 0;
+
+  const items: InventoryValuationItem[] = res.rows.map((row: any) => {
+    const qty = parseFloat(row.quantity);
+    const unitCost = parseFloat(row.unit_cost || 0);
+    const totalVal = Math.round(qty * unitCost * 100) / 100;
+
+    sumQuantity += qty;
+    sumValue += totalVal;
+
+    return {
+      balance_id: Number(row.balance_id),
+      property_id: Number(row.property_id),
+      product_id: Number(row.product_id),
+      product_name: row.product_name,
+      product_item_code: row.product_item_code ?? null,
+      category_id: row.category_id ? Number(row.category_id) : null,
+      category_name: row.category_name ?? null,
+      location_id: Number(row.location_id),
+      location_code: row.location_code,
+      location_name: row.location_name,
+      location_type: row.location_type,
+      base_unit_code: row.base_unit_code,
+      quantity: qty.toFixed(3),
+      unit_cost: unitCost.toFixed(2),
+      total_value: totalVal.toFixed(2),
+      updated_at: row.updated_at,
+    };
+  });
+
+  return {
+    property_id: propertyId,
+    filters: {
+      location_id: params.location_id ? Number(params.location_id) : null,
+      product_id: params.product_id ? Number(params.product_id) : null,
+      category_id: params.category_id ? Number(params.category_id) : null,
+      search: params.search ?? null,
+    },
+    summary: {
+      total_items: items.length,
+      total_quantity: sumQuantity.toFixed(3),
+      total_valuation_value: sumValue.toFixed(2),
+    },
+    items,
+  };
+}
+
+/**
+ * Laporan Rekap Variansi Opname (Opname Variance Report)
+ * Ringkasan hasil opname fisik per periode, filter berdasarkan status (SURPLUS, DEFICIT, MATCH),
+ * dan total selisih kuantitas serta nominal variansi.
+ */
+export async function getOpnameVarianceReport(
+  pool: Pool,
+  params: OpnameVarianceFilterParams
+): Promise<OpnameVarianceReportResult> {
+  const propertyId = Number(params.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    throw Object.assign(new Error('property_id wajib berupa bilangan bulat positif'), {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const { startBound, endBound } = parseAsiaJakartaDateBounds(params.start_date, params.end_date);
+
+  const conditions: string[] = ['so.property_id = $1', "so.operation_type = 'STOCK_OPNAME'"];
+  const queryParams: any[] = [propertyId];
+  let pIdx = 2;
+
+  if (params.location_id) {
+    conditions.push(`(so.metadata->>'location_id')::int = $${pIdx++}`);
+    queryParams.push(Number(params.location_id));
+  }
+  if (startBound) {
+    conditions.push(`so.created_at >= $${pIdx++}::timestamptz`);
+    queryParams.push(startBound);
+  }
+  if (endBound) {
+    conditions.push(`so.created_at <= $${pIdx++}::timestamptz`);
+    queryParams.push(endBound);
+  }
+
+  const queryStr = `
+    SELECT
+      so.id AS operation_id,
+      so.property_id,
+      so.operation_key,
+      so.operation_type,
+      so.notes,
+      so.metadata,
+      so.created_by,
+      so.created_at,
+      sl.id AS location_id,
+      sl.code AS location_code,
+      sl.name AS location_name
+    FROM stock_operations so
+    LEFT JOIN stock_locations sl
+      ON sl.id = (so.metadata->>'location_id')::int AND sl.property_id = so.property_id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY so.id DESC
+  `;
+
+  const opRes = await pool.query(queryStr, queryParams);
+
+  // Ambil unit_cost untuk setiap produk yang ada di opname agar perhitungan nilai variansi akurat
+  const productIds = new Set<number>();
+  for (const row of opRes.rows) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {};
+    const items = Array.isArray(meta.items_summary) ? meta.items_summary : [];
+    for (const item of items) {
+      if (item.product_id) productIds.add(Number(item.product_id));
+    }
+  }
+
+  const costMap = new Map<number, number>();
+  if (productIds.size > 0) {
+    const pids = Array.from(productIds);
+    const costRes = await pool.query(
+      `SELECT
+         pmi.id,
+         COALESCE(
+           (
+             SELECT sm.unit_cost
+             FROM stock_movements sm
+             WHERE sm.property_id = $1
+               AND sm.product_id = pmi.id
+               AND sm.unit_cost IS NOT NULL
+               AND sm.unit_cost > 0
+             ORDER BY sm.created_at DESC, sm.id DESC
+             LIMIT 1
+           ),
+           pmi.price,
+           0
+         ) AS unit_cost
+       FROM pos_menu_items pmi
+       WHERE pmi.property_id = $1 AND pmi.id = ANY($2::int[])`,
+      [propertyId, pids]
+    );
+    for (const cr of costRes.rows) {
+      costMap.set(Number(cr.id), parseFloat(cr.unit_cost || 0));
+    }
+  }
+
+  const requestedStatus = params.status ? String(params.status).trim().toUpperCase() : 'ALL';
+
+  let totalItemsCounted = 0;
+  let totalSurplusItems = 0;
+  let totalDeficitItems = 0;
+  let totalMatchItems = 0;
+  let totalSurplusQty = 0;
+  let totalDeficitQty = 0;
+  let netVarianceQty = 0;
+  let totalSurplusValue = 0;
+  let totalDeficitValue = 0;
+  let netVarianceValue = 0;
+
+  const sessionsList: any[] = [];
+  const itemsList: OpnameVarianceItemReport[] = [];
+
+  for (const row of opRes.rows) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {};
+    const items = Array.isArray(meta.items_summary) ? meta.items_summary : [];
+    const locId = Number(meta.location_id || row.location_id || 0);
+
+    sessionsList.push({
+      operation_id: Number(row.operation_id),
+      operation_key: row.operation_key,
+      location_id: locId,
+      location_code: row.location_code ?? null,
+      location_name: row.location_name ?? null,
+      notes: row.notes ?? null,
+      created_by: row.created_by ? Number(row.created_by) : null,
+      created_at: row.created_at,
+      total_items: items.length,
+    });
+
+    for (const item of items) {
+      totalItemsCounted++;
+      const itemStatus = String(item.status || '').toUpperCase() as 'SURPLUS' | 'DEFICIT' | 'MATCH';
+      const varQty = parseFloat(item.variance_quantity || 0);
+      const unitCost = costMap.get(Number(item.product_id)) || 0;
+      const varValue = Math.round(varQty * unitCost * 100) / 100;
+
+      if (itemStatus === 'SURPLUS') {
+        totalSurplusItems++;
+        totalSurplusQty += varQty;
+        totalSurplusValue += varValue;
+      } else if (itemStatus === 'DEFICIT') {
+        totalDeficitItems++;
+        totalDeficitQty += Math.abs(varQty);
+        totalDeficitValue += Math.abs(varValue);
+      } else {
+        totalMatchItems++;
+      }
+
+      netVarianceQty += varQty;
+      netVarianceValue += varValue;
+
+      // Filter status
+      if (requestedStatus === 'ALL' || requestedStatus === itemStatus) {
+        itemsList.push({
+          operation_id: Number(row.operation_id),
+          operation_key: row.operation_key,
+          location_id: locId,
+          location_code: row.location_code ?? null,
+          location_name: row.location_name ?? null,
+          product_id: Number(item.product_id),
+          product_name: item.product_name,
+          system_quantity: parseFloat(item.system_quantity || 0).toFixed(3),
+          physical_quantity: parseFloat(item.physical_quantity || 0).toFixed(3),
+          variance_quantity: varQty >= 0 ? `+${varQty.toFixed(3)}` : varQty.toFixed(3),
+          status: itemStatus,
+          movement_id: item.movement_id ? Number(item.movement_id) : null,
+          unit_cost: unitCost.toFixed(2),
+          variance_value: varValue >= 0 ? `+${varValue.toFixed(2)}` : varValue.toFixed(2),
+          notes: item.notes ?? null,
+          counted_at: row.created_at,
+        });
+      }
+    }
+  }
+
+  return {
+    property_id: propertyId,
+    filters: {
+      location_id: params.location_id ? Number(params.location_id) : null,
+      start_date: params.start_date || null,
+      end_date: params.end_date || null,
+      status: requestedStatus,
+    },
+    summary: {
+      total_sessions: sessionsList.length,
+      total_items_counted: totalItemsCounted,
+      total_surplus_items: totalSurplusItems,
+      total_deficit_items: totalDeficitItems,
+      total_match_items: totalMatchItems,
+      total_surplus_qty: totalSurplusQty.toFixed(3),
+      total_deficit_qty: totalDeficitQty.toFixed(3),
+      net_variance_qty: (netVarianceQty >= 0 ? '+' : '') + netVarianceQty.toFixed(3),
+      total_surplus_value: totalSurplusValue.toFixed(2),
+      total_deficit_value: totalDeficitValue.toFixed(2),
+      net_variance_value: (netVarianceValue >= 0 ? '+' : '') + netVarianceValue.toFixed(2),
+    },
+    sessions: sessionsList,
+    items: itemsList,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. Express Route Handlers (MP-04B B-5: Reports & Ledger)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function createStockLedgerHandler(deps: StockInventoryDeps) {
+  return async function handleStockLedger(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(
+          authUser,
+          ['inventory.view', 'inventory.create', 'inventory.edit'],
+          deps.pool
+        );
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const productId = Number(req.query?.product_id);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'product_id wajib disertakan berupa bilangan bulat positif',
+        });
+      }
+
+      const locationId = Number(req.query?.location_id);
+      if (!Number.isInteger(locationId) || locationId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'location_id wajib disertakan berupa bilangan bulat positif',
+        });
+      }
+
+      const ledger = await getStockLedgerCard(deps.pool, {
+        property_id: propertyId,
+        product_id: productId,
+        location_id: locationId,
+        start_date: req.query?.start_date ? String(req.query.start_date) : undefined,
+        end_date: req.query?.end_date ? String(req.query.end_date) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: ledger,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat kartu stok',
+      });
+    }
+  };
+}
+
+export function createInventoryValuationHandler(deps: StockInventoryDeps) {
+  return async function handleInventoryValuation(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(
+          authUser,
+          ['inventory.view', 'inventory.create', 'inventory.edit'],
+          deps.pool
+        );
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const valuation = await getInventoryValuationReport(deps.pool, {
+        property_id: propertyId,
+        location_id: req.query?.location_id ? Number(req.query.location_id) : undefined,
+        product_id: req.query?.product_id ? Number(req.query.product_id) : undefined,
+        category_id: req.query?.category_id ? Number(req.query.category_id) : undefined,
+        search: req.query?.search ? String(req.query.search) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: valuation,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat laporan valuasi persediaan',
+      });
+    }
+  };
+}
+
+export function createOpnameVarianceHandler(deps: StockInventoryDeps) {
+  return async function handleOpnameVariance(req: Request, res: Response) {
+    try {
+      const propertyId = Number(req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canView = await checkInventoryPermission(
+          authUser,
+          ['inventory.view', 'inventory.create', 'inventory.edit'],
+          deps.pool
+        );
+        if (!canView) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.view',
+          });
+        }
+      }
+
+      const varianceReport = await getOpnameVarianceReport(deps.pool, {
+        property_id: propertyId,
+        location_id: req.query?.location_id ? Number(req.query.location_id) : undefined,
+        start_date: req.query?.start_date ? String(req.query.start_date) : undefined,
+        end_date: req.query?.end_date ? String(req.query.end_date) : undefined,
+        status: req.query?.status ? String(req.query.status) : undefined,
+      });
+
+      return res.json({
+        status: 'OK',
+        data: varianceReport,
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memuat laporan variansi opname',
+      });
+    }
+  };
+}
+

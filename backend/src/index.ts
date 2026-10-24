@@ -196,6 +196,9 @@ import {
   createStockOpnamesQueryHandler,
   createStockTransferHandler,
   createStockTransfersQueryHandler,
+  createStockLedgerHandler,
+  createInventoryValuationHandler,
+  createOpnameVarianceHandler,
 } from './domains/pos/stockInventoryService';
 
 const app: any = express();
@@ -5487,6 +5490,14 @@ app.get('/api/pos/stock/opname', createStockOpnamesQueryHandler({ pool, assertPr
 app.get('/api/pos/stock/opnames', createStockOpnamesQueryHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/transfers', createStockTransferHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/transfers', createStockTransfersQueryHandler({ pool, assertPropertyScope }));
+
+// ── Master Produk: Laporan Mutasi Stok, Kartu Stok & Valuasi Persediaan (MP-04B B-5) ──
+app.get('/api/pos/inventory/stock-ledger', createStockLedgerHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/stock-ledger', createStockLedgerHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/inventory/valuation-report', createInventoryValuationHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/valuation-report', createInventoryValuationHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/inventory/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 
