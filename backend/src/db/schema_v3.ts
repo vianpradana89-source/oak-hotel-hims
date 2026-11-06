@@ -3367,6 +3367,7 @@ export async function initializeDatabase(pool: Pool) {
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_by VARCHAR(100);
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_at TIMESTAMP WITH TIME ZONE;
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS revenue_category VARCHAR(50) DEFAULT 'ROOM_SALES';
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS unit VARCHAR(30);
 
         CREATE INDEX IF NOT EXISTS idx_folio_entries_rule ON folio_entries (rule_id);
         CREATE INDEX IF NOT EXISTS idx_folio_entries_rev_cat ON folio_entries (revenue_category);
@@ -6162,6 +6163,22 @@ export async function initializeDatabase(pool: Pool) {
       `);
     }
   }
+
+  // Migration: doc_1b_2b_documents_permission_rows_v1
+  await pool.query(`
+    INSERT INTO permissions (resource, action, key, description, is_system)
+    VALUES
+      ('documents', 'view',    'documents.view',    'Hak akses VIEW pada modul documents', TRUE),
+      ('documents', 'create',  'documents.create',  'Hak akses CREATE pada modul documents', TRUE),
+      ('documents', 'edit',    'documents.edit',    'Hak akses EDIT pada modul documents', TRUE),
+      ('documents', 'delete',  'documents.delete',  'Hak akses DELETE pada modul documents', TRUE)
+    ON CONFLICT (key) DO NOTHING;
+  `);
+  await pool.query(`
+    INSERT INTO schema_migrations (version)
+    VALUES ('doc_1b_2b_documents_permission_rows_v1')
+    ON CONFLICT (version) DO NOTHING;
+  `);
 
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }

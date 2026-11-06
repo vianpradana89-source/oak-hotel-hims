@@ -1,0 +1,28 @@
+# DRAFT for preflight R2; do not submit before explicit authorization.
+# Dedicated manual config. Keep the existing staging trigger/config unchanged.
+# Source must be the reviewed, clean candidate; a tag alone does not prove its contents.
+# COMMIT_SHA must be the full actual candidate commit, supplied after authorized commit.
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-guest-bill-r8-image'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'VITE_REALTIME_BASE_URL=${_VITE_REALTIME_BASE_URL}'
+      - '-t'
+      - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+
+# Cloud Build pushes the produced commit-tag image. No latest tag and no deploy step.
+images:
+  - 'asia-southeast2-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/oak-hims-staging:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  # Candidate Cloud Run UI uses same-origin SSE. Validate AuthContext/API routing
+  # locally and preserve the original global staging pipeline unchanged.
+  _VITE_REALTIME_BASE_URL: ''

@@ -4,6 +4,11 @@ import html2canvas from 'html2canvas';
 import ReservationConfirmationPrint from './ReservationConfirmationPrint';
 import QuotationPrint from './QuotationPrint';
 import QuotationEditor from './QuotationEditor';
+import GuestFolioPrint, {
+  type GuestFolioDocumentDto,
+  type GuestFolioScope,
+  type GuestFolioViewMode,
+} from './GuestFolioPrint';
 import type { QuotationDraft, QuotationMode, PropertyPaymentInstructionsDto } from './quotationDraft';
 import {
   createBlankQuotationDraft,
@@ -26,13 +31,15 @@ function generateDocumentPdfFilename({
   quotationMode,
   bid,
   reference,
+  folioNumber,
   propertyInfo,
   propertyBranding,
 }: {
-  kind: 'confirmation' | 'quotation';
+  kind: 'confirmation' | 'quotation' | 'folio';
   quotationMode?: 'reservation' | 'manual';
   bid?: string | null;
   reference?: string | null;
+  folioNumber?: string | null;
   propertyInfo?: PropertyInfoDto;
   propertyBranding?: PropertyBrandingDto;
 }): string {
@@ -40,12 +47,18 @@ function generateDocumentPdfFilename({
   const hotelPrefix = sanitizeFilenameSegment(rawHotelName) || 'OAK-Hotel';
   const today = new Date().toISOString().slice(0, 10);
 
+  if (kind === 'folio') {
+    const cleanFolio = (folioNumber || bid || reference || '').trim();
+    const refSuffix = cleanFolio ? sanitizeFilenameSegment(cleanFolio) : today;
+    return `${hotelPrefix}-Guest-Folio-${refSuffix}.pdf`;
+  }
+
   if (kind === 'confirmation') {
     const cleanBid = (bid || '').trim();
     const refSuffix = cleanBid
       ? (cleanBid.toUpperCase().startsWith('BID-') ? cleanBid : `BID-${cleanBid}`)
       : today;
-    return `${hotelPrefix}-Reservation-Confirmation-${sanitizeFilenameSegment(refSuffix)}.pdf`;
+    return `${hotelPrefix}-Guest-Bill-${sanitizeFilenameSegment(refSuffix)}.pdf`;
   }
 
   if (quotationMode === 'reservation') {
@@ -92,19 +105,20 @@ function computePdfDimensions(pixels: { widthPx: number; heightPx: number }, pdf
 }
 
 /* ---------------------------------------------------------------- */
-/*  DocumentCenter - OAK HIMS DOCUMENT-1B Step 3A & 1B.1 Step D    */
+/*  DocumentCenter - OAK HIMS DOCUMENT-1B & Guest Folio             */
 /*                                                                  */
 /*  Left  : doc kind + property-scoped reservation picker + summary */
-/*          + QuotationEditor (Step C/D)                            */
-/*  Right : live A4 preview (draft-powered QuotationPrint)          */
+/*          + QuotationEditor / Guest Folio Presentation Controls   */
+/*  Right : live A4 preview                                         */
 /*                                                                  */
 /*  Canonical data fetched via dedicated Document Domain API:       */
-/*    GET /api/documents/reservations           (list picker)       */
-/*    GET /api/documents/reservations/:id       (detail print)      */
-/*  No DB writes. No SSE. No invoice / receipt logic.              */
+/*    GET /api/documents/reservations                (list picker)  */
+/*    GET /api/documents/reservations/:id            (detail print) */
+/*    GET /api/documents/reservations/:id/folio      (guest folio)  */
+/*  No DB writes. No SSE.                                           */
 /* ---------------------------------------------------------------- */
 
-export type DocKind = 'confirmation' | 'quotation';
+export type DocKind = 'confirmation' | 'quotation' | 'folio';
 
 /* Compatible signature for an authenticated fetch function. */
 export type AuthFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
@@ -134,7 +148,13 @@ function reservationMatches(res: any, q: string): boolean {
   const bid = String(res?.bid || '').toLowerCase();
   const guest = String(res?.guest_name || res?.booker_name || '').toLowerCase();
   const roomNo = String(res?.room_number || '').toLowerCase();
-  return bid.includes(needle) || guest.includes(needle) || roomNo.includes(needle);
+  const idStr = String(res?.id || '').toLowerCase();
+  return (
+    bid.includes(needle) ||
+    guest.includes(needle) ||
+    roomNo.includes(needle) ||
+    idStr.includes(needle)
+  );
 }
 
 /* ---- component -------------------------------------------------------- */
@@ -154,7 +174,16 @@ export default function DocumentCenter({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [kind, setKind] = useState<DocKind>(initialKind ?? 'confirmation');
   const [selectedResId, setSelectedResId] = useState<number | null>(null);
+  const [explicitIncludeId, setExplicitIncludeId] = useState<number | null>(
+    initialReservationId ?? null
+  );
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    if (initialReservationId != null) {
+      setExplicitIncludeId(Number(initialReservationId));
+    }
+  }, [initialReservationId]);
 
   /* Debounce ref for search queries to avoid a request on every keystroke. */
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -164,11 +193,10 @@ export default function DocumentCenter({
   const pickerRequestVersion = useRef(0);
 
   /* Single authoritative effect for all picker requests.
-     - Empty search → immediate default fetch (recent CHECKED_OUT, LIMIT 20)
+     - Empty search → immediate default fetch (recent CHECKED_OUT + optional include_id, LIMIT 20)
      - Non-empty search → debounced 300ms global property-scoped search
      - propertyId change cancels any in-flight request and resets state */
   useEffect(() => {
-    // Cancel any pending debounce timer from the previous run.
     if (searchDebounceRef.current) {
       clearTimeout(searchDebounceRef.current);
       searchDebounceRef.current = null;
@@ -184,8 +212,6 @@ export default function DocumentCenter({
     const doFetch = async (url: string) => {
       try {
         const res = await authFetch(url, { signal: controller.signal });
-        // Stale-response protection: enforce immediately after fetch,
-        // before ANY state update (success, error, or !res.ok handling).
         if (controller.signal.aborted) return;
         if (version !== pickerRequestVersion.current) return;
         if (!res.ok) {
@@ -203,7 +229,7 @@ export default function DocumentCenter({
         const rows = Array.isArray(json?.data) ? json.data : [];
         setPickerReservations(rows);
         setPickerLoading(false);
-      } catch (err) {
+      } catch {
         if (controller.signal.aborted) return;
         if (version !== pickerRequestVersion.current) return;
         setPickerError('Gagal memuat daftar reservasi dokumen.');
@@ -212,10 +238,12 @@ export default function DocumentCenter({
     };
 
     if (!searchQuery.trim()) {
-      // DEFAULT MODE: immediate fetch, no debounce.
-      doFetch(`/api/documents/reservations?property_id=${propertyId}`);
+      const includeQuery =
+        explicitIncludeId && Number.isInteger(explicitIncludeId) && explicitIncludeId > 0
+          ? `&include_id=${explicitIncludeId}`
+          : '';
+      doFetch(`/api/documents/reservations?property_id=${propertyId}${includeQuery}`);
     } else {
-      // SEARCH MODE: debounced 300ms to avoid excessive requests.
       searchDebounceRef.current = setTimeout(() => {
         const encoded = encodeURIComponent(searchQuery.trim());
         doFetch(`/api/documents/reservations?property_id=${propertyId}&search=${encoded}`);
@@ -229,15 +257,27 @@ export default function DocumentCenter({
         searchDebounceRef.current = null;
       }
     };
-  }, [propertyId, authFetch, searchQuery]);
+  }, [propertyId, authFetch, searchQuery, explicitIncludeId]);
 
-  /* Canonical detail state (loaded via API, not from picker row). */
+  /* Canonical detail state (loaded via API for Confirmation / Quotation). */
   const [selectedDetail, setSelectedDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetryCount, setDetailRetryCount] = useState(0);
 
   /* Stale-response protection: version ref incremented on every new request. */
   const detailRequestVersion = useRef(0);
+
+  /* Canonical Guest Folio state (loaded via GET /api/documents/reservations/:id/folio). */
+  const [folioDoc, setFolioDoc] = useState<GuestFolioDocumentDto | null>(null);
+  const [folioLoading, setFolioLoading] = useState(false);
+  const [folioError, setFolioError] = useState<string | null>(null);
+  const [folioScope, setFolioScope] = useState<GuestFolioScope>('GUEST_FOLIO');
+  const [folioViewMode, setFolioViewMode] = useState<GuestFolioViewMode>('EFFECTIVE');
+  const [folioFooterNote, setFolioFooterNote] = useState('');
+  const [folioCashierLabel, setFolioCashierLabel] = useState('');
+  const [folioRetryCount, setFolioRetryCount] = useState(0);
+  const folioRequestVersion = useRef(0);
 
   /* Quotation draft state (DOCUMENT-1B.1 Step C & D) */
   const [quotationMode, setQuotationMode] = useState<QuotationMode>('reservation');
@@ -286,7 +326,6 @@ export default function DocumentCenter({
           const config: PropertyPaymentInstructionsDto = json.data;
           setPropertyPaymentInstructions(config);
 
-          // If draft currently has blank bank info, prefill from active property config
           if (config.is_active !== false && (config.bank_name || config.bank_account_number)) {
             setQuotationDraft((prev) => {
               if (!prev.bankName && !prev.bankAccountNumber) {
@@ -326,11 +365,9 @@ export default function DocumentCenter({
 
   /* Property-switch / list-refresh safety:
       If the currently selected reservation no longer exists in the active
-      property's scoped list, clear the selection and all detail state.
-      This protects against propertyId changes and reservation list updates
-      that drop the selected id. */
+      property's scoped list (and picker has finished loading), clear the selection. */
   useEffect(() => {
-    if (selectedResId == null) return;
+    if (selectedResId == null || pickerLoading) return;
     const stillExists = pickerReservations.some(
       (r) => Number(r?.id) === selectedResId,
     );
@@ -339,6 +376,9 @@ export default function DocumentCenter({
       setSelectedDetail(null);
       setDetailError(null);
       setDetailLoading(false);
+      setFolioDoc(null);
+      setFolioError(null);
+      setFolioLoading(false);
       lastPreloadedResIdRef.current = null;
       setQuotationDraft(
         createBlankQuotationDraft(
@@ -347,7 +387,7 @@ export default function DocumentCenter({
         ),
       );
     }
-  }, [pickerReservations, selectedResId, quotationMode, propertyPaymentInstructions]);
+  }, [pickerReservations, pickerLoading, selectedResId, quotationMode, propertyPaymentInstructions]);
 
   /* Explicit propertyId change safety: clear selection & draft immediately */
   const prevPropertyIdRef = useRef(propertyId);
@@ -355,10 +395,15 @@ export default function DocumentCenter({
     if (prevPropertyIdRef.current !== propertyId) {
       prevPropertyIdRef.current = propertyId;
       setSelectedResId(null);
+      setExplicitIncludeId(null);
       setSelectedDetail(null);
       setDetailError(null);
       setDetailLoading(false);
+      setFolioDoc(null);
+      setFolioError(null);
+      setFolioLoading(false);
       lastPreloadedResIdRef.current = null;
+      pdfSnapshotCacheRef.current = {};
       setQuotationDraft(
         createBlankQuotationDraft(
           quotationMode === 'manual' ? 'manual' : 'reservation',
@@ -377,8 +422,9 @@ export default function DocumentCenter({
       return;
     }
 
-    /* Stale guard: bump version and capture it for this request. */
     const version = ++detailRequestVersion.current;
+    // Clear previous detail immediately to prevent stale render
+    setSelectedDetail(null);
     setDetailLoading(true);
     setDetailError(null);
 
@@ -401,9 +447,6 @@ export default function DocumentCenter({
         }
         const json = await res.json();
         if (cancelled || version !== detailRequestVersion.current) return;
-        /* The dedicated Document API returns:
-           { status: "OK", data: { reservation: {...}, nightly_rates: [...] } }
-           We extract the reservation object for rendering and keep nightly_rates for draft. */
         if (json?.status === 'ERROR') {
           throw new Error(json?.message || 'Data tidak tersedia');
         }
@@ -412,8 +455,12 @@ export default function DocumentCenter({
           throw new Error('Invalid response shape');
         }
 
-        /* Extract reservation object (not the wrapper) */
-        const reservation = responseData.reservation || responseData;
+        const baseRes = responseData.reservation && (responseData.reservation.guest_name || responseData.reservation.check_in)
+          ? { ...responseData, ...responseData.reservation }
+          : responseData;
+        const reservation = responseData.financials
+          ? { ...responseData.financials, ...baseRes }
+          : baseRes;
         setSelectedDetail(reservation);
         setDetailLoading(false);
       } catch (err: any) {
@@ -429,7 +476,69 @@ export default function DocumentCenter({
       cancelled = true;
       controller.abort();
     };
-  }, [selectedResId, propertyId, authFetch]);
+  }, [selectedResId, propertyId, authFetch, detailRetryCount]);
+
+  /* Fetch canonical Guest Folio projection when selectedResId, propertyId, or folioScope changes. */
+  useEffect(() => {
+    if (selectedResId == null) {
+      setFolioDoc(null);
+      setFolioError(null);
+      setFolioLoading(false);
+      return;
+    }
+
+    const version = ++folioRequestVersion.current;
+    // Immediately clear old folioDoc to guarantee zero stale preview
+    setFolioDoc(null);
+    setFolioLoading(true);
+    setFolioError(null);
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        const url = `/api/documents/reservations/${selectedResId}/folio?property_id=${propertyId}&scope=${folioScope}`;
+        const res = await authFetch(url, { signal: controller.signal });
+        if (cancelled || version !== folioRequestVersion.current) return;
+        if (!res.ok) {
+          let errMsg = `HTTP ${res.status}`;
+          try {
+            const errJson = await res.json();
+            if (errJson?.message) errMsg = errJson.message;
+          } catch {
+            // ignore json parse error
+          }
+          if (res.status === 403) {
+            throw new Error(errMsg || 'Akses ke Guest Folio ditolak.');
+          }
+          if (res.status === 404) {
+            throw new Error(errMsg || 'Reservasi tidak ditemukan pada properti ini.');
+          }
+          throw new Error(errMsg);
+        }
+        const json = await res.json();
+        if (cancelled || version !== folioRequestVersion.current) return;
+        if (json?.status === 'ERROR' || !json?.data) {
+          throw new Error(json?.message || 'Data Guest Folio tidak tersedia.');
+        }
+
+        setFolioDoc(json.data as GuestFolioDocumentDto);
+        setFolioLoading(false);
+      } catch (err: any) {
+        if (cancelled || version !== folioRequestVersion.current) return;
+        if (err?.name === 'AbortError') return;
+        setFolioError(err?.message || 'Gagal memuat rincian Guest Folio.');
+        setFolioLoading(false);
+        setFolioDoc(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [selectedResId, propertyId, folioScope, authFetch, folioRetryCount]);
 
   /* Preload canonical reservation detail into quotation draft (reservation mode only) */
   useEffect(() => {
@@ -460,13 +569,11 @@ export default function DocumentCenter({
       if (newMode === quotationMode) return;
       setQuotationMode(newMode);
       if (newMode === 'manual') {
-        // Clear reservation-specific state, create fresh blank draft
         lastPreloadedResIdRef.current = null;
         setQuotationDraft(
           createBlankQuotationDraft('manual', propertyPaymentInstructions),
         );
       } else {
-        // Switching to reservation mode: preload canonical detail if already loaded
         if (selectedDetail) {
           lastPreloadedResIdRef.current = Number(selectedDetail.id ?? selectedResId);
           setQuotationDraft(
@@ -482,6 +589,12 @@ export default function DocumentCenter({
     },
     [quotationMode, selectedDetail, selectedResId, propertyPaymentInstructions],
   );
+
+  /* Switch to a sibling room in a multi-room booking */
+  const handleSelectSiblingReservation = useCallback((siblingId: number) => {
+    setExplicitIncludeId(siblingId);
+    setSelectedResId(siblingId);
+  }, []);
 
   /* Picker row for summary (used while detail is still loading). */
   const pickerRow = useMemo(
@@ -503,23 +616,118 @@ export default function DocumentCenter({
   const currencyCode = propertyInfo?.currency;
 
   const totalLabel = useMemo(() => {
+    if (kind === 'folio' && folioDoc) {
+      return formatHotelCurrency(Number(folioDoc.summary.net_total_charges || 0), currencyCode);
+    }
     const val = docRes?.total_price ?? pickerRow?.total_price ?? 0;
     if (!Number(val)) return '';
     return formatHotelCurrency(Number(val), currencyCode);
-  }, [docRes, pickerRow, currencyCode]);
+  }, [kind, folioDoc, docRes, pickerRow, currencyCode]);
 
   const checkInLabel = useMemo(
-    () => formatHotelDateIndonesian(pickerRow?.check_in),
-    [pickerRow],
+    () => formatHotelDateIndonesian(folioDoc?.check_in || pickerRow?.check_in),
+    [folioDoc?.check_in, pickerRow],
   );
   const checkOutLabel = useMemo(
-    () => formatHotelDateIndonesian(pickerRow?.check_out),
-    [pickerRow],
+    () => formatHotelDateIndonesian(folioDoc?.check_out || pickerRow?.check_out),
+    [folioDoc?.check_out, pickerRow],
   );
 
+  /* Basic printable validation for quotation:
+     At least one meaningful item has description.trim() !== '' and qty > 0 */
+  const hasPrintableQuotation = useMemo(() => {
+    return (quotationDraft.items || []).some(
+      (item) => item.description?.trim() !== '' && Number(item.qty) > 0,
+    );
+  }, [quotationDraft.items]);
+
+  /* Guest Bill R7: Charges breakdown and dual signature receptionist resolution */
+  const guestBillChargeLines = useMemo(() => {
+    if (!folioDoc?.effective_lines) return [];
+    return folioDoc.effective_lines.filter(
+      (l) =>
+        l.included_in_scope &&
+        l.category !== 'PAYMENT' &&
+        l.category !== 'GROUP_PAYMENT_ALLOCATION' &&
+        l.category !== 'DEPOSIT_APPLY' &&
+        l.category !== 'DEPOSIT_UNAPPLY' &&
+        l.entry_type !== 'PAYMENT' &&
+        l.entry_type !== 'BOOKING_GROUP_ALLOCATION' &&
+        l.entry_type !== 'DEPOSIT_APPLICATION' &&
+        l.entry_type !== 'DEPOSIT_UNAPPLY' &&
+        l.entry_type !== 'PAYMENT_REVERSAL' &&
+        l.entry_type !== 'BOOKING_GROUP_ALLOCATION_REVERSAL',
+    );
+  }, [folioDoc?.effective_lines]);
+
+  const chargeBreakdownSum = useMemo(() => {
+    return guestBillChargeLines.reduce(
+      (sum, l) => sum + (Number(l.debit || 0) - Number(l.credit || 0)),
+      0,
+    );
+  }, [guestBillChargeLines]);
+
+  const isGuestBillChargesReconciled = useMemo(() => {
+    if (!folioDoc?.summary) return true;
+    return Math.abs(chargeBreakdownSum - Number(folioDoc.summary.net_total_charges || 0)) === 0;
+  }, [chargeBreakdownSum, folioDoc?.summary?.net_total_charges]);
+
+  const guestBillReceptionistName = useMemo(() => {
+    const role = String(folioDoc?.print_metadata?.printed_by_role || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_-]+/g, '');
+    const foRoles = ['RECEPTIONIST', 'FRONTDESK', 'FRONTOFFICE', 'FO', 'RESEPSIONIS'];
+    if (foRoles.includes(role)) {
+      return folioDoc?.print_metadata?.printed_by_name || null;
+    }
+    return null;
+  }, [folioDoc?.print_metadata]);
+
+  /* Print button enablement logic:
+     - Confirmation (Guest Bill): canonical detail loaded without error AND folio loaded and reconciled AND charges reconciled
+     - Folio: canonical folioDoc loaded without error AND reconciled
+     - Reservation quotation: canonical detail loaded without error AND has printable quotation
+     - Manual quotation: has printable quotation (no reservation required) */
+  const printEnabled =
+    kind === 'confirmation'
+      ? docRes != null &&
+        !detailLoading &&
+        !detailError &&
+        folioDoc != null &&
+        !folioLoading &&
+        !folioError &&
+        folioDoc.reconciliation?.is_reconciled === true &&
+        isGuestBillChargesReconciled === true
+      : kind === 'folio'
+        ? folioDoc != null &&
+          !folioLoading &&
+          !folioError &&
+          folioDoc.reconciliation?.is_reconciled === true
+        : quotationMode === 'reservation'
+          ? docRes != null && !detailLoading && !detailError && hasPrintableQuotation
+          : hasPrintableQuotation;
+
   const handlePrint = useCallback(() => {
+    if (!printEnabled || isSavingPdf) return;
+    if (kind === 'folio' && (!folioDoc || !folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled)) {
+      alert('Pencetakan diblokir: Rincian transaksi dan ringkasan finansial tidak cocok.');
+      return;
+    }
+    if (kind === 'confirmation') {
+      if (!folioDoc || !folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled) {
+        alert('Pencetakan diblokir: Guest Bill hanya boleh dicetak setelah folio siap dan rekonsiliasi berhasil.');
+        return;
+      }
+      if (!isGuestBillChargesReconciled) {
+        alert('Pencetakan diblokir: Jumlah rincian tagihan tidak sesuai dengan total tagihan ringkasan.');
+        return;
+      }
+      window.print();
+      return;
+    }
     window.print();
-  }, []);
+  }, [printEnabled, isSavingPdf, kind, folioDoc, isGuestBillChargesReconciled]);
 
   const statusLabel = (status?: string): string => {
     if (!status) return '—';
@@ -531,37 +739,43 @@ export default function DocumentCenter({
     return s;
   };
 
-  /* Basic printable validation for quotation:
-     At least one meaningful item has description.trim() !== '' and qty > 0 */
-  const hasPrintableQuotation = useMemo(() => {
-    return (quotationDraft.items || []).some(
-      (item) => item.description?.trim() !== '' && Number(item.qty) > 0,
-    );
-  }, [quotationDraft.items]);
-
-  /* Print button enablement logic (DOCUMENT-1B.1 Step D):
-     - Confirmation: canonical detail loaded without error
-     - Reservation quotation: canonical detail loaded without error AND has printable quotation
-     - Manual quotation: has printable quotation (no reservation required) */
-  const printEnabled =
-    kind === 'confirmation'
-      ? docRes != null && !detailLoading && !detailError
-      : quotationMode === 'reservation'
-        ? docRes != null && !detailLoading && !detailError && hasPrintableQuotation
-        : hasPrintableQuotation;
-
   const printHint = useMemo(() => {
-    if (kind === 'confirmation') {
-      if (docRes) {
-        return `BID ${pickerRow?.bid || '—'} · Konfirmasi Reservasi`;
+    if (kind === 'folio') {
+      if (folioDoc) {
+        if (folioDoc.reconciliation && !folioDoc.reconciliation.is_reconciled) {
+          return `Pencetakan diblokir: Rincian transaksi dan ringkasan finansial tidak cocok (Selisih: Rp ${(folioDoc.reconciliation.discrepancy_amount || 0).toLocaleString('id-ID')})`;
+        }
+        return `${folioDoc.folio_number} · ${folioDoc.summary.payment_status_label}`;
       }
+      if (folioError) {
+        return 'Guest Folio gagal dimuat — klik Coba Lagi atau pilih reservasi lain';
+      }
+      if (folioLoading) {
+        return 'Memuat rincian Guest Folio…';
+      }
+      return 'Pilih reservasi terlebih dahulu';
+    }
+
+    if (kind === 'confirmation') {
       if (detailError) {
         return 'Detail gagal dimuat — pilih reservasi lain';
       }
-      if (detailLoading) {
-        return 'Memuat detail…';
+      if (folioError) {
+        return 'Guest Folio gagal dimuat — klik Coba Lagi atau pilih reservasi lain';
       }
-      return 'Pilih reservasi terlebih dahulu';
+      if (detailLoading || folioLoading) {
+        return 'Memuat rincian Guest Bill & Folio…';
+      }
+      if (!docRes || !folioDoc) {
+        return 'Pilih reservasi terlebih dahulu';
+      }
+      if (folioDoc.reconciliation && !folioDoc.reconciliation.is_reconciled) {
+        return `Pencetakan diblokir: Rincian transaksi dan ringkasan finansial tidak cocok (Selisih: Rp ${(folioDoc.reconciliation.discrepancy_amount || 0).toLocaleString('id-ID')})`;
+      }
+      if (!isGuestBillChargesReconciled) {
+        return `Pencetakan diblokir: Total rincian tagihan (Rp ${chargeBreakdownSum.toLocaleString('id-ID')}) tidak cocok dengan total tagihan (Rp ${Number(folioDoc.summary.net_total_charges || 0).toLocaleString('id-ID')})`;
+      }
+      return `BID ${pickerRow?.bid || docRes?.bid || '—'} · Guest Bill`;
     }
 
     /* kind === 'quotation' */
@@ -593,6 +807,9 @@ export default function DocumentCenter({
   }, [
     kind,
     quotationMode,
+    folioDoc,
+    folioError,
+    folioLoading,
     docRes,
     pickerRow?.bid,
     detailError,
@@ -601,314 +818,491 @@ export default function DocumentCenter({
     hasPrintableQuotation,
     quotationDraft.reference,
     quotationDraft.items,
+    isGuestBillChargesReconciled,
+    chargeBreakdownSum,
   ]);
 
-  /* Clear PDF error on document/selection change */
+  const isLoadingDocument =
+    kind === 'confirmation'
+      ? detailLoading || folioLoading
+      : kind === 'folio'
+        ? folioLoading
+        : detailLoading;
+  const documentError =
+    kind === 'confirmation'
+      ? detailError || folioError
+      : kind === 'folio'
+        ? folioError
+        : detailError;
+
+  /* Clear PDF error and close export modal on document/selection change */
   useEffect(() => {
     setSavePdfError(null);
-  }, [kind, selectedResId, quotationMode]);
+    setShowPdfFilenameModal(false);
+  }, [
+    kind,
+    selectedResId,
+    quotationMode,
+    folioScope,
+    folioViewMode,
+    isLoadingDocument,
+    documentError,
+  ]);
 
-  /* ------------------------------------------------------------------ */
-
-   /* Handle real downloadable PDF export via DOM snapshot + jsPDF overlay
-      *
-       * Strategy (zero mutation of live preview DOM):
-       *   1. Snapshot canonical header/footer via html2canvas.
-       *      Live headerRef/footerRef carry `data-html2canvas-ignore="true"`
-       *      which causes html2canvas's internal DocumentCloner to skip them
-       *      during the iframe clone pass — producing "Unable to find element
-       *      in cloned iframe" when it later expects the reference element to
-       *      exist in the cloned document.
-       *      Fix: clone each live element, strip the ignore attribute on the
-       *      clone, place the clone inside a temporary off-screen host, then
-       *      snapshot the clone instead of the live element.
-       *   2. Build a detached clone of .oak-letterhead-frame, strip header &
-       *      footer from it, then attach the clone off-screen to document.body
-       *      so html2pdf can find the element in the layout context.
-       *   3. Retrieve the actual jsPDF instance via the official API:
-       *        const pdf = await worker.get('pdf')
-       *   4. Overlay the canonical OAK letterhead snapshots on EVERY page
-       *      (page 1 and pages 2+ use identical geometry).
-       *   5. Exactly ONE final `pdf.save(filename)` call.
-       *   6. Clean up both temporary nodes (snapshotHost + bodyClone) from
-       *      document.body in the finally block.
-       *
-       * The live preview DOM is never mutated.  Only temporary clones are
-       * appended to document.body and removed before the callback returns.
-       */
-    const handleOpenSavePdfDialog = useCallback(() => {
-      if (!printEnabled || isSavingPdf) return;
-      setSavePdfError(null);
-      const filename = generateDocumentPdfFilename({
-        kind,
-        quotationMode,
-        bid: docRes?.bid || pickerRow?.bid,
-        reference: quotationDraft.reference,
-        propertyInfo,
-        propertyBranding,
-      });
-      setPdfFilename(filename);
-      setShowPdfFilenameModal(true);
-    }, [
-      printEnabled,
-      isSavingPdf,
+  const handleOpenSavePdfDialog = useCallback(() => {
+    if (!printEnabled || isSavingPdf) return;
+    setSavePdfError(null);
+    const filename = generateDocumentPdfFilename({
       kind,
       quotationMode,
-      docRes?.bid,
-      pickerRow?.bid,
-      quotationDraft.reference,
+      bid: folioDoc?.bid || docRes?.bid || pickerRow?.bid,
+      reference: quotationDraft.reference,
+      folioNumber: folioDoc?.folio_number,
       propertyInfo,
       propertyBranding,
-    ]);
+    });
+    setPdfFilename(filename);
+    setShowPdfFilenameModal(true);
+  }, [
+    printEnabled,
+    isSavingPdf,
+    kind,
+    quotationMode,
+    folioDoc?.bid,
+    folioDoc?.folio_number,
+    docRes?.bid,
+    pickerRow?.bid,
+    quotationDraft.reference,
+    propertyInfo,
+    propertyBranding,
+  ]);
 
-    const savePdfWithFilename = useCallback(async (finalFilename: string) => {
-      if (isSavingPdf) return;
+  const savePdfWithFilename = useCallback(async (finalFilename: string) => {
+    if (isSavingPdf) return;
 
-      const rootEl = printDocumentRef.current;
-      if (!rootEl) {
-        setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
+    if (isLoadingDocument) {
+      setSavePdfError('Ekspor PDF diblokir: Dokumen masih dalam proses pemuatan.');
+      return;
+    }
+    if (documentError) {
+      setSavePdfError(`Ekspor PDF diblokir: ${documentError}`);
+      return;
+    }
+
+    if (kind === 'folio') {
+      if (!folioDoc) {
+        setSavePdfError('Ekspor PDF diblokir: Data guest folio belum siap.');
         return;
       }
-
-      const headerEl = headerRef.current;
-      const footerEl = footerRef.current;
-
-      if (!headerEl || !footerEl) {
-        setSavePdfError('Elemen header/footer tidak ditemukan di DOM.');
+      const folioResId = (folioDoc as any).reservation?.id ?? folioDoc.reservation_id;
+      if (pickerRow && folioResId && folioResId !== pickerRow.id) {
+        setSavePdfError('Ekspor PDF diblokir: Identitas reservasi tidak sesuai dengan pilihan aktif.');
         return;
       }
-
-      setIsSavingPdf(true);
-      setSavePdfError(null);
-
-      let bodyClone: HTMLElement | null = null;
-      let bodyHost: HTMLDivElement | null = null;
-
-      try {
-        // ── Step 1: Snapshot canonical header & footer ──────────────
-        // Live header/footer carry `data-html2canvas-ignore="true"` which
-        // causes html2canvas's DocumentCloner to drop them from the cloned
-        // iframe, leading to "Unable to find element in cloned iframe".
-        // We snapshot cloned copies with the attribute stripped instead.
-        const now = Date.now();
-        const cache = pdfSnapshotCacheRef.current;
-        const ttlExpired = !cache.header ||
-          (now - (cache.capturedAt || 0)) > SNAPSHOT_TTL_MS;
-
-        let headerDataUrl = cache.header;
-        let footerDataUrl = cache.footer;
-        let headerHeightMm = cache.headerHeight;
-        let footerHeightMm = cache.footerHeight;
-
-        if (ttlExpired) {
-          const snapshotHost = document.createElement('div');
-          snapshotHost.style.position = 'fixed';
-          snapshotHost.style.left = '-10000px';
-          snapshotHost.style.top = '0';
-          snapshotHost.style.width = '174mm';
-          snapshotHost.style.background = '#fff';
-          snapshotHost.style.pointerEvents = 'none';
-          snapshotHost.style.zIndex = '-1';
-          document.body.appendChild(snapshotHost);
-
-          try {
-            const headerClone = headerEl.cloneNode(true) as HTMLElement;
-            headerClone.removeAttribute('data-html2canvas-ignore');
-            snapshotHost.appendChild(headerClone);
-
-            const footerClone = footerEl.cloneNode(true) as HTMLElement;
-            footerClone.removeAttribute('data-html2canvas-ignore');
-            snapshotHost.appendChild(footerClone);
-
-            const [headerSnap, footerSnap] = await Promise.all([
-              captureSnapshot(headerClone),
-              captureSnapshot(footerClone),
-            ]);
-            headerDataUrl = headerSnap.dataUrl;
-            footerDataUrl = footerSnap.dataUrl;
-            headerHeightMm = computePdfDimensions(headerSnap, 174);
-            footerHeightMm = computePdfDimensions(footerSnap, 174);
-            pdfSnapshotCacheRef.current = {
-              header: headerDataUrl,
-              footer: footerDataUrl,
-              headerHeight: headerHeightMm,
-              footerHeight: footerHeightMm,
-              capturedAt: now,
-            };
-          } finally {
-            document.body.removeChild(snapshotHost);
-          }
-        }
-
-        // ── Step 2: Prepare body source (clone without header/footer) ─
-        const frameEl = rootEl.querySelector('.oak-letterhead-frame') as HTMLElement;
-        if (!frameEl) {
-          throw new Error('Frame elemen tidak ditemukan.');
-        }
-        bodyClone = frameEl.cloneNode(true) as HTMLElement;
-        const bh = bodyClone.querySelector('.oak-letterhead-header');
-        const bf = bodyClone.querySelector('.oak-letterhead-footer');
-        if (bh instanceof HTMLElement) bh.remove();
-        if (bf instanceof HTMLElement) bf.remove();
-
-        // Neutralize outer frame presentation on the clone ONLY to avoid
-        // double-spacing with html2pdf's own margin options.
-        // Live .oak-letterhead-frame in the browser is untouched.
-        bodyClone.style.padding = '0';
-        bodyClone.style.margin = '0';
-        bodyClone.style.border = '0';
-        bodyClone.style.borderRadius = '0';
-        bodyClone.style.boxShadow = 'none';
-        bodyClone.style.minHeight = '0';
-        bodyClone.style.maxWidth = 'none';
-
-        // ── Attach clone to document.body so html2pdf can find it ──
-        // bodyClone itself must remain at normal coordinates — if it carries
-        // position:fixed / left:-10000px, html2canvas reads those coordinates
-        // and the rendered PDF body becomes blank (content sits outside the
-        // capture viewport).  Instead we wrap bodyClone inside a bodyHost div
-        // that lives off-screen; bodyClone itself is positioned static so
-        // html2canvas can measure it normally.
-        const bodyHostEl = document.createElement('div');
-        bodyHostEl.style.position = 'fixed';
-        bodyHostEl.style.left = '-10000px';
-        bodyHostEl.style.top = '0';
-        bodyHostEl.style.width = '174mm';
-        bodyHostEl.style.background = '#fff';
-        bodyHostEl.style.pointerEvents = 'none';
-        bodyHostEl.style.zIndex = '-1';
-
-        bodyClone.style.position = 'static';
-        bodyClone.style.left = 'auto';
-        bodyClone.style.top = 'auto';
-        bodyClone.style.zIndex = 'auto';
-        bodyClone.style.width = '174mm';
-
-        bodyHostEl.appendChild(bodyClone);
-        document.body.appendChild(bodyHostEl);
-        bodyHost = bodyHostEl;
-
-        // Compute safe margins from actual snapshot heights
-        const headerGapMm = 3;
-        const topMargin = (headerHeightMm ?? 25) + headerGapMm;
-
-        // Overlay-safe bottom gap for footer position on the PDF page.
-        // Footer overlay is placed 14 mm above the A4 bottom edge so the full
-        // timestamp ("Waktu cetak …") remains visible and is not clipped.
-        const overlayFooterGapMm = 14;
-
-        // Body-content clearance above the footer overlay zone.  With
-        // bodyToFooterGapMm = 3 the rendered body ends 3 mm before the footer
-        // snapshot begins, preventing body content from overlapping the footer.
-        const bodyToFooterGapMm = 3;
-        const bottomMargin = (footerHeightMm ?? 20) + overlayFooterGapMm + bodyToFooterGapMm;
-
-        // ── Step 3: Generate paginated PDF via html2pdf ─────────────
-        const html2pdfLib = (html2pdf as any)?.default || html2pdf;
-        const worker = html2pdfLib().set({
-          margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
-          filename: finalFilename,
-          image: { type: 'jpeg' as const, quality: 0.98 },
-          html2canvas: {
-            scale: 2,
-            useCORS: true,
-            logging: false,
-            scrollY: 0,
-            scrollX: 0,
-          },
-          jsPDF: {
-            unit: 'mm' as const,
-            format: 'a4' as const,
-            orientation: 'portrait' as const,
-          },
-          pagebreak: {
-            mode: ['css', 'legacy'],
-            avoid: [
-              '.oak-letterhead-title',
-              '.oak-doc-summary-table',
-              '.oak-doc-fin-table tbody tr',
-              '.oak-doc-fin-block',
-            ],
-          },
-        }).from(bodyClone);
-
-        // Generate the PDF (no download yet).
-        await worker.toPdf();
-
-        // Retrieve the actual jsPDF instance via the official html2pdf API.
-        const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
-
-        // ── Step 4: Overlay canonical header/footer on EVERY page ───
-        const pages = pdf.getNumberOfPages();
-        const contentWidthMm = 174; // A4 210 − 18 − 18
-        const headerY = 3;
-        const footerY = 297 - overlayFooterGapMm - (footerHeightMm ?? 20);
-
-        for (let i = 1; i <= pages; i++) {
-          pdf.setPage(i);
-
-          // Header overlay at top
-          if (headerDataUrl && headerHeightMm) {
-            pdf.addImage(headerDataUrl, 'PNG', 18, headerY, contentWidthMm, headerHeightMm);
-          }
-
-          // Footer overlay at bottom
-          if (footerDataUrl && footerHeightMm) {
-            pdf.addImage(footerDataUrl, 'PNG', 18, footerY, contentWidthMm, footerHeightMm);
-          }
-        }
-
-        // Exactly ONE download trigger.
-        pdf.save(finalFilename);
-
-      } catch (err: unknown) {
-        console.error('[DocumentCenter] Failed to generate PDF:', err);
-        const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
-        setSavePdfError(msg);
-      } finally {
-        if (bodyHost && bodyHost.parentNode) {
-          bodyHost.parentNode.removeChild(bodyHost);
-        }
-        setIsSavingPdf(false);
+      if (!folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled) {
+        setSavePdfError('Ekspor PDF diblokir: Rincian transaksi dan ringkasan finansial tidak cocok.');
+        return;
       }
-    }, [
-      printEnabled,
-      isSavingPdf,
-      kind,
-      docRes?.bid,
-      pickerRow?.bid,
-      quotationDraft.reference,
-      propertyInfo,
-      propertyBranding,
-    ]);
+    } else if (kind === 'confirmation') {
+      if (!docRes) {
+        setSavePdfError('Ekspor PDF diblokir: Data guest bill belum siap.');
+        return;
+      }
+      if (pickerRow && docRes.reservation?.id && docRes.reservation.id !== pickerRow.id) {
+        setSavePdfError('Ekspor PDF diblokir: Identitas reservasi tidak sesuai dengan pilihan aktif.');
+        return;
+      }
+      if (!folioDoc) {
+        setSavePdfError('Ekspor PDF diblokir: Data folio belum siap.');
+        return;
+      }
+      if (!folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled) {
+        setSavePdfError('Ekspor PDF diblokir: Guest Bill hanya boleh diekspor setelah folio siap dan rekonsiliasi berhasil.');
+        return;
+      }
+      if (!isGuestBillChargesReconciled) {
+        setSavePdfError('Ekspor PDF diblokir: Jumlah rincian tagihan tidak sesuai dengan total tagihan ringkasan.');
+        return;
+      }
+    }
 
-    const normalizePdfFilename = (raw: string): string => {
-      const trimmed = raw.trim();
-      if (!trimmed) return '';
-      const lower = trimmed.toLowerCase();
-      if (lower.endsWith('.pdf')) return trimmed;
-      return trimmed + '.pdf';
-    };
+    const rootEl = printDocumentRef.current;
+    if (!rootEl) {
+      setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
+      return;
+    }
 
-    const handleConfirmPdfSave = useCallback(() => {
-      const finalFilename = normalizePdfFilename(pdfFilename);
-      if (!finalFilename) return;
+    const headerEl = headerRef.current;
+    const footerEl = footerRef.current;
+
+    if (!headerEl || !footerEl) {
+      setSavePdfError('Elemen header/footer tidak ditemukan di DOM.');
+      return;
+    }
+
+    setIsSavingPdf(true);
+    setSavePdfError(null);
+
+    let bodyClone: HTMLElement | null = null;
+    let bodyHost: HTMLDivElement | null = null;
+
+    try {
+      const now = Date.now();
+      const cache = pdfSnapshotCacheRef.current;
+      const ttlExpired = !cache.header ||
+        (now - (cache.capturedAt || 0)) > SNAPSHOT_TTL_MS;
+
+      let headerDataUrl = cache.header;
+      let footerDataUrl = cache.footer;
+      let headerHeightMm = cache.headerHeight;
+      let footerHeightMm = cache.footerHeight;
+
+      if (ttlExpired) {
+        const snapshotHost = document.createElement('div');
+        snapshotHost.style.position = 'fixed';
+        snapshotHost.style.left = '-10000px';
+        snapshotHost.style.top = '0';
+        snapshotHost.style.width = '174mm';
+        snapshotHost.style.background = '#fff';
+        snapshotHost.style.pointerEvents = 'none';
+        snapshotHost.style.zIndex = '-1';
+        document.body.appendChild(snapshotHost);
+
+        try {
+          const headerClone = headerEl.cloneNode(true) as HTMLElement;
+          headerClone.removeAttribute('data-html2canvas-ignore');
+          snapshotHost.appendChild(headerClone);
+
+          const footerClone = footerEl.cloneNode(true) as HTMLElement;
+          footerClone.removeAttribute('data-html2canvas-ignore');
+          snapshotHost.appendChild(footerClone);
+
+          const [headerSnap, footerSnap] = await Promise.all([
+            captureSnapshot(headerClone),
+            captureSnapshot(footerClone),
+          ]);
+          headerDataUrl = headerSnap.dataUrl;
+          footerDataUrl = footerSnap.dataUrl;
+          headerHeightMm = computePdfDimensions(headerSnap, 174);
+          footerHeightMm = computePdfDimensions(footerSnap, 174);
+          pdfSnapshotCacheRef.current = {
+            header: headerDataUrl,
+            footer: footerDataUrl,
+            headerHeight: headerHeightMm,
+            footerHeight: footerHeightMm,
+            capturedAt: now,
+          };
+        } finally {
+          document.body.removeChild(snapshotHost);
+        }
+      }
+
+      const frameEl = rootEl.querySelector('.oak-letterhead-frame') as HTMLElement;
+      if (!frameEl) {
+        throw new Error('Frame elemen tidak ditemukan.');
+      }
+      bodyClone = frameEl.cloneNode(true) as HTMLElement;
+      bodyClone.querySelectorAll('[data-html2canvas-ignore="true"]').forEach((el) => el.remove());
+      const bh = bodyClone.querySelector('.oak-letterhead-header');
+      const bf = bodyClone.querySelector('.oak-letterhead-footer');
+      const bw = bodyClone.querySelector('.oak-letterhead-watermark');
+      const br = bodyClone.querySelector('.oak-letterhead-rose');
+      if (bh instanceof HTMLElement) bh.remove();
+      if (bf instanceof HTMLElement) bf.remove();
+      if (bw instanceof HTMLElement) bw.remove();
+      if (br instanceof HTMLElement) br.remove();
+
+      // GF-F01 & R6: Multi-page table pagination for Save PDF (html2pdf)
+      // Chunk folio / guest bill table rows so that every continuation page repeats the full <thead>
+      if (kind === 'folio' || kind === 'confirmation') {
+        const tableSelector = kind === 'folio' ? '.oak-folio-table' : '.oak-guest-bill-table';
+        const table = bodyClone.querySelector(tableSelector);
+        if (table) {
+          const thead = table.querySelector('thead');
+          const tbody = table.querySelector('tbody');
+          const tfoot = table.querySelector('tfoot');
+          if (thead && tbody) {
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const total = rows.length;
+            const singlePageLimit = kind === 'confirmation' ? 12 : 8;
+            if (total > singlePageLimit) {
+              const chunks: HTMLTableRowElement[][] = [];
+              // GB6-F03 (R8): Allocate balanced table chunks so closing block (summary + signatures)
+              // lands together with the final chunk rows on the last page without creating an orphaned page.
+              const page1Max = kind === 'confirmation' ? 13 : 10;
+              const intermediateMax = kind === 'confirmation' ? 14 : 14;
+              const finalMax = kind === 'confirmation' ? 8 : 10;
+
+              if (total <= page1Max) {
+                const half = Math.ceil(total / 2);
+                chunks.push(rows.slice(0, half));
+                chunks.push(rows.slice(half));
+              } else {
+                chunks.push(rows.slice(0, page1Max));
+                let cur = page1Max;
+                while (cur < total) {
+                  const rem = total - cur;
+                  if (rem <= finalMax) {
+                    chunks.push(rows.slice(cur));
+                    break;
+                  }
+                  if (rem <= intermediateMax + finalMax) {
+                    const nextSize = Math.min(intermediateMax, rem - Math.min(finalMax, Math.ceil(rem / 2)));
+                    chunks.push(rows.slice(cur, cur + nextSize));
+                    cur += nextSize;
+                    chunks.push(rows.slice(cur));
+                    break;
+                  } else {
+                    chunks.push(rows.slice(cur, cur + intermediateMax));
+                    cur += intermediateMax;
+                  }
+                }
+              }
+
+              const theadHtml = thead.outerHTML;
+              const tfootHtml = tfoot ? tfoot.outerHTML : '';
+              const totalChunks = chunks.length;
+
+              if (kind === 'confirmation' && totalChunks > 1) {
+                const mainTitle = bodyClone.querySelector(
+                  '.oak-guest-bill-charges-section .oak-doc-section-title',
+                );
+                if (mainTitle) {
+                  mainTitle.textContent = `Rincian Tagihan (Halaman 1 dari ${totalChunks})`;
+                }
+              }
+
+              tbody.innerHTML = '';
+              chunks[0].forEach((r) => tbody.appendChild(r.cloneNode(true) as HTMLTableRowElement));
+              if (chunks.length > 1 && tfoot) {
+                tfoot.remove();
+              }
+
+              let lastInsertedEl: Element = table;
+              for (let c = 1; c < chunks.length; c++) {
+                const isLastChunk = c === chunks.length - 1;
+
+                const pageBreak = document.createElement('div');
+                pageBreak.className = 'html2pdf__page-break';
+                pageBreak.style.height = '0';
+                pageBreak.style.margin = '0';
+                pageBreak.style.padding = '0';
+                lastInsertedEl.after(pageBreak);
+
+                const contSection = document.createElement('div');
+                contSection.className = 'oak-folio-continuation-section';
+                contSection.style.marginTop = '4px';
+
+                const contHeader = document.createElement('div');
+                contHeader.className = 'oak-folio-continuation-header';
+                contHeader.style.fontSize = '11px';
+                contHeader.style.fontWeight = '600';
+                contHeader.style.color = '#1b3d2f';
+                contHeader.style.marginBottom = '6px';
+                contHeader.style.paddingBottom = '3px';
+                contHeader.style.borderBottom = '1px dashed #c2b280';
+                contHeader.textContent = kind === 'confirmation'
+                  ? `Rincian Tagihan (Lanjutan - Halaman ${c + 1} dari ${totalChunks})`
+                  : `Rincian Transaksi Folio (Lanjutan - Halaman ${c + 1} dari ${totalChunks})`;
+                contSection.appendChild(contHeader);
+
+                const newTable = document.createElement('table');
+                newTable.className = kind === 'confirmation' ? 'oak-guest-bill-table' : 'oak-doc-fin-table oak-folio-table';
+                newTable.innerHTML = theadHtml;
+
+                const newTbody = document.createElement('tbody');
+                chunks[c].forEach((r) => newTbody.appendChild(r.cloneNode(true) as HTMLTableRowElement));
+                newTable.appendChild(newTbody);
+
+                if (isLastChunk && tfootHtml) {
+                  const tempFoot = document.createElement('table');
+                  tempFoot.innerHTML = tfootHtml;
+                  const footEl = tempFoot.querySelector('tfoot');
+                  if (footEl) newTable.appendChild(footEl);
+                }
+
+                contSection.appendChild(newTable);
+                pageBreak.after(contSection);
+                lastInsertedEl = contSection;
+              }
+            }
+          }
+        }
+      }
+
+      bodyClone.classList.add('oak-pdf-export-body');
+      bodyClone.style.display = 'block';
+      bodyClone.style.padding = '0';
+      bodyClone.style.margin = '0';
+      bodyClone.style.border = '0';
+      bodyClone.style.borderRadius = '0';
+      bodyClone.style.boxShadow = 'none';
+      bodyClone.style.minHeight = '0';
+      bodyClone.style.height = 'auto';
+      bodyClone.style.maxWidth = 'none';
+      bodyClone.style.boxSizing = 'border-box';
+
+      const bodyHostEl = document.createElement('div');
+      bodyHostEl.style.position = 'fixed';
+      bodyHostEl.style.left = '-10000px';
+      bodyHostEl.style.top = '0';
+      bodyHostEl.style.width = '174mm';
+      bodyHostEl.style.background = '#fff';
+      bodyHostEl.style.pointerEvents = 'none';
+      bodyHostEl.style.zIndex = '-1';
+
+      bodyClone.style.position = 'static';
+      bodyClone.style.left = 'auto';
+      bodyClone.style.top = 'auto';
+      bodyClone.style.zIndex = 'auto';
+      bodyClone.style.width = '174mm';
+
+      bodyHostEl.appendChild(bodyClone);
+      document.body.appendChild(bodyHostEl);
+      bodyHost = bodyHostEl;
+
+      const headerGapMm = 2;
+      const topMargin = (headerHeightMm ?? 20) + headerGapMm;
+      const overlayFooterGapMm = 4;
+      const bodyToFooterGapMm = 2;
+      const bottomMargin = (footerHeightMm ?? 14) + overlayFooterGapMm + bodyToFooterGapMm;
+
+      const html2pdfLib = (html2pdf as any)?.default || html2pdf;
+      const worker = html2pdfLib().set({
+        margin: [topMargin, 18, bottomMargin, 18] as [number, number, number, number],
+        filename: finalFilename,
+        image: { type: 'jpeg' as const, quality: 0.98 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          logging: false,
+          scrollY: 0,
+          scrollX: 0,
+        },
+        jsPDF: {
+          unit: 'mm' as const,
+          format: 'a4' as const,
+          orientation: 'portrait' as const,
+        },
+        pagebreak: {
+          mode: ['css'],
+          avoid: [
+            '.oak-folio-table tbody tr',
+            '.oak-guest-bill-table tbody tr',
+            '.oak-doc-fin-table tbody tr',
+            '.oak-doc-summary-table',
+            '.oak-doc-fin-block',
+            '.oak-doc-signature-block',
+            '.oak-folio-summary-block',
+            '.oak-folio-signature-block',
+            '.oak-guest-bill-closing-block',
+          ],
+        },
+      }).from(bodyClone);
+
+      await worker.toPdf();
+
+      const pdf = await worker.get('pdf') as unknown as import('jspdf').jsPDF;
+
+      const pages = pdf.getNumberOfPages();
+      const contentWidthMm = 174;
+      const headerY = 3;
+      const footerY = 297 - overlayFooterGapMm - (footerHeightMm ?? 14);
+
+      for (let i = 1; i <= pages; i++) {
+        pdf.setPage(i);
+        if (headerDataUrl && headerHeightMm) {
+          pdf.addImage(headerDataUrl, 'PNG', 18, headerY, contentWidthMm, headerHeightMm);
+        }
+        if (footerDataUrl && footerHeightMm) {
+          pdf.addImage(footerDataUrl, 'PNG', 18, footerY, contentWidthMm, footerHeightMm);
+        }
+        // GB6-F03 (R8): Stamp physical page numbering on every page
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(110, 110, 110);
+        const pageNumText = `Halaman ${i} dari ${pages}`;
+        pdf.text(pageNumText, 18 + contentWidthMm, 297 - overlayFooterGapMm - 1, { align: 'right' });
+      }
+
+      pdf.save(finalFilename);
+    } catch (err: unknown) {
+      console.error('[DocumentCenter] Failed to generate PDF:', err);
+      const msg = err instanceof Error ? err.message : 'Gagal menghasilkan file PDF.';
+      setSavePdfError(msg);
+    } finally {
+      if (bodyHost && bodyHost.parentNode) {
+        bodyHost.parentNode.removeChild(bodyHost);
+      }
+      setIsSavingPdf(false);
+    }
+  }, [
+    isSavingPdf,
+    kind,
+    folioDoc,
+    docRes,
+    pickerRow,
+    isLoadingDocument,
+    documentError,
+  ]);
+
+  const normalizePdfFilename = (raw: string): string => {
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    const lower = trimmed.toLowerCase();
+    if (lower.endsWith('.pdf')) return trimmed;
+    return trimmed + '.pdf';
+  };
+
+  const handleConfirmPdfSave = useCallback(() => {
+    const finalFilename = normalizePdfFilename(pdfFilename);
+    if (!finalFilename) return;
+    if (isLoadingDocument) {
       setShowPdfFilenameModal(false);
-      savePdfWithFilename(finalFilename);
-    }, [pdfFilename, savePdfWithFilename]);
-
-    const handleCancelPdfSave = useCallback(() => {
+      setSavePdfError('Ekspor PDF diblokir: Dokumen masih dalam proses pemuatan.');
+      return;
+    }
+    if (documentError) {
       setShowPdfFilenameModal(false);
-    }, []);
+      setSavePdfError(`Ekspor PDF diblokir: ${documentError}`);
+      return;
+    }
+    if (kind === 'folio' && (!folioDoc || !folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled)) {
+      setShowPdfFilenameModal(false);
+      setSavePdfError('Ekspor PDF diblokir: Rincian transaksi dan ringkasan finansial tidak cocok.');
+      return;
+    }
+    if (kind === 'confirmation' && (!folioDoc || !folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled)) {
+      setShowPdfFilenameModal(false);
+      setSavePdfError('Ekspor PDF diblokir: Guest Bill hanya boleh diekspor setelah folio siap dan rekonsiliasi berhasil.');
+      return;
+    }
+    setShowPdfFilenameModal(false);
+    savePdfWithFilename(finalFilename);
+  }, [
+    pdfFilename,
+    savePdfWithFilename,
+    isLoadingDocument,
+    documentError,
+    kind,
+    folioDoc,
+  ]);
+
+  const handleCancelPdfSave = useCallback(() => {
+    setShowPdfFilenameModal(false);
+  }, []);
 
   /* ------------------------------------------------------------------ */
   /*  LEFT SIDEBAR                                                      */
   /* ------------------------------------------------------------------ */
 
+  const needsReservationPicker =
+    kind === 'confirmation' || kind === 'folio' || quotationMode === 'reservation';
+
   const sidebar = (
     <aside className="document-center-sidebar doc-center-sidebar-fixed min-w-0">
 
-      {/* Top Fixed Header & Control Area (not part of editor scroll) */}
+      {/* Top Fixed Header & Control Area */}
       <div className="doc-center-fixed-top shrink-0 bg-white border-b border-[#e8e5dd]">
         {/* Header with Title & Action */}
         <div className="document-center-header flex items-center justify-between gap-3 border-b-0 pb-3">
@@ -953,14 +1347,14 @@ export default function DocumentCenter({
         {/* Document type */}
         <div className="document-center-block border-t border-[#ece9e2]">
           <div className="document-center-block-label">Jenis Dokumen</div>
-          <div className="document-center-kind-grid">
+          <div className="grid grid-cols-3 gap-2">
             <button
               type="button"
               className={`document-center-kind-card ${kind === 'confirmation' ? 'active' : ''}`}
               onClick={() => setKind('confirmation')}
             >
-              <span className="document-center-kind-name">Konfirmasi Reservasi</span>
-              <span className="document-center-kind-desc">Keterangan menginap &amp; rincian biaya</span>
+              <span className="document-center-kind-name">Guest Bill</span>
+              <span className="document-center-kind-desc">Ringkasan tagihan &amp; pembayaran</span>
             </button>
             <button
               type="button"
@@ -968,7 +1362,15 @@ export default function DocumentCenter({
               onClick={() => setKind('quotation')}
             >
               <span className="document-center-kind-name">Quotation / Penawaran</span>
-              <span className="document-center-kind-desc">Penawaran tarif per malam &amp; total</span>
+              <span className="document-center-kind-desc">Penawaran tarif kamar &amp; paket</span>
+            </button>
+            <button
+              type="button"
+              className={`document-center-kind-card ${kind === 'folio' ? 'active' : ''}`}
+              onClick={() => setKind('folio')}
+            >
+              <span className="document-center-kind-name">Tagihan Tamu (Guest Folio)</span>
+              <span className="document-center-kind-desc">Rincian tagihan, bayar &amp; saldo</span>
             </button>
           </div>
         </div>
@@ -1001,14 +1403,14 @@ export default function DocumentCenter({
 
       {/* Scrollable Editor Body */}
       <div className="doc-center-body-scroll min-w-0 flex-1">
-        {/* Reservation selector (Confirmation OR Quotation in reservation mode) */}
-        {(kind === 'confirmation' || quotationMode === 'reservation') && (
+        {/* Reservation selector */}
+        {needsReservationPicker && (
           <div className="document-center-block">
             <div className="document-center-block-label">Reservasi</div>
             <input
               type="text"
               className="document-center-search"
-              placeholder="Cari BID, nama tamu, atau nomor kamar..."
+              placeholder="Cari BID, ID reservasi, nama tamu, atau nomor kamar..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               aria-label="Cari reservasi"
@@ -1039,9 +1441,10 @@ export default function DocumentCenter({
                       >
                         <div className="document-center-res-name">{guest}</div>
                         <div className="document-center-res-meta">
-                          <span>{r?.bid || '—'}</span>
+                          <span>{r?.bid || `#${r?.id}`}</span>
                           <span>{dates}</span>
                           {r?.room_number ? <span>Kamar {r?.room_number}</span> : null}
+                          <span>({statusLabel(r?.status)})</span>
                         </div>
                       </button>
                     );
@@ -1052,26 +1455,30 @@ export default function DocumentCenter({
           </div>
         )}
 
-        {/* Selected reservation summary (uses picker row; detail loads in background) */}
-        {(kind === 'confirmation' || quotationMode === 'reservation') && pickerRow ? (
+        {/* Selected reservation summary */}
+        {needsReservationPicker && (pickerRow || folioDoc) ? (
           <div className="document-center-block">
             <div className="document-center-block-label">Ringkasan Reservasi</div>
             <div className="document-center-summary">
               <div className="document-center-summary-row">
-                <span className="document-center-summary-key">BID</span>
-                <span className="document-center-summary-val">{pickerRow?.bid || '—'}</span>
+                <span className="document-center-summary-key">Referensi</span>
+                <span className="document-center-summary-val">
+                  {folioDoc?.reference_value || pickerRow?.bid || `#${selectedResId}`}
+                </span>
               </div>
               <div className="document-center-summary-row">
                 <span className="document-center-summary-key">Tamu</span>
                 <span className="document-center-summary-val">
-                  {pickerRow?.guest_name || pickerRow?.booker_name || '—'}
+                  {folioDoc?.guest_name || pickerRow?.guest_name || pickerRow?.booker_name || '—'}
                 </span>
               </div>
               <div className="document-center-summary-row">
                 <span className="document-center-summary-key">Kamar</span>
                 <span className="document-center-summary-val">
-                  {pickerRow?.room_type_name || pickerRow?.room_type || '—'}
-                  {pickerRow?.room_number ? ` · No. ${pickerRow?.room_number}` : ''}
+                  {folioDoc?.room_type_name || pickerRow?.room_type_name || pickerRow?.room_type || '—'}
+                  {(folioDoc?.room_number || pickerRow?.room_number)
+                    ? ` · No. ${folioDoc?.room_number || pickerRow?.room_number}`
+                    : ''}
                 </span>
               </div>
               <div className="document-center-summary-row">
@@ -1084,17 +1491,144 @@ export default function DocumentCenter({
               </div>
               <div className="document-center-summary-row">
                 <span className="document-center-summary-key">Status</span>
-                <span className="document-center-summary-val">{statusLabel(pickerRow?.status)}</span>
+                <span className="document-center-summary-val">
+                  {folioDoc?.status_label || statusLabel(pickerRow?.status)}
+                </span>
               </div>
               {totalLabel ? (
                 <div className="document-center-summary-row">
-                  <span className="document-center-summary-key">Total</span>
+                  <span className="document-center-summary-key">Total Tagihan</span>
                   <span className="document-center-summary-val">{totalLabel}</span>
+                </div>
+              ) : null}
+              {kind === 'folio' && folioDoc ? (
+                <div className="document-center-summary-row">
+                  <span className="document-center-summary-key">Sisa Tagihan</span>
+                  <span className="document-center-summary-val">
+                    {formatHotelCurrency(Number(folioDoc.summary.remaining_balance || 0), currencyCode)}{' '}
+                    ({folioDoc.summary.payment_status_label})
+                  </span>
                 </div>
               ) : null}
             </div>
           </div>
         ) : null}
+
+        {/* Guest Folio Options (Guest Folio only) */}
+        {kind === 'folio' && selectedResId != null && (
+          <div className="document-center-block">
+            <div className="document-center-block-label">Pengaturan Tampilan Guest Folio</div>
+            <div className="document-center-opts">
+              {/* Multi-room booking sibling switcher */}
+              {folioDoc?.is_multi_room_booking && folioDoc.booking_siblings.length >= 1 && (
+                <div className="document-center-opt-field document-center-sibling-switcher">
+                  <label className="document-center-opt-label">
+                    Pilih Kamar dalam Grup Booking ({folioDoc.bid || `#${folioDoc.booking_id}`})
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      className="px-2.5 py-1.5 text-xs rounded border transition-colors bg-[#1b4332] text-white border-[#1b4332] font-semibold active"
+                    >
+                      {folioDoc.room_number ? `Kamar ${folioDoc.room_number}` : `Res #${folioDoc.reservation_id}`} · {folioDoc.guest_name} (Aktif)
+                    </button>
+                    {folioDoc.booking_siblings.map((sib) => (
+                      <button
+                        key={sib.id}
+                        type="button"
+                        onClick={() => handleSelectSiblingReservation(sib.id)}
+                        className="px-2.5 py-1.5 text-xs rounded border transition-colors bg-white text-stone-700 border-stone-300 hover:border-[#c5a880]"
+                      >
+                        {sib.room_number ? `Kamar ${sib.room_number}` : `Res #${sib.id}`} · {sib.guest_name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Scope selector */}
+              <div className="document-center-opt-field">
+                <label className="document-center-opt-label">Cakupan Tagihan Folio</label>
+                <div className="document-center-kind-grid">
+                  <button
+                    type="button"
+                    className={`document-center-kind-card ${folioScope === 'GUEST_FOLIO' ? 'active' : ''}`}
+                    onClick={() => setFolioScope('GUEST_FOLIO')}
+                  >
+                    <span className="document-center-kind-name">Tagihan Tamu (Sesuai Pembayar)</span>
+                    <span className="document-center-kind-desc">
+                      Kewajiban bayar tamu di hotel (kecualikan kamar OTA Collect)
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`document-center-kind-card ${folioScope === 'FULL_RESERVATION' ? 'active' : ''}`}
+                    onClick={() => setFolioScope('FULL_RESERVATION')}
+                  >
+                    <span className="document-center-kind-name">Seluruh Tagihan Kamar</span>
+                    <span className="document-center-kind-desc">
+                      Tampilkan seluruh nilai kamar &amp; biaya tambahan
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* View Mode selector: Effective vs Audit */}
+              <div className="document-center-opt-field">
+                <label className="document-center-opt-label">Mode Rincian Baris Transaksi</label>
+                <div className="document-center-kind-grid">
+                  <button
+                    type="button"
+                    className={`document-center-kind-card ${folioViewMode === 'EFFECTIVE' ? 'active' : ''}`}
+                    onClick={() => setFolioViewMode('EFFECTIVE')}
+                  >
+                    <span className="document-center-kind-name">Item Efektif (Standar Tamu)</span>
+                    <span className="document-center-kind-desc">
+                      Hanya transaksi aktif pembentuk saldo akhir
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`document-center-kind-card ${folioViewMode === 'AUDIT' ? 'active' : ''}`}
+                    onClick={() => setFolioViewMode('AUDIT')}
+                  >
+                    <span className="document-center-kind-name">Jejak Audit Lengkap</span>
+                    <span className="document-center-kind-desc">
+                      Sertakan histori void/koreksi beserta jurnal pembalik
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Non-financial presentation labels */}
+              <div className="document-center-opt-field">
+                <label className="document-center-opt-label">
+                  Nama Petugas Kasir / FO (Opsional)
+                </label>
+                <input
+                  type="text"
+                  className="document-center-opt-input document-center-opt-input-inline"
+                  placeholder={folioDoc?.print_metadata?.printed_by_name || 'Nama kasir pada blok tanda tangan...'}
+                  value={folioCashierLabel}
+                  onChange={(e) => setFolioCashierLabel(e.target.value)}
+                />
+              </div>
+
+              <div className="document-center-opt-field">
+                <label className="document-center-opt-label">
+                  Catatan Kaki / Pernyataan Tamu (Opsional)
+                </label>
+                <textarea
+                  rows={2}
+                  className="document-center-opt-input"
+                  placeholder="Saya menyatakan bahwa rincian tagihan kamar, layanan tambahan, dan pembayaran pada Guest Folio ini telah diperiksa dan disetujui."
+                  value={folioFooterNote}
+                  onChange={(e) => setFolioFooterNote(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Quotation Editor (Quotation only, single instance) */}
         {kind === 'quotation' && (
@@ -1109,7 +1643,7 @@ export default function DocumentCenter({
   );
 
   /* ------------------------------------------------------------------ */
-  /*  RIGHT PREVIEW (DOCUMENT-1B.1 Step D: Draft-powered Live Preview)  */
+  /*  RIGHT PREVIEW                                                     */
   /* ------------------------------------------------------------------ */
 
   const preview = (
@@ -1117,26 +1651,137 @@ export default function DocumentCenter({
       <div className="document-center-preview-label">Pratinjau</div>
       <div className="document-center-preview-scroll w-full min-w-0">
 
-        {kind === 'confirmation' ? (
-          /* Confirmation mode: requires canonical detail */
+        {kind === 'folio' ? (
+          selectedResId == null ? (
+            <div className="document-center-empty">
+              <div className="document-center-empty-text">Pilih reservasi untuk menampilkan Guest Folio.</div>
+              <div className="document-center-empty-sub">
+                Gunakan pencarian di panel kiri untuk memilih reservasi yang akan dicetak tagihannya.
+              </div>
+            </div>
+          ) : folioLoading ? (
+            <div className="document-center-empty">
+              <div className="document-center-empty-text">Memuat rincian Guest Folio...</div>
+            </div>
+          ) : folioError ? (
+            <div className="document-center-empty document-center-empty-error">
+              <div className="document-center-empty-text">Guest Folio tidak dapat dimuat.</div>
+              <div className="document-center-empty-sub">{folioError}</div>
+              <button
+                type="button"
+                onClick={() => setFolioRetryCount((c) => c + 1)}
+                className="mt-3 px-3.5 py-1.5 text-xs font-semibold rounded-md bg-[#1b4332] text-white hover:bg-[#143626] transition-colors cursor-pointer"
+              >
+                Coba Lagi
+              </button>
+            </div>
+          ) : folioDoc ? (
+            <div ref={printDocumentRef} className="document-center-printable-wrapper">
+              {folioDoc.reconciliation && !folioDoc.reconciliation.is_reconciled && (
+                <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs">
+                  <div className="font-bold flex items-center gap-2 text-amber-800 text-sm mb-1">
+                    <span>⚠️</span>
+                    <span>Peringatan Rekonsiliasi Finansial — Cetak & Ekspor PDF Dinonaktifkan</span>
+                  </div>
+                  <p className="mb-2">
+                    Rincian baris transaksi tidak seimbang dengan ringkasan kalkulator finansial. Dokumen tidak dapat dicetak atau diekspor ke PDF hingga selisih teratasi.
+                  </p>
+                  {folioDoc.reconciliation.discrepancy_reasons && folioDoc.reconciliation.discrepancy_reasons.length > 0 && (
+                    <ul className="list-disc list-inside space-y-1 font-mono text-[11px] bg-white/70 p-2.5 rounded border border-amber-200">
+                      {folioDoc.reconciliation.discrepancy_reasons.map((reason, idx) => (
+                        <li key={idx}>{reason}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <GuestFolioPrint
+                data={folioDoc}
+                propertyInfo={propertyInfo}
+                propertyBranding={propertyBranding}
+                viewMode={folioViewMode}
+                customFooterNote={folioFooterNote}
+                cashierSignatureLabel={folioCashierLabel}
+                headerRef={headerRef}
+                footerRef={footerRef}
+              />
+            </div>
+          ) : (
+            <div className="document-center-empty">
+              <div className="document-center-empty-text">Pilih reservasi untuk menampilkan Guest Folio.</div>
+            </div>
+          )
+        ) : kind === 'confirmation' ? (
           selectedResId == null ? (
             <div className="document-center-empty">
               <div className="document-center-empty-text">Pilih reservasi untuk membuat dokumen.</div>
               <div className="document-center-empty-sub">Gunakan pencarian di panel kiri untuk memilih reservasi.</div>
             </div>
-          ) : detailLoading ? (
+          ) : (detailLoading || folioLoading) ? (
             <div className="document-center-empty">
-              <div className="document-center-empty-text">Memuat detail reservasi...</div>
+              <div className="document-center-empty-text">Memuat rincian Guest Bill &amp; Folio...</div>
             </div>
-          ) : detailError ? (
+          ) : (detailError || folioError) ? (
             <div className="document-center-empty document-center-empty-error">
-              <div className="document-center-empty-text">Detail reservasi tidak dapat dimuat.</div>
-              <div className="document-center-empty-sub">{detailError}</div>
+              <div className="document-center-empty-text">Detail reservasi atau folio tidak dapat dimuat.</div>
+              <div className="document-center-empty-sub">{detailError || folioError}</div>
+              <button
+                type="button"
+                onClick={() => {
+                  setDetailRetryCount((c) => c + 1);
+                  setFolioRetryCount((c) => c + 1);
+                }}
+                className="mt-3 px-3.5 py-1.5 text-xs font-semibold rounded-md bg-[#1b4332] text-white hover:bg-[#143626] transition-colors cursor-pointer"
+              >
+                Coba Lagi
+              </button>
             </div>
           ) : docRes ? (
             <div ref={printDocumentRef} className="document-center-printable-wrapper">
+              {folioDoc?.reconciliation && !folioDoc.reconciliation.is_reconciled && (
+                <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs">
+                  <div className="font-bold flex items-center gap-2 text-amber-800 text-sm mb-1">
+                    <span>⚠️</span>
+                    <span>Peringatan Rekonsiliasi Finansial — Cetak &amp; Ekspor PDF Dinonaktifkan</span>
+                  </div>
+                  <p className="mb-2">
+                    Rincian transaksi tidak seimbang dengan ringkasan kalkulator finansial. Guest Bill tidak dapat dicetak atau diekspor ke PDF hingga selisih teratasi.
+                  </p>
+                  {folioDoc.reconciliation.discrepancy_reasons && folioDoc.reconciliation.discrepancy_reasons.length > 0 && (
+                    <ul className="list-disc list-inside space-y-1 font-mono text-[11px] bg-white/70 p-2.5 rounded border border-amber-200">
+                      {folioDoc.reconciliation.discrepancy_reasons.map((reason, idx) => (
+                        <li key={idx}>{reason}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {folioDoc && !isGuestBillChargesReconciled && (
+                <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs">
+                  <div className="font-bold flex items-center gap-2 text-amber-800 text-sm mb-1">
+                    <span>⚠️</span>
+                    <span>Peringatan Rincian Tagihan — Cetak &amp; Ekspor PDF Dinonaktifkan</span>
+                  </div>
+                  <p>
+                    Total rincian tagihan (Rp {chargeBreakdownSum.toLocaleString('id-ID')}) tidak sesuai dengan total tagihan ringkasan (Rp {Number(folioDoc?.summary?.net_total_charges || 0).toLocaleString('id-ID')}).
+                  </p>
+                </div>
+              )}
               <ReservationConfirmationPrint
-                reservation={docRes}
+                reservation={
+                  folioDoc?.summary
+                    ? {
+                        ...docRes,
+                        total_price: folioDoc.summary.net_total_charges,
+                        amount_paid: folioDoc.summary.effective_amount_paid,
+                        applied_deposit: folioDoc.summary.applied_deposit,
+                        remaining_balance: folioDoc.summary.remaining_balance,
+                        payment_status: folioDoc.summary.payment_status,
+                      }
+                    : docRes
+                }
+                chargeLines={guestBillChargeLines}
+                receptionistName={guestBillReceptionistName}
                 propertyInfo={propertyInfo}
                 propertyBranding={propertyBranding}
                 headerRef={headerRef}
@@ -1149,7 +1794,6 @@ export default function DocumentCenter({
             </div>
           )
         ) : (
-          /* Quotation kind: renders draft-powered QuotationPrint */
           quotationMode === 'reservation' && selectedResId == null ? (
             <div className="document-center-empty">
               <div className="document-center-empty-text">Pilih reservasi untuk membuat penawaran.</div>
@@ -1163,9 +1807,15 @@ export default function DocumentCenter({
             <div className="document-center-empty document-center-empty-error">
               <div className="document-center-empty-text">Detail reservasi tidak dapat dimuat.</div>
               <div className="document-center-empty-sub">{detailError}</div>
+              <button
+                type="button"
+                onClick={() => setDetailRetryCount((c) => c + 1)}
+                className="mt-3 px-3.5 py-1.5 text-xs font-semibold rounded-md bg-[#1b4332] text-white hover:bg-[#143626] transition-colors cursor-pointer"
+              >
+                Coba Lagi
+              </button>
             </div>
           ) : (
-            /* Draft-powered live quotation preview (both reservation and manual modes) */
             <div ref={printDocumentRef} className="document-center-printable-wrapper">
               <QuotationPrint
                 draft={quotationDraft}

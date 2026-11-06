@@ -82,6 +82,8 @@ interface Props {
   posOrdersRefreshReservationId?: number | null;
   /** Buka modal pembayaran CASH untuk order POS (forward ke App). */
   onOpenCashPayment?: (ctx: import('../pos/PosPayCashModal').PosPayCashOrderContext) => void;
+  /** Buka Tagihan Tamu (Guest Folio) di Dokumen & Print untuk reservasi ini. */
+  onOpenGuestFolio?: (reservationId: number) => void;
 }
 
 /** One row of the reservation activity log timeline (backend redacted DTO). */
@@ -329,6 +331,7 @@ export default function ReservationDetailDrawer({
   posOrdersRefreshVersion,
   posOrdersRefreshReservationId,
   onOpenCashPayment,
+  onOpenGuestFolio,
 }: Props) {
   const [detailData, setDetailData] = useState<any>(reservation);
   const [loading, setLoading] = useState<boolean>(false);
@@ -1917,8 +1920,8 @@ export default function ReservationDetailDrawer({
 
           {/* Section 6: Folio & Ringkasan Pembayaran (Authoritative Derived Output, No Direct Edit) */}
           <div id="folio-section" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
-            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-2 gap-2 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
                   Folio &amp; Ringkasan Pembayaran
                 </span>
@@ -1929,6 +1932,15 @@ export default function ReservationDetailDrawer({
                       className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
                     >
                       + Tambah Biaya
+                    </button>
+                  )}
+                  {onOpenGuestFolio && data?.id && !isCancelled && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenGuestFolio(Number(data.id))}
+                      className="px-2.5 py-1 bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1"
+                    >
+                      <span>🧾</span> Cetak Guest Folio
                     </button>
                   )}
                 </div>
@@ -2324,6 +2336,27 @@ export default function ReservationDetailDrawer({
               </div>
             )}
           </div>
+
+          {/* Guest Folio Document Shortcut */}
+          {onOpenGuestFolio && data?.id && !isCancelled && (
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs flex items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-400 block">
+                  Tagihan Tamu (Guest Folio)
+                </span>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  Rincian resmi biaya kamar, layanan tambahan, pembayaran, dan rekonsiliasi saldo.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenGuestFolio(Number(data.id))}
+                className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
+              >
+                <span>🧾</span> Buka Guest Folio
+              </button>
+            </div>
+          )}
 
           </div>
 

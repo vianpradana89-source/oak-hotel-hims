@@ -618,6 +618,7 @@ function AppContent() {
 
   const [propertyFeatures, setPropertyFeatures] = useState<Record<string, boolean>>({});
   const [initialSettingsCategory, setInitialSettingsCategory] = useState<SettingsCategoryKey>('housekeeping');
+  const [docCenterInit, setDocCenterInit] = useState<{ reservationId: number | null; kind: 'confirmation' | 'quotation' | 'folio' }>({ reservationId: null, kind: 'confirmation' });
 
   useEffect(() => {
     if (!propertyId) return;
@@ -4749,6 +4750,8 @@ function AppContent() {
             propertyBranding={activeBranding}
             propertyId={propertyId}
             authFetch={authFetch}
+            initialReservationId={docCenterInit.reservationId}
+            initialKind={docCenterInit.kind}
           />
         )}
 
@@ -5104,6 +5107,22 @@ function AppContent() {
             posOrdersRefreshVersion={posOrdersRefreshVersion}
             posOrdersRefreshReservationId={posOrdersRefreshReservationId}
             onOpenCashPayment={openPosCashPayment}
+            onOpenGuestFolio={
+              propertyFeatures['documents.enabled'] !== false &&
+              (!effectiveAccess || getVisibleNavKeys(effectiveAccess.effective).includes('Dokumen & Print'))
+                ? (resId) => {
+                    if (showPosCashPayment) {
+                      window.alert(
+                        'Tolak menutup detail reservasi: modal pembayaran CASH sedang terbuka. Tutup modal pembayaran dahulu.',
+                      );
+                      return;
+                    }
+                    setDocCenterInit({ reservationId: resId, kind: 'folio' });
+                    setSelectedRes(null);
+                    setSelectedMenu('Dokumen & Print');
+                  }
+                : undefined
+            }
             />
          )}
 

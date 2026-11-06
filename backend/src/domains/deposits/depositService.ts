@@ -1251,11 +1251,11 @@ export async function reconcileDeposit(client: PoolClient | Pool, depositId: num
   return issues;
 }
 
-export async function getDepositsByReservation(pool: Pool, propertyId: number, reservationId: number): Promise<any[]> {
+export async function getDepositsByReservation(clientOrPool: Pool | PoolClient, propertyId: number, reservationId: number): Promise<any[]> {
   requirePositiveInteger(propertyId, 'property_id');
   requirePositiveInteger(reservationId, 'reservation_id');
   // Canonical ownership: reservation -> booking -> property (INNER JOIN; schema enforces booking_id NOT NULL)
-  const ownership = await pool.query(
+  const ownership = await clientOrPool.query(
     `SELECT b.id AS booking_id FROM reservations r
      INNER JOIN bookings b ON b.id = r.booking_id
      WHERE r.id = $1 AND b.property_id = $2`,
@@ -1264,14 +1264,14 @@ export async function getDepositsByReservation(pool: Pool, propertyId: number, r
   if ((ownership.rowCount ?? 0) === 0) throw domainError(404, 'RESERVATION_NOT_FOUND', 'Reservation not found for this property');
   const targetBookingId = ownership.rows[0].booking_id;
   // ROOM_RESERVATION: direct deposit for this reservation
-  const resDeposits = await pool.query(
+  const resDeposits = await clientOrPool.query(
     'SELECT id FROM deposits WHERE property_id = $1 AND reservation_id = $2 AND scope = \'ROOM_RESERVATION\'',
     [propertyId, reservationId]
   );
   // BOOKING_GROUP: shared deposit for this booking
   let groupDeposits: any = { rows: [] };
   if (targetBookingId != null && Number(targetBookingId) > 0) {
-    groupDeposits = await pool.query(
+    groupDeposits = await clientOrPool.query(
       'SELECT id FROM deposits WHERE property_id = $1 AND booking_id = $2 AND scope = \'BOOKING_GROUP\'',
       [propertyId, targetBookingId]
     );
@@ -1285,13 +1285,19 @@ export async function getDepositsByReservation(pool: Pool, propertyId: number, r
   }
   ids.sort((a, b) => a - b);
   // Enrich group-scope rows with release metadata (read-only, no lock required).
-  const hydrated = await Promise.all(ids.map(id => hydrateDeposit(pool, id)));
-  // Use a new client for the eligibility query so we don't hold locks on the main pool.
-  const client = await pool.connect();
-  try {
-    await enrichGroupRowsWithReleaseMetadata(hydrated, client, propertyId);
-  } finally {
-    client.release();
+  const hydrated = await Promise.all(ids.map(id => hydrateDeposit(clientOrPool, id)));
+  // If clientOrPool is already a PoolClient (e.g. running in an isolated snapshot transaction), reuse it directly.
+  // Otherwise check out a temporary client from the pool.
+  if ('release' in clientOrPool && typeof (clientOrPool as any).release === 'function') {
+    await enrichGroupRowsWithReleaseMetadata(hydrated, clientOrPool as PoolClient, propertyId);
+  } else {
+    const pool = clientOrPool as Pool;
+    const client = await pool.connect();
+    try {
+      await enrichGroupRowsWithReleaseMetadata(hydrated, client, propertyId);
+    } finally {
+      client.release();
+    }
   }
   return hydrated;
 }

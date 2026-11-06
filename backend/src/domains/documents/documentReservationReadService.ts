@@ -102,6 +102,7 @@ export interface DocumentReservationDetail {
   // Financial (pre-verified, canonical columns)
   total_price: number | null;
   amount_paid: number | null;
+  applied_deposit: number | null;
   remaining_balance: number | null;
   payment_status: string | null;
 
@@ -178,6 +179,7 @@ function pickDetail(
 
     total_price: row.total_price != null ? Number(row.total_price) : null,
     amount_paid: row.amount_paid != null ? Number(row.amount_paid) : null,
+    applied_deposit: row.applied_deposit != null ? Number(row.applied_deposit) : null,
     remaining_balance: row.remaining_balance != null
       ? Number(row.remaining_balance)
       : null,
@@ -205,6 +207,7 @@ export async function getDocumentReservationList(
   db: Pool | PoolClient,
   propertyId: number,
   search?: string,
+  includeId?: number,
 ): Promise<DocumentReservationListResult> {
   const params: any[] = [propertyId];
 
@@ -246,6 +249,36 @@ export async function getDocumentReservationList(
     `;
     params.push(needle);
     orderClause = ' ORDER BY r.check_out DESC NULLS LAST, r.id DESC';
+  } else if (includeId && Number.isInteger(includeId) && includeId > 0) {
+    // DEFAULT MODE with explicit preselected reservation ID included (still strictly property-scoped)
+    baseQuery = `
+      SELECT
+        r.id,
+        b.bid,
+        r.guest_name,
+        COALESCE(r.booker_name, b.booker_name) AS booker_name,
+        TO_CHAR(r.check_in, 'YYYY-MM-DD') AS check_in,
+        TO_CHAR(r.check_out, 'YYYY-MM-DD') AS check_out,
+        COALESCE(r.booked_room_type_name_snapshot, rt.name) AS room_type_name,
+        COALESCE(r.booked_room_type_code_snapshot, rt.code) AS room_type,
+        rm.room_number,
+        r.status,
+        r.total_price
+      FROM reservations r
+      INNER JOIN bookings b ON b.id = r.booking_id
+      LEFT JOIN rooms rm ON rm.id = r.room_id
+        AND rm.property_id = b.property_id
+      LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+        AND rt.property_id = b.property_id
+      WHERE b.property_id = $1
+        AND (
+          (UPPER(r.status) = 'CHECKED_OUT' AND r.check_out::date <= CURRENT_DATE)
+          OR r.id = $2
+        )
+    `;
+    params.push(includeId);
+    orderClause = ' ORDER BY CASE WHEN r.id = $2 THEN 0 ELSE 1 END ASC, r.check_out DESC, r.id DESC';
+    limitClause = ' LIMIT 20';
   } else {
     // DEFAULT MODE: recent checkouts only, newest first, capped at 20.
     baseQuery = `
@@ -334,6 +367,7 @@ export async function getDocumentReservationDetail(
 
       r.total_price,
       r.amount_paid,
+      r.applied_deposit,
       r.remaining_balance,
       r.payment_status
 

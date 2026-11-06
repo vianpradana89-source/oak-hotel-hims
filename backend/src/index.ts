@@ -1397,6 +1397,7 @@ async function createCanonicalBooking(
   reservationPayloads: any[],
   options: { requirePropertyId?: boolean } = {}
 ) {
+  const newlyCreatedGuestIds: number[] = [];
   const rawReservationPayloads = Array.isArray(reservationPayloads) ? reservationPayloads : [];
   if (rawReservationPayloads.length < 1) {
     throw createHttpError(400, 'reservations must be a non-empty array');
@@ -2151,6 +2152,7 @@ async function createCanonicalBooking(
     const insertedChildren: any[] = [];
     let bookingLegacyNumber: string | null = null;
     for (const child of normalizedChildren) {
+      let stayingGuestId: number | null = null;
       const inserted = await createChildReservationRecord(client, {
         bookingId: Number(bookingRecord.id),
         bid: String(bookingRecord.bid),
@@ -2460,7 +2462,7 @@ async function createCanonicalBooking(
       }
 
       try {
-        let stayingGuestId: number | null = child.guestId
+        stayingGuestId = child.guestId
           ? Number(child.guestId)
           : (child.guest_id
             ? Number(child.guest_id)
@@ -2642,6 +2644,7 @@ async function createCanonicalBooking(
             ]
           );
           stayingGuestId = newGuestRes.rows[0].id;
+          newlyCreatedGuestIds.push(Number(stayingGuestId));
           const guestCode = `GST-${String(stayingGuestId).padStart(5, '0')}`;
           await client.query(`UPDATE guests SET guest_code = $1 WHERE id = $2`, [guestCode, stayingGuestId]);
         }
@@ -2686,6 +2689,7 @@ async function createCanonicalBooking(
               [bName, normBName, bPhone || null, normBPhone, bookingPropertyId]
             );
             bookerGuestId = newBookerRes.rows[0].id;
+            newlyCreatedGuestIds.push(Number(bookerGuestId));
             const guestCode = `GST-${String(bookerGuestId).padStart(5, '0')}`;
             await client.query(`UPDATE guests SET guest_code = $1 WHERE id = $2`, [guestCode, bookerGuestId]);
           }
@@ -2761,6 +2765,7 @@ async function createCanonicalBooking(
 
       insertedChildren.push({
         ...inserted.reservation,
+        guest_id: stayingGuestId || null,
         bid: String(bookingRecord.bid),
         booking_id: Number(bookingRecord.id),
         stay_sequence: child.index + 1
@@ -2938,10 +2943,13 @@ async function createCanonicalBooking(
         booking_status: 'ACTIVE',
         currency_code: currencyCode,
         legacy_booking_number: bookingLegacyNumber,
+        guest_id: newlyCreatedGuestIds[0] || null,
+        created_guest_ids: newlyCreatedGuestIds,
         correlation_id: correlationId,
         ...(groupPaymentResult ? { payment_id: groupPaymentResult.parentPayment.id } : {})
       },
       reservations: insertedChildren.map(withReservationHotelDates),
+      created_guest_ids: newlyCreatedGuestIds,
       correlationId,
       bookingLegacyNumber
     };
@@ -4817,6 +4825,8 @@ app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('paymen
         property_id: result.booking.property_id,
         guest_name: result.booking.guest_name_snapshot,
         guest_phone: result.booking.guest_phone_snapshot,
+        guest_id: (result as any).booking?.guest_id || (result as any).created_guest_ids?.[0] || null,
+        created_guest_ids: (result as any).created_guest_ids || [],
         booking_source: result.booking.booking_source,
         channel: result.booking.channel,
         currency_code: result.booking.currency_code,

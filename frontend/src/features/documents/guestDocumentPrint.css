@@ -222,6 +222,12 @@
     padding: 12mm 14mm;
   }
 
+  /* A4 page setup */
+  @page {
+    size: A4 portrait;
+    margin: 6mm 8mm !important;
+  }
+
   /* Hide modal chrome and buttons */
   .guest-doc-controls,
   .modal-card,
@@ -231,11 +237,7 @@
     display: none !important;
   }
 
-  /* A4 page setup */
-  @page {
-    size: A4 portrait;
-    margin: 0;
-  }
+
 
   /* Avoid page break inside financial tables */
   .guest-doc-fin-table {
@@ -268,6 +270,7 @@
 
 /* The actual A4 page: white, gold frame, fixed width */
 .oak-letterhead-frame {
+  box-sizing: border-box;
   position: relative;
   width: 100%;
   max-width: 210mm;   /* A4 width */
@@ -280,6 +283,12 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.oak-letterhead,
+.oak-letterhead-frame,
+.oak-letterhead-frame * {
+  box-sizing: border-box;
 }
 
 /* Centered watermark -- very low opacity so body text remains readable */
@@ -442,25 +451,39 @@
     visibility: visible;
   }
 
+  @page {
+    size: A4 portrait;
+    margin: 6mm 8mm !important;
+  }
+
   /* Position the page at top-left, remove padding/background of wrapper */
   .oak-letterhead {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    padding: 0;
-    background: white;
-    min-height: 0;
-    display: block;
+    position: static !important;
+    display: block !important;
+    min-height: 0 !important;
+    height: auto !important;
+    width: 100% !important;
+    padding: 0 !important;
+    background: white !important;
   }
 
   .oak-letterhead-frame {
-    width: 100%;
-    max-width: none;
-    min-height: auto;
-    box-shadow: none;
-    border-radius: 0;
-    padding: 12mm 14mm 16mm 14mm;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 0 !important;
+    height: auto !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .oak-letterhead-footer {
+    margin-top: 2mm !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 
   /* Watermark and rose: ensure they print correctly */
@@ -496,11 +519,7 @@
     break-inside: avoid;
   }
 
-  /* A4 page setup */
-  @page {
-    size: A4 portrait;
-    margin: 0;
-  }
+
 }
 
 /* ================================================================
@@ -647,10 +666,141 @@
   page-break-inside: avoid;
 }
 
+/* Guest Bill Itemized Charges Table */
+.oak-guest-bill-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.oak-guest-bill-table thead th {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #444;
+  padding: 6px 8px;
+  border-bottom: 1.5px solid var(--doc-primary-color, #1b4332);
+  background: #fafaf8;
+}
+
+.oak-guest-bill-table tbody td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+  color: #222;
+  vertical-align: top;
+}
+
+.oak-guest-bill-charge-desc {
+  font-weight: 500;
+  color: #111;
+}
+
+.oak-guest-bill-charge-ref {
+  font-size: 9.5px;
+  color: #777;
+  margin-top: 1px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Dual signature block for Guest Bill */
+.oak-doc-signature-block {
+  margin-top: 20px;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+.oak-doc-signature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+
+.oak-doc-signature-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.oak-doc-signature-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--doc-primary-color, #1b4332);
+  margin-bottom: 4px;
+}
+
+.oak-doc-signature-space {
+  height: 32mm;
+  min-height: 32mm;
+  width: 100%;
+}
+
+.oak-doc-signature-line {
+  width: 80%;
+  border-bottom: 1px solid #333;
+  margin-bottom: 6px;
+}
+
+.oak-doc-signature-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: #111;
+  line-height: 1.3;
+}
+
+.oak-doc-signature-role {
+  font-size: 10px;
+  color: #666;
+  margin-top: 1px;
+}
+
+/* Page break rules for charges section and signature */
+.oak-guest-bill-charges-section {
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+.oak-guest-bill-table {
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+.oak-guest-bill-table thead {
+  display: table-header-group !important;
+}
+
+.oak-guest-bill-table tbody tr {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
 /* PRINT -- complementary rules for document body classes */
 @media print {
   .oak-doc-section {
     break-inside: avoid;
+  }
+
+  .oak-guest-bill-charges-section,
+  .oak-guest-bill-table {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .oak-guest-bill-table thead {
+    display: table-header-group !important;
+  }
+
+  .oak-guest-bill-table tbody tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .oak-doc-signature-block {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 
   .oak-doc-fin-table {
@@ -1076,11 +1226,1034 @@
   }
 
   .document-center .oak-letterhead-frame {
-    width: 100%;
-    max-width: none;
-    min-height: auto;
-    box-shadow: none;
-    border-radius: 0;
-    padding: 12mm 14mm 16mm 14mm;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 0 !important;
+    height: auto !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+}
+
+
+/* ================================================================
+   GUEST FOLIO (TAGIHAN TAMU) — Swiss-Belinn Inspired + OAK Visual System
+   Forest Green (#1b4332), Warm Ivory (#f9f9f7), Muted Gold (#c5a880)
+   ================================================================ */
+
+.oak-folio-identity-box {
+  background: #faf9f5;
+  border: 1px solid #e2dccd;
+  border-top: 2.5px solid var(--doc-primary-color, #1b4332);
+  border-radius: 3px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.oak-folio-identity-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 24px;
+}
+
+@media (max-width: 560px) {
+  .oak-folio-identity-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.oak-folio-identity-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.oak-folio-kv-row {
+  display: grid;
+  grid-template-columns: 118px 10px minmax(0, 1fr);
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.oak-folio-kv-value {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.oak-folio-kv-label {
+  color: #5c5952;
+  font-weight: 600;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.oak-folio-kv-sep {
+  color: #888;
+  font-weight: 600;
+}
+
+.oak-folio-kv-value {
+  color: #1a1a1a;
+  font-weight: 500;
+  overflow-wrap: break-word;
+}
+
+.oak-folio-kv-strong {
+  font-weight: 700;
+  color: var(--doc-primary-color, #1b4332);
+}
+
+.oak-folio-multiroom-banner {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #d8d1c0;
+  font-size: 10.5px;
+  color: #4b4840;
+  line-height: 1.45;
+}
+
+/* Section header above transaction table */
+.oak-folio-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--doc-accent-color, #c5a880);
+}
+
+.oak-folio-debit-credit-legend {
+  font-size: 10px;
+  color: #5c5952;
+  background: #f5f3ec;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid #e5dfd0;
+}
+
+/* Folio transaction table: MUST allow multi-page flow while keeping rows intact */
+.oak-folio-transactions-section {
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+.oak-folio-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+  box-sizing: border-box;
+}
+
+.oak-folio-table th,
+.oak-folio-table td {
+  box-sizing: border-box;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.oak-folio-table thead {
+  display: table-header-group;
+}
+
+.oak-folio-table tfoot {
+  display: table-row-group;
+}
+
+.oak-folio-table thead th {
+  background: #f4f2eb;
+  color: var(--doc-primary-color, #1b4332);
+  border-top: 1px solid var(--doc-primary-color, #1b4332);
+  border-bottom: 1.5px solid var(--doc-primary-color, #1b4332);
+  padding: 7px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.oak-folio-table tbody tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.oak-folio-table tbody td {
+  padding: 6.5px 8px;
+  border-bottom: 1px solid #ece9e0;
+  vertical-align: top;
+  color: #1f1f1f;
+}
+
+.oak-folio-col-date {
+  white-space: nowrap;
+  font-size: 11px;
+  color: #333;
+  font-variant-numeric: tabular-nums;
+}
+
+.oak-folio-col-ref {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: #444;
+}
+
+.oak-folio-desc-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.oak-folio-desc-sub {
+  font-size: 10px;
+  color: #666;
+  margin-top: 2px;
+  line-height: 1.35;
+}
+
+.oak-folio-row-audit td {
+  color: #6b7280;
+  background: #fafafa;
+}
+
+.oak-folio-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+}
+
+.oak-folio-badge-replacement {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.oak-folio-badge-group {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+
+.oak-folio-badge-void {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.oak-folio-badge-reversal {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.oak-folio-badge-ota {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.oak-folio-table-subtotal td {
+  font-weight: 700;
+  font-size: 11.5px;
+  background: #faf9f5;
+  border-top: 1.5px solid var(--doc-primary-color, #1b4332);
+  border-bottom: 1.5px solid var(--doc-primary-color, #1b4332);
+  padding: 7px 8px;
+  color: #111;
+  font-variant-numeric: tabular-nums;
+}
+
+.oak-folio-ota-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #f8f7f2;
+  border-left: 3px solid var(--doc-accent-color, #c5a880);
+  font-size: 10.5px;
+  color: #444;
+  line-height: 1.45;
+}
+
+/* Reconciled Summary Block */
+.oak-folio-summary-block,
+.oak-folio-custody-block,
+.oak-folio-signature-block {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.oak-folio-summary-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+@media (max-width: 560px) {
+  .oak-folio-summary-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.oak-folio-status-card {
+  background: #faf9f5;
+  border: 1px solid #e2dccd;
+  border-radius: 3px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.oak-folio-status-caption {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #666;
+  margin-bottom: 5px;
+}
+
+.oak-folio-status-badge {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border-radius: 3px;
+  margin-bottom: 6px;
+}
+
+.oak-folio-status-paid {
+  background: #1b4332;
+  color: #ffffff;
+}
+
+.oak-folio-status-partial {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+}
+
+.oak-folio-status-unpaid {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+.oak-folio-status-sub {
+  font-size: 10px;
+  color: #555;
+  line-height: 1.4;
+}
+
+.oak-folio-overpayment-row td {
+  font-weight: 700;
+  color: #065f46 !important;
+  background: #ecfdf5;
+}
+
+/* Deposit Custody Block (separate from folio balance) */
+.oak-folio-custody-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.oak-folio-custody-metric {
+  background: #faf9f5;
+  border: 1px solid #e5dfd0;
+  border-radius: 3px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.oak-folio-custody-highlight {
+  border-color: var(--doc-accent-color, #c5a880);
+  background: #f5f2e8;
+}
+
+.oak-folio-custody-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.oak-folio-custody-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  font-variant-numeric: tabular-nums;
+}
+
+.oak-folio-custody-note {
+  font-size: 10px;
+  color: #5c5952;
+  line-height: 1.4;
+}
+
+/* Signature & Approval Block */
+.oak-folio-legal-statement {
+  font-size: 10.5px;
+  color: #444;
+  font-style: italic;
+  line-height: 1.45;
+  margin-bottom: 14px;
+  padding: 7px 10px;
+  background: #faf9f5;
+  border-left: 2.5px solid var(--doc-accent-color, #c5a880);
+}
+
+.oak-folio-signature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  margin-top: 6px;
+}
+
+.oak-folio-sig-col {
+  text-align: center;
+}
+
+.oak-folio-sig-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #444;
+}
+
+.oak-folio-sig-space {
+  height: 46px;
+  border-bottom: 1px solid #999;
+  width: 78%;
+  margin: 0 auto 5px;
+}
+
+.oak-folio-sig-name {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+.oak-folio-sig-role {
+  font-size: 9.5px;
+  color: #777;
+  margin-top: 1px;
+}
+
+.oak-folio-print-meta {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 9.5px;
+  color: #777;
+}
+
+/* Compact styling for html2pdf client-side export host (GF-F01 parity with @media print) */
+.oak-pdf-export-body .oak-letterhead-header {
+  margin-bottom: 1.5mm !important;
+  padding-bottom: 1mm !important;
+}
+
+.oak-pdf-export-body .oak-letterhead-title {
+  margin: 1mm 0 1.5mm 0 !important;
+  padding: 1mm 0 !important;
+  font-size: 13pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-identity-box {
+  margin-bottom: 1.5mm !important;
+  padding: 1.5mm 2.5mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-identity-grid {
+  gap: 2.5px 16px !important;
+}
+
+.oak-pdf-export-body .oak-folio-identity-col {
+  gap: 2px !important;
+}
+
+.oak-pdf-export-body .oak-folio-kv-row {
+  font-size: 7.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-kv-label {
+  font-size: 7pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-kv-value {
+  font-size: 7.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-section-header {
+  margin-top: 1.5mm !important;
+  margin-bottom: 1mm !important;
+  padding-bottom: 1mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-table {
+  width: 100% !important;
+  margin-bottom: 1.5mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-table thead th {
+  padding: 1mm 1.8mm !important;
+  font-size: 7.5pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-table tbody td {
+  padding: 0.8mm 1.8mm !important;
+  font-size: 7.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-desc-main {
+  font-size: 7.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-desc-sub {
+  font-size: 7pt !important;
+  line-height: 1.12 !important;
+  margin-top: 1px !important;
+}
+
+.oak-pdf-export-body .oak-folio-col-ref {
+  font-size: 7.2pt !important;
+  line-height: 1.12 !important;
+  word-break: break-word !important;
+}
+
+.oak-pdf-export-body .oak-folio-table-subtotal td {
+  padding: 1mm 1.8mm !important;
+  font-size: 8pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-summary-block {
+  margin-top: 1.2mm !important;
+  margin-bottom: 1.2mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-summary-layout {
+  gap: 6px !important;
+}
+
+.oak-pdf-export-body .oak-folio-status-card {
+  padding: 1.2mm 1.8mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-status-caption {
+  font-size: 7pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-status-badge {
+  font-size: 8pt !important;
+  padding: 1.5px 5px !important;
+}
+
+.oak-pdf-export-body .oak-folio-status-sub {
+  font-size: 6.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-summary-numbers td {
+  padding: 0.8mm 1.5mm !important;
+  font-size: 7.8pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-block {
+  margin-top: 1.2mm !important;
+  margin-bottom: 1.2mm !important;
+  padding: 1.2mm 1.8mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-grid {
+  gap: 4px !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-metric {
+  padding: 0.8mm 1.4mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-label {
+  font-size: 6.8pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-val {
+  font-size: 7.5pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-custody-note {
+  margin-top: 1mm !important;
+  font-size: 6.5pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-signature-block {
+  margin-top: 1.2mm !important;
+  margin-bottom: 0.8mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-sig-space {
+  height: 7mm !important;
+  margin: 0 auto 1.5mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-sig-name {
+  font-size: 7.5pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-sig-role {
+  font-size: 6.8pt !important;
+}
+
+.oak-pdf-export-body .oak-folio-legal-statement {
+  margin-top: 0.8mm !important;
+  margin-bottom: 0.8mm !important;
+  padding: 0.8mm 1.5mm !important;
+  font-size: 6.5pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-folio-print-meta {
+  margin-top: 0.8mm !important;
+  font-size: 7pt !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-charges-section,
+.oak-pdf-export-body .oak-guest-bill-table {
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-table thead {
+  display: table-header-group !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-table tbody tr,
+.oak-pdf-export-body .oak-doc-signature-block,
+.oak-pdf-export-body .oak-guest-bill-closing-block {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+/* Guest Bill compact export styling (html2pdf) */
+.oak-pdf-export-body .oak-doc-section {
+  margin-bottom: 2mm !important;
+}
+
+.oak-pdf-export-body .oak-doc-section-title {
+  font-size: 7.5pt !important;
+  margin-bottom: 1mm !important;
+  padding-bottom: 0.5mm !important;
+}
+
+.oak-pdf-export-body .oak-doc-field-grid {
+  gap: 1mm 10px !important;
+}
+
+.oak-pdf-export-body .oak-doc-field-label {
+  font-size: 6.8pt !important;
+  line-height: 1.15 !important;
+}
+
+.oak-pdf-export-body .oak-doc-field-value {
+  font-size: 8pt !important;
+  line-height: 1.2 !important;
+  margin-top: 0.3mm !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-table {
+  margin-bottom: 1.5mm !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-table thead th {
+  padding: 1mm 2mm !important;
+  font-size: 7.5pt !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-table tbody td {
+  padding: 1mm 2mm !important;
+  font-size: 8pt !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-charge-desc {
+  font-size: 8pt !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-charge-ref {
+  font-size: 6.8pt !important;
+}
+
+.oak-pdf-export-body .oak-doc-fin-block {
+  margin-bottom: 2mm !important;
+}
+
+.oak-pdf-export-body .oak-doc-fin-table td {
+  padding: 0.8mm 1.5mm !important;
+  font-size: 8pt !important;
+}
+
+.oak-guest-bill-closing-block {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+.oak-pdf-export-body .oak-guest-bill-closing-block {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+.oak-pdf-export-body .oak-doc-signature-block {
+  margin-top: 2.5mm !important;
+  margin-bottom: 1mm !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+.oak-pdf-export-body .oak-doc-signature-space {
+  height: 30mm !important;
+  margin: 0 auto 1.5mm !important;
+}
+
+.oak-pdf-export-body .oak-doc-signature-name {
+  font-size: 8pt !important;
+}
+
+.oak-pdf-export-body .oak-doc-signature-role {
+  font-size: 7pt !important;
+}
+
+/* GF-F01: Multi-page continuation styling for html2pdf Save PDF */
+.html2pdf__page-break {
+  page-break-before: always !important;
+  break-before: page !important;
+  display: block !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+.oak-pdf-export-body .oak-folio-continuation-section {
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+  margin-top: 1.5mm !important;
+}
+
+.oak-pdf-export-body .oak-folio-continuation-header {
+  font-family: inherit;
+  font-size: 8pt !important;
+  font-weight: 600 !important;
+  color: #1b3d2f !important;
+  margin-top: 1mm !important;
+  margin-bottom: 1.5mm !important;
+  padding-bottom: 1mm !important;
+  border-bottom: 1px dashed #c2b280 !important;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 6mm 8mm !important;
+    @bottom-right {
+      content: "Halaman " counter(page) " dari " counter(pages);
+      font-size: 7.5pt;
+      color: #666;
+    }
+  }
+
+  /* Prevent horizontal clipping & overflow */
+  html, body {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    overflow: visible !important;
+  }
+
+  .oak-letterhead {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .oak-letterhead-frame {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+  }
+
+  .oak-letterhead-body {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .oak-folio-container {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Compact typography and spacing in print so standard 1-page folios never overflow to page 2 */
+  .oak-letterhead-header {
+    margin-bottom: 1.5mm !important;
+    padding-bottom: 1mm !important;
+  }
+
+  .oak-letterhead-title {
+    margin: 1mm 0 1.5mm 0 !important;
+    padding: 1mm 0 !important;
+    font-size: 13pt !important;
+  }
+
+  .oak-folio-identity-box {
+    margin-bottom: 1.5mm !important;
+    padding: 1.5mm 2.5mm !important;
+  }
+
+  .oak-folio-kv-row {
+    font-size: 9pt !important;
+    line-height: 1.25 !important;
+  }
+
+  .oak-folio-section-header {
+    margin-top: 1.5mm !important;
+    margin-bottom: 1mm !important;
+    padding-bottom: 1mm !important;
+  }
+
+  .oak-folio-table {
+    width: 100% !important;
+    margin-bottom: 1.5mm !important;
+  }
+
+  .oak-folio-table thead th {
+    padding: 1.2mm 2mm !important;
+    font-size: 8pt !important;
+  }
+
+  .oak-folio-table tbody td {
+    padding: 1.2mm 2mm !important;
+    font-size: 8.5pt !important;
+  }
+
+  .oak-folio-table-subtotal td {
+    padding: 1.5mm 2mm !important;
+    font-size: 8.5pt !important;
+  }
+
+  .oak-folio-summary-block {
+    margin-top: 1.5mm !important;
+    margin-bottom: 1.5mm !important;
+  }
+
+  .oak-folio-summary-layout {
+    gap: 8px !important;
+  }
+
+  .oak-folio-status-card {
+    padding: 1.5mm 2mm !important;
+  }
+
+  .oak-folio-custody-block {
+    margin-top: 1.5mm !important;
+    margin-bottom: 1.5mm !important;
+    padding: 1.5mm 2mm !important;
+  }
+
+  .oak-folio-custody-grid {
+    gap: 5px !important;
+  }
+
+  .oak-folio-custody-metric {
+    padding: 1.2mm 1.8mm !important;
+  }
+
+  .oak-folio-signature-block {
+    margin-top: 1.5mm !important;
+    margin-bottom: 1mm !important;
+  }
+
+  .oak-folio-sig-space {
+    height: 8mm !important;
+    margin: 0 auto 2px !important;
+  }
+
+  .oak-folio-legal-statement {
+    margin-top: 1mm !important;
+    margin-bottom: 1mm !important;
+    padding: 1.2mm 2mm !important;
+    font-size: 6.8pt !important;
+    line-height: 1.2 !important;
+  }
+
+  .oak-folio-print-meta {
+    margin-top: 1mm !important;
+    font-size: 7.5pt !important;
+  }
+
+  .oak-letterhead-footer {
+    margin-top: 1.5mm !important;
+    padding-top: 1mm !important;
+  }
+
+  .oak-letterhead-footer-contact {
+    font-size: 7.5pt !important;
+    line-height: 1.25 !important;
+  }
+
+  .oak-letterhead-footer-system {
+    font-size: 6.8pt !important;
+    line-height: 1.15 !important;
+  }
+
+  .oak-folio-transactions-section,
+  .oak-folio-table,
+  .oak-guest-bill-charges-section,
+  .oak-guest-bill-table {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .oak-folio-table thead,
+  .oak-guest-bill-table thead {
+    display: table-header-group !important;
+  }
+
+  .oak-folio-table tbody tr,
+  .oak-guest-bill-table tbody tr,
+  .oak-folio-identity-box,
+  .oak-folio-summary-block,
+  .oak-folio-custody-block,
+  .oak-folio-signature-block,
+  .oak-doc-signature-block {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .oak-folio-identity-box,
+  .oak-folio-table thead th,
+  .oak-folio-table-subtotal td,
+  .oak-folio-status-card,
+  .oak-folio-status-paid,
+  .oak-folio-status-partial,
+  .oak-folio-status-unpaid,
+  .oak-folio-custody-metric {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Guest Bill compact print styling */
+  .oak-doc-section {
+    margin-bottom: 2mm !important;
+  }
+
+  .oak-doc-section-title {
+    font-size: 7.5pt !important;
+    margin-bottom: 1mm !important;
+    padding-bottom: 0.5mm !important;
+  }
+
+  .oak-doc-field-grid {
+    gap: 1mm 10px !important;
+  }
+
+  .oak-doc-field-label {
+    font-size: 6.8pt !important;
+    line-height: 1.15 !important;
+  }
+
+  .oak-doc-field-value {
+    font-size: 8pt !important;
+    line-height: 1.2 !important;
+    margin-top: 0.3mm !important;
+  }
+
+  .oak-guest-bill-table {
+    margin-bottom: 1.5mm !important;
+  }
+
+  .oak-guest-bill-table thead th {
+    padding: 1mm 2mm !important;
+    font-size: 7.5pt !important;
+  }
+
+  .oak-guest-bill-table tbody td {
+    padding: 1mm 2mm !important;
+    font-size: 8pt !important;
+  }
+
+  .oak-guest-bill-charge-desc {
+    font-size: 8pt !important;
+  }
+
+  .oak-guest-bill-charge-ref {
+    font-size: 6.8pt !important;
+  }
+
+  .oak-doc-fin-block {
+    margin-bottom: 2mm !important;
+  }
+
+  .oak-doc-fin-table td {
+    padding: 0.8mm 1.5mm !important;
+    font-size: 8pt !important;
+  }
+
+  .oak-doc-signature-block {
+    margin-top: 2.5mm !important;
+    margin-bottom: 1mm !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .oak-doc-signature-space {
+    height: 30mm !important;
+    margin: 0 auto 1.5mm !important;
+  }
+
+  .oak-doc-signature-name {
+    font-size: 8pt !important;
+  }
+
+  .oak-doc-signature-role {
+    font-size: 7pt !important;
   }
 }

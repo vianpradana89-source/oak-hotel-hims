@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 backend/node_modules/
 frontend/node_modules/
 backend/dist/
@@ -35,3 +35,11 @@ __pycache__/
 .paddlex/
 *.bak
 *.backup
+*.zip
+*.patch
+diffs/
+artifacts/
+package_staging_*/
+verification_evidence/
+sanitized_provenance/
+synthetic_document_samples/
