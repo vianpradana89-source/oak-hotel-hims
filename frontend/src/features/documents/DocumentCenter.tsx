@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import html2pdf from 'html2pdf.js';
 import html2canvas from 'html2canvas';
 import ReservationConfirmationPrint from './ReservationConfirmationPrint';
@@ -8,6 +9,7 @@ import GuestFolioPrint, {
   type GuestFolioDocumentDto,
   type GuestFolioScope,
   type GuestFolioViewMode,
+  updateFolioPrintTimestampInDom,
 } from './GuestFolioPrint';
 import type { QuotationDraft, QuotationMode, PropertyPaymentInstructionsDto } from './quotationDraft';
 import {
@@ -290,6 +292,7 @@ export default function DocumentCenter({
   const [savePdfError, setSavePdfError] = useState<string | null>(null);
   const [showPdfFilenameModal, setShowPdfFilenameModal] = useState(false);
   const [pdfFilename, setPdfFilename] = useState('');
+  const [actionTimestamp, setActionTimestamp] = useState<Date | null>(null);
   const printDocumentRef = useRef<HTMLDivElement>(null);
   const pdfSnapshotCacheRef = useRef<{
     header?: string;
@@ -710,6 +713,14 @@ export default function DocumentCenter({
 
   const handlePrint = useCallback(() => {
     if (!printEnabled || isSavingPdf) return;
+    const now = new Date();
+    const targetTz = (propertyInfo as any)?.timezone || (folioDoc?.property as any)?.timezone || 'Asia/Jakarta';
+    if (printDocumentRef.current) {
+      updateFolioPrintTimestampInDom(printDocumentRef.current, now, targetTz);
+    }
+    flushSync(() => {
+      setActionTimestamp(now);
+    });
     if (kind === 'folio' && (!folioDoc || !folioDoc.reconciliation || !folioDoc.reconciliation.is_reconciled)) {
       alert('Pencetakan diblokir: Rincian transaksi dan ringkasan finansial tidak cocok.');
       return;
@@ -727,7 +738,7 @@ export default function DocumentCenter({
       return;
     }
     window.print();
-  }, [printEnabled, isSavingPdf, kind, folioDoc, isGuestBillChargesReconciled]);
+  }, [printEnabled, isSavingPdf, kind, folioDoc, isGuestBillChargesReconciled, propertyInfo]);
 
   const statusLabel = (status?: string): string => {
     if (!status) return '—';
@@ -847,6 +858,7 @@ export default function DocumentCenter({
     folioViewMode,
     isLoadingDocument,
     documentError,
+    propertyInfo,
   ]);
 
   const handleOpenSavePdfDialog = useCallback(() => {
@@ -926,6 +938,15 @@ export default function DocumentCenter({
       }
     }
 
+    const nowTimestamp = new Date();
+    const targetTz = (propertyInfo as any)?.timezone || (folioDoc?.property as any)?.timezone || 'Asia/Jakarta';
+    if (printDocumentRef.current) {
+      updateFolioPrintTimestampInDom(printDocumentRef.current, nowTimestamp, targetTz);
+    }
+    flushSync(() => {
+      setActionTimestamp(nowTimestamp);
+    });
+
     const rootEl = printDocumentRef.current;
     if (!rootEl) {
       setSavePdfError('Elemen pratinjau dokumen tidak ditemukan.');
@@ -1002,6 +1023,7 @@ export default function DocumentCenter({
         throw new Error('Frame elemen tidak ditemukan.');
       }
       bodyClone = frameEl.cloneNode(true) as HTMLElement;
+      updateFolioPrintTimestampInDom(bodyClone, nowTimestamp, targetTz);
       bodyClone.querySelectorAll('[data-html2canvas-ignore="true"]').forEach((el) => el.remove());
       const bh = bodyClone.querySelector('.oak-letterhead-header');
       const bf = bodyClone.querySelector('.oak-letterhead-footer');
@@ -1244,6 +1266,7 @@ export default function DocumentCenter({
     pickerRow,
     isLoadingDocument,
     documentError,
+    propertyInfo,
   ]);
 
   const normalizePdfFilename = (raw: string): string => {
@@ -1702,6 +1725,7 @@ export default function DocumentCenter({
                 viewMode={folioViewMode}
                 customFooterNote={folioFooterNote}
                 cashierSignatureLabel={folioCashierLabel}
+                actionTimestamp={actionTimestamp}
                 headerRef={headerRef}
                 footerRef={footerRef}
               />

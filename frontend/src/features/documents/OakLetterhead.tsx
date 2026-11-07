@@ -37,6 +37,10 @@ export interface OakLetterheadProps {
   headerRef?: React.Ref<HTMLDivElement>;
   /** Ref to the footer element (for PDF snapshot) */
   footerRef?: React.Ref<HTMLDivElement>;
+  /** Optional flag to suppress duplicate print timestamp in letterhead footer */
+  hidePrintTime?: boolean;
+  /** Optional action timestamp for synchronous print time rendering */
+  actionTimestamp?: Date | string | null;
 }
 
 /**
@@ -65,6 +69,8 @@ export default function OakLetterhead({
   children,
   headerRef,
   footerRef,
+  hidePrintTime = false,
+  actionTimestamp,
 }: OakLetterheadProps) {
   // Decide whether to show the baked OAK Lawang logo as fallback.
   // Rules:
@@ -84,8 +90,15 @@ export default function OakLetterhead({
   const primaryColor = propertyBranding?.primaryColor || '#1b4332';
   const accentColor = propertyBranding?.accentColor || '#c5a880';
 
-  const now = new Date();
-  const printedDate = now.toLocaleDateString('id-ID', {
+  const printTimeObj = React.useMemo(() => {
+    if (actionTimestamp) {
+      const d = actionTimestamp instanceof Date ? actionTimestamp : new Date(actionTimestamp);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    return null;
+  }, [actionTimestamp]) || new Date();
+
+  const printedDate = printTimeObj.toLocaleDateString('id-ID', {
     day: 'numeric',
     month: 'long',
     year: 'numeric',
@@ -190,7 +203,7 @@ export default function OakLetterhead({
             <span>
               Dokumen ini dicetak secara otomatis dari sistem OAK HIMS
             </span>
-            <span>Waktu cetak: {printedDate}</span>
+            {!hidePrintTime && <span className="oak-letterhead-print-time">Waktu cetak: {printedDate}</span>}
           </div>
         </div>
 

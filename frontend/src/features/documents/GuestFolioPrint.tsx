@@ -188,6 +188,7 @@ export interface GuestFolioPrintProps {
   viewMode?: GuestFolioViewMode;
   customFooterNote?: string;
   cashierSignatureLabel?: string;
+  actionTimestamp?: Date | string | null;
   headerRef?: React.Ref<HTMLDivElement>;
   footerRef?: React.Ref<HTMLDivElement>;
 }
@@ -214,6 +215,76 @@ function getBadgeLabelAndClass(badge: GuestFolioLineDto['status_badge']): {
   }
 }
 
+export function formatActualPrintTimeInTz(
+  value: Date | string | null | undefined,
+  tz?: string | null,
+): string {
+  if (!value) return '—';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  const targetTz = tz || 'Asia/Jakarta';
+
+  const tzLabel =
+    targetTz === 'Asia/Jakarta' || targetTz === 'WIB'
+      ? 'WIB'
+      : targetTz === 'Asia/Makassar' || targetTz === 'Asia/Ujung_Pandang' || targetTz === 'WITA'
+        ? 'WITA'
+        : targetTz === 'Asia/Jayapura' || targetTz === 'WIT'
+          ? 'WIT'
+          : targetTz;
+
+  try {
+    const formatted = new Intl.DateTimeFormat('id-ID', {
+      timeZone: targetTz,
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(d);
+    return `${formatted} ${tzLabel}`;
+  } catch {
+    const formatted = new Intl.DateTimeFormat('id-ID', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(d);
+    return `${formatted} ${tzLabel}`;
+  }
+}
+
+export function updateFolioPrintTimestampInDom(
+  rootEl: HTMLElement | Document = document,
+  timestamp: Date = new Date(),
+  timezone: string = 'Asia/Jakarta',
+): string {
+  const formatted = formatActualPrintTimeInTz(timestamp, timezone);
+  const timeElements = rootEl.querySelectorAll('.oak-folio-print-meta-time');
+  timeElements.forEach((el) => {
+    el.textContent = 'Waktu cetak: ' + formatted;
+  });
+  return formatted;
+}
+
+function getPrintRowBreakIndices(totalRows: number): Set<number> {
+  const breaks = new Set<number>();
+  if (totalRows <= 8) {
+    return breaks;
+  }
+  if (totalRows <= 18) {
+    breaks.add(Math.ceil(totalRows / 2));
+    return breaks;
+  }
+  const rowsPerPage = Math.ceil(totalRows / 3);
+  breaks.add(rowsPerPage);
+  breaks.add(rowsPerPage * 2);
+  return breaks;
+}
+
 export default function GuestFolioPrint({
   data,
   propertyInfo,
@@ -221,6 +292,7 @@ export default function GuestFolioPrint({
   viewMode = 'EFFECTIVE',
   customFooterNote,
   cashierSignatureLabel,
+  actionTimestamp,
   headerRef,
   footerRef,
 }: GuestFolioPrintProps) {
@@ -285,6 +357,48 @@ export default function GuestFolioPrint({
       ? cashierSignatureLabel.trim()
       : data.print_metadata.printed_by_name || 'Front Office / Kasir';
 
+  const [beforePrintTime, setBeforePrintTime] = React.useState<Date | null>(null);
+  const propertyTz = data.property?.timezone || (propertyInfo as Record<string, any>)?.timezone || 'Asia/Jakarta';
+
+  // Synchronous derivation: actionTimestamp prop takes immediate effect during render without useEffect delay
+  const effectivePrintTime = React.useMemo(() => {
+    if (beforePrintTime) return beforePrintTime;
+    if (actionTimestamp) {
+      const d = actionTimestamp instanceof Date ? actionTimestamp : new Date(actionTimestamp);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    return new Date();
+  }, [actionTimestamp, beforePrintTime]);
+
+  const actualPrintTime = React.useMemo(() => {
+    return formatActualPrintTimeInTz(effectivePrintTime, propertyTz);
+  }, [effectivePrintTime, propertyTz]);
+
+  React.useEffect(() => {
+    const handleBeforePrint = () => {
+      const now = new Date();
+      setBeforePrintTime(now);
+      const formatted = formatActualPrintTimeInTz(now, propertyTz);
+      const metaEls = document.querySelectorAll('.oak-folio-print-meta-time');
+      metaEls.forEach((el) => {
+        el.textContent = 'Waktu cetak: ' + formatted;
+      });
+    };
+    const handleAfterPrint = () => {
+      setBeforePrintTime(null);
+    };
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+    };
+  }, [propertyTz]);
+
+  const printBreakIndices = React.useMemo(() => {
+    return getPrintRowBreakIndices(lines.length);
+  }, [lines.length]);
+
   return (
     <OakLetterhead
       propertyInfo={effectivePropertyInfo}
@@ -292,6 +406,8 @@ export default function GuestFolioPrint({
       documentTitle="Tagihan Tamu / Guest Folio"
       headerRef={headerRef}
       footerRef={footerRef}
+      hidePrintTime={true}
+      actionTimestamp={effectivePrintTime}
     >
       {/* ── 1. HEADER IDENTITAS TAMU & MENGINAP (Swiss-Belinn Style 2-Column) ── */}
       <div className="oak-doc-section oak-folio-identity-box">
@@ -418,17 +534,24 @@ export default function GuestFolioPrint({
                 </td>
               </tr>
             ) : (
-              lines.map((line) => {
+              lines.map((line, idx) => {
                 const badgeInfo = getBadgeLabelAndClass(line.status_badge);
                 const isAuditDimmed =
                   line.status_badge === 'VOIDED' ||
                   line.status_badge === 'CORRECTED' ||
                   line.status_badge === 'REVERSAL';
 
+                const rowClasses = [
+                  isAuditDimmed ? 'oak-folio-row-audit' : '',
+                  printBreakIndices.has(idx) ? 'oak-folio-row-page-break' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ') || undefined;
+
                 return (
                   <tr
                     key={line.line_id}
-                    className={isAuditDimmed ? 'oak-folio-row-audit' : undefined}
+                    className={rowClasses}
                   >
                     <td className="oak-folio-col-date">{line.date_display}</td>
                     <td>
@@ -479,7 +602,9 @@ export default function GuestFolioPrint({
           )}
       </div>
 
-      {/* ── 3. RINGKASAN FINANSIAL REKONSILIASI (INDIVISIBLE BLOCK) ── */}
+      {/* ── CLOSING GROUP (RINGKASAN, DEPOSIT CUSTODY & TANDA TANGAN / METADATA) ── */}
+      <div className="oak-folio-closing-group">
+        {/* ── 3. RINGKASAN FINANSIAL REKONSILIASI (INDIVISIBLE BLOCK) ── */}
       <div className="oak-doc-section oak-doc-fin-block oak-folio-summary-block">
         <div className="oak-doc-section-title">Ringkasan Tagihan &amp; Pembayaran</div>
         <div className="oak-folio-summary-layout">
@@ -605,14 +730,18 @@ export default function GuestFolioPrint({
         </div>
 
         <div className="oak-folio-print-meta">
-          <span>
+          <div className="oak-folio-print-meta-ref">
             {(data.folio_label || (data.is_derived_reference ? 'No. Referensi Folio (Turunan)' : 'No. Folio'))}: {data.folio_number}
-          </span>
-          <span>•</span>
-          <span>
-            Dicetak pada: {data.print_metadata.printed_at_local} ({data.property.timezone})
-          </span>
+          </div>
+          <div
+            className="oak-folio-print-meta-time"
+            data-data-loaded-at={data.print_metadata?.printed_at_local}
+            title={data.print_metadata?.printed_at_local ? `Data dimuat: ${data.print_metadata.printed_at_local}` : undefined}
+          >
+            Waktu cetak: {actualPrintTime}
+          </div>
         </div>
+      </div>
       </div>
     </OakLetterhead>
   );
