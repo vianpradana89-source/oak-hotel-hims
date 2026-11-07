@@ -202,13 +202,24 @@ export function createPosOrderStatusHandler(deps: PosOrderStatusDeps) {
         [propertyId, orderId]
       );
 
-      if (hasRows(q1a) || hasRows(q1b) || hasRows(q2)) {
+      const q3 = await client.query(
+        `SELECT 1 AS found
+         FROM folio_entries
+         WHERE property_id  = $1
+           AND source_type  = 'POS_ORDER'
+           AND source_id    = $2
+           AND is_voided    = FALSE
+         LIMIT 1`,
+        [propertyId, String(orderId)]
+      );
+
+      if (hasRows(q1a) || hasRows(q1b) || hasRows(q2) || hasRows(q3) || currentStatus === 'BILLED_TO_ROOM') {
         await client.query('ROLLBACK');
         txnActive = false;
         res.status(409).json({
           status: 'ERROR',
           code: 'POS_ORDER_FINANCIAL_ARTIFACTS_PRESENT',
-          message: 'Order memiliki transaksi atau settlement terkait. Void hanya melalui mekanisme refund resmi.'
+          message: 'Order memiliki transaksi, settlement, atau tagihan kamar terkait. Void hanya melalui mekanisme refund/reversal resmi.'
         });
         return;
       }

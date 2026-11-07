@@ -636,6 +636,8 @@ export default function PosWorkspace({
   // POS-EDIT-1B (taf2): guard sinkron anti double-click tombol Bayar EDIT.
   const editPayPendingRef = useRef(false);
   const [editPayPending, setEditPayPending] = useState(false);
+  const [billingToRoom, setBillingToRoom] = useState(false);
+  const [localBilledOrderId, setLocalBilledOrderId] = useState<number | null>(null);
   // Epoch guard untuk GET detail (propertyId bisa berubah cepat).
   const editDetailEpochRef = useRef(0);
   /** Promise in-flight dari pemanggilan loadOrderDetail terbaru (untuk await eksplisit tanpa polling). */
@@ -2840,6 +2842,100 @@ export default function PosWorkspace({
     // handleSaveOrder.
   }, [handleSaveOrder, onOpenCashPayment]);
 
+  const handleSaveAndBillToRoom = useCallback(async () => {
+    const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+    if (!effectiveResId || !propertyId) return;
+
+    const result = await handleSaveOrder();
+    if (!result.ok) return;
+
+    if (result.order.status === 'OPEN') {
+      setBillingToRoom(true);
+      try {
+        const res = await (authFetch || fetch)(`/api/pos/orders/${result.order.id}/room-charge`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            reservation_id: effectiveResId,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && (res.status === 200 || res.status === 201)) {
+          setSaveResult({
+            ok: true,
+            message: `Order ${result.order.order_number} berhasil ditagihkan ke kamar (Folio #${effectiveResId}).`,
+            order: { ...result.order, status: 'BILLED_TO_ROOM' },
+          });
+          setLocalBilledOrderId(result.order.id);
+          if (onRefresh) onRefresh();
+        } else {
+          setSaveResult({
+            ok: false,
+            message: data.message || 'Gagal menagihkan pesanan ke kamar.',
+          });
+        }
+      } catch (err: any) {
+        setSaveResult({
+          ok: false,
+          message: err.message || 'Terjadi kesalahan jaringan saat menagihkan ke kamar.',
+        });
+      } finally {
+        setBillingToRoom(false);
+      }
+    } else if (result.order.status === 'BILLED_TO_ROOM') {
+      setSaveResult({
+        ok: true,
+        message: `Order ${result.order.order_number} sudah ditagihkan ke kamar.`,
+        order: result.order,
+      });
+      setLocalBilledOrderId(result.order.id);
+    } else {
+      setSaveResult({
+        ok: false,
+        message: `Order ${result.order.order_number} tidak dapat ditagihkan ke kamar (status: ${result.order.status}).`,
+      });
+    }
+  }, [reservationId, pickedGuest, propertyId, handleSaveOrder, authFetch, onRefresh]);
+
+  const handleBillExistingOrderToRoom = useCallback(async (order: PosOrderItem) => {
+    const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+    if (!effectiveResId || !propertyId) return;
+    setBillingToRoom(true);
+    try {
+      const res = await (authFetch || fetch)(`/api/pos/orders/${order.id}/room-charge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          reservation_id: effectiveResId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && (res.status === 200 || res.status === 201)) {
+        setSaveResult({
+          ok: true,
+          message: `Order ${order.order_number} berhasil ditagihkan ke kamar (Folio #${effectiveResId}).`,
+          order: { ...order, status: 'BILLED_TO_ROOM' },
+        });
+        setLocalBilledOrderId(order.id);
+        if (onRefresh) onRefresh();
+      } else {
+        setSaveResult({
+          ok: false,
+          message: data.message || 'Gagal menagihkan pesanan ke kamar.',
+        });
+      }
+    } catch (err: any) {
+      setSaveResult({
+        ok: false,
+        message: err.message || 'Terjadi kesalahan jaringan saat menagihkan ke kamar.',
+      });
+    } finally {
+      setBillingToRoom(false);
+    }
+  }, [reservationId, pickedGuest, propertyId, authFetch, onRefresh]);
+
   const [menuPhotoUrls, setMenuPhotoUrls] = useState<Record<string, string>>({});
   const menuPhotoUrlsRef = useRef<Record<string, string>>({});
   menuPhotoUrlsRef.current = menuPhotoUrls;
@@ -4135,12 +4231,12 @@ export default function PosWorkspace({
                             (OPEN → langsung CASH payment) bila onOpenCashPayment tersedia.
                             Kedua tombol disabled saat saving/busy/draft kosong/
                             tidak ada izin edit. */}
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 flex-wrap">
                           <button
                             type="button"
-                            disabled={!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy}
+                            disabled={!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy || billingToRoom}
                             onClick={() => void handleSaveOrder()}
-                            className={`flex-1 py-2.5 rounded-xl ${
+                            className={`flex-1 min-w-[120px] py-2.5 rounded-xl ${
                               onOpenCashPayment
                                 ? 'bg-emerald-700 hover:bg-emerald-600'
                                 : 'bg-emerald-800 hover:bg-emerald-700'
@@ -4148,12 +4244,22 @@ export default function PosWorkspace({
                           >
                             {saving ? 'Menyimpan…' : 'Simpan Pesanan'}
                           </button>
+                          {(reservationId != null || pickedGuest?.reservation_id != null) && (
+                            <button
+                              type="button"
+                              disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy || billingToRoom}
+                              onClick={() => void handleSaveAndBillToRoom()}
+                              className="flex-1 min-w-[140px] py-2.5 rounded-xl bg-blue-800 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
+                            >
+                              {billingToRoom ? 'Menagihkan…' : 'Tagihkan ke Kamar'}
+                            </button>
+                          )}
                           {onOpenCashPayment && (
                             <button
                               type="button"
-                              disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy}
+                              disabled={!canEditPos || !canSaveDraft || draftPreview.value?.total === 0 || cart.length === 0 || saving || busy || billingToRoom}
                               onClick={() => void handleSaveAndPay()}
-                              className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
+                              className="flex-1 min-w-[100px] py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
                             >
                               {saving ? 'Menyimpan…' : 'Bayar'}
                             </button>
@@ -4209,6 +4315,25 @@ export default function PosWorkspace({
                                   Bayar
                                 </button>
                               )}
+                            {/* Tagihkan ke Kamar — untuk order OPEN yang terikat reservasi */}
+                            {saveResult?.ok && saveResult.order && canEditPos &&
+                              (reservationId != null || pickedGuest?.reservation_id != null) &&
+                              saveResult.order.status === 'OPEN' && (
+                                <button
+                                  type="button"
+                                  disabled={billingToRoom}
+                                  onClick={() => void handleBillExistingOrderToRoom(saveResult.order!)}
+                                  className="mt-2 ml-2 px-2.5 py-1 bg-blue-800 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-[11px] font-bold cursor-pointer"
+                                >
+                                  {billingToRoom ? 'Menagihkan…' : 'Tagihkan ke Kamar'}
+                                </button>
+                              )}
+                            {/* Indikator Ditagihkan ke Kamar */}
+                            {saveResult?.ok && saveResult.order && (saveResult.order.status === 'BILLED_TO_ROOM' || localBilledOrderId === saveResult.order.id) && (
+                              <div className="mt-2 text-[11px] font-semibold text-blue-700">
+                                ✓ Ditagihkan ke Kamar — tercatat di folio
+                              </div>
+                            )}
                             {/* Indikator order sudah LUNAS (lokal atau dari signal App) */}
                             {saveResult?.ok && saveResult.order && localPaidOrderId === saveResult.order.id && (
                               <div className="mt-2 text-[11px] font-semibold text-emerald-700">

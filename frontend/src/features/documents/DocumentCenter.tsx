@@ -175,6 +175,7 @@ export default function DocumentCenter({
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [kind, setKind] = useState<DocKind>(initialKind ?? 'confirmation');
+  const [guestBillShowGuestSignature, setGuestBillShowGuestSignature] = useState(true);
   const [selectedResId, setSelectedResId] = useState<number | null>(null);
   const [explicitIncludeId, setExplicitIncludeId] = useState<number | null>(
     initialReservationId ?? null
@@ -1537,6 +1538,32 @@ export default function DocumentCenter({
           </div>
         ) : null}
 
+        {/* Guest Bill presentation option; never changes financial data. */}
+        {kind === 'confirmation' && selectedResId != null && (
+          <div className="document-center-block">
+            <div className="document-center-block-label">Pengaturan Guest Bill</div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-medium">Guest Signature</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs">{guestBillShowGuestSignature ? 'ON' : 'OFF'}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Guest Signature"
+                  aria-checked={guestBillShowGuestSignature}
+                  onClick={() => setGuestBillShowGuestSignature((value) => !value)}
+                  className={`inline-flex h-6 w-11 items-center rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1b4332] ${guestBillShowGuestSignature ? 'bg-[#1b4332]' : 'bg-stone-300'}`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`h-4 w-4 rounded-full bg-white transition-transform ${guestBillShowGuestSignature ? 'translate-x-6' : 'translate-x-1'}`}
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Guest Folio Options (Guest Folio only) */}
         {kind === 'folio' && selectedResId != null && (
           <div className="document-center-block">
@@ -1805,6 +1832,7 @@ export default function DocumentCenter({
                     : docRes
                 }
                 chargeLines={guestBillChargeLines}
+                showGuestSignature={guestBillShowGuestSignature}
                 receptionistName={guestBillReceptionistName}
                 propertyInfo={propertyInfo}
                 propertyBranding={propertyBranding}

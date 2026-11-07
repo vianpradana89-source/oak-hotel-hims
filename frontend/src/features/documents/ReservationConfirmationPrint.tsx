@@ -6,6 +6,7 @@ import type { GuestFolioLineDto } from './GuestFolioPrint';
 
 export interface ReservationConfirmationPrintProps extends GuestDocumentContentProps {
   chargeLines?: GuestFolioLineDto[];
+  showGuestSignature?: boolean;
   receptionistName?: string | null;
   receptionistRole?: string | null;
   headerRef?: React.Ref<HTMLDivElement>;
@@ -17,6 +18,7 @@ export default function ReservationConfirmationPrint({
   propertyInfo,
   propertyBranding,
   chargeLines,
+  showGuestSignature = true,
   receptionistName,
   receptionistRole,
   headerRef,
@@ -262,14 +264,19 @@ export default function ReservationConfirmationPrint({
         {/* Dual Signature Block */}
         <div className="oak-doc-signature-block">
           <div className="oak-doc-signature-grid">
-            <div className="oak-doc-signature-col">
-              <div className="oak-doc-signature-title">Guest Signature</div>
-              <div className="oak-doc-signature-space" />
-              <div className="oak-doc-signature-line" />
-              <div className="oak-doc-signature-name">{guestName}</div>
-              <div className="oak-doc-signature-role">(Tamu / Guest)</div>
-            </div>
-            <div className="oak-doc-signature-col">
+            {showGuestSignature && (
+              <div className="oak-doc-signature-col oak-doc-guest-signature">
+                <div className="oak-doc-signature-title">Guest Signature</div>
+                <div className="oak-doc-signature-space" />
+                <div className="oak-doc-signature-line" />
+                <div className="oak-doc-signature-name">{guestName}</div>
+                <div className="oak-doc-signature-role">(Tamu / Guest)</div>
+              </div>
+            )}
+            <div
+              className="oak-doc-signature-col"
+              style={!showGuestSignature ? { gridColumn: 2 } : undefined}
+            >
               <div className="oak-doc-signature-title">Receptionist Signature</div>
               <div className="oak-doc-signature-space" />
               <div className="oak-doc-signature-line" />

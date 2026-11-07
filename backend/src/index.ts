@@ -37,6 +37,7 @@ import { reconcileCanonicalAvailability } from './domains/inventory/canonicalRec
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
 import { payPosOrderCash, payPosOrder, PosSettlementError, POS_SUPPORTED_METHODS } from './domains/pos/posSettlementService';
+import { postPosOrderToRoomFolio, PosRoomChargeError } from './domains/pos/posRoomChargeService';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
 import {
   listEffectiveArrivalsForDate,
@@ -366,6 +367,8 @@ app.use(async (req, res, next) => {
   // dari data order tersimpan). Cache global (idempotency_keys) tidak diaktifkan
   // untuk rute ini agar replay tidak melewati pemeriksaan auth/property-scope.
   if (req.method === 'POST' && req.path === '/api/pos/orders') return next();
+  // Bypass cache global untuk POST /api/pos/orders/:id/room-charge:
+  if (req.method === 'POST' && /^\/api\/pos\/orders\/\d+\/room-charge$/.test(req.path)) return next();
   // Bypass cache global untuk POST /api/pos/orders/:id/pay (settlement CASH):
   // Canonical path harus memiliki segmen <id> murni digit lalu /pay, tanpa
   // trailing slash. Dedup ditangani di domain service
@@ -396,6 +399,13 @@ app.use(async (req, res, next) => {
     req.method === 'POST' &&
     /^\/api\/pos\/orders\/.+\/pay\/?$/i.test(req.path) &&
     !/^\/api\/pos\/orders\/\d+\/pay$/.test(req.path)
+  ) {
+    return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
+  }
+  if (
+    req.method === 'POST' &&
+    /^\/api\/pos\/orders\/.+\/room-charge\/?$/i.test(req.path) &&
+    !/^\/api\/pos\/orders\/\d+\/room-charge$/.test(req.path)
   ) {
     return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
   }
@@ -5945,6 +5955,93 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
 // (global, resource 'POS', action 'edit') sudah berjalan sebelum handler.
 // assertPropertyScope dipanggil SEBELUM transaksi DB di dalam handler.
 // ─────────────────────────────────────────────────────────────────────────
+app.post('/api/pos/orders/:id/room-charge', async (req, res) => {
+  const { property_id: propertyIdRaw, reservation_id: reservationIdRaw, notes } = req.body ?? {};
+
+  const orderIdRaw = req.params.id;
+  if (orderIdRaw === undefined || orderIdRaw === null || String(orderIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'order id is required' });
+  }
+  if (!/^\d+$/.test(String(orderIdRaw))) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Invalid order id' });
+  }
+  const orderId = Number(orderIdRaw);
+  if (!Number.isInteger(orderId) || orderId <= 0 || orderId > 2147483647) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'Invalid order id' });
+  }
+
+  if (propertyIdRaw === undefined || propertyIdRaw === null || String(propertyIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+
+  if (reservationIdRaw === undefined || reservationIdRaw === null || String(reservationIdRaw).trim() === '') {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'reservation_id is required' });
+  }
+  const reservationId = Number(reservationIdRaw);
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid reservation_id' });
+  }
+
+  try {
+    await assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    const sc = scopeErr?.statusCode ?? 403;
+    return res.status(sc).json({
+      status: 'ERROR',
+      code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
+      message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
+    });
+  }
+
+  const actorName = req.user?.full_name || req.user?.username || null;
+  const actorUserId = req.user?.id?.toString() || null;
+  const actorRole = (req.user as any)?.role || 'STAFF';
+
+  let client: import('pg').PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (connectErr: any) {
+    console.error('POS room charge pool.connect error', connectErr?.message || connectErr);
+    res.status(500).json({ status: 'ERROR', message: 'Database connection error' });
+    return;
+  }
+  try {
+    const result = await postPosOrderToRoomFolio(client, {
+      propertyId,
+      orderId,
+      reservationId,
+      notes: typeof notes === 'string' ? notes.trim() : null,
+      actorName: actorName ?? undefined,
+      actorUserId: actorUserId ?? undefined,
+      actorRole,
+    });
+
+    const statusCode = result.created ? 201 : 200;
+    res.status(statusCode).json({
+      status: 'SUCCESS',
+      code: result.created ? 'POS_ORDER_BILLED_TO_ROOM' : 'POS_ORDER_BILLED_TO_ROOM_REPLAY',
+      data: result,
+    });
+  } catch (err: any) {
+    if (err instanceof PosRoomChargeError) {
+      res.status(err.statusCode).json({
+        status: 'ERROR',
+        code: err.code,
+        message: err.message,
+      });
+      return;
+    }
+    console.error('POS room charge error', err?.code || err);
+    res.status(500).json({ status: 'ERROR', message: 'Internal room charge error' });
+  } finally {
+    client.release();
+  }
+});
+
 app.patch('/api/pos/orders/:id/status', createPosOrderStatusHandler({
   pool,
   connect: () => pool.connect(),

@@ -78,6 +78,8 @@ export interface POSOrderPanelProps {
   posOrdersRefreshReservationId?: number | null;
   /** Buka modal pembayaran CASH untuk order terpilih (forward ke App). */
   onOpenCashPayment?: (ctx: PosPayCashOrderContext) => void;
+  /** Callback saat pesanan berhasil ditagihkan ke kamar */
+  onOrderBilledToRoom?: (info: { orderId: number; reservationId: number }) => void;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -164,7 +166,12 @@ export default function POSOrderPanel({
   posOrdersRefreshReservationId,
   onOpenCashPayment,
   reservationStatus,
+  onOrderBilledToRoom,
 }: POSOrderPanelProps) {
+  const [roomChargeOrder, setRoomChargeOrder] = useState<PosOrderRecord | null>(null);
+  const [chargeNotes, setChargeNotes] = useState('');
+  const [submittingCharge, setSubmittingCharge] = useState(false);
+  const [chargeError, setChargeError] = useState<string | null>(null);
   const { authFetch } = useAuth();
 
   const [orders, setOrders] = useState<PosOrderRecord[]>([]);
@@ -250,6 +257,39 @@ export default function POSOrderPanel({
       }
     }
   }, [propertyId, reservationId, authFetch]);
+
+const handleConfirmRoomCharge = useCallback(async () => {
+    if (!roomChargeOrder) return;
+    setSubmittingCharge(true);
+    setChargeError(null);
+    try {
+      const res = await authFetch(`/api/pos/orders/${roomChargeOrder.id}/room-charge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          reservation_id: reservationId,
+          notes: chargeNotes.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && (res.status === 200 || res.status === 201)) {
+        const billedOrderId = roomChargeOrder.id;
+        setRoomChargeOrder(null);
+        setChargeNotes('');
+        await fetchOrders();
+        if (onOrderBilledToRoom) {
+          onOrderBilledToRoom({ orderId: billedOrderId, reservationId });
+        }
+      } else {
+        setChargeError(data.message || 'Gagal menagihkan pesanan ke kamar.');
+      }
+    } catch (err: any) {
+      setChargeError(err.message || 'Terjadi kesalahan jaringan.');
+    } finally {
+      setSubmittingCharge(false);
+    }
+  }, [roomChargeOrder, chargeNotes, propertyId, reservationId, authFetch, fetchOrders, onOrderBilledToRoom]);
 
   // Satu effect: reset konteks + fetch. Cleanup menginvalidasi respons
   // in-flight SAAT CONTEXT BERUBAH ATAU UNMOUNT (refresh manual di-handle
@@ -380,10 +420,16 @@ export default function POSOrderPanel({
                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                     order.status === 'OPEN'
                       ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                      : order.status === 'BILLED_TO_ROOM'
+                      ? 'bg-blue-100 text-blue-800 border border-blue-300'
                       : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                   }`}
                 >
-                  {order.status === 'OPEN' ? 'Belum Dibayar' : order.status}
+                  {order.status === 'OPEN'
+                    ? 'Belum Dibayar'
+                    : order.status === 'BILLED_TO_ROOM'
+                    ? 'Ditagihkan ke Kamar'
+                    : order.status}
                 </span>
               </div>
               <div className="text-stone-500">
@@ -395,28 +441,45 @@ export default function POSOrderPanel({
                 <span className="font-bold text-stone-900">
                   {formatIDR(Number(order.total_amount || 0))}
                 </span>
-                {/* Bayar hanya untuk order OPEN + izin edit POS.
-                    Hilang saat status berubah (PAID/CANCELLED/CLOSED). */}
-                {canEditPos && order.status === 'OPEN' && onOpenCashPayment && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenCashPayment({
-                        orderId: order.id,
-                        propertyId,
-                        orderNumber: order.order_number,
-                        totalAmount: order.total_amount,
-                        guestName: order.guest_name ?? guestName ?? null,
-                        roomNumber: roomNumber ?? null,
-                        reservationId: order.reservation_id ?? reservationId,
-                      });
-                    }}
-                    className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    Bayar
-                  </button>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {/* Tagihkan ke Kamar hanya untuk order OPEN + status reservasi aktif (BOOKED / CHECKED_IN) */}
+                  {canEditPos && order.status === 'OPEN' && (reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRoomChargeOrder(order);
+                        setChargeNotes('');
+                        setChargeError(null);
+                      }}
+                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Tagihkan ke Kamar
+                    </button>
+                  )}
+                  {/* Bayar hanya untuk order OPEN + izin edit POS.
+                      Hilang saat status berubah (PAID/CANCELLED/CLOSED/BILLED_TO_ROOM). */}
+                  {canEditPos && order.status === 'OPEN' && onOpenCashPayment && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenCashPayment({
+                          orderId: order.id,
+                          propertyId,
+                          orderNumber: order.order_number,
+                          totalAmount: order.total_amount,
+                          guestName: order.guest_name ?? guestName ?? null,
+                          roomNumber: roomNumber ?? null,
+                          reservationId: order.reservation_id ?? reservationId,
+                        });
+                      }}
+                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Bayar
+                    </button>
+                  )}
+                </div>
                 {/* Cetak Ulang hanya untuk order PAID dengan id/property valid */}
                 {order.status === 'PAID' &&
                   Number.isInteger(order.id) && order.id > 0 &&
@@ -464,6 +527,10 @@ export default function POSOrderPanel({
                   <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded-full font-bold text-[10px]">
                     Belum Dibayar
                   </span>
+                ) : selectedOrder.status === 'BILLED_TO_ROOM' ? (
+                  <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 border border-blue-300 rounded-full font-bold text-[10px]">
+                    Ditagihkan ke Kamar
+                  </span>
                 ) : (
                   <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-full font-bold text-[10px]">
                     {selectedOrder.status}
@@ -507,6 +574,103 @@ export default function POSOrderPanel({
                 {formatDate(selectedOrder.created_at)}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal Tagihkan ke Kamar */}
+      {roomChargeOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-stone-200 pb-2">
+              <h3 className="text-sm font-bold text-stone-900">
+                Tagihkan Pesanan ke Kamar
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!submittingCharge) {
+                    setRoomChargeOrder(null);
+                    setChargeError(null);
+                  }
+                }}
+                disabled={submittingCharge}
+                className="text-stone-400 hover:text-stone-600 text-lg leading-none cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="bg-stone-50 p-3 rounded-lg border border-stone-200 space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Nomor Order:</span>
+                  <span className="font-mono font-semibold text-stone-800">{roomChargeOrder.order_number}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Total Pesanan:</span>
+                  <span className="font-bold text-emerald-800">{formatIDR(Number(roomChargeOrder.total_amount || 0))}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Kamar:</span>
+                  <span className="font-semibold text-stone-800">{roomNumber ? `Kamar ${roomNumber}` : '—'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Tamu:</span>
+                  <span className="font-semibold text-stone-800">{roomChargeOrder.guest_name || guestName || '—'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Reservasi:</span>
+                  <span className="font-semibold text-stone-800">#{reservationId}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-stone-600 mb-1">
+                  Catatan (Opsional)
+                </label>
+                <input
+                  type="text"
+                  value={chargeNotes}
+                  onChange={(e) => setChargeNotes(e.target.value)}
+                  placeholder="Catatan room charge..."
+                  disabled={submittingCharge}
+                  className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              <p className="text-[11px] text-stone-500 italic">
+                Pesanan akan ditagihkan sebagai debit F&amp;B ke folio reservasi ini. Setelah ditagihkan, pesanan tidak dapat dibayar terpisah melalui kasir POS.
+              </p>
+
+              {chargeError && (
+                <div className="p-2 bg-red-50 border border-red-200 rounded text-red-700 text-[11px]">
+                  {chargeError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-200">
+              <button
+                type="button"
+                disabled={submittingCharge}
+                onClick={() => {
+                  setRoomChargeOrder(null);
+                  setChargeError(null);
+                }}
+                className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs font-semibold hover:bg-stone-50 transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={submittingCharge}
+                onClick={handleConfirmRoomCharge}
+                className="px-3 py-1.5 rounded-lg bg-blue-800 hover:bg-blue-700 text-white text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                {submittingCharge ? 'Memproses…' : 'Konfirmasi Tagihkan ke Kamar'}
+              </button>
+            </div>
           </div>
         </div>
       )}

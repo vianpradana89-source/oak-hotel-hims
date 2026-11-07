@@ -685,6 +685,21 @@ export async function payPosOrder(
       );
     }
 
+    // Room Charge guard
+    const billedFolioQ = await poolClient.query(
+      `SELECT 1 FROM folio_entries
+       WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2 AND is_voided = FALSE
+       LIMIT 1`,
+      [propertyId, String(orderId)]
+    );
+    if (orderStatus === 'BILLED_TO_ROOM' || (billedFolioQ.rowCount ?? 0) > 0) {
+      throw new PosSettlementError(
+        409,
+        'ALREADY_BILLED_TO_ROOM',
+        `POS order #${orderId} sudah ditagihkan ke folio kamar`
+      );
+    }
+
     // â”€â”€ Legacy payment guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const legacyPayQ = await poolClient.query(
       `SELECT EXISTS(

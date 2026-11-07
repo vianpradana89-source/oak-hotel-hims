@@ -541,6 +541,20 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
           });
           return;
         }
+        const billedFolioRes = await client.query(
+          `SELECT COUNT(*)::int AS n FROM folio_entries
+           WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2 AND is_voided = FALSE`,
+          [propertyId, String(orderId)]
+        );
+        if (Number(billedFolioRes.rows[0]?.n ?? 0) > 0) {
+          await client.query('ROLLBACK');
+          txnActive = false;
+          res.status(409).json({
+            status: 'ERROR', code: 'FINANCIAL_LOCK',
+            message: 'POS order sudah ditagihkan ke folio kamar — tidak dapat diedit',
+          });
+          return;
+        }
       }
 
       // ── 6. Version check (optimistic concurrency, request BARU) ──────────
