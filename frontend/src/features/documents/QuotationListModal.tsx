@@ -31,6 +31,7 @@ interface QuotationListModalProps {
   onClose: () => void;
   propertyId: number;
   onSelectQuotation: (quotationId: number) => Promise<void>;
+  onDeleteQuotation?: (quotationId: number) => void;
 }
 
 export default function QuotationListModal({
@@ -38,6 +39,7 @@ export default function QuotationListModal({
   onClose,
   propertyId,
   onSelectQuotation,
+  onDeleteQuotation,
 }: QuotationListModalProps) {
   const [tab, setTab] = useState<'ACTIVE' | 'DELETED'>('ACTIVE');
   const [search, setSearch] = useState('');
@@ -107,6 +109,9 @@ export default function QuotationListModal({
         throw new Error(errJson.message || 'Gagal memindahkan quotation ke sampah');
       }
       setDeletingItem(null);
+      if (onDeleteQuotation) {
+        onDeleteQuotation(deletingItem.id);
+      }
       setActionMessage({ type: 'success', text: `Quotation ${deletingItem.quotation_number} berhasil dipindahkan ke sampah.` });
       fetchQuotations();
     } catch (err: any) {

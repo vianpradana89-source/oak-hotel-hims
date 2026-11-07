@@ -181,7 +181,12 @@ export async function createQuotation(
         userId,
       ]
     );
-    const quotation = qInsert.rows[0];
+    const rawQuotation = qInsert.rows[0];
+    const quotation = {
+      ...rawQuotation,
+      id: Number(rawQuotation.id),
+      version: Number(rawQuotation.version),
+    };
 
     const snapshot = {
       quotation_number: quotationNumber,
@@ -221,11 +226,20 @@ export async function createQuotation(
 
     await client.query('COMMIT');
 
+    const rawRev = revInsert.rows[0];
+    const revision = {
+      ...rawRev,
+      id: Number(rawRev.id),
+      quotation_id: Number(rawRev.quotation_id),
+      revision_number: Number(rawRev.revision_number),
+    };
     return {
       status: 'SUCCESS',
       data: {
         ...quotation,
-        revision: revInsert.rows[0],
+        quotation,
+        revision,
+        latest_revision: revision,
       },
     };
   } catch (err) {
@@ -330,7 +344,12 @@ export async function updateQuotationRevision(
         propertyId,
       ]
     );
-    const updatedQuotation = updateRes.rows[0];
+    const rawUpdated = updateRes.rows[0];
+    const updatedQuotation = {
+      ...rawUpdated,
+      id: Number(rawUpdated.id),
+      version: Number(rawUpdated.version),
+    };
 
     // 5. Create snapshot and insert into quotation_revisions
     const snapshot = {
@@ -373,11 +392,20 @@ export async function updateQuotationRevision(
 
     await client.query('COMMIT');
 
+    const rawRev = revInsert.rows[0];
+    const revision = {
+      ...rawRev,
+      id: Number(rawRev.id),
+      quotation_id: Number(rawRev.quotation_id),
+      revision_number: Number(rawRev.revision_number),
+    };
     return {
       status: 'SUCCESS',
       data: {
         ...updatedQuotation,
-        revision: revInsert.rows[0],
+        quotation: updatedQuotation,
+        revision,
+        latest_revision: revision,
       },
     };
   } catch (err) {
@@ -461,7 +489,7 @@ export async function listQuotations(
 
   return {
     status: 'SUCCESS',
-    data: listRes.rows,
+    data: listRes.rows.map((row: any) => ({ ...row, id: Number(row.id), version: Number(row.version) })),
     pagination: {
       page,
       limit,
@@ -490,7 +518,12 @@ export async function getQuotationDetail(pool: Pool, id: number, propertyId: num
   if (qRes.rows.length === 0) {
     throw { statusCode: 404, code: 'QUOTATION_NOT_FOUND', message: 'Quotation tidak ditemukan' };
   }
-  const quotation = qRes.rows[0];
+  const rawQuotation = qRes.rows[0];
+  const quotation = {
+    ...rawQuotation,
+    id: Number(rawQuotation.id),
+    version: Number(rawQuotation.version),
+  };
 
   const revRes = await pool.query(
     `SELECT qr.id, qr.revision_number, qr.revision_label, qr.snapshot, qr.change_summary, qr.created_at, COALESCE(u.full_name, u.username) as created_by_name
@@ -501,16 +534,19 @@ export async function getQuotationDetail(pool: Pool, id: number, propertyId: num
     [id]
   );
 
-  const latestRevision = revRes.rows[0] || null;
+  const rawLatest = revRes.rows[0] || null;
+  const latestRevision = rawLatest ? { ...rawLatest, id: Number(rawLatest.id), quotation_id: Number(rawLatest.quotation_id), revision_number: Number(rawLatest.revision_number) } : null;
 
   return {
     status: 'SUCCESS',
     data: {
+      ...quotation,
       quotation,
       latest_revision: latestRevision,
+      revision: latestRevision,
       revisions: revRes.rows.map((r: any) => ({
-        id: r.id,
-        revision_number: r.revision_number,
+        id: Number(r.id),
+        revision_number: Number(r.revision_number),
         revision_label: r.revision_label,
         change_summary: r.change_summary,
         created_at: r.created_at,
@@ -555,7 +591,7 @@ export async function softDeleteQuotation(pool: Pool, id: number, propertyId: nu
     return {
       status: 'SUCCESS',
       message: `Quotation ${current.quotation_number} berhasil dipindahkan ke sampah`,
-      data: updateRes.rows[0],
+      data: { ...updateRes.rows[0], id: Number(updateRes.rows[0].id), version: Number(updateRes.rows[0].version) },
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -601,7 +637,7 @@ export async function restoreQuotation(pool: Pool, id: number, propertyId: numbe
     return {
       status: 'SUCCESS',
       message: `Quotation ${current.quotation_number} berhasil dipulihkan`,
-      data: updateRes.rows[0],
+      data: { ...updateRes.rows[0], id: Number(updateRes.rows[0].id), version: Number(updateRes.rows[0].version) },
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

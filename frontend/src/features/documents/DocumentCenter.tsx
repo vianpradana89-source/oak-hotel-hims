@@ -187,7 +187,16 @@ export default function DocumentCenter({
   const [pickerReservations, setPickerReservations] = useState<any[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
-  const [kind, setKind] = useState<DocKind>(initialKind ?? 'confirmation');
+  const [kind, setKind] = useState<DocKind>(() => {
+    if (initialKind != null) return initialKind;
+    try {
+      const savedKind = sessionStorage.getItem('oak_active_doc_kind');
+      if (savedKind === 'quotation' || savedKind === 'confirmation' || savedKind === 'folio') {
+        return savedKind as DocKind;
+      }
+    } catch {}
+    return 'confirmation';
+  });
   const [guestBillShowGuestSignature, setGuestBillShowGuestSignature] = useState(true);
   const [selectedResId, setSelectedResId] = useState<number | null>(null);
   const [explicitIncludeId, setExplicitIncludeId] = useState<number | null>(
@@ -639,6 +648,9 @@ export default function DocumentCenter({
     lastPreloadedResIdRef.current = null;
     setInitialQuotationBaselineJson(JSON.stringify(blank));
     setQuotationActionMessage(null);
+    try {
+      sessionStorage.removeItem('oak_active_quotation_id');
+    } catch {}
   }, [propertyPaymentInstructions]);
 
   const handleNewQuotationClick = useCallback(() => {
@@ -665,9 +677,17 @@ export default function DocumentCenter({
     (targetKind: 'confirmation' | 'quotation' | 'folio') => {
       if (targetKind === kind) return;
       if (kind === 'quotation' && isQuotationDirty) {
-        setPendingExitAction(() => () => setKind(targetKind));
+        setPendingExitAction(() => () => {
+          try {
+            sessionStorage.setItem('oak_active_doc_kind', targetKind);
+          } catch {}
+          setKind(targetKind);
+        });
         setShowUnsavedExitModal(true);
       } else {
+        try {
+          sessionStorage.setItem('oak_active_doc_kind', targetKind);
+        } catch {}
         setKind(targetKind);
       }
     },
@@ -684,24 +704,40 @@ export default function DocumentCenter({
         }
         const json = await res.json();
         const detail = json.data;
+        const q = detail.quotation || detail;
+        const rev = detail.latest_revision || detail.revision || {};
+
+        const quotationId = Number(q.id ?? detail.id ?? selectedId);
+        const quotationNumber = String(q.quotation_number ?? detail.quotation_number ?? '');
+        const version = Number(q.version ?? detail.version ?? 1);
+        const revNumber = Number(rev.revision_number ?? 1);
+        const revLabel = String(rev.revision_label ?? `R${revNumber}`);
+
         const newDraft = buildQuotationDraftFromSavedRecord(detail);
         setQuotationDraft(newDraft);
         setSavedQuotationRecord({
-          id: detail.id,
-          quotation_number: detail.quotation_number,
-          revision_number: detail.latest_revision?.revision_number ?? 1,
-          revision_label: detail.latest_revision?.revision_label ?? 'R1',
-          version: detail.version,
+          id: quotationId,
+          quotation_number: quotationNumber,
+          revision_number: revNumber,
+          revision_label: revLabel,
+          version: version,
         });
         setQuotationMode('manual');
         lastPreloadedResIdRef.current = null;
         setInitialQuotationBaselineJson(JSON.stringify(newDraft));
         setIsQuotationListModalOpen(false);
+        try {
+          sessionStorage.setItem('oak_active_quotation_id', String(quotationId));
+          sessionStorage.setItem('oak_active_doc_kind', 'quotation');
+        } catch {}
         setQuotationActionMessage({
           type: 'success',
-          text: `Quotation ${detail.quotation_number} (${detail.latest_revision?.revision_label || 'R1'}) berhasil dibuka.`,
+          text: `Quotation ${quotationNumber} (${revLabel}) berhasil dibuka.`,
         });
       } catch (err: any) {
+        try {
+          sessionStorage.removeItem('oak_active_quotation_id');
+        } catch {}
         setQuotationActionMessage({
           type: 'error',
           text: err.message || 'Gagal memuat quotation',
@@ -738,7 +774,10 @@ export default function DocumentCenter({
     setIsSavingQuotation(true);
     try {
       const totals = calculateQuotationDraftTotals(quotationDraft);
-      const isRevision = savedQuotationRecord !== null;
+      const isRevision =
+        savedQuotationRecord !== null &&
+        Number.isInteger(savedQuotationRecord.id) &&
+        savedQuotationRecord.id > 0;
 
       const payload: any = {
         property_id: propertyId,
@@ -785,7 +824,7 @@ export default function DocumentCenter({
         url = `/api/documents/quotations/${savedQuotationRecord.id}`;
         method = 'PUT';
         payload.expected_version = savedQuotationRecord.version;
-        payload.change_summary = `Revisi ${savedQuotationRecord.revision_number + 1}`;
+        payload.change_summary = `Revisi R${savedQuotationRecord.revision_number + 1}`;
       }
 
       const res = await authFetch(url, {
@@ -804,31 +843,42 @@ export default function DocumentCenter({
 
       const json = await res.json();
       const resData = json.data;
+      const q = resData.quotation || resData;
       const revision = resData.revision || resData.latest_revision || {};
+
+      const savedId = Number(q.id ?? resData.id);
+      const savedNumber = String(q.quotation_number ?? resData.quotation_number ?? '');
+      const savedVersion = Number(q.version ?? resData.version ?? 1);
+      const savedRevNumber = Number(revision.revision_number ?? 1);
+      const savedRevLabel = String(revision.revision_label ?? `R${savedRevNumber}`);
 
       const updatedDraft: QuotationDraft = {
         ...quotationDraft,
-        quotationNumber: resData.quotation_number,
-        revisionNumber: Number(revision.revision_number) || 1,
-        revisionLabel: revision.revision_label || 'R1',
-        version: Number(resData.version) || 1,
-        savedQuotationId: Number(resData.id),
+        quotationNumber: savedNumber,
+        revisionNumber: savedRevNumber,
+        revisionLabel: savedRevLabel,
+        version: savedVersion,
+        savedQuotationId: savedId,
       };
 
       setQuotationDraft(updatedDraft);
       setSavedQuotationRecord({
-        id: Number(resData.id),
-        quotation_number: resData.quotation_number,
-        revision_number: Number(revision.revision_number) || 1,
-        revision_label: revision.revision_label || 'R1',
-        version: Number(resData.version) || 1,
+        id: savedId,
+        quotation_number: savedNumber,
+        revision_number: savedRevNumber,
+        revision_label: savedRevLabel,
+        version: savedVersion,
       });
+      try {
+        sessionStorage.setItem('oak_active_quotation_id', String(savedId));
+        sessionStorage.setItem('oak_active_doc_kind', 'quotation');
+      } catch {}
       setInitialQuotationBaselineJson(JSON.stringify(updatedDraft));
       setQuotationActionMessage({
         type: 'success',
         text: isRevision
-          ? `Revisi ${revision.revision_label || ''} berhasil disimpan untuk ${resData.quotation_number}.`
-          : `Quotation berhasil disimpan: ${resData.quotation_number} (R1).`,
+          ? `Revisi ${savedRevLabel} berhasil disimpan untuk ${savedNumber}.`
+          : `Quotation berhasil disimpan: ${savedNumber} (R1).`,
       });
     } catch (err: any) {
       setQuotationActionMessage({
@@ -845,6 +895,30 @@ export default function DocumentCenter({
     propertyId,
     authFetch,
   ]);
+
+  const handleQuotationDeleted = useCallback(
+    (deletedId: number) => {
+      if (savedQuotationRecord && savedQuotationRecord.id === deletedId) {
+        doResetQuotation();
+      }
+    },
+    [savedQuotationRecord, doResetQuotation],
+  );
+
+  // Auto-restore active quotation across browser refreshes if available
+  useEffect(() => {
+    if (kind !== 'quotation') return;
+    if (savedQuotationRecord !== null) return;
+    try {
+      const storedIdStr = sessionStorage.getItem('oak_active_quotation_id');
+      if (storedIdStr) {
+        const storedId = Number(storedIdStr);
+        if (Number.isInteger(storedId) && storedId > 0) {
+          void handleSelectSavedQuotation(storedId);
+        }
+      }
+    } catch {}
+  }, [kind, savedQuotationRecord, handleSelectSavedQuotation]);
 
   /* Switch to a sibling room in a multi-room booking */
   const handleSelectSiblingReservation = useCallback((siblingId: number) => {
@@ -2270,6 +2344,7 @@ export default function DocumentCenter({
         onClose={() => setIsQuotationListModalOpen(false)}
         propertyId={propertyId}
         onSelectQuotation={handleSelectSavedQuotation}
+        onDeleteQuotation={handleQuotationDeleted}
       />
       <Modal
         isOpen={showUnsavedExitModal}

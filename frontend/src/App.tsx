@@ -279,7 +279,13 @@ function AppContent() {
   const [financeSummary, setFinanceSummary] = useState<any>(null);
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
-  const [selectedMenu, setSelectedMenu] = useState<MainNavKey>('Kalender');
+  const [selectedMenu, setSelectedMenu] = useState<MainNavKey>(() => {
+    try {
+      const saved = localStorage.getItem('oak_selected_menu');
+      if (saved) return saved as MainNavKey;
+    } catch {}
+    return 'Kalender';
+  });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem('oak_sidebar_collapsed') === 'true';
@@ -373,6 +379,12 @@ function AppContent() {
       setSelectedMenu(getDefaultNavKey(effectiveAccess.effective));
     }
   }, [user, selectedMenu, effectiveAccess]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('oak_selected_menu', selectedMenu);
+    } catch {}
+  }, [selectedMenu]);
 
   const handleSelectMenu = (menu: MainNavKey) => {
     if (!isNavAllowed(effectiveAccess?.effective, menu)) {
