@@ -1,7 +1,9 @@
 import { enumerateHotelDates, hotelDateKey } from '../../utils/hotelDate';
 import {
+  CanonicalAvailabilityKey,
   CanonicalAvailabilityRow,
   canonicalAvailabilityKey,
+  ensureCanonicalAvailabilityRows,
   mutateCanonicalAvailabilityRow
 } from './canonicalAvailability';
 
@@ -104,6 +106,16 @@ export async function reconcileCanonicalAvailability(
     for (const hold of activeHolds.rows) {
       const key = canonicalAvailabilityKey(Number(hold.room_type_id), String(hold.hotel_date));
       expected.set(key, (expected.get(key) || 0) + Number(hold.qty || 0));
+    }
+
+    // Ensure canonical ledger rows exist for all expected active reservation & hold cells
+    const expectedKeys: CanonicalAvailabilityKey[] = [];
+    for (const key of expected.keys()) {
+      const [rtIdStr, d] = key.split('|');
+      expectedKeys.push({ roomTypeId: Number(rtIdStr), date: d });
+    }
+    if (expectedKeys.length > 0) {
+      await ensureCanonicalAvailabilityRows(client, expectedKeys);
     }
 
     const ledgerResult = await client.query(

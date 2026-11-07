@@ -34,6 +34,55 @@ interface QuotationListModalProps {
   onDeleteQuotation?: (quotationId: number) => void;
 }
 
+const ID_MONTHS = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+];
+
+function parseDateParts(raw?: string | null): { year: number; month: number; day: number } | null {
+  if (!raw) return null;
+  const match = String(raw).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+  };
+}
+
+export function formatStayPeriod(checkInRaw?: string | null, checkOutRaw?: string | null): string {
+  const inParts = parseDateParts(checkInRaw);
+  const outParts = parseDateParts(checkOutRaw);
+
+  if (!inParts && !outParts) return '-';
+  if (inParts && !outParts) {
+    const m = ID_MONTHS[inParts.month - 1] || '';
+    return `${inParts.day} ${m} ${inParts.year}`.trim();
+  }
+  if (!inParts && outParts) {
+    const m = ID_MONTHS[outParts.month - 1] || '';
+    return `${outParts.day} ${m} ${outParts.year}`.trim();
+  }
+
+  const cin = inParts!;
+  const cout = outParts!;
+  const mIn = ID_MONTHS[cin.month - 1] || '';
+  const mOut = ID_MONTHS[cout.month - 1] || '';
+
+  if (cin.year === cout.year && cin.month === cout.month) {
+    if (cin.day === cout.day) {
+      return `${cin.day} ${mIn} ${cin.year}`;
+    }
+    return `${cin.day}–${cout.day} ${mIn} ${cin.year}`;
+  }
+
+  if (cin.year === cout.year) {
+    return `${cin.day} ${mIn} – ${cout.day} ${mOut} ${cin.year}`;
+  }
+
+  return `${cin.day} ${mIn} ${cin.year} – ${cout.day} ${mOut} ${cout.year}`;
+}
+
 export default function QuotationListModal({
   isOpen,
   onClose,
@@ -265,9 +314,7 @@ export default function QuotationListModal({
                 <tbody className="divide-y divide-stone-100">
                   {items.map((item) => {
                     const revLabel = item.latest_revision?.revision_label || 'R1';
-                    const stayText = item.check_in_date && item.check_out_date
-                      ? `${item.check_in_date} s/d ${item.check_out_date}`
-                      : (item.check_in_date || '-');
+                    const stayText = formatStayPeriod(item.check_in_date, item.check_out_date);
                     const updatedText = new Date(item.updated_at).toLocaleDateString('id-ID', {
                       day: '2-digit',
                       month: 'short',

@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
     "test:booking-create": "node test/booking_create_test.js",
+    "test:future-quick-booking": "npm run build && node test/future_quick_booking_inventory_test.js",
     "test:reservation-create-compat": "node test/reservation_create_compat_test.js",
     "test:reservation-edit-availability": "npm run build && node test/reservation_edit_availability_test.js",
     "test:booking-create-availability": "npm run build && node test/booking_create_availability_test.js",
