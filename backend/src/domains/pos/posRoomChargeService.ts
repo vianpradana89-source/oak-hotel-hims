@@ -20,6 +20,7 @@
 import { PoolClient } from 'pg';
 import { projectFolioEntryToTransaction } from '../transactions/transactionService';
 import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
+import { formatPosOrderDisplayRef } from './posFormatUtils';
 
 export class PosRoomChargeError extends Error {
   statusCode: number;
@@ -238,12 +239,12 @@ export async function postPosOrderToRoomFolio(
     );
     const items = itemsQ.rows;
 
-    const orderNum = orderRow.order_number ? `Bon #${orderRow.order_number}` : `Order #${orderId}`;
+    const displayRef = formatPosOrderDisplayRef(orderId);
     let itemsSummary = '';
     if (items.length > 0) {
       itemsSummary = items.map((it: any) => `${it.item_name} (${it.quantity})`).join(', ');
     }
-    let folioDesc = itemsSummary ? `POS ${orderNum}: ${itemsSummary}` : `Tagihan POS ${orderNum}`;
+    let folioDesc = itemsSummary ? `${displayRef} - ${itemsSummary}` : `Tagihan ${displayRef}`;
     if (folioDesc.length > 250) {
       folioDesc = folioDesc.slice(0, 247) + '...';
     }

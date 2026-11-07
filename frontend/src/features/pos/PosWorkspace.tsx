@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
 import {buildPosOrderDraft, buildPosOrderEditPayload, previewPosDraft, normalizeDiscountInput, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams, type PosOrderEditItem} from './posOrderDraft';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { formatPosOrderDisplayRef } from './posFormatUtils';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 
 export interface PosMenuItem {
@@ -365,6 +366,25 @@ export default function PosWorkspace({
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [orderFilterQuery, setOrderFilterQuery] = useState<string>('');
+  const filteredPosOrders = useMemo(() => {
+    if (!orderFilterQuery.trim()) return posOrders;
+    const q = orderFilterQuery.trim().toLowerCase();
+    return posOrders.filter((order) => {
+      const shortRef = formatPosOrderDisplayRef(order.id).toLowerCase();
+      const orderNum = (order.order_number || '').toLowerCase();
+      const guest = (order.guest_name || '').toLowerCase();
+      const tbl = (order.table_number || '').toLowerCase();
+      const idStr = String(order.id);
+      return (
+        shortRef.includes(q) ||
+        orderNum.includes(q) ||
+        guest.includes(q) ||
+        tbl.includes(q) ||
+        idStr.includes(q)
+      );
+    });
+  }, [posOrders, orderFilterQuery]);
   const [cart, setCart] = useState<PosCartLine[]>([]);
   const [tableNumber, setTableNumber] = useState('');
   const [guestName, setGuestName] = useState(() => guestNameInitial ?? '');
@@ -4386,6 +4406,29 @@ export default function PosWorkspace({
 
           {/* ── Tabel Riwayat (disembunyikan saat editor terbuka) ───────────── */}
             <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-xs flex flex-col flex-1 min-h-0">
+              <div className="p-3 border-b border-gray-200 bg-gray-50/50 flex items-center justify-between gap-3">
+                <div className="relative flex-1 max-w-sm">
+                  <input
+                    type="text"
+                    value={orderFilterQuery}
+                    onChange={(e) => setOrderFilterQuery(e.target.value)}
+                    placeholder="Cari nomor order (mis. POS-000112), tamu, meja..."
+                    className="w-full text-xs sm:text-sm pl-8 pr-3 py-1.5 rounded-lg border border-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-600 bg-white"
+                  />
+                  <svg className="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+                {orderFilterQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setOrderFilterQuery('')}
+                    className="text-xs text-gray-500 hover:text-gray-700 underline cursor-pointer"
+                  >
+                    Reset Filter
+                  </button>
+                )}
+              </div>
               <div className="overflow-x-auto lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
                 <table className="w-full text-left text-xs sm:text-sm">
                   <thead className="bg-gray-50/80 border-b border-gray-200 text-gray-600 font-semibold uppercase text-[11px] tracking-wider">
@@ -4398,23 +4441,24 @@ export default function PosWorkspace({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {posOrders.length === 0 ? (
+                    {filteredPosOrders.length === 0 ? (
                       <tr>
                         <td colSpan={5} className="py-12 text-center text-gray-400">
-                          Belum ada order POS tercatat.
+                          {orderFilterQuery ? 'Tidak ada order yang cocok dengan pencarian.' : 'Belum ada order POS tercatat.'}
                         </td>
                       </tr>
                     ) : (
-                      posOrders.map((order) => (
+                      filteredPosOrders.map((order) => (
                         <tr key={order.id} className="hover:bg-gray-50/60 transition-colors">
                           <td className="py-3 px-4">
                             <button
                               type="button"
                               onClick={() => void openEditOrderInRegister(order.id)}
                               disabled={editLoading}
+                              title={order.order_number}
                               className="font-mono font-semibold text-purple-900 hover:underline hover:text-purple-700 text-xs sm:text-sm cursor-pointer disabled:opacity-40 disabled:no-underline"
                             >
-                              {order.order_number}
+                              {formatPosOrderDisplayRef(order.id) || order.order_number}
                             </button>
                           </td>
                           <td className="py-3 px-4 text-gray-700">

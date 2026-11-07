@@ -4,6 +4,7 @@ import { safeFetchJson } from '../calendar/calendarApi';
 import type { SafeFetchResult } from '../calendar/calendarApi';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 import PosThermalReceiptModal from '../thermalReceipt/PosThermalReceiptModal';
+import { formatPosOrderDisplayRef } from './posFormatUtils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -414,7 +415,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="font-mono font-semibold text-stone-800">
-                  {order.order_number}
+                  {formatPosOrderDisplayRef(order.id) || order.order_number}
                 </span>
                 <span
                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -512,7 +513,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
             <svg className="w-3.5 h-3.5 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            Bukti Pemesanan — {selectedOrder.order_number}
+            Bukti Pemesanan — {formatPosOrderDisplayRef(selectedOrder.id) || selectedOrder.order_number}
           </h4>
 
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 space-y-1.5">
@@ -605,7 +606,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
               <div className="bg-stone-50 p-3 rounded-lg border border-stone-200 space-y-1.5">
                 <div className="flex justify-between">
                   <span className="text-stone-500">Nomor Order:</span>
-                  <span className="font-mono font-semibold text-stone-800">{roomChargeOrder.order_number}</span>
+                  <span className="font-mono font-semibold text-stone-800" title={roomChargeOrder.order_number}>{formatPosOrderDisplayRef(roomChargeOrder.id) || roomChargeOrder.order_number}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-stone-500">Total Pesanan:</span>

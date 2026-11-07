@@ -30,6 +30,7 @@ import { resolvePropertyTimezone } from '../../utils/propertyTimezone';
 import { hasPermission, normalizeRoleName } from '../auth/authMiddleware';
 import { hasAnyEffectivePermission } from '../settings/accessControlService';
 import type { AuthUserPayload } from '../auth/authService';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 
 export type GuestFolioScope = 'GUEST_FOLIO' | 'FULL_RESERVATION';
 
@@ -446,7 +447,7 @@ function classifyChargeCategory(
   return 'STAY_CHARGE';
 }
 
-function formatFolioEntryDescription(
+export function formatFolioEntryDescription(
   row: any,
   roomNumber?: string | null,
   roomTypeName?: string | null
@@ -458,6 +459,19 @@ function formatFolioEntryDescription(
   const unitPrice = Number(row.unit_price || 0);
 
   let baseLabel = rawDesc;
+  if (sourceType === 'POS_ORDER' || entryType === 'FNB_POS') {
+    const displayRef = formatPosOrderDisplayRef(row.source_id);
+    if (displayRef) {
+      if (rawDesc.includes(': ')) {
+        const itemsPart = rawDesc.substring(rawDesc.indexOf(': ') + 2).trim();
+        if (itemsPart) {
+          baseLabel = `${displayRef} - ${itemsPart}`;
+        }
+      } else if (rawDesc.startsWith('POS Bon #') || rawDesc.startsWith('POS Order #') || rawDesc.startsWith('Tagihan POS')) {
+        baseLabel = `Tagihan ${displayRef}`;
+      }
+    }
+  }
   if (
     !baseLabel ||
     baseLabel === 'Reservasi kamar' ||
@@ -667,7 +681,7 @@ export function resolveLineQtyAndUnit(
   return { quantity: null, unit: null, qty_label: '—' };
 }
 
-function formatFolioEntryReference(row: any, bid: string | null): string {
+export function formatFolioEntryReference(row: any, bid: string | null): string {
   const id = Number(row.id);
   const entryType = String(row.entry_type || '').toUpperCase();
   const sourceType = String(row.source_type || '').toUpperCase();
@@ -688,6 +702,10 @@ function formatFolioEntryReference(row: any, bid: string | null): string {
   }
   if (ruleCode) {
     return `${ruleCode} / FE-${id}`;
+  }
+  if (sourceType === 'POS_ORDER' || entryType === 'FNB_POS') {
+    const shortPos = formatPosOrderDisplayRef(sourceId);
+    return shortPos ? `${shortPos} / FE-${id}` : `FE-${id}`;
   }
   if (sourceId && sourceType && sourceType !== 'MANUAL_STAY_CHARGE') {
     return `${sourceType}-${sourceId} / FE-${id}`;

@@ -15,10 +15,13 @@ import type { QuotationDraft, QuotationMode, PropertyPaymentInstructionsDto } fr
 import {
   createBlankQuotationDraft,
   buildQuotationDraftFromReservation,
+  buildQuotationDraftFromSavedRecord,
+  calculateQuotationDraftTotals,
 } from './quotationDraft';
 import { formatHotelDateIndonesian, formatHotelCurrency } from './GuestDocumentContent';
 import type { PropertyInfoDto, PropertyBrandingDto } from './GuestDocumentContent';
 import { Modal } from '../../design-system/Modal';
+import QuotationListModal from './QuotationListModal';
 import './guestDocumentPrint.css';
 
 function sanitizeFilenameSegment(segment: string): string {
@@ -34,6 +37,8 @@ function generateDocumentPdfFilename({
   bid,
   reference,
   folioNumber,
+  quotationNumber,
+  revisionLabel,
   propertyInfo,
   propertyBranding,
 }: {
@@ -42,6 +47,8 @@ function generateDocumentPdfFilename({
   bid?: string | null;
   reference?: string | null;
   folioNumber?: string | null;
+  quotationNumber?: string | null;
+  revisionLabel?: string | null;
   propertyInfo?: PropertyInfoDto;
   propertyBranding?: PropertyBrandingDto;
 }): string {
@@ -61,6 +68,12 @@ function generateDocumentPdfFilename({
       ? (cleanBid.toUpperCase().startsWith('BID-') ? cleanBid : `BID-${cleanBid}`)
       : today;
     return `${hotelPrefix}-Guest-Bill-${sanitizeFilenameSegment(refSuffix)}.pdf`;
+  }
+
+  if (kind === 'quotation' && quotationNumber && quotationNumber.trim()) {
+    const qNum = sanitizeFilenameSegment(quotationNumber);
+    const rev = sanitizeFilenameSegment(revisionLabel || 'R1');
+    return `${hotelPrefix}-Quotation-${qNum}-${rev}.pdf`;
   }
 
   if (quotationMode === 'reservation') {
@@ -287,6 +300,30 @@ export default function DocumentCenter({
   const [quotationDraft, setQuotationDraft] = useState<QuotationDraft>(() =>
     createBlankQuotationDraft('reservation'),
   );
+
+  /* Persisted Quotation state */
+  const [isQuotationListModalOpen, setIsQuotationListModalOpen] = useState(false);
+  const [savedQuotationRecord, setSavedQuotationRecord] = useState<{
+    id: number;
+    quotation_number: string;
+    revision_number: number;
+    revision_label: string;
+    version: number;
+  } | null>(null);
+  const [initialQuotationBaselineJson, setInitialQuotationBaselineJson] = useState<string>(() =>
+    JSON.stringify(createBlankQuotationDraft('reservation')),
+  );
+  const [isSavingQuotation, setIsSavingQuotation] = useState(false);
+  const [quotationActionMessage, setQuotationActionMessage] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [showUnsavedExitModal, setShowUnsavedExitModal] = useState(false);
+  const [pendingExitAction, setPendingExitAction] = useState<(() => void) | null>(null);
+
+  const isQuotationDirty = useMemo(() => {
+    return JSON.stringify(quotationDraft) !== initialQuotationBaselineJson;
+  }, [quotationDraft, initialQuotationBaselineJson]);
 
   /* PDF export state & capture ref (DOCUMENT-1B.2F) */
   const [isSavingPdf, setIsSavingPdf] = useState(false);
@@ -546,26 +583,26 @@ export default function DocumentCenter({
 
   /* Preload canonical reservation detail into quotation draft (reservation mode only) */
   useEffect(() => {
-    if (selectedDetail && quotationMode === 'reservation') {
+    if (selectedDetail && quotationMode === 'reservation' && !savedQuotationRecord) {
       const currentDetailId = Number(selectedDetail.id ?? selectedResId);
       if (currentDetailId && currentDetailId !== lastPreloadedResIdRef.current) {
         lastPreloadedResIdRef.current = currentDetailId;
-        setQuotationDraft(
-          buildQuotationDraftFromReservation(selectedDetail, propertyPaymentInstructions),
-        );
+        const draft = buildQuotationDraftFromReservation(selectedDetail, propertyPaymentInstructions);
+        setQuotationDraft(draft);
+        setInitialQuotationBaselineJson(JSON.stringify(draft));
       }
     }
-  }, [selectedDetail, selectedResId, quotationMode, propertyPaymentInstructions]);
+  }, [selectedDetail, selectedResId, quotationMode, propertyPaymentInstructions, savedQuotationRecord]);
 
   /* If selected reservation is cleared while in reservation mode, reset draft */
   useEffect(() => {
-    if (selectedResId == null && quotationMode === 'reservation') {
+    if (selectedResId == null && quotationMode === 'reservation' && !savedQuotationRecord) {
       lastPreloadedResIdRef.current = null;
-      setQuotationDraft(
-        createBlankQuotationDraft('reservation', propertyPaymentInstructions),
-      );
+      const blank = createBlankQuotationDraft('reservation', propertyPaymentInstructions);
+      setQuotationDraft(blank);
+      setInitialQuotationBaselineJson(JSON.stringify(blank));
     }
-  }, [selectedResId, quotationMode, propertyPaymentInstructions]);
+  }, [selectedResId, quotationMode, propertyPaymentInstructions, savedQuotationRecord]);
 
   /* Switch quotation source mode (reservation vs manual) */
   const handleSwitchMode = useCallback(
@@ -593,6 +630,221 @@ export default function DocumentCenter({
     },
     [quotationMode, selectedDetail, selectedResId, propertyPaymentInstructions],
   );
+
+  const doResetQuotation = useCallback(() => {
+    const blank = createBlankQuotationDraft('manual', propertyPaymentInstructions);
+    setQuotationDraft(blank);
+    setSavedQuotationRecord(null);
+    setQuotationMode('manual');
+    lastPreloadedResIdRef.current = null;
+    setInitialQuotationBaselineJson(JSON.stringify(blank));
+    setQuotationActionMessage(null);
+  }, [propertyPaymentInstructions]);
+
+  const handleNewQuotationClick = useCallback(() => {
+    if (isQuotationDirty) {
+      setPendingExitAction(() => () => doResetQuotation());
+      setShowUnsavedExitModal(true);
+    } else {
+      doResetQuotation();
+    }
+  }, [isQuotationDirty, doResetQuotation]);
+
+  const handleOpenSavedListClick = useCallback(() => {
+    if (isQuotationDirty) {
+      setPendingExitAction(() => () => {
+        setIsQuotationListModalOpen(true);
+      });
+      setShowUnsavedExitModal(true);
+    } else {
+      setIsQuotationListModalOpen(true);
+    }
+  }, [isQuotationDirty]);
+
+  const handleSwitchKind = useCallback(
+    (targetKind: 'confirmation' | 'quotation' | 'folio') => {
+      if (targetKind === kind) return;
+      if (kind === 'quotation' && isQuotationDirty) {
+        setPendingExitAction(() => () => setKind(targetKind));
+        setShowUnsavedExitModal(true);
+      } else {
+        setKind(targetKind);
+      }
+    },
+    [kind, isQuotationDirty],
+  );
+
+  const handleSelectSavedQuotation = useCallback(
+    async (selectedId: number) => {
+      try {
+        const res = await authFetch(`/api/documents/quotations/${selectedId}?property_id=${propertyId}`);
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.message || 'Gagal memuat rincian quotation');
+        }
+        const json = await res.json();
+        const detail = json.data;
+        const newDraft = buildQuotationDraftFromSavedRecord(detail);
+        setQuotationDraft(newDraft);
+        setSavedQuotationRecord({
+          id: detail.id,
+          quotation_number: detail.quotation_number,
+          revision_number: detail.latest_revision?.revision_number ?? 1,
+          revision_label: detail.latest_revision?.revision_label ?? 'R1',
+          version: detail.version,
+        });
+        setQuotationMode('manual');
+        lastPreloadedResIdRef.current = null;
+        setInitialQuotationBaselineJson(JSON.stringify(newDraft));
+        setIsQuotationListModalOpen(false);
+        setQuotationActionMessage({
+          type: 'success',
+          text: `Quotation ${detail.quotation_number} (${detail.latest_revision?.revision_label || 'R1'}) berhasil dibuka.`,
+        });
+      } catch (err: any) {
+        setQuotationActionMessage({
+          type: 'error',
+          text: err.message || 'Gagal memuat quotation',
+        });
+      }
+    },
+    [authFetch, propertyId],
+  );
+
+  const handleSaveQuotation = useCallback(async () => {
+    if (isSavingQuotation) return;
+    setQuotationActionMessage(null);
+
+    const customerName = quotationDraft.customerName?.trim();
+    if (!customerName) {
+      setQuotationActionMessage({
+        type: 'error',
+        text: 'Nama pelanggan wajib diisi untuk menyimpan quotation.',
+      });
+      return;
+    }
+
+    const validItems = (quotationDraft.items || []).filter(
+      (it) => it.description && it.description.trim() !== '',
+    );
+    if (validItems.length === 0) {
+      setQuotationActionMessage({
+        type: 'error',
+        text: 'Minimal harus ada 1 item penawaran dengan deskripsi.',
+      });
+      return;
+    }
+
+    setIsSavingQuotation(true);
+    try {
+      const totals = calculateQuotationDraftTotals(quotationDraft);
+      const isRevision = savedQuotationRecord !== null;
+
+      const payload: any = {
+        property_id: propertyId,
+        customer_name: customerName,
+        customer_email: quotationDraft.email?.trim() || null,
+        customer_phone: quotationDraft.phone?.trim() || null,
+        customer_address: quotationDraft.address?.trim() || null,
+        check_in_date: quotationDraft.checkIn || null,
+        check_out_date: quotationDraft.checkOut || null,
+        items: validItems.map((it) => ({
+          description: it.description.trim(),
+          quantity: Math.max(0, Number(it.qty) || 1),
+          unit_price: Math.max(0, Number(it.unitPrice) || 0),
+          discount: 0,
+        })),
+        pricing: {
+          subtotal: totals.subtotal,
+          service_rate:
+            quotationDraft.serviceType === 'percent'
+              ? Math.max(0, Number(quotationDraft.serviceValue) || 0)
+              : undefined,
+          service_amount: totals.serviceAmount,
+          tax_rate:
+            quotationDraft.taxType === 'percent'
+              ? Math.max(0, Number(quotationDraft.taxValue) || 0)
+              : undefined,
+          tax_amount: totals.taxAmount,
+          total_discount: totals.discountAmount,
+          total_amount: totals.grandTotal,
+        },
+        notes: quotationDraft.notes?.trim() || null,
+        terms_conditions: quotationDraft.terms?.trim() || null,
+        bank_details: {
+          bank_name: quotationDraft.bankName?.trim() || '',
+          bank_account_name: quotationDraft.bankAccountName?.trim() || '',
+          bank_account_number: quotationDraft.bankAccountNumber?.trim() || '',
+        },
+      };
+
+      let url = '/api/documents/quotations';
+      let method = 'POST';
+
+      if (isRevision) {
+        url = `/api/documents/quotations/${savedQuotationRecord.id}`;
+        method = 'PUT';
+        payload.expected_version = savedQuotationRecord.version;
+        payload.change_summary = `Revisi ${savedQuotationRecord.revision_number + 1}`;
+      }
+
+      const res = await authFetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        if (res.status === 409) {
+          throw new Error('Konflik perubahan: Quotation ini telah diubah di sesi lain. Buka ulang dari daftar tersimpan.');
+        }
+        throw new Error(errJson.message || 'Gagal menyimpan quotation.');
+      }
+
+      const json = await res.json();
+      const resData = json.data;
+      const revision = resData.revision || resData.latest_revision || {};
+
+      const updatedDraft: QuotationDraft = {
+        ...quotationDraft,
+        quotationNumber: resData.quotation_number,
+        revisionNumber: Number(revision.revision_number) || 1,
+        revisionLabel: revision.revision_label || 'R1',
+        version: Number(resData.version) || 1,
+        savedQuotationId: Number(resData.id),
+      };
+
+      setQuotationDraft(updatedDraft);
+      setSavedQuotationRecord({
+        id: Number(resData.id),
+        quotation_number: resData.quotation_number,
+        revision_number: Number(revision.revision_number) || 1,
+        revision_label: revision.revision_label || 'R1',
+        version: Number(resData.version) || 1,
+      });
+      setInitialQuotationBaselineJson(JSON.stringify(updatedDraft));
+      setQuotationActionMessage({
+        type: 'success',
+        text: isRevision
+          ? `Revisi ${revision.revision_label || ''} berhasil disimpan untuk ${resData.quotation_number}.`
+          : `Quotation berhasil disimpan: ${resData.quotation_number} (R1).`,
+      });
+    } catch (err: any) {
+      setQuotationActionMessage({
+        type: 'error',
+        text: err.message || 'Terjadi kesalahan saat menyimpan quotation.',
+      });
+    } finally {
+      setIsSavingQuotation(false);
+    }
+  }, [
+    isSavingQuotation,
+    quotationDraft,
+    savedQuotationRecord,
+    propertyId,
+    authFetch,
+  ]);
 
   /* Switch to a sibling room in a multi-room booking */
   const handleSelectSiblingReservation = useCallback((siblingId: number) => {
@@ -871,6 +1123,8 @@ export default function DocumentCenter({
       bid: folioDoc?.bid || docRes?.bid || pickerRow?.bid,
       reference: quotationDraft.reference,
       folioNumber: folioDoc?.folio_number,
+      quotationNumber: quotationDraft.quotationNumber,
+      revisionLabel: quotationDraft.revisionLabel,
       propertyInfo,
       propertyBranding,
     });
@@ -886,6 +1140,8 @@ export default function DocumentCenter({
     docRes?.bid,
     pickerRow?.bid,
     quotationDraft.reference,
+    quotationDraft.quotationNumber,
+    quotationDraft.revisionLabel,
     propertyInfo,
     propertyBranding,
   ]);
@@ -1321,7 +1577,7 @@ export default function DocumentCenter({
   /* ------------------------------------------------------------------ */
 
   const needsReservationPicker =
-    kind === 'confirmation' || kind === 'folio' || quotationMode === 'reservation';
+    kind === 'confirmation' || kind === 'folio' || (kind === 'quotation' && quotationMode === 'reservation' && !savedQuotationRecord);
 
   const sidebar = (
     <aside className="document-center-sidebar doc-center-sidebar-fixed min-w-0">
@@ -1375,7 +1631,7 @@ export default function DocumentCenter({
             <button
               type="button"
               className={`document-center-kind-card ${kind === 'confirmation' ? 'active' : ''}`}
-              onClick={() => setKind('confirmation')}
+              onClick={() => handleSwitchKind('confirmation')}
             >
               <span className="document-center-kind-name">Guest Bill</span>
               <span className="document-center-kind-desc">Ringkasan tagihan &amp; pembayaran</span>
@@ -1383,7 +1639,7 @@ export default function DocumentCenter({
             <button
               type="button"
               className={`document-center-kind-card ${kind === 'quotation' ? 'active' : ''}`}
-              onClick={() => setKind('quotation')}
+              onClick={() => handleSwitchKind('quotation')}
             >
               <span className="document-center-kind-name">Quotation / Penawaran</span>
               <span className="document-center-kind-desc">Penawaran tarif kamar &amp; paket</span>
@@ -1391,7 +1647,7 @@ export default function DocumentCenter({
             <button
               type="button"
               className={`document-center-kind-card ${kind === 'folio' ? 'active' : ''}`}
-              onClick={() => setKind('folio')}
+              onClick={() => handleSwitchKind('folio')}
             >
               <span className="document-center-kind-name">Tagihan Tamu (Guest Folio)</span>
               <span className="document-center-kind-desc">Rincian tagihan, bayar &amp; saldo</span>
@@ -1421,6 +1677,97 @@ export default function DocumentCenter({
                 <span className="document-center-kind-desc">Entri penawaran kustom langsung</span>
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Quotation Management Toolbar (Quotation only) */}
+        {kind === 'quotation' && (
+          <div className="document-center-block border-t border-[#ece9e2]">
+            <div className="flex items-center justify-between mb-2">
+              <span className="document-center-block-label !mb-0">Kelola Quotation</span>
+              {savedQuotationRecord ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-[#1b4332]/10 text-[#1b4332]">
+                    {savedQuotationRecord.quotation_number} ({savedQuotationRecord.revision_label})
+                  </span>
+                  {isQuotationDirty ? (
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800">
+                      ● Ada Revisi
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800">
+                      ✓ Tersimpan
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-stone-100 text-stone-600">
+                    Draft Baru
+                  </span>
+                  {isQuotationDirty && (
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800">
+                      ● Belum disimpan
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Quotation action status message */}
+            {quotationActionMessage && (
+              <div
+                className={`mb-2.5 p-2 rounded text-xs flex items-center justify-between ${
+                  quotationActionMessage.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-rose-50 text-rose-800 border border-rose-200'
+                }`}
+              >
+                <span>{quotationActionMessage.text}</span>
+                <button
+                  type="button"
+                  className="text-stone-400 hover:text-stone-700 ml-2 font-bold"
+                  onClick={() => setQuotationActionMessage(null)}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <button
+                type="button"
+                className="px-2.5 py-1.5 text-xs font-medium rounded border border-[#c5a880]/60 bg-[#faf8f5] hover:bg-[#f3ede2] text-[#1b4332] text-center"
+                onClick={handleNewQuotationClick}
+              >
+                + Quotation Baru
+              </button>
+              <button
+                type="button"
+                className="px-2.5 py-1.5 text-xs font-medium rounded border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-center"
+                onClick={handleOpenSavedListClick}
+              >
+                📁 Daftar Tersimpan
+              </button>
+            </div>
+
+            {/* Primary Save / Revise button */}
+            <button
+              type="button"
+              className={`w-full py-2 px-3 text-xs font-semibold rounded shadow-sm text-center transition-colors ${
+                savedQuotationRecord
+                  ? 'bg-[#1b4332] hover:bg-[#143225] text-[#f7f4ee]'
+                  : 'bg-[#c5a880] hover:bg-[#b3956c] text-[#1b4332]'
+              } ${isSavingQuotation ? 'opacity-70 cursor-not-allowed' : ''}`}
+              onClick={handleSaveQuotation}
+              disabled={isSavingQuotation}
+            >
+              {isSavingQuotation
+                ? 'Menyimpan...'
+                : savedQuotationRecord
+                  ? `Simpan Revisi (${savedQuotationRecord.quotation_number} - R${savedQuotationRecord.revision_number + 1})`
+                  : 'Simpan Quotation'}
+            </button>
           </div>
         )}
       </div>
@@ -1918,6 +2265,51 @@ export default function DocumentCenter({
       `}</style>
       {sidebar}
       {preview}
+      <QuotationListModal
+        isOpen={isQuotationListModalOpen}
+        onClose={() => setIsQuotationListModalOpen(false)}
+        propertyId={propertyId}
+        onSelectQuotation={handleSelectSavedQuotation}
+      />
+      <Modal
+        isOpen={showUnsavedExitModal}
+        onClose={() => {
+          setShowUnsavedExitModal(false);
+          setPendingExitAction(null);
+        }}
+        title="Perubahan Belum Disimpan"
+      >
+        <div className="p-4 space-y-4">
+          <p className="text-sm text-stone-700">
+            Quotation saat ini memiliki perubahan yang belum disimpan. Jika Anda melanjutkan, perubahan yang belum disimpan akan hilang.
+          </p>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded"
+              onClick={() => {
+                setShowUnsavedExitModal(false);
+                setPendingExitAction(null);
+              }}
+            >
+              Tetap di Sini
+            </button>
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded"
+              onClick={() => {
+                setShowUnsavedExitModal(false);
+                if (pendingExitAction) {
+                  pendingExitAction();
+                  setPendingExitAction(null);
+                }
+              }}
+            >
+              Abaikan Perubahan &amp; Lanjutkan
+            </button>
+          </div>
+        </div>
+      </Modal>
       {showPdfFilenameModal && (
         <Modal
           isOpen={showPdfFilenameModal}

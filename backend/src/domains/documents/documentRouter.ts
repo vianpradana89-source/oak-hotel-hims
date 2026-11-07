@@ -22,7 +22,7 @@
 
 import { Router, Response } from 'express';
 import { Pool } from 'pg';
-import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
+import { requireAuth, requirePermission, type AuthenticatedRequest } from '../auth/authMiddleware';
 import { isPlatformSuperAdmin } from '../auth/authService';
 import { isFeatureEnabled } from '../features/featureService';
 import {
@@ -30,6 +30,14 @@ import {
   getDocumentReservationDetail,
 } from './documentReservationReadService';
 import { getDocumentGuestFolio } from './documentGuestFolioReadService';
+import {
+  createQuotation,
+  updateQuotationRevision,
+  listQuotations,
+  getQuotationDetail,
+  softDeleteQuotation,
+  restoreQuotation,
+} from './quotationService';
 
 function parsePositiveInt(value: any): number | null {
   const n = Number(value);
@@ -191,6 +199,193 @@ export function createDocumentRouter(pool: Pool): Router {
         return res.status(400).json(result);
       }
 
+      return res.status(200).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+      });
+    }
+  });
+
+  // ── Quotation Endpoints ──────────────────────────────────────────────────
+
+  // GET /api/documents/quotations - list quotations
+  router.get('/quotations', requireAuth, requirePermission('documents.view'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.query.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id is required and must be a positive integer',
+        });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const status = req.query.status === 'DELETED' ? 'DELETED' : (req.query.status === 'ALL' ? 'ALL' : 'ACTIVE');
+      const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+      const page = parsePositiveInt(req.query.page) || 1;
+      const limit = parsePositiveInt(req.query.limit) || 50;
+
+      const result = await listQuotations(pool, propertyId, { status, search, page, limit });
+      return res.status(200).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+      });
+    }
+  });
+
+  // POST /api/documents/quotations - create quotation
+  router.post('/quotations', requireAuth, requirePermission('documents.create'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id || req.query.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id is required and must be a positive integer',
+        });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User belum login' });
+      }
+
+      const result = await createQuotation(pool, propertyId, userId, req.body);
+      return res.status(201).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+      });
+    }
+  });
+
+  // GET /api/documents/quotations/:id - get detail
+  router.get('/quotations/:id', requireAuth, requirePermission('documents.view'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const quotationId = parsePositiveInt(req.params.id);
+      if (quotationId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'id must be a positive integer' });
+      }
+      const propertyId = parsePositiveInt(req.query.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const result = await getQuotationDetail(pool, quotationId, propertyId);
+      return res.status(200).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+      });
+    }
+  });
+
+  // PUT /api/documents/quotations/:id - save revision
+  router.put('/quotations/:id', requireAuth, requirePermission('documents.edit'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const quotationId = parsePositiveInt(req.params.id);
+      if (quotationId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'id must be a positive integer' });
+      }
+      const propertyId = parsePositiveInt(req.body.property_id || req.query.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User belum login' });
+      }
+
+      const expectedVersion = Number(req.body.expected_version ?? req.body.version);
+      if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'expected_version is required for optimistic concurrency control',
+        });
+      }
+
+      const result = await updateQuotationRevision(pool, quotationId, propertyId, userId, expectedVersion, req.body);
+      return res.status(200).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+        current_version: err.current_version,
+      });
+    }
+  });
+
+  // DELETE /api/documents/quotations/:id - soft delete
+  router.delete('/quotations/:id', requireAuth, requirePermission('documents.delete'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const quotationId = parsePositiveInt(req.params.id);
+      if (quotationId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'id must be a positive integer' });
+      }
+      const propertyId = parsePositiveInt(req.query.property_id || req.body?.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User belum login' });
+      }
+
+      const result = await softDeleteQuotation(pool, quotationId, propertyId, userId);
+      return res.status(200).json(result);
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      return res.status(status).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Terjadi kesalahan internal',
+      });
+    }
+  });
+
+  // POST /api/documents/quotations/:id/restore - restore
+  router.post('/quotations/:id/restore', requireAuth, requirePermission('documents.edit'), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const quotationId = parsePositiveInt(req.params.id);
+      if (quotationId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'id must be a positive integer' });
+      }
+      const propertyId = parsePositiveInt(req.query.property_id || req.body?.property_id);
+      if (propertyId === null) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+      }
+      await assertPropertyScope(pool, req, propertyId);
+
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 'ERROR', code: 'UNAUTHORIZED', message: 'User belum login' });
+      }
+
+      const result = await restoreQuotation(pool, quotationId, propertyId, userId);
       return res.status(200).json(result);
     } catch (err: any) {
       const status = err.statusCode || 500;

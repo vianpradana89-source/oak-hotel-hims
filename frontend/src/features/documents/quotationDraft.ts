@@ -19,7 +19,11 @@ export interface QuotationDraft {
   mode: QuotationMode;
   reservationId?: number | null;
 
+  savedQuotationId?: number | null;
   quotationNumber?: string;
+  revisionNumber?: number;
+  revisionLabel?: string;
+  version?: number;
   quotationDate: string;
   validUntil?: string;
   reference?: string;
@@ -364,5 +368,74 @@ export function calculateQuotationDraftTotals(draft: QuotationDraft): QuotationD
     serviceAmount,
     taxAmount,
     grandTotal,
+  };
+}
+
+
+/**
+ * 4. buildQuotationDraftFromSavedRecord
+ * Memuat quotation tersimpan dari database ke state editor & preview secara langsung.
+ * Tidak akan tertimpa oleh live rate atau seleksi reservasi.
+ */
+export function buildQuotationDraftFromSavedRecord(detail: any): QuotationDraft {
+  const q = detail.quotation || detail;
+  const rev = detail.latest_revision || detail.revision || {};
+  const snap = typeof rev.snapshot === 'string' ? JSON.parse(rev.snapshot) : (rev.snapshot || {});
+
+  const snapCustomer = snap.customer || {};
+  const snapStay = snap.stay_dates || {};
+  const snapPricing = snap.pricing || {};
+
+  return {
+    mode: 'manual',
+    reservationId: null,
+
+    savedQuotationId: Number(q.id),
+    quotationNumber: q.quotation_number || '',
+    revisionNumber: Number(rev.revision_number) || 1,
+    revisionLabel: rev.revision_label || 'R1',
+    version: Number(q.version) || 1,
+
+    quotationDate: snap.created_at ? snap.created_at.slice(0, 10) : (q.created_at ? q.created_at.slice(0, 10) : getTodayHotelDate()),
+    validUntil: '',
+    reference: '',
+    subject: '',
+
+    customerName: snapCustomer.name || q.customer_name || '',
+    contactPerson: '',
+    phone: snapCustomer.phone || q.customer_phone || '',
+    email: snapCustomer.email || q.customer_email || '',
+    address: snapCustomer.address || q.customer_address || '',
+
+    checkIn: snapStay.check_in_date || (q.check_in_date ? q.check_in_date.slice(0, 10) : '') || '',
+    checkOut: snapStay.check_out_date || (q.check_out_date ? q.check_out_date.slice(0, 10) : '') || '',
+    roomType: '',
+    roomNumber: '',
+    guestCount: null,
+
+    items: (snap.items || []).map((it: any, idx: number) => ({
+      id: it.id || `item-${idx + 1}`,
+      description: it.description || '',
+      qty: Math.max(0, Number(it.quantity ?? it.qty) || 1),
+      unit: it.unit || '',
+      unitPrice: Math.max(0, Number(it.unit_price ?? it.unitPrice) || 0),
+      note: it.note || '',
+    })),
+
+    discountType: 'amount',
+    discountValue: Number(snapPricing.total_discount || 0),
+
+    serviceType: snapPricing.service_rate ? 'percent' : 'amount',
+    serviceValue: Number(snapPricing.service_rate || snapPricing.service_amount || 0),
+
+    taxType: snapPricing.tax_rate ? 'percent' : 'amount',
+    taxValue: Number(snapPricing.tax_rate || snapPricing.tax_amount || 0),
+
+    notes: snap.notes || q.notes || '',
+    terms: snap.terms_conditions || q.terms_conditions || '',
+
+    bankName: snap.bank_details?.bank_name || '',
+    bankAccountName: snap.bank_details?.bank_account_name || '',
+    bankAccountNumber: snap.bank_details?.bank_account_number || '',
   };
 }

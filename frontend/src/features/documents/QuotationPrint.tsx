@@ -102,7 +102,10 @@ export default function QuotationPrint({
           {draft.quotationNumber?.trim() ? (
             <div>
               <div className="oak-doc-field-label">No. Quotation</div>
-              <div className="oak-doc-field-value">{draft.quotationNumber}</div>
+              <div className="oak-doc-field-value">
+                {draft.quotationNumber}
+                {draft.revisionLabel ? ` (${draft.revisionLabel})` : ''}
+              </div>
             </div>
           ) : null}
           <div>

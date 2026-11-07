@@ -1,5 +1,6 @@
 import type { ThermalWidth } from './thermalReceiptTypes';
 import type { PosReceiptData } from '../pos/posReceiptTypes';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 import { getLogoServeUrl } from '../propertySettings/propertyBrandingApi';
 import {
   formatHotelDateTimeIndonesian,
@@ -100,7 +101,10 @@ export default function PosThermalReceiptContent({
 
       {/* 3. IDENTITAS TRANSAKSI */}
       <div className="thermal-section">
-        <Row label="No. Order" value={order.order_number} mono />
+        <Row label="No. Order" value={order.id ? formatPosOrderDisplayRef(order.id) : order.order_number} mono />
+        {order.id && order.order_number ? (
+          <Row label="Ref Bon" value={order.order_number} mono />
+        ) : null}
         <Row label="No. Transaksi" value={sale.transaction_no} mono />
         {txDate && <Row label="Tanggal" value={formatHotelDateTimeIndonesian(txDate)} />}
         {order.guest_name && <Row label="Tamu" value={order.guest_name} />}
