@@ -4537,11 +4537,37 @@ function AppContent() {
             getPaymentStatusLabel={getPaymentStatusLabel}
             getPaymentBadgeClass={getPaymentBadgeClass}
             onNavigateToReservation={(resId) => {
-              const target = reservations.find((r) => Number(r.id) === Number(resId));
-              if (target) {
-                setSelectedRes(target);
-                fetchReservationFolio(Number(resId));
-              }
+              void (async () => {
+                const targetId = Number(resId);
+                if (!targetId || propertyId === null) return;
+                // 1) Prefer already-loaded data (transaction list or tape-chart)
+                const cached =
+                  transactionReservations.find((r: any) => Number(r.id ?? r.reservation_id) === targetId) ||
+                  reservations.find((r: any) => Number(r.id ?? r.reservation_id) === targetId);
+                if (cached) setSelectedRes(cached);
+                // 2) Authoritative fetch so the drawer renders with full data
+                try {
+                  const response = await authFetch(`/api/reservations/${targetId}?property_id=${propertyId}`);
+                  const json = await response.json().catch(() => null);
+                  if (response.ok && json?.data) {
+                    const fullDto = json.data;
+                    setSelectedRes((prev: any) =>
+                      !prev || Number(prev.id) !== targetId
+                        ? fullDto
+                        : { ...prev, ...fullDto, room_number: prev.room_number ?? fullDto.room_number }
+                    );
+                    // refresh folio alongside so drawer content stays consistent
+                    await fetchReservationFolio(targetId);
+                  } else if (cached) {
+                    // cache hit but API failed: fall back to folio only
+                    await fetchReservationFolio(targetId);
+                  } else {
+                    console.error('Gagal memuat detail reservasi dari transksi:', json?.message || response.status);
+                  }
+                } catch (error) {
+                  console.error('Gagal memuat detail reservasi:', error);
+                }
+              })();
             }}
             realtimeRefreshVersion={transactionRefreshVersion}
           />

@@ -3043,6 +3043,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           openSoftDeleteModal(tx);
         }}
         onNavigateToReservation={(resId) => {
+          setBookingDetailOpen(false);
+          setSelectedBookingIdForDetail(null);
           setDetailDrawerOpen(false);
           if (onNavigateToReservation) {
             onNavigateToReservation(resId);

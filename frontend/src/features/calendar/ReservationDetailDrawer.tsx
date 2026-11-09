@@ -143,7 +143,7 @@ const REQUIREMENT_ACTION_MAP: Record<
   },
   IDENTITY_DOCUMENT_MISSING: {
     actionLabel: 'Lengkapi Identitas',
-    tab: 'dokumen',
+    tab: 'tamu-kamar',
     anchor: 'ktp-card',
     needsGate: null,
   },
@@ -182,6 +182,12 @@ function CheckinReadinessChecklist({
 
   const metCount = rows.filter(r => r.isMet).length;
   const totalRows = rows.length;
+  // Sederhanakan tampilan checklist: default hanya syarat yang BELUM terpenuhi
+  // yang di-render sebagai baris. Syarat terpenuhi diringkas dengan jumlah +
+  // tombol "Lihat semua" yang membuka daftar lengkap.
+  const [showAllRows, setShowAllRows] = useState<boolean>(false);
+  const unmetRows = rows.filter(r => !r.isMet);
+  const displayRows = showAllRows ? rows : unmetRows;
 
   const handleAction = (code: string, gate: 'payment' | 'guarantee' | null) => {
     if (gate === 'payment' && !canShowPaymentForm) return;
@@ -200,7 +206,7 @@ function CheckinReadinessChecklist({
       <div className="space-y-1">
         <div className="flex items-center justify-between text-[11px] font-semibold text-stone-600">
           <span>
-            {metCount} dari {totalRows} selesai
+            {metCount} dari {totalRows} terpenuhi
           </span>
           <span className="text-stone-500 font-medium">{progressPct}%</span>
         </div>
@@ -212,8 +218,8 @@ function CheckinReadinessChecklist({
         </div>
       </div>
 
-      {/* Checklist rows */}
-      {rows.map(row => {
+      {/* Checklist rows — default: hanya yang belum terpenuhi */}
+      {displayRows.map(row => {
         // Action config lives in the drawer (UI concern); row metadata
         // (code/isMet/label) comes from canonical buildCheckinReadinessRows.
         const action = REQUIREMENT_ACTION_MAP[row.code];
@@ -301,11 +307,23 @@ function CheckinReadinessChecklist({
       })}
 
       {/* Note for unmet rows with no action */}
-      {rows.some(r => !r.isMet && !r.hasKnownAction) && (
+      {unmetRows.some(r => !r.hasKnownAction) && (
         <div className="text-[11px] text-stone-500 mt-1 px-2.5">
           Beberapa syarat memerlukan tindakan di luar panel ini (misalnya menunggu
           kamar siap dari Housekeeping).
         </div>
+      )}
+
+      {/* Toggle daftar lengkap: hanya tampil ketika ada baris tersembunyi
+          (syarat yang sudah terpenuhi disembunyikan pada tampilan default) */}
+      {metCount > 0 && unmetRows.length < totalRows && (
+        <button
+          type="button"
+          onClick={() => setShowAllRows(v => !v)}
+          className="w-full py-1.5 text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer"
+        >
+          {showAllRows ? 'Tutup daftar lengkap' : 'Lihat semua'}
+        </button>
       )}
     </div>
   );
@@ -337,7 +355,8 @@ export default function ReservationDetailDrawer({
   const [loading, setLoading] = useState<boolean>(false);
   // Visual tab navigation state (shell only — all tab panes remain React-mounted;
   // inactive panes use display:none so internal component state survives tab switches).
-  const [activeTab, setActiveTab] = useState<'ringkasan' | 'tamu-kamar' | 'pembayaran' | 'deposit-jaminan' | 'dokumen' | 'riwayat'>('ringkasan');
+  // Default tab sesuai urutan navigasi yang disetujui Owner: Data Tamu pertama.
+  const [activeTab, setActiveTab] = useState<'ringkasan' | 'tamu-kamar' | 'pembayaran' | 'deposit-jaminan' | 'dokumen' | 'riwayat'>('tamu-kamar');
   // Per-pane visibility helper: returns 'hidden' when the pane is NOT the active tab.
   // Keeping every pane mounted (display:none) preserves DepositGuaranteeSection internals,
   // payment draft state, modal state, etc. while the user switches tabs.
@@ -397,6 +416,14 @@ export default function ReservationDetailDrawer({
     const [isThermalModalOpen, setIsThermalModalOpen] = useState(false);
     const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState(false);
 
+    // Guest CRM data (fetched from /api/guests/:id when primaryGuestId available)
+    type GuestCrmStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error';
+    const [guestCrmData, setGuestCrmData] = useState<any>(null);
+    const [guestCrmStatus, setGuestCrmStatus] = useState<GuestCrmStatus>('idle');
+    const [guestCrmError, setGuestCrmError] = useState<{ httpStatus: number; message: string } | null>(null);
+    const guestCrmRetryKeyRef = useRef(0);
+    const [guestCrmRetryCount, setGuestCrmRetryCount] = useState(0);
+
     // ---- Activity Log (Riwayat) state — delegated to useAuditLog hook ----
     // The hook owns entries, hasMore, cursor, loading, error, loadMoreError,
     // in-flight guard, generation-based stale-context discard, and auto-load.
@@ -415,7 +442,20 @@ export default function ReservationDetailDrawer({
   const ktpIdentityNumber = hasCanonicalPrimaryGuest
     ? (detailData.primary_guest?.primary_guest_identity_number || null)
     : ((detailData || reservation)?.identity_number || null);
-  const hasKtpIdentity = Boolean(ktpDocPath) || Boolean(ktpIdentityNumber);
+
+  // Distinguish "terlampir" (canonical storage key present) vs
+  // "terverifikasi" (has_valid_identity flag true) — consistent with
+  // reservationEditIdentityGuard Gate 3 and checkinGateService.
+  // The legacy identity_path is advisory only; it must NOT substitute
+  // for the storage key as proof of a canonical document.
+  const ktpIdentityAttached = Boolean(detailData?.primary_guest?.primary_guest_identity_storage_key?.trim());
+  const ktpIdentityVerified = Boolean(detailData?.primary_guest?.primary_guest_identity_verified);
+  const primaryGuestName = detailData?.primary_guest?.primary_guest_name || (detailData || reservation)?.guest_name || null;
+  const primaryGuestId = detailData?.primary_guest?.primary_guest_id ?? null;
+  // Actual identity type from backend (KTP, PASPOR, etc.); fall back to 'KTP' if unknown.
+  const identityTypeLabel: string = detailData?.primary_guest?.primary_guest_identity_type
+    ? String(detailData.primary_guest.primary_guest_identity_type).toUpperCase()
+    : (ktpIdentityNumber ? 'KTP' : '');
 
   // Secure temporary Blob Object URLs for in-app preview (Zero credentials in query string/history)
   const currentRes = detailData || reservation;
@@ -468,6 +508,69 @@ export default function ReservationDetailDrawer({
       console.warn('Failed to load room findings', err);
     }
   }, [detailData?.room_id, activePropId, reservation?.room_id, authFetch]);
+
+  // Load guest CRM data when primaryGuestId and activePropId are available.
+  // R2: explicit state machine — no shared "null means unknown" ambiguity:
+  //   idle    → no target (no primary guest or no property context)
+  //   loading → request in flight
+  //   success → data retrieved (visit_count / room_nights / first_stay / last_stay)
+  //   empty   → 200 but no usable stats payload (legitimate "belum pernah menginap")
+  //   error   → HTTP failure or network error (403 / 404 / 500 / timeout / DNS)
+  // The cancelled flag ensures stale responses (target changed mid-flight)
+  // never overwrite the newer state.
+  useEffect(() => {
+    const guestId = detailData?.primary_guest?.primary_guest_id ?? null;
+    const propId = activePropId;
+    // No target → reset to idle without starting a request.
+    // Bump the ref so any in-flight fetch for the previous target is discarded.
+    if (!guestId || !propId) {
+      guestCrmRetryKeyRef.current++;
+      setGuestCrmData(null);
+      setGuestCrmStatus('idle');
+      setGuestCrmError(null);
+      return;
+    }
+    const requestKey = ++guestCrmRetryKeyRef.current;
+    let cancelled = false;
+    setGuestCrmStatus('loading');
+    setGuestCrmError(null);
+    safeFetchJson<{ data?: any }>(
+      `/api/guests/${guestId}?property_id=${propId}`,
+      undefined,
+      undefined,
+      authFetch
+    ).then((result) => {
+      if (cancelled || requestKey !== guestCrmRetryKeyRef.current) return;
+      if (result.ok && result.data?.data) {
+        setGuestCrmData(result.data.data);
+        setGuestCrmStatus('success');
+      } else if (result.ok) {
+        // 200 but empty/malformed payload — legitimate "belum pernah menginap"
+        // case, NOT an error.
+        setGuestCrmData(null);
+        setGuestCrmStatus('empty');
+      } else {
+        const httpStatus = result.status || 0;
+        const msg = httpStatus === 403
+          ? 'Akses ditolak — Anda tidak berwenang melihat CRM tamu ini.'
+          : httpStatus === 404
+            ? 'Tamu tidak ditemukan di properti ini.'
+            : httpStatus === 0
+              ? 'Gagal terhubung ke server. Periksa koneksi lalu coba lagi.'
+              : `Gagal memuat data CRM (HTTP ${httpStatus}). Silakan coba lagi.`;
+        setGuestCrmError({ httpStatus, message: msg });
+        setGuestCrmStatus('error');
+      }
+    }).catch(() => {
+      if (cancelled || requestKey !== guestCrmRetryKeyRef.current) return;
+      setGuestCrmError({
+        httpStatus: 0,
+        message: 'Gagal memuat data CRM. Silakan coba lagi.'
+      });
+      setGuestCrmStatus('error');
+    });
+    return () => { cancelled = true; };
+  }, [detailData?.primary_guest?.primary_guest_id, activePropId, authFetch, guestCrmRetryCount]);
 
   // Load complete reservation details
   const loadFullReservation = async (customId?: number): Promise<any | null> => {
@@ -1244,75 +1347,83 @@ export default function ReservationDetailDrawer({
           </div>
         </div>
 
-        {/* Tab Bar — 6 ikon; all panes stay mounted, inactive panes use display:none */}
-        <div className="grid grid-cols-6 shrink-0 px-2 py-2 bg-white border-b border-stone-200" role="tablist" aria-label="Detail reservasi">
-          {(
-            [
-              { key: 'ringkasan', label: 'Ringkasan', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <rect x="2" y="2" width="12" height="12" rx="2" />
-                  <path d="M5 6h6M5 9h4" strokeLinecap="round" />
-                </svg>
-              ) },
-              { key: 'tamu-kamar', label: 'Tamu & Kamar', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <circle cx="8" cy="5.5" r="2.5" />
-                  <path d="M3.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4" strokeLinecap="round" />
-                </svg>
-              ) },
-              { key: 'pembayaran', label: 'Pembayaran', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <rect x="1.5" y="3" width="13" height="10" rx="2" />
-                  <path d="M4 7h2M4 9h1" strokeLinecap="round" />
-                  <circle cx="11" cy="8" r="1.5" />
-                </svg>
-              ) },
-              { key: 'deposit-jaminan', label: 'Deposit & Jaminan', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M8 1.8 2.8 3.7v3.9c0 3 2.2 5.3 5.2 6.6 3-1.3 5.2-3.6 5.2-6.6V3.7L8 1.8Z" strokeLinejoin="round" />
-                  <path d="M5.9 8l1.4 1.4 2.8-2.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) },
-              { key: 'dokumen', label: 'Dokumen', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" />
-                  <path d="M9 2v3h3" />
-                </svg>
-              ) },
-              { key: 'riwayat', label: 'Riwayat', icon: (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8Z" />
-                  <path d="M8 5v3l2 1.5" strokeLinecap="round" />
-                </svg>
-              ) },
-            ] as const
-          ).map(tab => {
-            const isActive = activeTab === tab.key;
-            const tooltipClass =
-              tab.key === 'ringkasan' ? '!left-0 !translate-x-0' :
-              tab.key === 'riwayat'   ? '!left-auto !right-0 !translate-x-0' :
-              undefined;
-            return (
-              <div key={tab.key} className="flex items-center justify-center min-w-0">
-                <Tooltip content={tab.label} position="bottom" className={tooltipClass}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab(tab.key)}
-                    role="tab"
-                    aria-selected={isActive}
-                    aria-label={tab.label}
-                    className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
-                      isActive
-                        ? 'bg-emerald-800 text-white'
-                        : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
-                    }`}
-                  >
+        {/* Tab Bar — 6 tab; urutan disetujui Owner:
+            Data Tamu → Ringkasan → Pembayaran → Jaminan → Dokumen → Riwayat.
+            Setiap tab: ikon di atas, label di bawah. Aktif: hijau + garis bawah.
+            Non-aktif: abu-abu. Semua pane tetap mounted; pane non-aktif display:none.
+            Drawer sempit: bar bisa digulir horizontal agar label tetap utuh. */}
+        <div className="shrink-0 px-2 pt-2 pb-0 bg-white border-b border-stone-200 overflow-x-auto" role="tablist" aria-label="Detail reservasi">
+          <div className="grid grid-cols-6 min-w-[560px] px-1 gap-1">
+            {(
+              [
+                { key: 'tamu-kamar', label: 'Data Tamu', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="8" cy="5.5" r="2.5" />
+                    <path d="M3.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4" strokeLinecap="round" />
+                  </svg>
+                ) },
+                { key: 'ringkasan', label: 'Ringkasan', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <rect x="2" y="2" width="12" height="12" rx="2" />
+                    <path d="M5 6h6M5 9h4" strokeLinecap="round" />
+                  </svg>
+                ) },
+                { key: 'pembayaran', label: 'Pembayaran', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <rect x="1.5" y="3" width="13" height="10" rx="2" />
+                    <path d="M4 7h2M4 9h1" strokeLinecap="round" />
+                    <circle cx="11" cy="8" r="1.5" />
+                  </svg>
+                ) },
+                { key: 'deposit-jaminan', label: 'Jaminan', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M8 1.8 2.8 3.7v3.9c0 3 2.2 5.3 5.2 6.6 3-1.3 5.2-3.6 5.2-6.6V3.7L8 1.8Z" strokeLinejoin="round" />
+                    <path d="M5.9 8l1.4 1.4 2.8-2.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) },
+                { key: 'dokumen', label: 'Dokumen', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" />
+                    <path d="M9 2v3h3" />
+                  </svg>
+                ) },
+                { key: 'riwayat', label: 'Riwayat', icon: (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8Z" />
+                    <path d="M8 5v3l2 1.5" strokeLinecap="round" />
+                  </svg>
+                ) },
+              ] as const
+            ).map(tab => {
+              const isActive = activeTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setActiveTab(tab.key)}
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-label={tab.label}
+                  className={`relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-lg transition-colors cursor-pointer shrink-0 ${
+                    isActive ? 'text-emerald-900' : 'text-stone-400 hover:text-stone-600'
+                  }`}
+                >
+                  <span className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors ${
+                    isActive ? 'bg-emerald-800 text-white' : 'bg-stone-100 text-stone-500 group-hover:bg-stone-200'
+                  }`}>
                     {tab.icon}
-                  </button>
-                </Tooltip>
-              </div>
-            );
-          })}
+                  </span>
+                  <span className={`text-[11px] font-semibold whitespace-nowrap ${isActive ? 'text-emerald-900' : 'text-stone-400'}`}>
+                    {tab.label}
+                  </span>
+                  {/* Garis bawah: aktif saja */}
+                  <span className={`absolute bottom-0 left-2 right-2 h-0.5 rounded-full ${
+                    isActive ? 'bg-emerald-800' : 'bg-transparent'
+                  }`} aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Scrollable Body */}
@@ -1603,7 +1714,7 @@ export default function ReservationDetailDrawer({
           </div>
 
           {/* Tab Pane: Tamu & Kamar — always mounted; display:none when inactive */}
-          <div className={`space-y-5 ${isTabVisible('tamu-kamar')}`} role="tabpanel" aria-label="Tamu & Kamar">
+          <div className={`space-y-5 ${isTabVisible('tamu-kamar')}`} role="tabpanel" aria-label="Data Tamu">
 
           {/* Active Room Findings & Maintenance Blocker Alert */}
           {activeRoomFindings.length > 0 && (
@@ -1805,81 +1916,68 @@ export default function ReservationDetailDrawer({
             </div>
           )}
 
-          {/* Section 2: Data Pemesan vs Data Tamu Menginap */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Booker */}
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-1.5">
+          {/* ── Card 1: Tamu Menginap (full width) ── */}
+          <div id="guest-card" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-3">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Data Pemesan (Booker)
+                Tamu Menginap
               </span>
-              <div className="font-bold text-sm text-stone-900">
-                {data.booker_name || data.guest_name}
-              </div>
-              <div className="text-xs text-stone-600 font-mono">
-                📞 {data.booker_phone || data.guest_phone || '—'}
-              </div>
+              {data.guest_segment && (
+                <span className="text-xs px-2 py-0.5 bg-stone-100 text-stone-700 rounded font-medium shrink-0">
+                  {data.guest_segment}
+                </span>
+              )}
+            </div>
+            <div className="font-bold text-sm text-stone-900">
+              {primaryGuestName || data.guest_name}
             </div>
 
-            {/* Staying Guest */}
-            <div id="guest-card" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                Tamu Menginap (Staying Guest)
-              </span>
-              <div className="font-bold text-sm text-stone-900 flex items-center justify-between">
-                <span>{data.guest_name}</span>
-                {data.guest_segment && (
-                  <span className="text-xs px-2 py-0.5 bg-stone-100 text-stone-700 rounded font-medium">
-                    {data.guest_segment}
-                  </span>
-                )}
+            {/* HP / WA / Ubah */}
+            <div id="guest-phone-section" className="flex items-center gap-2 flex-wrap">
+              <div className="p-2 bg-stone-50 rounded-lg text-xs text-stone-500 shrink-0">
+                No. Telepon
               </div>
-
               {isEditingPhone ? (
-                <div id="guest-phone-section" className="space-y-1.5 pt-1 border-t border-stone-100">
-                  <label className="block text-xs font-bold text-stone-600">
-                    Nomor Telepon Tamu <span className="text-rose-500">*</span>
-                  </label>
-                  <div className="space-y-1.5">
-                    <input
-                      type="tel"
-                      value={phoneDraft}
-                      onChange={e => setPhoneDraft(e.target.value)}
-                      placeholder="08xxxxxxxxxx"
-                      className="w-full min-w-0 text-xs px-2.5 py-1.5 bg-stone-50 border border-stone-300 rounded-lg font-mono focus:bg-white focus:border-emerald-600 focus:outline-hidden"
-                      autoFocus
-                    />
-                    <div className="flex gap-1.5">
-                      <button
-                        type="button"
-                        disabled={savingPhone}
-                        onClick={handleSavePhone}
-                        className="flex-1 px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
-                      >
-                        {savingPhone ? '...' : 'Simpan'}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={savingPhone}
-                        onClick={() => {
-                          setIsEditingPhone(false);
-                          setPhoneDraft(data.guest_phone || '');
-                        }}
-                        className="flex-1 px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
-                      >
-                        Batal
-                      </button>
-                    </div>
+                <div className="min-w-[180px] max-w-[280px] text-xs space-y-1.5">
+                  <input
+                    type="tel"
+                    value={phoneDraft}
+                    onChange={e => setPhoneDraft(e.target.value)}
+                    placeholder="08xxxxxxxxxx"
+                    className="w-full text-xs px-2.5 py-1.5 bg-stone-50 border border-stone-300 rounded-lg font-mono focus:bg-white focus:border-emerald-600 focus:outline-hidden"
+                    autoFocus
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      disabled={savingPhone}
+                      onClick={handleSavePhone}
+                      className="flex-1 px-3 py-1 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                    >
+                      {savingPhone ? '...' : 'Simpan'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingPhone}
+                      onClick={() => {
+                        setIsEditingPhone(false);
+                        setPhoneDraft(data.guest_phone || '');
+                      }}
+                      className="flex-1 px-2.5 py-1 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
+                    >
+                      Batal
+                    </button>
                   </div>
                 </div>
               ) : (
-                <div id="guest-phone-section" className="flex items-center justify-between pt-1 border-t border-stone-100">
-                  <div className="text-xs text-stone-600 font-mono flex items-center gap-1">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="text-stone-600 font-mono flex items-center gap-1">
                     <span>📞</span>
                     {data.guest_phone ? (
                       <span className="font-bold text-stone-900">{data.guest_phone}</span>
                     ) : (
                       <span className="text-rose-600 font-semibold bg-rose-50 px-2 py-0.5 rounded text-xs">
-                        ⚠️ Belum ada No. Telepon
+                        ⚠️ Belum ada
                       </span>
                     )}
                     {data.guest_phone && !isCancelled && !isCheckedOut && (
@@ -1903,15 +2001,216 @@ export default function ReservationDetailDrawer({
                         setPhoneDraft(data.guest_phone || '');
                         setIsEditingPhone(true);
                       }}
-                      className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                      className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer whitespace-nowrap"
                     >
-                      {data.guest_phone ? 'Ubah No. Telp' : '+ Isi No. Telp'}
+                      {data.guest_phone ? 'Ubah' : '+ Isi'}
                     </button>
                   )}
                 </div>
               )}
             </div>
+
+            {/* Identitas + Status + Aksi */}
+            <div id="ktp-card" className="pt-1 border-t border-stone-100 space-y-1.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-stone-500 font-medium">Identitas</span>
+                  {ktpIdentityVerified && ktpIdentityAttached ? (
+                    <span className="font-bold text-emerald-800 flex items-center gap-1">
+                      <span>✓</span> {identityTypeLabel || 'KTP'}
+                      {ktpIdentityNumber && (
+                        <span className="text-stone-600 font-mono font-normal">
+                          {ktpIdentityNumber}
+                        </span>
+                      )}
+                    </span>
+                  ) : ktpIdentityAttached ? (
+                    <span className="font-bold text-amber-800 flex items-center gap-1">
+                      <span>⚠</span> {identityTypeLabel || 'KTP'} Terlampir
+                      <span className="text-stone-500 font-normal">— Menunggu Verifikasi</span>
+                    </span>
+                  ) : (
+                    <span className="text-rose-600 font-semibold bg-rose-50 px-2 py-0.5 rounded text-xs">
+                      ⚠️ Belum ada
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {Boolean(ktpDocPath) && (
+                    <button
+                      type="button"
+                      onClick={() => setIsKtpPreviewOpen(true)}
+                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
+                    >
+                      Lihat
+                    </button>
+                  )}
+                  {!isCancelled && !isCheckedOut && (
+                    <button
+                      type="button"
+                      onClick={() => setIsIdentityModalOpen(true)}
+                      className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                    >
+                      {ktpIdentityVerified || ktpIdentityAttached ? 'Ganti' : 'Lengkapi'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Ringkasan CRM read-only — dari sumber CRM aktual */}
+            <div className="pt-1 border-t border-stone-100 text-xs space-y-1">
+              <span className="text-xs font-bold uppercase tracking-wider text-stone-400 block">
+                Ringkasan CRM
+              </span>
+              {guestCrmStatus === 'loading' ? (
+                <p className="text-stone-400 italic">Memuat data CRM…</p>
+              ) : guestCrmStatus === 'error' ? (
+                <div className="space-y-1.5">
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    {guestCrmError?.message || 'Gagal memuat data CRM.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setGuestCrmRetryCount(c => c + 1)}
+                    className="text-xs font-semibold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                  >
+                    Coba lagi
+                  </button>
+                </div>
+              ) : guestCrmStatus === 'success' && guestCrmData ? (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-stone-500">Kunjungan</span>
+                    <span className="font-semibold text-stone-900 text-right">
+                      {Number(guestCrmData.visit_count || 0)} kali
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-stone-500">Total Malam</span>
+                    <span className="font-semibold text-stone-900 text-right">
+                      {Number(guestCrmData.room_nights || 0)}
+                    </span>
+                  </div>
+                  {guestCrmData.first_stay && (
+                    <div className="flex justify-between gap-2">
+                      <span className="text-stone-500">Kunjungan Pertama</span>
+                      <span className="font-mono text-stone-700 text-right">
+                        {new Date(guestCrmData.first_stay).toLocaleDateString('id-ID')}
+                      </span>
+                    </div>
+                  )}
+                  {guestCrmData.last_stay && (
+                    <div className="flex justify-between gap-2">
+                      <span className="text-stone-500">Kunjungan Terakhir</span>
+                      <span className="font-mono text-stone-700 text-right">
+                        {new Date(guestCrmData.last_stay).toLocaleDateString('id-ID')}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              ) : guestCrmStatus === 'empty' ? (
+                <p className="text-stone-400 italic">
+                  Data CRM belum tersedia untuk tamu ini.
+                </p>
+              ) : primaryGuestId ? (
+                <p className="text-stone-400 italic">
+                  Data CRM belum tersedia untuk tamu ini.
+                </p>
+              ) : (
+                <p className="text-stone-400 italic">
+                  Belum ada relasi tamu utama untuk reservasi ini.
+                </p>
+              )}
+            </div>
           </div>
+
+          {/* ── Card 2: Data Pemesan (separate, full width) ── */}
+          <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-1.5">
+            <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+              Data Pemesan
+            </span>
+            <div className="font-bold text-sm text-stone-900">
+              {data.booker_name || data.guest_name}
+            </div>
+            <div className="text-xs text-stone-600 font-mono">
+              📞 {data.booker_phone || data.guest_phone || '—'}
+            </div>
+          </div>
+
+          {/* ── Section 5: Catatan Reservasi (moved from Riwayat pane) ── */}
+          {(notesEditable || specialRequestsNote) && (
+            <div id="catatan-section" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
+                  Catatan Reservasi
+                </span>
+                {notesEditable && !isEditingNotes && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNotesDraft(specialRequestsNote);
+                      setNotesFeedback(null);
+                      setIsEditingNotes(true);
+                    }}
+                    className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
+                  >
+                    {specialRequestsNote ? 'Edit Catatan' : 'Tambah Catatan'}
+                  </button>
+                )}
+              </div>
+
+              {notesFeedback && (
+                <div
+                  className={`text-xs rounded-lg px-2.5 py-1.5 border ${
+                    notesFeedback.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                      : 'bg-rose-50 text-rose-800 border-rose-200'
+                  }`}
+                >
+                  {notesFeedback.text}
+                </div>
+              )}
+
+              {isEditingNotes ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={notesDraft}
+                    onChange={(e) => setNotesDraft(e.target.value)}
+                    rows={4}
+                    className="w-full text-xs px-2.5 py-2 bg-stone-50 border border-stone-300 rounded-lg text-stone-800 focus:bg-white focus:border-emerald-600 focus:outline-hidden"
+                    placeholder="Contoh: late arrival, high floor"
+                    disabled={savingNotes}
+                  />
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleSaveSpecialRequests}
+                      disabled={savingNotes}
+                      className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                    >
+                      {savingNotes ? 'Menyimpan…' : 'Simpan'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingNotes(false);
+                        setNotesDraft(specialRequestsNote);
+                        setNotesFeedback(null);
+                      }}
+                      className="px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                </div>
+              ) : specialRequestsNote ? (
+                <p className="text-xs text-rose-700 font-semibold whitespace-pre-wrap">{specialRequestsNote}</p>
+              ) : (
+                <p className="text-xs text-stone-500 italic">Belum ada catatan.</p>
+              )}
+            </div>
+          )}
 
           </div>
 
@@ -2282,60 +2581,7 @@ export default function ReservationDetailDrawer({
           {/* Tab Pane: Dokumen — always mounted; display:none when inactive */}
           <div className={`space-y-5 ${isTabVisible('dokumen')}`} role="tabpanel" aria-label="Dokumen">
 
-          {/* KTP Document */}
-          <div id="ktp-card" className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-              Dokumen Identitas (KTP)
-            </span>
-
-            {hasKtpIdentity ? (
-              <div className="flex items-center justify-between text-xs pt-1 border-t border-stone-100">
-                <div>
-                  <span className="font-bold text-emerald-800 flex items-center gap-1">
-                    <span>✓</span> KTP / Identitas Terlampir
-                  </span>
-                  {ktpIdentityNumber && (
-                    <p className="text-xs text-stone-600 font-mono mt-0.5">NIK: <strong className="text-stone-900">{ktpIdentityNumber}</strong></p>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  {Boolean(ktpDocPath) && (
-                    <button
-                      type="button"
-                      onClick={() => setIsKtpPreviewOpen(true)}
-                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg font-semibold text-xs border border-emerald-200 cursor-pointer transition-colors"
-                    >
-                      Lihat KTP
-                    </button>
-                  )}
-                  {!isCancelled && !isCheckedOut && (
-                    <button
-                      type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
-                      className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
-                    >
-                      Ganti KTP
-                    </button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="pt-1 border-t border-stone-100 flex items-center justify-between">
-                <span className="text-xs text-rose-600 font-semibold bg-rose-50 px-2 py-0.5 rounded">
-                  ⚠️ Belum ada KTP (Wajib Check-in)
-                </span>
-                {!isCancelled && !isCheckedOut && (
-                  <button
-                    type="button"
-                    onClick={() => setIsIdentityModalOpen(true)}
-                    className="px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1"
-                  >
-                    <span>📷</span> + Unggah KTP
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
+          {/* KTP card moved to Data Tamu tab (id="ktp-card") */}
 
           {/* Guest Folio Document Shortcut */}
           {onOpenGuestFolio && data?.id && !isCancelled && (
@@ -2429,84 +2675,9 @@ export default function ReservationDetailDrawer({
             </div>
           </div>
 
-          {/* Section 8: Catatan / Special Requests */}
+          </div>
 
-          {(notesEditable || specialRequestsNote) && (
-            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-stone-400">
-                  Catatan / Special Requests
-                </span>
-                {notesEditable && !isEditingNotes && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNotesDraft(specialRequestsNote);
-                      setNotesFeedback(null);
-                      setIsEditingNotes(true);
-                    }}
-                    className="text-xs font-bold text-emerald-800 hover:text-emerald-950 hover:underline cursor-pointer"
-                  >
-                    {specialRequestsNote ? 'Edit Catatan' : 'Tambah Catatan'}
-                  </button>
-                )}
-              </div>
-
-              {notesFeedback && (
-                <div
-                  className={`text-xs rounded-lg px-2.5 py-1.5 border ${
-                    notesFeedback.type === 'success'
-                      ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
-                      : 'bg-rose-50 text-rose-800 border-rose-200'
-                  }`}
-                >
-                  {notesFeedback.text}
-                </div>
-              )}
-
-              {isEditingNotes ? (
-                <div className="space-y-2">
-                  <textarea
-                    value={notesDraft}
-                    onChange={(e) => setNotesDraft(e.target.value)}
-                    rows={4}
-                    className="w-full text-xs px-2.5 py-2 bg-stone-50 border border-stone-300 rounded-lg text-stone-800 focus:bg-white focus:border-emerald-600 focus:outline-hidden"
-                    placeholder="Contoh: late arrival, high floor"
-                    disabled={savingNotes}
-                  />
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      disabled={savingNotes}
-                      onClick={handleSaveSpecialRequests}
-                      className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
-                    >
-                      {savingNotes ? 'Menyimpan...' : 'Simpan'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={savingNotes}
-                      onClick={() => {
-                        setIsEditingNotes(false);
-                        setNotesDraft(specialRequestsNote);
-                        setNotesFeedback(null);
-                      }}
-                      className="px-2.5 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs rounded-lg transition-colors cursor-pointer font-medium"
-                    >
-                      Batal
-                    </button>
-                  </div>
-                </div>
-              ) : specialRequestsNote ? (
-                <p className="text-xs text-rose-700 font-semibold whitespace-pre-wrap">{specialRequestsNote}</p>
-              ) : (
-                <p className="text-xs text-stone-500 italic">Belum ada catatan.</p>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Action Bar Footer — Lifecycle-Aware Single Action Area */}
+          {/* Action Bar Footer — Lifecycle-Aware Single Action Area */}
         <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-3 flex-wrap">
           {/* Left: Printer action + Destructive or Informational State */}
           <div className="flex items-center gap-2">
@@ -2960,11 +3131,31 @@ export default function ReservationDetailDrawer({
                       className="w-full h-[60vh] rounded-lg border-0"
                     />
                   ) : (
-                    <img
-                      src={ktpBlobUrl}
-                      alt={`KTP ${data.guest_name || ''}`}
-                      className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
-                    />
+                    <div className="relative">
+                      <img
+                        src={ktpBlobUrl}
+                        alt={`KTP ${data.guest_name || ''}`}
+                        className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          img.style.display = 'none';
+                          const fb = img.nextElementSibling as HTMLElement | null;
+                          if (fb) fb.style.display = 'flex';
+                        }}
+                      />
+                      <div
+                        style={{ display: 'none' }}
+                        className="flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2"
+                      >
+                        <div className="text-2xl">🖼️</div>
+                        <p className="font-bold text-rose-400">Gagal memuat gambar dokumen</p>
+                        <p className="text-stone-500 text-[11px] max-w-[300px]">
+                          File dokumen terunduh tetapi tidak dapat ditampilkan.
+                          Periksa apakah file masih valid atau hubungkan kembali
+                          dokumen melalui halaman identitas tamu.
+                        </p>
+                      </div>
+                    </div>
                   )
                 ) : null}
               </div>
@@ -3026,11 +3217,30 @@ export default function ReservationDetailDrawer({
                       className="w-full h-[60vh] rounded-lg border-0"
                     />
                   ) : (
-                    <img
-                      src={paymentEvidenceBlobUrl}
-                      alt="Bukti Pembayaran"
-                      className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
-                    />
+                    <div className="relative">
+                      <img
+                        src={paymentEvidenceBlobUrl}
+                        alt="Bukti Pembayaran"
+                        className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-md"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          img.style.display = 'none';
+                          const fb = img.nextElementSibling as HTMLElement | null;
+                          if (fb) fb.style.display = 'flex';
+                        }}
+                      />
+                      <div
+                        style={{ display: 'none' }}
+                        className="flex-col items-center justify-center py-12 text-stone-400 text-xs gap-2"
+                      >
+                        <div className="text-2xl">🖼️</div>
+                        <p className="font-bold text-rose-400">Gagal memuat gambar bukti pembayaran</p>
+                        <p className="text-stone-500 text-[11px] max-w-[300px]">
+                          File terunduh tetapi tidak dapat ditampilkan.
+                          Coba unduh ulang atau pastikan file masih valid.
+                        </p>
+                      </div>
+                    </div>
                   )
                 ) : null}
               </div>

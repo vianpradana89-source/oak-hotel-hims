@@ -580,11 +580,27 @@ export const GuestProfileModal: React.FC<GuestProfileModalProps> = ({
                   </p>
                 </div>
               ) : ktpBlobUrl ? (
-                <img
-                  src={ktpBlobUrl}
-                  alt={`KTP ${guest.full_name}`}
-                  className="max-h-[60vh] max-w-full object-contain rounded-lg shadow-xl border border-stone-800 bg-stone-900"
-                />
+                <div className="relative">
+                  <img
+                    src={ktpBlobUrl}
+                    alt={`KTP ${guest.full_name}`}
+                    className="max-h-[60vh] max-w-full object-contain rounded-lg shadow-xl border border-stone-800 bg-stone-900"
+                    onError={(e) => {
+                      const img = e.currentTarget;
+                      img.style.display = 'none';
+                      const fb = img.nextElementSibling as HTMLElement | null;
+                      if (fb) fb.style.display = 'flex';
+                    }}
+                  />
+                  <div style={{ display: 'none' }} className="flex-col items-center justify-center py-10 text-stone-500 text-xs gap-2">
+                    <div className="text-2xl">🖼️</div>
+                    <p className="font-bold text-rose-400">Gagal memuat gambar dokumen</p>
+                    <p className="text-stone-500 text-[11px] max-w-[280px]">
+                      File terunduh tetapi tidak dapat ditampilkan.
+                      Unggah ulang dokumen melalui alur identitas tamu.
+                    </p>
+                  </div>
+                </div>
               ) : null}
             </div>
 

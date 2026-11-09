@@ -3354,7 +3354,7 @@ app.get('/api/reservations/:id', async (req, res) => {
     let primary_guest_data: any = null;
     try {
       const pgRes = await pool.query(
-        `SELECT rg.guest_id, g.full_name, g.identity_number, g.has_valid_identity, g.phone, g.identity_path, g.identity_storage_key
+        `SELECT rg.guest_id, g.full_name, g.identity_number, g.has_valid_identity, g.phone, g.identity_path, g.identity_storage_key, g.identity_type
          FROM reservation_guests rg
          JOIN guests g ON g.id = rg.guest_id
          WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
@@ -3369,6 +3369,7 @@ app.get('/api/reservations/:id', async (req, res) => {
           primary_guest_phone: pg.phone || null,
           phone: pg.phone || null,
           primary_guest_identity_number: pg.identity_number || null,
+          primary_guest_identity_type: pg.identity_type || 'KTP',
           primary_guest_identity_verified: Boolean(pg.has_valid_identity),
           primary_guest_identity_path: pg.identity_path || null,
           primary_guest_identity_storage_key: pg.identity_storage_key || null
@@ -4555,6 +4556,9 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUp
       payment_amount: body.payment_amount === undefined || String(body.payment_amount).trim() === '' ? undefined : Number(body.payment_amount),
       amount_tendered: body.amount_tendered === undefined || String(body.amount_tendered).trim() === '' ? undefined : Number(body.amount_tendered),
       keep_current_price: body.keep_current_price === true || body.keep_current_price === 'true',
+      // RE-F01: explicitly pass the preserve-rate-plan flag so the service
+      // knows the operator did not explicitly pick a different rate plan.
+      preserve_rate_plan: body.preserve_rate_plan === true || body.preserve_rate_plan === 'true',
       expected_new_total: body.expected_new_total === undefined ? undefined : Number(body.expected_new_total),
       guest_id: nullableId(body.guest_id),
       booker_guest_id: nullableId(body.booker_guest_id),

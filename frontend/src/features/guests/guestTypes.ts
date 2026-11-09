@@ -37,6 +37,7 @@ export interface Guest {
   identity_number?: string | null;
   identity_path?: string | null;
   has_valid_identity?: boolean | null;
+  identity_storage_key?: string | null;
   rt_rw?: string | null;
   village_kelurahan?: string | null;
   district_kecamatan?: string | null;

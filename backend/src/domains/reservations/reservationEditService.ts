@@ -6,6 +6,7 @@ import { syncPrimaryGuestFromReservation, normalizePhone, normalizeDigitsOnly, a
 import { validateDayUseInterval } from '../../utils/dayUseInterval';
 import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
 import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
+import { requirePrimaryGuestIdentity } from './reservationEditIdentityGuard';
 
 export interface ReservationEditPayload {
   property_id?: number;
@@ -30,6 +31,17 @@ export interface ReservationEditPayload {
   guest_id?: number;
   booker_guest_id?: number;
   actor?: string;
+  /**
+   * UI helper flag (RE-F01): set when the payload was produced by the edit
+   * modal WITHOUT the operator explicitly choosing a rate plan in this
+   * session — i.e. the plan value in `rate_plan_id` is merely the
+   * reservation's original plan echoed back by the form (possibly re-
+   * selected by the compatibility effect). When true, the server resolves
+   * `rate_plan_id` to the reservation's current plan so that a catalog
+   * quote for the same plan cannot trigger a hidden reprice. The UI only
+   * omits this flag when the operator actually picked a different plan.
+   */
+  preserve_rate_plan?: boolean;
 }
 
 export interface ReservationEditAvailability {
@@ -540,6 +552,11 @@ export async function applyReservationEdit(
   const targetAdults = payload.adults !== undefined ? Number(payload.adults) : current.adults;
   const targetChildren = payload.children !== undefined ? Number(payload.children) : current.children;
   const targetOtaSourceId = payload.ota_source_id !== undefined ? payload.ota_source_id : current.ota_source_id;
+  // Notes are the canonical special_requests field. Metadata-only edits must
+  // not be silently dropped, and must not touch pricing.
+  const targetSpecialRequests = payload.notes !== undefined
+    ? (String(payload.notes ?? '').trim() ? String(payload.notes).trim() : null)
+    : (current.special_requests ?? null);
 
   // 2.5. Handle canonical guest swap (guest_id / booker_guest_id)
   let guestSwapped = false;
@@ -680,8 +697,36 @@ export async function applyReservationEdit(
     }
   }
 
+  // 2.7. Identity document guard — mirrors checkinGate Gate 3.
+  // Placed after guest resolution so a swapped/newly-created guest without
+  // a stored document is rejected BEFORE any price/billing/overlap mutations.
+  // Applies only to BOOKED-save paths (bookedOnly=true); the preview path
+  // (previewReservationEdit) is not affected.
+  // A missing PRIMARY_GUEST link fails closed; the selected guest_id (when
+  // supplied) must be the guest that ends up linked.
+  if (bookedOnly) {
+    const requestedGuestId = payload.guest_id !== undefined && payload.guest_id !== null
+      ? Number(payload.guest_id)
+      : null;
+    await requirePrimaryGuestIdentity(client, reservationId, propertyId, requestedGuestId);
+  }
+
+  // Targets must be resolved before the metadata-only determination so the
+  // shared pricing logic can tell which price-affecting dimensions actually moved.
+  // Use `payload.X !== undefined ? payload.X : current.X` so that re-saving the
+  // same dimension values (including a different physical room id) does NOT
+  // mark the save as non-metadata-only — only a *changed* value does.
   const targetRoomTypeId = payload.room_type_id || current.current_room_type_id;
-  let targetRatePlanId = payload.rate_plan_id !== undefined ? payload.rate_plan_id : current.rate_plan_id;
+  // RE-F01: When the UI signals preserve_rate_plan, the plan value in
+  // payload.rate_plan_id is the reservation's original plan echoed back by the
+  // form (or a compatibility auto-select). The server resolves it to the
+  // reservation's current plan so a catalog quote for the same plan cannot
+  // trigger a hidden reprice. The flag is omitted only when the operator
+  // actually picked a different plan.
+  const preserveRatePlan = payload.preserve_rate_plan === true;
+  let targetRatePlanId: number | null = preserveRatePlan
+    ? Number(current.rate_plan_id || 0) || null
+    : (payload.rate_plan_id !== undefined ? payload.rate_plan_id : current.rate_plan_id);
   const targetRoomId = payload.room_id !== undefined ? payload.room_id : current.room_id;
   const currentCheckIn = normalizeHotelDate(current.check_in);
   const currentCheckOut = normalizeHotelDate(current.check_out);
@@ -690,9 +735,21 @@ export async function applyReservationEdit(
   const targetStayType = payload.stay_type || current.stay_type || 'OVERNIGHT';
   const targetCheckInTime = payload.check_in_time !== undefined ? payload.check_in_time : current.check_in_time;
   const targetCheckOutTime = payload.check_out_time !== undefined ? payload.check_out_time : current.check_out_time;
+  const currentCheckInTimeVal = current.check_in_time ?? null;
+  const currentCheckOutTimeVal = current.check_out_time ?? null;
 
   const datesChanged = targetCheckIn !== currentCheckIn || targetCheckOut !== currentCheckOut;
   const roomTypeChanged = Number(targetRoomTypeId) !== Number(current.current_room_type_id);
+  const ratePlanChanged = Number(targetRatePlanId || 0) !== Number(current.rate_plan_id || 0);
+  const roomChanged = payload.room_id !== undefined && Number(payload.room_id) !== Number(current.room_id);
+  const stayTypeChanged = payload.stay_type !== undefined && String(payload.stay_type) !== String(current.stay_type || 'OVERNIGHT');
+  const checkInTimeChanged = payload.check_in_time !== undefined && String(targetCheckInTime) !== String(currentCheckInTimeVal);
+  const checkOutTimeChanged = payload.check_out_time !== undefined && String(targetCheckOutTime) !== String(currentCheckOutTimeVal);
+  // Metadata-only: no price-affecting dimension changed. A new catalog quote
+  // must not overwrite the saved selling price for these edits.
+  const metadataOnlyEdit = !datesChanged && !roomTypeChanged && !ratePlanChanged
+    && !roomChanged && !stayTypeChanged && !checkInTimeChanged && !checkOutTimeChanged;
+
   const availabilityCheckOut = targetStayType === 'DAY_USE' && targetCheckIn === targetCheckOut
     ? addDays(targetCheckIn, 1)
     : targetCheckOut;
@@ -715,8 +772,9 @@ export async function applyReservationEdit(
     throw err;
   }
 
-  // 3. OTA stale rate plan guard: if room type changed and current rate plan is incompatible, clear it
-  if (targetRatePlanId && (roomTypeChanged || isOta)) {
+  // Preserve an explicit catalog rate plan for metadata-only saves; only clear
+  // it when a price-affecting dimension actually moves.
+  if (!metadataOnlyEdit && targetRatePlanId !== null && targetRatePlanId !== 0 && (roomTypeChanged || isOta)) {
     const rpCheck = await client.query(
       'SELECT id, room_type_id FROM rate_plans WHERE id = $1 AND property_id = $2',
       [targetRatePlanId, propertyId]
@@ -725,13 +783,8 @@ export async function applyReservationEdit(
       targetRatePlanId = null;
     }
   }
-  const ratePlanChanged = Number(targetRatePlanId) !== Number(current.rate_plan_id);
 
   // 3.5. Complimentary APPROVED mutation guard — only when protected fields actually change
-  const roomChanged = payload.room_id !== undefined && payload.room_id !== current.room_id;
-  const stayTypeChanged = payload.stay_type !== undefined && payload.stay_type !== current.stay_type;
-  const checkInTimeChanged = payload.check_in_time !== undefined && String(payload.check_in_time) !== String(current.check_in_time);
-  const checkOutTimeChanged = payload.check_out_time !== undefined && String(payload.check_out_time) !== String(current.check_out_time);
   const hasProtectedMutation = datesChanged || roomTypeChanged || roomChanged || ratePlanChanged || stayTypeChanged || checkInTimeChanged || checkOutTimeChanged;
   if (hasProtectedMutation) {
     await assertNoApprovedComplimentaryForMutation(client, reservationId, propertyId);
@@ -821,7 +874,7 @@ export async function applyReservationEdit(
   let finalGrandTotal = oldTotalPrice;
   let quoteResult: any = null;
 
-  const needsQuote = !isOta && (datesChanged || roomTypeChanged || ratePlanChanged || stayTypeChanged);
+  const needsQuote = !isOta && !metadataOnlyEdit && (datesChanged || roomTypeChanged || ratePlanChanged || stayTypeChanged);
 
   if (needsQuote) {
     quoteResult = await calculatePriceQuote(client, {
@@ -859,7 +912,7 @@ export async function applyReservationEdit(
     : oldTotalPrice;
   const quotedPriceDifference = quotedTotalAfterDiscount - oldTotalPrice;
 
-  if (keepCurrentPrice && !isOta && quotedPriceDifference >= 0) {
+  if (keepCurrentPrice && !isOta && !metadataOnlyEdit && quotedPriceDifference >= 0) {
     const err: any = new Error('Harga lama hanya dapat dipertahankan ketika quote baru lebih rendah.');
     err.statusCode = 409;
     err.code = 'KEEP_PRICE_NOT_APPLICABLE';
@@ -888,8 +941,9 @@ export async function applyReservationEdit(
          rate_plan_id = $10, check_in = $11, check_out = $12,
          stay_type = $13, start_at = $14, end_at = $15,
          subtotal_amount = $16, service_amount = $17, tax_amount = $18,
-         total_price = $19, remaining_balance = $20, payment_status = $21
-     WHERE id = $22
+         total_price = $19, remaining_balance = $20, payment_status = $21,
+         special_requests = $22
+     WHERE id = $23
      RETURNING *`,
     [
       targetGuestName, targetGuestPhone, targetGuestSegment,
@@ -899,6 +953,7 @@ export async function applyReservationEdit(
       targetStayType, startAt, endAt,
       finalSubtotal, finalService, finalTax,
       finalTotalAfterDiscount, remainingBalance, paymentStatus,
+      targetSpecialRequests,
       reservationId
     ]
   );
@@ -915,9 +970,15 @@ export async function applyReservationEdit(
   }
 
   // 8. Keep snapshot identity aligned with the selected assignment. The money
-  // remains unchanged only for an explicit preserved-price or OTA-manual edit.
-  // When APPROVED complimentary exists, skip snapshot mutation for metadata-only edits.
-  if (keepCurrentPrice || (isOta && hasProtectedMutation)) {
+  // remains unchanged only for an explicit preserved-price, metadata-only, or
+  // OTA-manual edit. When APPROVED complimentary exists, skip snapshot mutation
+  // for metadata-only edits.
+  //
+  // RE-F01: metadata-only edits must NOT call refreshPreservedPriceSnapshotContext
+  // because it sets is_manual_override = TRUE, turning a purely metadata save
+  // into a manual-override state. Deliberate price preservation (keepCurrentPrice)
+  // and OTA manual-rate edits still use the refresh helper as before.
+  if ((keepCurrentPrice || (isOta && hasProtectedMutation)) && !metadataOnlyEdit) {
     await refreshPreservedPriceSnapshotContext(
       client,
       reservationId,
@@ -930,9 +991,28 @@ export async function applyReservationEdit(
     );
     const refreshed = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
     updatedRes.rows[0] = refreshed.rows[0];
+  } else if (metadataOnlyEdit) {
+    // Pure metadata: no price dimension changed; snapshot/override state is
+    // intentionally untouched. Re-read the row so the response reflects the
+    // canonical NET values already written by the main UPDATE.
+    const refreshed = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    updatedRes.rows[0] = refreshed.rows[0];
   } else if (quoteResult && quoteResult.nightly_breakdown) {
     await client.query(`DELETE FROM reservation_nightly_rates WHERE reservation_id = $1`, [reservationId]);
     await createReservationRateSnapshots(client, reservationId, propertyId, quoteResult);
+
+    // RE-F01: createReservationRateSnapshots writes GROSS total_price and
+    // recalculates remaining_balance from GROSS, clobbering the NET values
+    // (total after discount) that the main UPDATE just wrote. Restore the
+    // canonical NET financial state so the row, response, and folio agree.
+    await client.query(
+      `UPDATE reservations
+       SET total_price = $1,
+           remaining_balance = $2,
+           payment_status = $3
+       WHERE id = $4`,
+      [finalTotalAfterDiscount, remainingBalance, paymentStatus, reservationId]
+    );
 
     await client.query(
       `UPDATE folio_entries
@@ -940,6 +1020,11 @@ export async function applyReservationEdit(
        WHERE reservation_id = $5 AND entry_type = 'ROOM_CHARGE' AND is_voided = FALSE`,
       [finalTotalAfterDiscount, finalSubtotal, finalTax, finalService, reservationId]
     );
+
+    // Re-read the final row after all helper writes so the response and audit
+    // reflect the authoritative end-state, not a stale pre-helper object.
+    const finalRow = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
+    updatedRes.rows[0] = finalRow.rows[0];
   }
 
   // 9. Update parent booking booker info
@@ -1020,7 +1105,13 @@ export async function previewReservationEdit(
   }
 
   const targetRoomTypeId = payload.room_type_id || current.current_room_type_id;
-  let targetRatePlanId = payload.rate_plan_id !== undefined ? payload.rate_plan_id : current.rate_plan_id;
+  // RE-F01: same logic as apply path — when preserve_rate_plan is set, the
+  // server resolves the plan to the reservation's current plan so no catalog
+  // quote for a changed plan can trigger a hidden reprice.
+  const preserveRatePlan = payload.preserve_rate_plan === true;
+  let targetRatePlanId: number | null = preserveRatePlan
+    ? Number(current.rate_plan_id || 0) || null
+    : (payload.rate_plan_id !== undefined ? payload.rate_plan_id : current.rate_plan_id);
   const targetCheckIn = payload.check_in || normalizeHotelDate(current.check_in);
   const targetCheckOut = payload.check_out || normalizeHotelDate(current.check_out);
   const targetStayType = payload.stay_type || current.stay_type || 'OVERNIGHT';
@@ -1029,8 +1120,17 @@ export async function previewReservationEdit(
 
   // OTA stale rate plan guard in preview too
   const roomTypeChanged = Number(targetRoomTypeId) !== Number(current.current_room_type_id || current.room_type_id);
+  const ratePlanChanged = Number(targetRatePlanId || 0) !== Number(current.rate_plan_id || 0);
+  const roomChanged = payload.room_id !== undefined && Number(payload.room_id) !== Number(current.room_id);
+  const stayTypeChanged = payload.stay_type !== undefined && String(payload.stay_type) !== String(current.stay_type || 'OVERNIGHT');
+  const datesChanged = targetCheckIn !== normalizeHotelDate(current.check_in) || targetCheckOut !== normalizeHotelDate(current.check_out);
+  // Metadata-only preview: no price-affecting dimension moved. For these, the
+  // UI knows no price decision modal is needed (preserve_price_context: true).
+  const previewMetadataOnly = !datesChanged && !roomTypeChanged && !ratePlanChanged
+    && !roomChanged && !stayTypeChanged;
+
   const isOta = current.ota_source_id != null;
-  if (targetRatePlanId && (roomTypeChanged || isOta)) {
+  if (!preserveRatePlan && targetRatePlanId && (roomTypeChanged || isOta)) {
     const rpCheck = await pool.query(
       'SELECT id, room_type_id FROM rate_plans WHERE id = $1 AND property_id = $2',
       [targetRatePlanId, propertyId]
@@ -1076,14 +1176,29 @@ export async function previewReservationEdit(
     }
   }
 
-  // Calculate new quote (skip for OTA — manual rate is authoritative)
+  // Calculate new quote (skip for OTA — manual rate is authoritative;
+  // also skip for metadata-only non-OTA — no price dimension changed, so
+  // the stored price must not be overwritten by a catalog recalculation)
   let quote: any;
+  const currentTotalPrice = Number(current.total_price || 0);
+  const currentSubtotal = Number(current.subtotal_amount || current.total_price || 0);
+
   if (isOta) {
-    const currentTotalPrice = Number(current.total_price || 0);
     quote = {
       rate_plan: { name: 'OTA Manual Rate' },
       nights: Math.max(1, Math.round((new Date(targetCheckOut).getTime() - new Date(targetCheckIn).getTime()) / 86400000)),
-      room_subtotal: Number(current.subtotal_amount || current.total_price || 0),
+      room_subtotal: currentSubtotal,
+      service_amount: Number(current.service_amount || 0),
+      tax_amount: Number(current.tax_amount || 0),
+      grand_total: currentTotalPrice,
+      nightly_breakdown: []
+    };
+  } else if (previewMetadataOnly) {
+    // Metadata-only: use the stored price directly — no catalog quote.
+    quote = {
+      rate_plan: { name: 'Preserved Price' },
+      nights: Math.max(1, Math.round((new Date(targetCheckOut).getTime() - new Date(targetCheckIn).getTime()) / 86400000)),
+      room_subtotal: currentSubtotal,
       service_amount: Number(current.service_amount || 0),
       tax_amount: Number(current.tax_amount || 0),
       grand_total: currentTotalPrice,
@@ -1102,9 +1217,7 @@ export async function previewReservationEdit(
     });
   }
 
-  const currentTotalPrice = Number(current.total_price || 0);
-  const currentSubtotal = Number(current.subtotal_amount || current.total_price || 0);
-  const newTotalPrice = isOta
+  const newTotalPrice = isOta || previewMetadataOnly
     ? currentTotalPrice
     : Math.max(0, Number(quote.grand_total || 0) - Number(current.discount_amount || 0));
   const settlement = calculateEditSettlement(
@@ -1118,6 +1231,10 @@ export async function previewReservationEdit(
     reservation_id: reservationId,
     property_id: propertyId,
     is_ota: isOta,
+    // RE-F01: UI uses this flag to suppress the price-decision modal when
+    // no price dimension changed and the operator did not explicitly pick a
+    // different rate plan.
+    preserve_price_context: previewMetadataOnly && !isOta && preserveRatePlan,
     current: {
       room_type_id: current.current_room_type_id || current.room_type_id,
       room_id: current.room_id,
@@ -1359,13 +1476,21 @@ export async function executeReservationEditWithPayment(
     // Payment orchestration uses the server-derived required amount. A price
     // increase can be smaller than an existing outstanding balance, or fully
     // covered by prior settlement, so it must not post raw price_difference.
+    //
+    // Payment is OPTIONAL on save: when no payment details are supplied the
+    // edit is committed with the recalculated remaining_balance and the
+    // operator settles later from Detail Reservasi → Pembayaran. The existing
+    // atomic payment validation still applies whenever payment is supplied.
     let paymentRow: any = null;
     let evidenceRow: any = null;
     let savedEvidence: { storageKey: string; absolutePath: string; fileSizeBytes: number } | null = null;
 
-    if (!payload.keep_current_price && settlement.paymentRequired > 0) {
+    const requestedPaymentMethod = String(payload.payment_method || '').trim();
+    const paymentRequested = requestedPaymentMethod.length > 0 || Boolean(file);
+
+    if (!payload.keep_current_price && settlement.paymentRequired > 0 && paymentRequested) {
       const paymentAmount = settlement.paymentRequired;
-      const paymentMethod = String(payload.payment_method || '').trim();
+      const paymentMethod = requestedPaymentMethod;
 
       if (!paymentMethod) {
         const err: any = new Error('Metode pembayaran selisih wajib dipilih.');
