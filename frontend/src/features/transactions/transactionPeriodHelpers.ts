@@ -179,6 +179,14 @@ export function getTransactionPeriodRange(
 export type PenjualanDatePreset = 'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time';
 
 /**
+ * Returns today's hotel business date (Asia/Jakarta) as YYYY-MM-DD.
+ * Uses the canonical `hotelDateFromInstant` to avoid UTC boundary drift.
+ */
+export function hotelDateToday(now: Date = new Date()): string {
+  return hotelDateFromInstant(now);
+}
+
+/**
  * Inclusive start/end for Penjualan period presets, using canonical hotel business date
  * (Asia/Jakarta). All Time sends empty dates so the list stays unscoped.
  */
@@ -444,6 +452,94 @@ export function getTransactionActionMatrix(
     ],
   };
 }
+
+/**
+ * TX-F1-R2-02: Daily-cards hotel-date rollover watcher.
+ *
+ * Creates a lifecycle watcher that detects when the canonical hotel business
+ * date (Asia/Jakarta) changes while a component is mounted (tab left open
+ * overnight, or a tab resumed after a day boundary), and triggers a callback
+ * exactly once per new date.
+ *
+ * Contract (production helper used by TransactionWorkspace):
+ *   - The watcher uses `hotelDateFromInstant` (canonical Asia/Jakarta date)
+ *     and `setInterval`/`visibilitychange` to detect rollover without
+ *     relying on the hotel-date appearing in any React dependency array.
+ *   - Each trigger fires `onRollover(newDate)` with the new hotel date.
+ *   - A stale-response guard is exposed via `isStale(date)`: callers can
+ *     check whether a response that was prepared for an older date should
+ *     be discarded (e.g. a fetch response that straddles a day boundary).
+ *   - `cleanup()` clears the interval and removes the visibility listener.
+ *   - The watcher is idempotent: calling cleanup twice is safe.
+ *
+ * @param getNow  - injectable clock (defaults to `() => new Date()`), used by tests
+ * @param onRollover - called with the new canonical hotel date string when the day changes
+ */
+export function createDailyCardsRolloverWatcher(
+  getNow: () => Date,
+  onRollover: (newHotelDate: string) => void,
+): {
+  cleanup: () => void;
+  /** Returns true if `date` differs from the current tracked hotel date (stale). */
+  isStale: (date: string) => boolean;
+  /** The currently tracked hotel date (empty until first tick or mount). */
+  currentDate: () => string;
+} {
+  let trackedDate = hotelDateFromInstant(getNow());
+  let interval: ReturnType<typeof setInterval> | null = null;
+  let mounted = true;
+
+  const fireIfRolledOver = () => {
+    if (!mounted) return;
+    const newDate = hotelDateFromInstant(getNow());
+    if (newDate !== trackedDate) {
+      trackedDate = newDate;
+      onRollover(newDate);
+    }
+  };
+
+  // Poll every 60 s — cheap enough for a single interval, and ensures we
+  // never miss the boundary by more than ~1 minute in the common case.
+  // `unref()` keeps the interval from pinning the Node event loop open
+  // (critical in tests that run without a browser; in the browser the
+  // reference count is irrelevant and the interval is cleared on unmount).
+  interval = setInterval(fireIfRolledOver, 60_000);
+  if (typeof interval === 'object' && interval !== null && 'unref' in interval) {
+    (interval as unknown as { unref?: () => void }).unref?.();
+  }
+
+  // When the tab is re-focused (resume after long inactivity / overnight),
+  // check immediately so the user sees fresh data without waiting for a tick.
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible') fireIfRolledOver();
+  };
+  let docRef: typeof document | null = null;
+  if (typeof document !== 'undefined') {
+    docRef = document;
+    docRef.addEventListener('visibilitychange', onVisibility);
+  }
+
+  const isStale = (date: string): boolean => date !== trackedDate;
+
+  const cleanup = () => {
+    mounted = false;
+    if (interval !== null) {
+      clearInterval(interval);
+      interval = null;
+    }
+    if (docRef !== null) {
+      docRef.removeEventListener('visibilitychange', onVisibility);
+    }
+  };
+
+  return {
+    cleanup,
+    isStale,
+    currentDate: () => trackedDate,
+  };
+}
+
+export type DailyCardsRolloverWatcher = ReturnType<typeof createDailyCardsRolloverWatcher>;
 
 /**
  * Formats stay period display e.g. "27 Agu – 28 Agu (1 mlm)"

@@ -18,7 +18,9 @@ import {
   shouldShowListSettlementAmounts,
   type PenjualanListItem
 } from './penjualanBidGrouping';
-import { getPenjualanPeriodPresetRange } from './transactionPeriodHelpers';
+import { getPenjualanPeriodPresetRange, hotelDateToday, createDailyCardsRolloverWatcher } from './transactionPeriodHelpers';
+import { fetchTransactionsStaged, type TransactionFetchParams } from './transactionStagedFetch';
+import { getFooterDisplay } from './transactionFooterHelpers';
 import { resolvePenjualanMainRowDetailTarget } from './penjualanDetailTarget';
 import {
   fetchTransactionsApi,
@@ -105,10 +107,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [activeTab, setActiveTab] = useState<'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL'>('SALE');
   const [showVendorSupplierMaster, setShowVendorSupplierMaster] = useState<boolean>(false);
 
-  // LEVEL 2 — DATE PERIOD
-  const [datePreset, setDatePreset] = useState<'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time' | 'custom'>('today');
-  const [startDate, setStartDate] = useState<string>(() => getPenjualanPeriodPresetRange('today').start);
-  const [endDate, setEndDate] = useState<string>(() => getPenjualanPeriodPresetRange('today').end);
+  // LEVEL 2 — DATE PERIOD (default: this_month for all 4 categories)
+  const [datePreset, setDatePreset] = useState<'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time' | 'custom'>('this_month');
+  const [startDate, setStartDate] = useState<string>(() => getPenjualanPeriodPresetRange('this_month').start);
+  const [endDate, setEndDate] = useState<string>(() => getPenjualanPeriodPresetRange('this_month').end);
   const [showCustomDatePicker, setShowCustomDatePicker] = useState<boolean>(false);
 
   // LEVEL 3 — SEARCH & FILTERS
@@ -125,7 +127,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // Pagination
   const [page, setPage] = useState<number>(1);
-  const pageSize = 25;
+  const [pageSize, setPageSize] = useState<number>(30);
+  /** 'SEMUA' mode disables limit/offset navigation; limit is set to total. */
+  const [pageMode, setPageMode] = useState<'PAGED' | 'SEMUA'>('PAGED');
 
   // Search debounce
   const searchTimerRef = useRef<any>(null);
@@ -154,7 +158,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     hapus: 0
   });
   // SCOPE A: Global period summary — independent of activeTab/operational_sheet
-  const [globalSummary, setGlobalSummary] = useState<TransactionSummary>({
+  // (captured from list response; retained for future use but no longer drives the card UI directly)
+  const [_globalSummary, setGlobalSummary] = useState<TransactionSummary>({
     total_sale: 0,
     total_purchase: 0,
     total_expense: 0,
@@ -164,10 +169,41 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     count_expense: 0,
     count_income: 0
   });
+
+  // Daily cards: separate fetch scoped to today (Asia/Jakarta), independent of
+  // activeTab / operationalSheet / search / pageSize. Stale responses are
+  // discarded via a monotonic request id ref.
+  const [dailyCards, setDailyCards] = useState<TransactionSummary>({
+    total_sale: 0,
+    total_purchase: 0,
+    total_expense: 0,
+    total_income: 0,
+    count_sale: 0,
+    count_purchase: 0,
+    count_expense: 0,
+    count_income: 0
+  });
+  const [dailyCardsLoading, setDailyCardsLoading] = useState<boolean>(true);
+  const dailyCardsReqRef = useRef<number>(0);
+  // TX-F1-R1-02: track the propertyId + hotelDate the current card data belongs to.
+  // When a newer request is in flight for a different property, stale values are
+  // never committed. On error, dailyCards is reset to zeros (never keep A's
+  // values when B fails) and dailyCardsError shows a clear retry affordance.
+  const dailyCardsScopeRef = useRef<{ propertyId: number; hotelDate: string }>({ propertyId: 0, hotelDate: '' });
+  const [dailyCardsError, setDailyCardsError] = useState<string | null>(null);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * TX-F1-R2-01: query validity gate for the pagination footer.
+   *  - 'IDLE'  → no successful result yet; totalCount is 0 by init, not a query outcome
+   *  - 'LOADING' → a new query is in flight; the displayed cache must not be labelled as a success
+   *  - 'ERROR' → current query failed (network or incomplete / safety cap)
+   *  - 'SUCCESS' → current query completed; footer range/count is valid
+   * The footer renders stale count/range/navigation only when queryStatus === 'SUCCESS'.
+   */
+  const [queryStatus, setQueryStatus] = useState<'IDLE' | 'LOADING' | 'ERROR' | 'SUCCESS'>('IDLE');
 
   // Modals & Drawers
   const [voidModalOpen, setVoidModalOpen] = useState<boolean>(false);
@@ -255,6 +291,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setStartDate(range.start);
     setEndDate(range.end);
     setPage(1);
+    setPageMode('PAGED');
   };
 
   const loadTransactions = useCallback(async () => {
@@ -262,38 +299,66 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setIsQueryLoading(true);
     setIsLoading(true);
     setError(null);
-    try {
-      const txTypeParam = activeTab === 'ALL' ? undefined : activeTab;
-      const res = await fetchTransactionsApi({
-        property_id: propertyId,
-        transaction_type: txTypeParam,
-        category_code: categoryCode || undefined,
-        department_code: departmentCode || undefined,
-        verification_status: verificationFilter || undefined,
-        receiving_status: receivingFilter || undefined,
-        operational_sheet: operationalStatus !== 'ALL' ? operationalStatus : undefined,
-        start_date: startDate || undefined,
-        end_date: endDate || undefined,
-        search: debouncedSearch.trim() || undefined,
-        limit: pageSize,
-        offset: (page - 1) * pageSize
-      });
+    // TX-F1-R2-01: signal that a new query is in flight so the footer
+    // does not present the previous totalCount as a valid result.
+    setQueryStatus('LOADING');
 
-      if (reqId === currentRequestIdRef.current) {
-        setTransactions(res.transactions || []);
-        setTotalCount(res.total_count || 0);
-        if (res.sheet_counts) {
-          setSheetCounts(res.sheet_counts);
-        }
-        // SCOPE A: Use global_summary for dashboard cards (period-only, tab/sheet-independent)
-        if (res.global_summary) {
-          setGlobalSummary(res.global_summary);
-        }
-        // Table-scoped summary (res.summary) intentionally not stored — cards use globalSummary only.
+    const txTypeParam = activeTab === 'ALL' ? undefined : activeTab;
+    const isSemua = pageMode === 'SEMUA';
+
+    // Build the canonical query context (shared across every staged page)
+    const fetchParams: TransactionFetchParams = {
+      property_id: propertyId,
+      transaction_type: txTypeParam,
+      category_code: categoryCode || undefined,
+      department_code: departmentCode || undefined,
+      verification_status: verificationFilter || undefined,
+      receiving_status: receivingFilter || undefined,
+      operational_sheet: operationalStatus !== 'ALL' ? operationalStatus : undefined,
+      start_date: startDate || undefined,
+      end_date: endDate || undefined,
+      search: debouncedSearch.trim() || undefined,
+    };
+
+    try {
+      const result = await fetchTransactionsStaged(
+        // fetchPage: single-page request (limit ≤ 100 enforced by backend)
+        async (limit, offset) =>
+          fetchTransactionsApi({ ...fetchParams, limit, offset }),
+        fetchParams,
+        isSemua ? 'SEMUA' : 'PAGED',
+        page,
+        pageSize,
+      );
+
+      // Stale-response guard: discard if a newer request was initiated
+      // (filter/property/sheet/mode change while in flight)
+      if (reqId !== currentRequestIdRef.current) return;
+
+      // TX-F1-R1-01: incomplete results (safety cap hit) must NEVER be
+      // committed as a complete "Semua" result. Surface the limit notice
+      // as an error so the UI shows retry instead of a truncated dataset
+      // masquerading as full data.
+      if (result.incomplete) {
+        setError(result.incompleteReason || 'Hasil tidak lengkap — batas sumber daya tercapai.');
+        // TX-F1-R2-01: incomplete = the query did not succeed; the footer
+        // must not present the stale totalCount as a valid query result.
+        setQueryStatus('ERROR');
+        return;
       }
+
+      setTransactions(result.transactions);
+      setTotalCount(result.totalCount);
+      if (result.sheetCounts) setSheetCounts(result.sheetCounts);
+      if (result.globalSummary) setGlobalSummary(result.globalSummary);
+      // TX-F1-R2-01: success — footer may now present totalCount/range/navigation.
+      setQueryStatus('SUCCESS');
     } catch (err: any) {
+      // Stale guard: only surface errors from the CURRENT request
       if (reqId === currentRequestIdRef.current) {
         setError(err.message || 'Gagal memuat daftar transaksi');
+        // TX-F1-R2-01: network/other error — footer must not claim a valid result.
+        setQueryStatus('ERROR');
       }
     } finally {
       if (reqId === currentRequestIdRef.current) {
@@ -312,7 +377,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     startDate,
     endDate,
     debouncedSearch,
-    page
+    page,
+    pageSize,
+    pageMode,
   ]);
 
   useEffect(() => {
@@ -342,6 +409,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   useEffect(() => {
     if (refreshVersion <= 0) return;
     void loadTransactions();
+    // TX-F1-R1-02: invalidate daily cards on any transaction change signal
+    void loadDailyCards();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshVersion]);
 
@@ -355,6 +424,87 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setSoftDeleteModalOpen(false);
     setActiveEditor(null);
   }, [propertyId]);
+
+  // DAILY CARDS: separate fetch scoped to today's hotel date (Asia/Jakarta) + active property.
+  // Independent of activeTab / operationalSheet / search / pageSize / list period.
+  // TX-F1-R1-02: stale responses for a different property are discarded via
+  // dailyCardsScopeRef. On error, dailyCards is reset to zeros and
+  // dailyCardsError is set — never display property A's numbers when property B's
+  // request fails. Invalidated on: property change, transaction mutation,
+  // realtime signal, and hotel-date rollover.
+  const loadDailyCards = useCallback(async () => {
+    const reqId = ++dailyCardsReqRef.current;
+    const today = hotelDateToday();
+    // Record the scope of THIS request so a newer request for a different
+    // property or a later hotel date can be detected on response.
+    dailyCardsScopeRef.current = { propertyId, hotelDate: today };
+    setDailyCardsLoading(true);
+    setDailyCardsError(null);
+    try {
+      const res = await fetchTransactionsApi({
+        property_id: propertyId,
+        start_date: today,
+        end_date: today,
+        limit: 1,
+        offset: 0
+      });
+      // Stale-response guard: discard if a newer request was initiated for a
+      // different property or the hotel date has rolled over.
+      if (reqId === dailyCardsReqRef.current) {
+        setDailyCards(res.global_summary || {
+          total_sale: 0, total_purchase: 0, total_expense: 0, total_income: 0,
+          count_sale: 0, count_purchase: 0, count_expense: 0, count_income: 0
+        });
+        setDailyCardsError(null);
+      }
+    } catch (err: any) {
+      // On failure for the CURRENT scope: reset to zeros + show error,
+      // never keep the previous property's numbers as if they were valid.
+      if (reqId === dailyCardsReqRef.current) {
+        setDailyCards({
+          total_sale: 0, total_purchase: 0, total_expense: 0, total_income: 0,
+          count_sale: 0, count_purchase: 0, count_expense: 0, count_income: 0
+        });
+        setDailyCardsError(
+          err?.response?.data?.message || err?.message || 'Gagal memuat ringkasan harian'
+        );
+      }
+    }
+    if (reqId === dailyCardsReqRef.current) setDailyCardsLoading(false);
+  }, [propertyId]);
+
+  useEffect(() => { void loadDailyCards(); }, [loadDailyCards]);
+
+  // TX-F1-R2-02: hotel-date rollover invalidation for daily cards.
+  // Runs whenever propertyId changes (the initial-load effect above already
+  // handles propertyId). This effect adds the date-rollover trigger: if the
+  // canonical hotel date (Asia/Jakarta) advances while the tab is open,
+  // or the tab is resumed after a day boundary, loadDailyCards() is called
+  // automatically. Cleanup clears the interval + visibility listener so the
+  // watcher never outlives the component mount. Stale responses arriving
+  // for the old date are already discarded by the reqId guard inside
+  // loadDailyCards itself (dailyCardsReqRef).
+  useEffect(() => {
+    const watcher = createDailyCardsRolloverWatcher(
+      () => new Date(),
+      (_newHotelDate) => {
+        // Trigger a fresh fetch for the new hotel date.
+        // Stale-response protection: loadDailyCards increments its own
+        // monotonic reqId so a response that was prepared for the old
+        // date cannot overwrite the new one.
+        void loadDailyCards();
+      },
+    );
+    return () => watcher.cleanup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, loadDailyCards]);
+
+  // PAGE GUARD: clamp page to valid range when totalCount shrinks (e.g. filter changed, data removed).
+  useEffect(() => {
+    if (pageMode === 'SEMUA') return;
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+    if (page > totalPages) setPage(totalPages);
+  }, [totalCount, pageSize, page, pageMode]);
 
   const handleTabChange = (tab: 'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL') => {
     setActiveTab(tab);
@@ -449,6 +599,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       }
       await updatePurchaseLifecycleApi(tx.id, payload);
       await loadTransactions();
+      void loadDailyCards();
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
@@ -485,6 +636,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       }
       await updateExpenseLifecycleApi(tx.id, payload);
       await loadTransactions();
+      void loadDailyCards();
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
@@ -672,6 +824,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       setSelectedTxForSoftDelete(null);
       setDeleteReason('');
       loadTransactions();
+      void loadDailyCards();
       if (detailDrawerOpen && selectedTxIdForDetail === selectedTxForSoftDelete.id) {
         setDetailDrawerOpen(false);
       }
@@ -1211,8 +1364,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     );
   };
 
-  const totalPages = Math.ceil(totalCount / pageSize);
-
   const getSearchPlaceholder = () => {
     switch (activeTab) {
       case 'SALE':
@@ -1258,6 +1409,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         onSuccess={(createdId) => {
           setActiveEditor(null);
           loadTransactions();
+          void loadDailyCards();
           openDetailDrawer(createdId);
         }}
       />
@@ -1281,6 +1433,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           setEditingExpenseId(null);
           setEditingExpenseData(null);
           loadTransactions();
+          void loadDailyCards();
           openDetailDrawer(updatedId);
         }}
       />
@@ -1296,6 +1449,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         onSuccess={(createdId) => {
           setActiveEditor(null);
           loadTransactions();
+          void loadDailyCards();
           openDetailDrawer(createdId);
         }}
       />
@@ -1352,7 +1506,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* 2. FOUR DOMAIN CARDS — replaces tab-button grid */}
+      {/* 2. FOUR DAILY CARDS — hari ini (Asia/Jakarta), independen dari kategori/sheet/periode/size */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {/* PENJUALAN — emerald */}
         <button
@@ -1366,26 +1520,37 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'SALE' ? 'text-emerald-200' : 'text-slate-400'
           }`}>Penjualan</div>
-          {isQueryLoading ? (
+          {dailyCardsLoading ? (
             <div className="space-y-1.5">
               <div className="h-6 w-20 bg-emerald-200/40 animate-pulse rounded" />
               <div className="h-4 w-16 bg-emerald-200/30 animate-pulse rounded" />
+            </div>
+          ) : dailyCardsError ? (
+            <div className="space-y-1">
+              <div className={`text-xs font-semibold ${activeTab === 'SALE' ? 'text-rose-200' : 'text-rose-500'}`}>{dailyCardsError}</div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void loadDailyCards(); }}
+                className={`text-[10px] font-semibold underline cursor-pointer ${activeTab === 'SALE' ? 'text-emerald-200 hover:text-emerald-100' : 'text-rose-500 hover:text-rose-600'}`}
+              >
+                Muat ulang
+              </button>
             </div>
           ) : (
             <>
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'SALE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(globalSummary.total_sale)}
+                {formatIdr(dailyCards.total_sale)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'SALE' ? 'text-emerald-100' : 'text-slate-500'
               }`}>
-                {globalSummary.count_sale} transaksi
+                {dailyCards.count_sale} transaksi · Hari Ini
               </div>
             </>
           )}
-          {activeTab === 'SALE' && !isQueryLoading && (
+          {activeTab === 'SALE' && !dailyCardsLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-emerald-300" />
           )}
         </button>
@@ -1402,26 +1567,37 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'PURCHASE' ? 'text-blue-200' : 'text-slate-400'
           }`}>Pembelian</div>
-          {isQueryLoading ? (
+          {dailyCardsLoading ? (
             <div className="space-y-1.5">
               <div className="h-6 w-20 bg-blue-200/40 animate-pulse rounded" />
               <div className="h-4 w-16 bg-blue-200/30 animate-pulse rounded" />
+            </div>
+          ) : dailyCardsError ? (
+            <div className="space-y-1">
+              <div className={`text-xs font-semibold ${activeTab === 'PURCHASE' ? 'text-rose-200' : 'text-rose-500'}`}>{dailyCardsError}</div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void loadDailyCards(); }}
+                className={`text-[10px] font-semibold underline cursor-pointer ${activeTab === 'PURCHASE' ? 'text-blue-200 hover:text-blue-100' : 'text-rose-500 hover:text-rose-600'}`}
+              >
+                Muat ulang
+              </button>
             </div>
           ) : (
             <>
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'PURCHASE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(globalSummary.total_purchase)}
+                {formatIdr(dailyCards.total_purchase)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'PURCHASE' ? 'text-blue-100' : 'text-slate-500'
               }`}>
-                {globalSummary.count_purchase} transaksi
+                {dailyCards.count_purchase} transaksi · Hari Ini
               </div>
             </>
           )}
-          {activeTab === 'PURCHASE' && !isQueryLoading && (
+          {activeTab === 'PURCHASE' && !dailyCardsLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-blue-300" />
           )}
         </button>
@@ -1438,26 +1614,37 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'EXPENSE' ? 'text-rose-200' : 'text-slate-400'
           }`}>Pengeluaran</div>
-          {isQueryLoading ? (
+          {dailyCardsLoading ? (
             <div className="space-y-1.5">
               <div className="h-6 w-20 bg-rose-200/40 animate-pulse rounded" />
               <div className="h-4 w-16 bg-rose-200/30 animate-pulse rounded" />
+            </div>
+          ) : dailyCardsError ? (
+            <div className="space-y-1">
+              <div className={`text-xs font-semibold ${activeTab === 'EXPENSE' ? 'text-rose-200' : 'text-rose-500'}`}>{dailyCardsError}</div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void loadDailyCards(); }}
+                className={`text-[10px] font-semibold underline cursor-pointer ${activeTab === 'EXPENSE' ? 'text-rose-200 hover:text-rose-100' : 'text-rose-500 hover:text-rose-600'}`}
+              >
+                Muat ulang
+              </button>
             </div>
           ) : (
             <>
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'EXPENSE' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(globalSummary.total_expense)}
+                {formatIdr(dailyCards.total_expense)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'EXPENSE' ? 'text-rose-100' : 'text-slate-500'
               }`}>
-                {globalSummary.count_expense} transaksi
+                {dailyCards.count_expense} transaksi · Hari Ini
               </div>
             </>
           )}
-          {activeTab === 'EXPENSE' && !isQueryLoading && (
+          {activeTab === 'EXPENSE' && !dailyCardsLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-rose-300" />
           )}
         </button>
@@ -1474,26 +1661,37 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${
             activeTab === 'INCOME' ? 'text-teal-200' : 'text-slate-400'
           }`}>Pemasukan</div>
-          {isQueryLoading ? (
+          {dailyCardsLoading ? (
             <div className="space-y-1.5">
               <div className="h-6 w-20 bg-teal-200/40 animate-pulse rounded" />
               <div className="h-4 w-16 bg-teal-200/30 animate-pulse rounded" />
+            </div>
+          ) : dailyCardsError ? (
+            <div className="space-y-1">
+              <div className={`text-xs font-semibold ${activeTab === 'INCOME' ? 'text-rose-200' : 'text-rose-500'}`}>{dailyCardsError}</div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void loadDailyCards(); }}
+                className={`text-[10px] font-semibold underline cursor-pointer ${activeTab === 'INCOME' ? 'text-teal-200 hover:text-teal-100' : 'text-rose-500 hover:text-rose-600'}`}
+              >
+                Muat ulang
+              </button>
             </div>
           ) : (
             <>
               <div className={`text-lg font-bold font-mono leading-tight ${
                 activeTab === 'INCOME' ? 'text-white' : 'text-slate-900'
               }`}>
-                {formatIdr(globalSummary.total_income)}
+                {formatIdr(dailyCards.total_income)}
               </div>
               <div className={`text-[11px] mt-1 font-medium ${
                 activeTab === 'INCOME' ? 'text-teal-100' : 'text-slate-500'
               }`}>
-                {globalSummary.count_income} transaksi
+                {dailyCards.count_income} transaksi · Hari Ini
               </div>
             </>
           )}
-          {activeTab === 'INCOME' && !isQueryLoading && (
+          {activeTab === 'INCOME' && !dailyCardsLoading && (
             <span className="absolute top-3 right-3 w-2 h-2 rounded-full bg-teal-300" />
           )}
         </button>
@@ -1528,11 +1726,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-1.5">
               {[
-                { key: 'today', label: 'Hari Ini' },
-                { key: 'yesterday', label: 'Kemarin' },
                 { key: 'this_month', label: 'Bulan Ini' },
-                { key: 'last_month', label: 'Bulan Lalu' },
-                { key: 'all_time', label: 'All Time' }
+                { key: 'last_month', label: 'Bulan Lalu' }
               ].map((p) => (
                 <button
                   key={p.key}
@@ -1555,7 +1750,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                 }`}
               >
-                Kustom...
+                Pilih Tanggal
               </button>
               {(activeTab === 'SALE' || activeTab === 'ALL') && (
                 <span
@@ -1565,6 +1760,30 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   Aktivitas Periode
                 </span>
               )}
+
+              {/* Baris per halaman — dipindah dari footer; selalu tersedia di semua state */}
+              <div className="flex items-center gap-1.5 ml-1">
+                <label className="text-[11px] text-slate-400 shrink-0">Baris</label>
+                <select
+                  value={queryStatus === 'LOADING' ? (pageMode === 'SEMUA' ? 'semua' : String(pageSize)) : (pageMode === 'SEMUA' ? 'semua' : String(pageSize))}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'semua') {
+                      setPageMode('SEMUA');
+                    } else {
+                      setPageSize(Number(v));
+                      setPageMode('PAGED');
+                      setPage(1);
+                    }
+                  }}
+                  className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 font-medium focus:outline-hidden focus:ring-1 focus:ring-emerald-400 cursor-pointer"
+                >
+                  <option value="30">30</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="semua">Semua</option>
+                </select>
+              </div>
             </div>
 
             {/* Contextual create action — right side */}
@@ -1616,6 +1835,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   setStartDate(e.target.value);
                   setDatePreset('custom');
                   setPage(1);
+                  setPageMode('PAGED');
                 }}
                 className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 font-medium"
               />
@@ -1627,6 +1847,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   setEndDate(e.target.value);
                   setDatePreset('custom');
                   setPage(1);
+                  setPageMode('PAGED');
                 }}
                 className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 font-medium"
               />
@@ -2862,33 +3083,92 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           )}
         </div>
 
-        {/* Pagination Footer */}
-        {totalPages > 1 && (
-          <div className="p-4 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between text-xs text-slate-500">
-            <div>
-              Menampilkan <strong>{transactions.length}</strong> dari <strong>{totalCount}</strong> transaksi
+        {/* Pagination Footer — TX-F1-R1-03 + TX-F1-R2-01: dropdown selalu terlihat;
+            count/rentang/navigation hanya ditampilkan saat hasil query sekarang valid (queryStatus === 'SUCCESS').
+            Saat LOADING (query baru in-flight) atau ERROR (gagal / cap incomplete) footer
+            tidak mengklaim total lama sebagai hasil query berhasil — dropdown Baris tetap tersedia. */}
+        {(() => {
+          // TX-F1-R2-01: delegate display logic to getFooterDisplay — the exact
+          // helper validated by test/transaction_footer_status_test.ts.
+          const footer = getFooterDisplay(queryStatus, pageMode, pageSize, page, totalCount);
+
+          return (
+            <div className="px-4 py-3 border-t border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+              {/* Left: count / range — only shown when result is valid */}
+              {footer.showLoadingSpinner ? (
+                <div className="flex items-center gap-2 text-slate-400">
+                  <div className="w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-[11px] font-medium">{footer.rightContent}</span>
+                </div>
+              ) : footer.showErrorHint ? (
+                <div className="flex items-center gap-2 text-rose-500">
+                  <span className="text-[11px] font-medium">{footer.rightContent}</span>
+                  {footer.showReturnToPageButton && (
+                    <button
+                      onClick={() => { setPageMode('PAGED'); setPage(1); }}
+                      className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-900 cursor-pointer"
+                    >
+                      Kembali ke halaman
+                    </button>
+                  )}
+                </div>
+              ) : pageMode === 'SEMUA' ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500">{footer.rightContent}</span>
+                  {footer.showReturnToPageButton && (
+                    <button
+                      onClick={() => { setPageMode('PAGED'); setPage(1); }}
+                      className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-900 cursor-pointer"
+                    >
+                      Kembali ke halaman
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500">{footer.rightContent}</span>
+                </div>
+              )}
+
+              {/* Right: page navigation — PAGED mode only, results valid */}
+              {footer.showPageNav && footer.pageNumbers && (
+                <div className="flex items-center gap-1">
+                  <button
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="px-2 py-1 border border-slate-200 rounded-lg bg-white text-[11px] font-semibold disabled:opacity-40 hover:bg-slate-100 transition-colors cursor-pointer"
+                  >
+                    ‹
+                  </button>
+                  {footer.pageNumbers.map((p, i) =>
+                    typeof p === 'number' ? (
+                      <button
+                        key={i}
+                        onClick={() => setPage(p)}
+                        className={`min-w-[24px] px-1.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                          p === page
+                            ? 'bg-emerald-700 text-white'
+                            : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ) : (
+                      <span key={i} className="px-1 text-[11px] text-slate-400">…</span>
+                    )
+                  )}
+                  <button
+                    disabled={page >= Math.max(1, Math.ceil(totalCount / pageSize))}
+                    onClick={() => setPage((p) => Math.min(Math.max(1, Math.ceil(totalCount / pageSize)), p + 1))}
+                    className="px-2 py-1 border border-slate-200 rounded-lg bg-white text-[11px] font-semibold disabled:opacity-40 hover:bg-slate-100 transition-colors cursor-pointer"
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-1">
-              <button
-                disabled={page <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className="px-3 py-1.5 border border-slate-200 rounded-lg bg-white disabled:opacity-40 hover:bg-slate-100 transition-colors cursor-pointer font-medium"
-              >
-                Sebelumnya
-              </button>
-              <span className="px-3 py-1.5 font-semibold text-slate-700">
-                Halaman {page} dari {totalPages}
-              </span>
-              <button
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                className="px-3 py-1.5 border border-slate-200 rounded-lg bg-white disabled:opacity-40 hover:bg-slate-100 transition-colors cursor-pointer font-medium"
-              >
-                Selanjutnya
-              </button>
-            </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
       )}
 
@@ -2904,6 +3184,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         }}
         onSuccess={() => {
           loadTransactions();
+          void loadDailyCards();
         }}
       />
 
@@ -3060,6 +3341,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         }}
         onTransactionUpdated={() => {
           loadTransactions();
+          void loadDailyCards();
         }}
       />
       {/* PURCHASE-2C: Supplier Bank Quick Info Popover */}
