@@ -326,15 +326,15 @@ export async function getBookingCreateAvailability(
              AND (
                (conflict.stay_type = 'DAY_USE' AND conflict.start_at < ($5::timestamptz + ($6 || ' minutes')::interval) AND (conflict.end_at + ($6 || ' minutes')::interval) > $4::timestamptz)
                OR
-               (conflict.stay_type = 'OVERNIGHT' AND (
-                 (conflict.check_in < $4::date AND conflict.check_out > $4::date)
-                 OR (conflict.check_in::date = $4::date AND $5::timestamptz > (conflict.check_in::date + TIME '14:00:00' - ($6 || ' minutes')::interval))
-                 OR (conflict.check_out::date = $4::date AND $4::timestamptz < (conflict.check_out::date + TIME '12:00:00' + ($6 || ' minutes')::interval))
-               ))
+               (conflict.stay_type = 'OVERNIGHT' AND
+                ((conflict.check_in::date + TIME '14:00:00') AT TIME ZONE $7)
+                  < ($5::timestamptz + ($6 || ' minutes')::interval)
+                AND (((conflict.check_out::date + TIME '12:00:00') AT TIME ZONE $7)
+                  + ($6 || ' minutes')::interval) > $4::timestamptz)
              )
          )
        ORDER BY rt.display_order, rt.id, r.room_number`,
-      [propertyId, checkIn, effectiveCheckOut, interval.startAt, interval.endAt, CREATE_AVAILABILITY_DAY_USE_BUFFER_MINUTES]
+      [propertyId, checkIn, effectiveCheckOut, interval.startAt, interval.endAt, CREATE_AVAILABILITY_DAY_USE_BUFFER_MINUTES, propertyTimezone]
     );
     return {
       property_id: propertyId,

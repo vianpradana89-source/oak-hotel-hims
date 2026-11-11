@@ -417,6 +417,14 @@ async function hydrateDeposit(client: PoolClient | Pool, depositId: number): Pro
   return { ...deposit, original_amount: asInteger(deposit.original_amount), events, balance: deriveDepositBalance(events) };
 }
 
+type EvidenceResourceOwner = {
+  registerStorageKey(storageKey: string): void;
+  isOwnedByCaller(): boolean;
+  releaseOwnedEvidence(): Promise<void>;
+};
+
+type EvidenceRegisteringOwner = Pick<EvidenceResourceOwner, 'registerStorageKey' | 'isOwnedByCaller'>;
+
 export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Promise<any> {
   const propertyId = requirePositiveInteger(input.propertyId, 'property_id');
   const reservationId = requirePositiveInteger(input.reservationId, 'reservation_id');
@@ -427,100 +435,139 @@ export async function receiveDeposit(pool: Pool, input: ReceiveDepositInput): Pr
   const scope = validateScope(input.scope);
   const purpose = normalizeDepositPurpose(input.purpose);
 
-  let savedStorageKey: string | null = null;
   const client = await pool.connect();
+  let ownedStorageKey: string | null = null;
+  const owner: EvidenceResourceOwner = {
+    registerStorageKey(storageKey) {
+      ownedStorageKey = storageKey;
+    },
+    isOwnedByCaller() {
+      return true;
+    },
+    releaseOwnedEvidence() {
+      const key = ownedStorageKey;
+      ownedStorageKey = null;
+      return key ? deleteEvidenceFile(key).catch(() => {}) : Promise.resolve();
+    }
+  };
   try {
     await client.query('BEGIN');
-    await lockIdempotencyKey(client, propertyId, idempotencyKey);
-    const reservation = await lockReservation(client, propertyId, reservationId);
-
-    const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'RECEIVED');
-    if (replay) {
-      assertReplayMatches(replay, { reservationId, amount, paymentMethod: method });
-      const existing = await hydrateDeposit(client, Number(replay.deposit_id));
-      await client.query('COMMIT');
-      return { ...existing, idempotent_replay: true };
-    }
-    assertReservationOpenForDeposit(reservation, 'receive');
-
-    // For BOOKING_GROUP: validate booking ownership
-    const resolvedBookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
-    if (scope === 'BOOKING_GROUP') {
-      if (!resolvedBookingId) {
-        throw domainError(400, 'BOOKING_REQUIRED', 'BOOKING_GROUP deposit requires reservation to be linked to a booking');
-      }
-      await validateGroupOwnership(client, propertyId, reservationId, resolvedBookingId);
-    }
-
-    const depositNumber = await generateDepositNumber(client, propertyId, 'DEP');
-    const paymentResult = await client.query(
-      `INSERT INTO payment_transactions (
-         reservation_id, property_id, transaction_type, amount, payment_method,
-         reference_code, status, created_by, booking_id, scope
-       ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6, $7, $8)
-       RETURNING *`,
-      [reservationId, propertyId, amount, method, depositNumber, input.actor.name, resolvedBookingId, scope]
-    );
-    const payment = paymentResult.rows[0];
-
-    let evidence: any = null;
-    if (input.evidence) {
-      const saved = await saveEvidenceFile(propertyId, input.evidence);
-      savedStorageKey = saved.storageKey;
-      evidence = await insertEvidence(
-        client,
-        propertyId,
-        reservationId,
-        Number(payment.id),
-        input.evidence,
-        saved.storageKey,
-        input.evidenceNote || null,
-        input.actor
-      );
-    }
-
-    const depositResult = await client.query(
-      `INSERT INTO deposits (
-         property_id, reservation_id, deposit_number, original_amount,
-         payment_method, status, received_by, notes, booking_id, scope, purpose
-       ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, $9, $10)
-       RETURNING *`,
-      [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, resolvedBookingId, scope, purpose]
-    );
-    const deposit = depositResult.rows[0];
-
-    const eventResult = await client.query(
-      `INSERT INTO deposit_events (
-         deposit_id, property_id, reservation_id, event_type, amount,
-         payment_transaction_id, idempotency_key, performed_by, notes
-       ) VALUES ($1, $2, $3, 'RECEIVED', $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [deposit.id, propertyId, reservationId, amount, payment.id, idempotencyKey, input.actor.name, input.notes || null]
-    );
-
-    const balance = await updateStatusProjection(client, Number(deposit.id));
-    await logDepositAudit(client, 'DEPOSIT_RECEIVED', propertyId, reservationId, {
-      deposit_id: deposit.id,
-      deposit_number: depositNumber,
-      deposit_event_id: eventResult.rows[0].id,
-      payment_transaction_id: payment.id,
-      amount,
-      payment_method: method,
-      purpose,
-      evidence_id: evidence?.id || null,
-      actor_user_id: input.actor.userId,
-      actor_name: input.actor.name
-    }, idempotencyKey);
-
+    const result = await receiveDepositInTransaction(client, input, owner);
     await client.query('COMMIT');
-    return { ...deposit, original_amount: amount, event: eventResult.rows[0], payment, evidence, balance };
+    return result;
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
-    if (savedStorageKey) await deleteEvidenceFile(savedStorageKey).catch(() => {});
+    await owner.releaseOwnedEvidence();
     throw error;
   } finally {
     client.release();
   }
+}
+
+export async function receiveDepositInTransaction(
+  client: PoolClient,
+  input: ReceiveDepositInput,
+  owner?: EvidenceRegisteringOwner
+): Promise<any> {
+  const propertyId = requirePositiveInteger(input.propertyId, 'property_id');
+  const reservationId = requirePositiveInteger(input.reservationId, 'reservation_id');
+  const amount = requirePositiveInteger(input.amount, 'amount');
+  const method = normalizePaymentMethod(input.paymentMethod);
+  const idempotencyKey = validateIdempotencyKey(input.idempotencyKey);
+  validateEvidence(input.evidence);
+  const scope = validateScope(input.scope);
+  const purpose = normalizeDepositPurpose(input.purpose);
+
+  await lockIdempotencyKey(client, propertyId, idempotencyKey);
+  const reservation = await lockReservation(client, propertyId, reservationId);
+
+  const replay = await findIdempotentEvent(client, propertyId, idempotencyKey, 'RECEIVED');
+  if (replay) {
+    assertReplayMatches(replay, { reservationId, amount, paymentMethod: method });
+    const existing = await hydrateDeposit(client, Number(replay.deposit_id));
+    return { ...existing, idempotent_replay: true };
+  }
+  assertReservationOpenForDeposit(reservation, 'receive');
+
+  // For BOOKING_GROUP: validate booking ownership
+  const resolvedBookingId = reservation.booking_id ? Number(reservation.booking_id) : null;
+  if (scope === 'BOOKING_GROUP') {
+    if (!resolvedBookingId) {
+      throw domainError(400, 'BOOKING_REQUIRED', 'BOOKING_GROUP deposit requires reservation to be linked to a booking');
+    }
+    await validateGroupOwnership(client, propertyId, reservationId, resolvedBookingId);
+  }
+
+  // New evidence requires a registration owner before numbering/receipt writes.
+  // Replay above creates no file and remains compatible without an owner.
+  if (input.evidence && (!owner || typeof owner.registerStorageKey !== 'function')) {
+    throw domainError(400, 'EVIDENCE_OWNER_REQUIRED',
+      'Evidence receipt requires a registering owner to track storage keys');
+  }
+
+  const depositNumber = await generateDepositNumber(client, propertyId, 'DEP');
+  const paymentResult = await client.query(
+    `INSERT INTO payment_transactions (
+       reservation_id, property_id, transaction_type, amount, payment_method,
+       reference_code, status, created_by, booking_id, scope
+     ) VALUES ($1, $2, 'DEPOSIT', $3, $4, $5, 'SUCCESS', $6, $7, $8)
+     RETURNING *`,
+    [reservationId, propertyId, amount, method, depositNumber, input.actor.name, resolvedBookingId, scope]
+  );
+  const payment = paymentResult.rows[0];
+
+  let evidence: any = null;
+  if (input.evidence) {
+    const saved = await saveEvidenceFile(propertyId, input.evidence);
+    // Ownership evidence is registered immediately after save so that the
+    // caller can compensate even if a later query inside this core throws.
+    owner!.registerStorageKey(saved.storageKey);
+    evidence = await insertEvidence(
+      client,
+      propertyId,
+      reservationId,
+      Number(payment.id),
+      input.evidence,
+      saved.storageKey,
+      input.evidenceNote || null,
+      input.actor
+    );
+  }
+
+  const depositResult = await client.query(
+    `INSERT INTO deposits (
+       property_id, reservation_id, deposit_number, original_amount,
+       payment_method, status, received_by, notes, booking_id, scope, purpose
+     ) VALUES ($1, $2, $3, $4, $5, 'RECEIVED', $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [propertyId, reservationId, depositNumber, amount, method, input.actor.name, input.notes || null, resolvedBookingId, scope, purpose]
+  );
+  const deposit = depositResult.rows[0];
+
+  const eventResult = await client.query(
+    `INSERT INTO deposit_events (
+       deposit_id, property_id, reservation_id, event_type, amount,
+       payment_transaction_id, idempotency_key, performed_by, notes
+     ) VALUES ($1, $2, $3, 'RECEIVED', $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [deposit.id, propertyId, reservationId, amount, payment.id, idempotencyKey, input.actor.name, input.notes || null]
+  );
+
+  const balance = await updateStatusProjection(client, Number(deposit.id));
+  await logDepositAudit(client, 'DEPOSIT_RECEIVED', propertyId, reservationId, {
+    deposit_id: deposit.id,
+    deposit_number: depositNumber,
+    deposit_event_id: eventResult.rows[0].id,
+    payment_transaction_id: payment.id,
+    amount,
+    payment_method: method,
+    purpose,
+    evidence_id: evidence?.id || null,
+    actor_user_id: input.actor.userId,
+    actor_name: input.actor.name
+  }, idempotencyKey);
+
+  return { ...deposit, original_amount: amount, event: eventResult.rows[0], payment, evidence, balance };
 }
 
 export async function applyDeposit(pool: Pool, input: ApplyDepositInput): Promise<any> {

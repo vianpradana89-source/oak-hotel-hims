@@ -137,6 +137,29 @@ import {
   hasBookingLevelPaymentInput,
   stayChargeLineGrosses
 } from './domains/reservations/reservationBilling';
+import { isBookingCreateRequest, buildLegacyBookingCacheKey } from './domains/reservations/bookingCreateHttpService';
+import { buildEvidenceDescriptor } from './domains/reservations/bookingCreateContextService';
+import { computeBookingCreateFingerprint } from './domains/reservations/bookingCreateRequestService';
+import { normalizeBookingPaymentIntent, BookingPaymentIntent } from './domains/reservations/bookingPaymentIntentService';
+import {
+  evaluateBookingPaymentGates,
+  buildOrdinaryPaymentPlan,
+  resolveBookingRequestKey,
+  convertFileToEvidence,
+  validateDpReceiptMethod,
+  buildDpReceiptPlan,
+  callDpReceiptInBookingTransaction,
+  buildDpResultMetadata
+} from './domains/reservations/bookingCreatePaymentService';
+import {
+  prepareExplicitBookingCreateContext,
+  readBookingCreateEndpointReplay,
+  claimBookingCreateEndpoint,
+  finalizeBookingCreateEndpoint,
+  type ExplicitBookingCreateContext,
+  BOOKING_CREATE_ENDPOINT_FP_VERSION
+} from './domains/reservations/bookingCreateEndpointService';
+import { receiveDepositInTransaction } from './domains/deposits/depositService';
 import { createRoomMoveRouter } from './domains/reservations/roomMoveRouter';
 import { createReservationSpecialRequestsRouter } from './domains/reservations/reservationSpecialRequestsRouter';
 import { createComplimentaryRouter } from './domains/reservations/complimentaryRouter';
@@ -359,6 +382,113 @@ const computeBillingSummary = (baseSubtotal: any, discountAmountInput: any, disc
 
 // Idempotency middleware
 import { computeRequestHash } from './utils/hash';
+
+// Module-level pool reference, set after Pool construction (below).
+// The extracted cache body reads this so tests can pass a mock instead.
+let __oakGlobalPoolRef: any = null;
+
+/**
+ * Named global idempotency cache body (three-arg Express middleware signature).
+ * Extracted so the POST /api/bookings global-bypass test can exercise the
+ * actual production logic without opening a Pool or server.
+ *
+ * The returned closure is the real cache logic. Callers that only need to
+ * invoke the cache body directly (tests) pass a mock pool via the optional
+ * argument. When no argument is given, the module-level `pool` is used.
+ */
+function globalIdempotencyCacheBody(poolOverride?: any) {
+  return async function globalIdempotencyCache(req: any, res: any, next: any): Promise<void> {
+    const effectivePool: any = poolOverride ?? __oakGlobalPoolRef ?? pool;
+    const key = req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || req.headers['Idempotency-Key'.toLowerCase()];
+    if (!key) return next();
+    const idKey = String(key);
+    try {
+      const reqHash = computeRequestHash(req.method, req.path, req.body);
+      const row = await effectivePool.query('SELECT request_hash, response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [idKey]);
+      if (hasRows(row)) {
+        const r = row.rows[0];
+        // expired
+        if (r.expires_at && new Date(r.expires_at) < new Date()) {
+          await effectivePool.query('DELETE FROM idempotency_keys WHERE key = $1', [idKey]);
+          return next();
+        }
+        if (r.request_hash !== reqHash) {
+          return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
+        }
+        if (r.response_body) {
+          res.setHeader('X-Idempotency', 'HIT');
+          return res.status(r.status_code || 200).send(r.response_body);
+        }
+        const waitSeconds = Number(process.env.IDEMPOTENCY_WAIT_SECONDS || 10);
+        const intervalMs = 500;
+        const maxIter = Math.ceil((waitSeconds * 1000) / intervalMs);
+        for (let i = 0; i < maxIter; i++) {
+          await new Promise((r) => setTimeout(r, intervalMs));
+          const check = await effectivePool.query('SELECT response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [idKey]);
+          if (hasRows(check) && check.rows[0].response_body) {
+            const cr = check.rows[0];
+            res.setHeader('X-Idempotency', 'HIT');
+            return res.status(cr.status_code || 200).send(cr.response_body);
+          }
+        }
+        return res.status(202).json({ status: 'IN_PROGRESS' });
+      }
+
+      // Insert a placeholder to mark in-progress
+      const expiresAt = new Date(Date.now() + (Number(process.env.IDEMPOTENCY_TTL_MINUTES || 1440) * 60 * 1000));
+      try {
+        await effectivePool.query('INSERT INTO idempotency_keys (key, request_hash, expires_at) VALUES ($1, $2, $3)', [idKey, reqHash, expiresAt.toISOString()]);
+      } catch (insertErr: any) {
+        if (insertErr.code === '23505') {
+          const waitSeconds = Number(process.env.IDEMPOTENCY_WAIT_SECONDS || 10);
+          const intervalMs = 500;
+          const maxIter = Math.ceil((waitSeconds * 1000) / intervalMs);
+          for (let i = 0; i < maxIter; i++) {
+            await new Promise((r) => setTimeout(r, intervalMs));
+            const check = await effectivePool.query('SELECT response_body, status_code, expires_at, request_hash FROM idempotency_keys WHERE key = $1', [idKey]);
+            if (hasRows(check)) {
+              const cr = check.rows[0];
+              if (cr.request_hash !== reqHash) {
+                return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
+              }
+              if (cr.response_body) {
+                res.setHeader('X-Idempotency', 'HIT');
+                return res.status(cr.status_code || 200).send(cr.response_body);
+              }
+            }
+          }
+          return res.status(202).json({ status: 'IN_PROGRESS' });
+        }
+        throw insertErr;
+      }
+      (req as any)._idempotency_key = idKey;
+      (req as any)._request_hash = reqHash;
+
+      const originalSend = res.send.bind(res);
+      res.send = (body: any) => {
+        if (idKey) {
+          const statusCode = res.statusCode || 200;
+          const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+          let headersStr = '{}';
+          try {
+            headersStr = JSON.stringify(res.getHeaders ? res.getHeaders() : {});
+          } catch (_e) {}
+          effectivePool.query(
+            'UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4',
+            [bodyStr, headersStr, statusCode, idKey]
+          ).catch((err: any) => console.error('Error persisting idempotency key', err));
+        }
+        return originalSend(body);
+      };
+
+      return next();
+    } catch (err) {
+      console.error('Idempotency middleware error', err);
+      return res.status(500).json({ status: 'ERROR', message: 'Idempotency middleware error' });
+    }
+  };
+}
+
 app.use(async (req, res, next) => {
   // Only for mutating methods
   if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();
@@ -409,98 +539,14 @@ app.use(async (req, res, next) => {
   ) {
     return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'Not Found' });
   }
-  const key = req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || req.headers['Idempotency-Key'.toLowerCase()];
-  if (!key) return next();
-
-  const idKey = String(key);
-  try {
-    const reqHash = computeRequestHash(req.method, req.path, req.body);
-    const row = await pool.query('SELECT request_hash, response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [idKey]);
-    if (hasRows(row)) {
-      const r = row.rows[0];
-      // expired
-      if (r.expires_at && new Date(r.expires_at) < new Date()) {
-        // delete expired and allow processing
-        await pool.query('DELETE FROM idempotency_keys WHERE key = $1', [idKey]);
-        return next();
-      }
-      if (r.request_hash !== reqHash) {
-        return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
-      }
-      if (r.response_body) {
-        res.setHeader('X-Idempotency', 'HIT');
-        return res.status(r.status_code || 200).send(r.response_body);
-      }
-        // in-progress: wait for completion up to a configured wait time
-        const waitSeconds = Number(process.env.IDEMPOTENCY_WAIT_SECONDS || 10);
-        const intervalMs = 500;
-        const maxIter = Math.ceil((waitSeconds * 1000) / intervalMs);
-        for (let i = 0; i < maxIter; i++) {
-          await new Promise((r) => setTimeout(r, intervalMs));
-          const check = await pool.query('SELECT response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [idKey]);
-          if (hasRows(check) && check.rows[0].response_body) {
-            const cr = check.rows[0];
-            res.setHeader('X-Idempotency', 'HIT');
-            return res.status(cr.status_code || 200).send(cr.response_body);
-          }
-        }
-        // still in-progress
-        return res.status(202).json({ status: 'IN_PROGRESS' });
-      }
-
-    // Insert a placeholder to mark in-progress
-    const expiresAt = new Date(Date.now() + (Number(process.env.IDEMPOTENCY_TTL_MINUTES || 1440) * 60 * 1000));
-    try {
-      await pool.query('INSERT INTO idempotency_keys (key, request_hash, expires_at) VALUES ($1, $2, $3)', [idKey, reqHash, expiresAt.toISOString()]);
-    } catch (insertErr: any) {
-      if (insertErr.code === '23505') {
-        const waitSeconds = Number(process.env.IDEMPOTENCY_WAIT_SECONDS || 10);
-        const intervalMs = 500;
-        const maxIter = Math.ceil((waitSeconds * 1000) / intervalMs);
-        for (let i = 0; i < maxIter; i++) {
-          await new Promise((r) => setTimeout(r, intervalMs));
-          const check = await pool.query('SELECT response_body, status_code, expires_at, request_hash FROM idempotency_keys WHERE key = $1', [idKey]);
-          if (hasRows(check)) {
-            const cr = check.rows[0];
-            if (cr.request_hash !== reqHash) {
-              return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
-            }
-            if (cr.response_body) {
-              res.setHeader('X-Idempotency', 'HIT');
-              return res.status(cr.status_code || 200).send(cr.response_body);
-            }
-          }
-        }
-        return res.status(202).json({ status: 'IN_PROGRESS' });
-      }
-      throw insertErr;
-    }
-    // Attach idempotency key to request for later saving
-    (req as any)._idempotency_key = idKey;
-    (req as any)._request_hash = reqHash;
-
-    const originalSend = res.send.bind(res);
-    res.send = (body: any) => {
-      if (idKey) {
-        const statusCode = res.statusCode || 200;
-        const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
-        let headersStr = '{}';
-        try {
-          headersStr = JSON.stringify(res.getHeaders ? res.getHeaders() : {});
-        } catch (_e) {}
-        pool.query(
-          'UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 WHERE key = $4',
-          [bodyStr, headersStr, statusCode, idKey]
-        ).catch((err: any) => console.error('Error persisting idempotency key', err));
-      }
-      return originalSend(body);
-    };
-
-    return next();
-  } catch (err) {
-    console.error('Idempotency middleware error', err);
-    return res.status(500).json({ status: 'ERROR', message: 'Idempotency middleware error' });
-  }
+  // Unit 3C-02: bypass cache global untuk POST /api/bookings (semua varian
+  // kapitalisasi + trailing slash, query string tidak termasuk dalam req.path).
+  // Dedup booking handled di domain (booking_create_requests + legacy scoped
+  // cache setelah auth/property authorization). Cache global TIDAK dipakai
+  // agar HIT tidak pernah melewati auth/property-scope.
+  if (isBookingCreateRequest(req.method, req.path)) return next();
+  // Delegate to the extracted global cache body (non-booking paths only).
+  await globalIdempotencyCacheBody()(req, res, next);
 });
 
 
@@ -511,6 +557,7 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'secretpassword',
   database: process.env.DB_NAME || 'oak_hotel_db',
 });
+__oakGlobalPoolRef = pool;
 
 app.use(createOperationalAccessGuard(pool));
 
@@ -679,7 +726,7 @@ if (require.main === module) {
   });
 }
 
-export { app, pool, createCanonicalBooking, realtimeBus };
+export { app, pool, createCanonicalBooking, realtimeBus, globalIdempotencyCacheBody, bookingScopedLegacyCacheLookup, bookingScopedLegacyCachePersist, bookingScopedLegacyCacheClaim, buildScopedBookingPayloadFingerprint };
 
 // Helper generate booking identifier with source-based prefix.
 // Example: WALKIN-20260821-0001 or OTA-20260821-0001.
@@ -1002,6 +1049,7 @@ async function findActiveRoomOverlap(
     startAt?: string | Date | null;
     endAt?: string | Date | null;
     bufferMinutes?: number;
+    propertyTimezone: string;
   }
 ) {
   const stayType = options?.stayType || 'OVERNIGHT';
@@ -1020,15 +1068,15 @@ async function findActiveRoomOverlap(
            (existing.stay_type = 'DAY_USE' AND existing.start_at < ($3::timestamptz + ($5 || ' minutes')::interval) AND (existing.end_at + ($5 || ' minutes')::interval) > $2::timestamptz)
            OR
            -- 2. Collision with OVERNIGHT stay on same room
-           (existing.stay_type = 'OVERNIGHT' AND (
-             (existing.check_in < $2::date AND existing.check_out > $2::date)
-             OR (existing.check_in::date = $2::date AND $3::timestamptz > (existing.check_in::date + TIME '14:00:00' - ($5 || ' minutes')::interval))
-             OR (existing.check_out::date = $2::date AND $2::timestamptz < (existing.check_out::date + TIME '12:00:00' + ($5 || ' minutes')::interval))
-           ))
+           (existing.stay_type = 'OVERNIGHT' AND
+            ((existing.check_in::date + TIME '14:00:00') AT TIME ZONE $6)
+              < ($3::timestamptz + ($5 || ' minutes')::interval)
+            AND (((existing.check_out::date + TIME '12:00:00') AT TIME ZONE $6)
+              + ($5 || ' minutes')::interval) > $2::timestamptz)
          )
        LIMIT 1
        FOR UPDATE OF existing`,
-      [targetRoomId, startTs, endTs, excludeReservationId, bufferMins]
+      [targetRoomId, startTs, endTs, excludeReservationId, bufferMins, options.propertyTimezone]
     );
   }
 
@@ -1110,6 +1158,40 @@ function normalizeBookingSourceValue(value: any): string {
   return upper.includes('OTA') ? 'OTA' : 'WALKIN';
 }
 
+interface BookingCollectionDerivation {
+  bookingSource: string;
+  bookingChannel: string;
+  otaSourceId: number | null;
+  channelType: 'WALK_IN' | 'OTA';
+  paymentResponsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT';
+}
+
+function deriveBookingCollectionContext(
+  bookingSource: string,
+  bookingChannelRaw: any,
+  otaSourceIdRaw: any,
+  rawPaymentResponsibility: any
+): BookingCollectionDerivation {
+  const bookingChannel = bookingChannelRaw ||
+    (['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(bookingSource.toUpperCase()) ? 'OTA' : 'WALK_IN');
+  const otaSourceId = otaSourceIdRaw ? Number(otaSourceIdRaw) : null;
+  const channelType: 'WALK_IN' | 'OTA' =
+    (bookingChannel === 'OTA' || ['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(bookingSource.toUpperCase()) || otaSourceId) ? 'OTA' : 'WALK_IN';
+  let paymentResponsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT' = 'HOTEL_COLLECT';
+  if (rawPaymentResponsibility === 'OTA_COLLECT' || rawPaymentResponsibility === 'HOTEL_COLLECT') {
+    if (rawPaymentResponsibility === 'OTA_COLLECT' && channelType !== 'OTA') {
+      throw createHttpError(400, 'payment_responsibility=OTA_COLLECT is only valid for OTA bookings; non-OTA must be HOTEL_COLLECT');
+    }
+    paymentResponsibility = rawPaymentResponsibility;
+  } else if (rawPaymentResponsibility !== undefined && rawPaymentResponsibility !== null && rawPaymentResponsibility !== '') {
+    throw createHttpError(400, 'payment_responsibility must be either HOTEL_COLLECT or OTA_COLLECT');
+  }
+  if (channelType !== 'OTA' && paymentResponsibility === 'OTA_COLLECT') {
+    paymentResponsibility = 'HOTEL_COLLECT';
+  }
+  return { bookingSource, bookingChannel, otaSourceId, channelType, paymentResponsibility };
+}
+
 function normalizeGuestSegmentValue(value: any): string {
   const normalized = String(value || 'Reguler');
   return ['Reguler', 'Group', 'Corporate'].includes(normalized) ? normalized : 'Reguler';
@@ -1163,6 +1245,83 @@ async function persistIdempotencyResult(req: any, res: express.Response, statusC
     [respBody, respHeaders, statusCode, idKey]
   );
 }
+
+// ── Unit 3C-02 Part A: scoped legacy booking cache helpers ────────────────────
+
+/** Parsed business input + upload descriptor; computed once, before any writer. */
+function buildScopedBookingPayloadFingerprint(payload: Record<string, any>, fileBuffer: Buffer | null, mimeType?: string): string {
+  const omitted = new Set(['request_key', 'correlation_id', '_oak_correlation']);
+  const businessPayload = Object.fromEntries(Object.entries(payload).filter(([key]) => !omitted.has(key)));
+  const upload = fileBuffer === null ? null : buildEvidenceDescriptor({ bytes: fileBuffer, mime: mimeType });
+  const evidenceDescriptor = upload === null ? null : {
+    sha256: upload.sha256, byteLength: upload.byteLength, mime: upload.mime
+  };
+  return computeBookingCreateFingerprint({ businessPayload, evidenceDescriptor });
+}
+
+/** Auth/property checks and fingerprint construction belong to the route. */
+async function bookingScopedLegacyCacheLookup(
+  poolInstance: any, scopedKey: string, fingerprint: string, rawHeaderKey: string
+): Promise<{ status: string; statusCode?: number; body?: any }> {
+  const scopedRow = await poolInstance.query(
+    'SELECT request_hash, response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [scopedKey]
+  );
+  if (hasRows(scopedRow)) {
+    const row = scopedRow.rows[0];
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      // Delete only the still-expired row, never a newly acquired replacement.
+      const deleted = await poolInstance.query(
+        'DELETE FROM idempotency_keys WHERE key = $1 AND expires_at < NOW() RETURNING key', [scopedKey]
+      );
+      if (!hasRows(deleted)) return { status: 'in_progress' };
+    } else {
+      if (row.request_hash !== fingerprint) return { status: 'conflict' };
+      if (row.response_body) return { status: 'hit', statusCode: row.status_code || 200, body: JSON.parse(row.response_body) };
+      return { status: 'in_progress' };
+    }
+  }
+  const legacyRow = await poolInstance.query(
+    'SELECT expires_at FROM idempotency_keys WHERE key = $1', [rawHeaderKey]
+  );
+  if (hasRows(legacyRow)) {
+    const row = legacyRow.rows[0];
+    if (!row.expires_at || !(new Date(row.expires_at) < new Date())) return { status: 'unscoped_legacy' };
+  }
+  return { status: 'none' };
+}
+
+/** INSERT success is the only proof of ownership. No row means fail closed. */
+async function bookingScopedLegacyCacheClaim(
+  poolInstance: any, scopedKey: string, fingerprint: string
+): Promise<{ claimed: boolean; row?: any; ownerToken?: string }> {
+  const ownerToken = JSON.stringify({ booking_legacy_claim: crypto.randomUUID() });
+  const expiresAt = new Date(Date.now() + Number(process.env.IDEMPOTENCY_TTL_MINUTES || 1440) * 60000);
+  const inserted = await poolInstance.query(
+    'INSERT INTO idempotency_keys (key, request_hash, response_headers, expires_at) VALUES ($1, $2, $3, $4) ' +
+    'ON CONFLICT (key) DO NOTHING RETURNING key',
+    [scopedKey, fingerprint, ownerToken, expiresAt.toISOString()]
+  );
+  if (hasRows(inserted)) return { claimed: true, ownerToken };
+  const existing = await poolInstance.query(
+    'SELECT request_hash, response_body, status_code, expires_at FROM idempotency_keys WHERE key = $1', [scopedKey]
+  );
+  if (hasRows(existing)) return { claimed: false, row: existing.rows[0] };
+  throw Object.assign(new Error('Booking cache claim could not be confirmed'), { statusCode: 503 });
+}
+
+/** Finalize only our PENDING placeholder. Never insert or overwrite a FINAL. */
+async function bookingScopedLegacyCachePersist(
+  poolInstance: any, scopedKey: string, fingerprint: string, ownerToken: string,
+  statusCode: number, responseObj: any
+): Promise<void> {
+  const updated = await poolInstance.query(
+    'UPDATE idempotency_keys SET response_body = $1, response_headers = $2, status_code = $3 ' +
+    'WHERE key = $4 AND request_hash = $5 AND response_headers = $6 AND response_body IS NULL RETURNING key',
+    [JSON.stringify(responseObj), '{}', statusCode, scopedKey, fingerprint, ownerToken]
+  );
+  if (!hasRows(updated)) throw Object.assign(new Error('Booking cache finalization ownership lost'), { statusCode: 503 });
+}
+
 
 async function createBookingParentRecord(
   client: any,
@@ -1373,40 +1532,60 @@ async function createChildReservationRecord(
   throw new Error('Failed to generate unique reservation booking number');
 }
 
+type CanonicalBookingResult = {
+  booking: {
+    id: number;
+    bid: string;
+    property_id: number;
+    guest_name_snapshot: string;
+    guest_phone_snapshot: string | null;
+    booker_name: string;
+    booker_phone: string | null;
+    booking_channel: string;
+    booking_source: string;
+    ota_source_id: number | null;
+    referral: string | null;
+    channel: string | null;
+    currency_code: string;
+    booking_status: string;
+    legacy_booking_number: string | null;
+    guest_id: number | null;
+    created_guest_ids: number[];
+    correlation_id: string;
+    payment_id?: number;
+  };
+  reservations: any[];
+  created_guest_ids: number[];
+  correlationId: string;
+  bookingLegacyNumber: string | null;
+  dp_metadata?: Record<string, unknown>;
+};
+
+type ExplicitBookingOutcome =
+  | { kind: 'fresh'; result: CanonicalBookingResult; response: import('./domains/reservations/bookingCreateHttpService').BookingCreateHttpResponse }
+  | { kind: 'replay'; response: import('./domains/reservations/bookingCreateEndpointService').BookingCreateStoredHttpResponse; bookingId: number };
+
+// Overload: explicit mode returns a discriminated union
 async function createCanonicalBooking(
   req: any,
-  bookingPayload: {
-    property_id: any;
-    guest_name: any;
-    guest_phone?: any;
-    guest_segment?: any;
-    booker_name?: any;
-    booker_phone?: any;
-    booker_same_as_guest?: any;
-    booking_channel?: any;
-    booking_source?: any;
-    ota_source_id?: any;
-    referral?: any;
-    guest_id?: any;
-    identity_number?: any;
-    ktp_path?: any;
-    has_valid_identity?: any;
-    payment_method?: any;
-    amount_paid?: any;
-    bukti_bayar_path?: any;
-    discount_reason?: any;
-    stay_charges?: any[];
-    require_strict_gates?: boolean;
-    strict_gates?: boolean;
-    same_as_booker?: any;
-    initial_payment?: any;
-    channel?: any;
-    currency_code?: any;
-    [key: string]: any;
-  },
+  bookingPayload: Record<string, any>,
   reservationPayloads: any[],
-  options: { requirePropertyId?: boolean } = {}
-) {
+  options: { requirePropertyId?: boolean; explicitContext: ExplicitBookingCreateContext }
+): Promise<ExplicitBookingOutcome>;
+// Overload: legacy/default mode returns the canonical shape
+async function createCanonicalBooking(
+  req: any,
+  bookingPayload: Record<string, any>,
+  reservationPayloads: any[],
+  options?: { requirePropertyId?: boolean }
+): Promise<CanonicalBookingResult>;
+// Implementation
+async function createCanonicalBooking(
+  req: any,
+  bookingPayload: Record<string, any>,
+  reservationPayloads: any[],
+  options: { requirePropertyId?: boolean; explicitContext?: ExplicitBookingCreateContext } = {}
+): Promise<ExplicitBookingOutcome | CanonicalBookingResult> {
   const newlyCreatedGuestIds: number[] = [];
   const rawReservationPayloads = Array.isArray(reservationPayloads) ? reservationPayloads : [];
   if (rawReservationPayloads.length < 1) {
@@ -1427,10 +1606,8 @@ async function createCanonicalBooking(
     : (rawReservationPayloads[0]?.guest_phone ? String(rawReservationPayloads[0]?.guest_phone).trim() : null);
   const guestSegment = normalizeGuestSegmentValue(bookingPayload.guest_segment || rawReservationPayloads[0]?.guest_segment);
   const bookingSource = normalizeBookingSourceValue(bookingPayload.booking_source);
-  const bookingChannel = bookingPayload.booking_channel || (['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(bookingSource.toUpperCase()) ? 'OTA' : 'WALK_IN');
   const bookerName = bookingPayload.booker_name ? String(bookingPayload.booker_name).trim() : guestName;
   const bookerPhone = bookingPayload.booker_phone ? String(bookingPayload.booker_phone).trim() : guestPhone;
-  const otaSourceId = bookingPayload.ota_source_id ? Number(bookingPayload.ota_source_id) : null;
   const referral = bookingPayload.referral ? String(bookingPayload.referral).trim() : null;
   const channel = Object.prototype.hasOwnProperty.call(bookingPayload, 'channel')
     ? String(bookingPayload.channel || '').trim() || null
@@ -1438,7 +1615,16 @@ async function createCanonicalBooking(
   const currencyCode = normalizeCurrencyCodeValue(bookingPayload.currency_code);
   const correlationId = String((req.headers && req.headers['x-correlation-id']) || req.headers?.['X-Correlation-Id'] || `CORR-${Date.now()}`);
 
-  const channelType: 'WALK_IN' | 'OTA' = (bookingChannel === 'OTA' || ['TIKET_COM', 'BOOKING_COM', 'AGODA', 'TRAVELOKA'].includes(String(bookingSource).toUpperCase()) || otaSourceId) ? 'OTA' : 'WALK_IN';
+  const collectionDerivation = deriveBookingCollectionContext(
+    bookingSource,
+    bookingPayload.booking_channel,
+    bookingPayload.ota_source_id,
+    bookingPayload.payment_responsibility
+  );
+  const bookingChannel = collectionDerivation.bookingChannel;
+  const otaSourceId = collectionDerivation.otaSourceId;
+  const channelType = collectionDerivation.channelType;
+  let paymentResponsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT' = collectionDerivation.paymentResponsibility;
 
   let rulesMap: Record<string, string> = {};
   try {
@@ -1484,54 +1670,111 @@ async function createCanonicalBooking(
   }
 
   // ── Normalize and validate payment_responsibility BEFORE payment gates ──
-  const rawPaymentResponsibility = bookingPayload.payment_responsibility;
-  let paymentResponsibility: 'HOTEL_COLLECT' | 'OTA_COLLECT' = 'HOTEL_COLLECT';
-  if (rawPaymentResponsibility === 'OTA_COLLECT' || rawPaymentResponsibility === 'HOTEL_COLLECT') {
-    if (rawPaymentResponsibility === 'OTA_COLLECT' && channelType !== 'OTA') {
-      throw createHttpError(400, 'payment_responsibility=OTA_COLLECT is only valid for OTA bookings; non-OTA must be HOTEL_COLLECT');
-    }
-    paymentResponsibility = rawPaymentResponsibility;
-  } else if (rawPaymentResponsibility !== undefined && rawPaymentResponsibility !== null && rawPaymentResponsibility !== '') {
-    throw createHttpError(400, 'payment_responsibility must be either HOTEL_COLLECT or OTA_COLLECT');
-  }
-  // For non-OTA: enforce HOTEL_COLLECT canonical
-  if (channelType !== 'OTA' && paymentResponsibility === 'OTA_COLLECT') {
-    paymentResponsibility = 'HOTEL_COLLECT';
-  }
+  // paymentResponsibility is already derived by collectionDerivation above.
 
-  if (rulesMap['payment_method'] === 'REQUIRED') {
-    // OTA_COLLECT bypasses payment_method requirement
-    if (paymentResponsibility !== 'OTA_COLLECT') {
-      const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
-      if (!paymentMethod) {
-        missingFields.push('payment_method');
-      }
+  // ── Unit 3B: explicit payment mode = payment_mode present ──────────────────
+  // Legacy requests (no payment_mode) keep their existing payment pipeline below;
+  // the strict normalizer is never invoked for them.
+  const rawPaymentMode = bookingPayload.payment_mode;
+  const hasExplicitPaymentMode = rawPaymentMode !== undefined && rawPaymentMode !== null && rawPaymentMode !== '';
+  const paymentIntent: BookingPaymentIntent = hasExplicitPaymentMode
+    ? normalizeBookingPaymentIntent(bookingPayload)
+    : {
+        mode: 'LEGACY',
+        ordinaryAmount: 0,
+        advanceAmount: 0,
+        paymentMethod: null,
+        evidencePath: null,
+        legacy: true
+      };
+  const bookingPaymentExplicit = hasExplicitPaymentMode;
+  const explicitNonOrdinaryPayment = bookingPaymentExplicit && paymentIntent.mode !== 'PAY_BILL';
+  const idempotencyHeaderKey = req?.headers
+    ? (req.headers['idempotency-key'] ?? req.headers['Idempotency-Key'] ?? null)
+    : null;
+  let bookingRequestKey: string | null = null;
+  if (bookingPaymentExplicit) {
+    bookingRequestKey = resolveBookingRequestKey({
+      headerKey: idempotencyHeaderKey,
+      bodyKey: bookingPayload.request_key,
+      intent: paymentIntent
+    }).requestKey;
+  }
+  // Only a server-prepared context matching this actual canonical input may claim.
+  if (options.explicitContext) {
+    const ctx = options.explicitContext;
+    if (!bookingPaymentExplicit || ctx.propertyId !== bookingPropertyId ||
+        ctx.childCount !== rawReservationPayloads.length || ctx.requestKey !== bookingRequestKey ||
+        ctx.fingerprintVersion !== BOOKING_CREATE_ENDPOINT_FP_VERSION ||
+        typeof ctx.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(ctx.fingerprint) ||
+        computeBookingCreateFingerprint({ intent: ctx.intent }) !== computeBookingCreateFingerprint({ intent: paymentIntent })) {
+      throw createHttpError(409, 'Explicit context does not match canonical booking input', 'BOOKING_CREATE_CONTEXT_MISMATCH');
     }
   }
-  if (rulesMap['payment_amount'] === 'REQUIRED') {
-    // OTA_COLLECT bypasses payment_amount requirement
-    if (paymentResponsibility !== 'OTA_COLLECT') {
-      const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
-        ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
-        : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
-      if (totalAmountPaid <= 0) {
-        missingFields.push('payment_amount');
+  const rawChildOrdinaryTotal = rawReservationPayloads.reduce((sum: number, r: any) => {
+    const raw = r && typeof r === 'object' ? r.amount_paid : undefined;
+    const value = Number(raw);
+    return sum + (Number.isFinite(value) ? value : 0);
+  }, 0);
+
+  if (bookingPaymentExplicit) {
+    // Explicit gates: cash-now per mode (PAY_BILL ordinary, DP advance, UNPAID 0).
+    const gateResult = evaluateBookingPaymentGates({
+      intent: paymentIntent,
+      rules: rulesMap,
+      channelType,
+      paymentResponsibility,
+      paymentMethod: paymentIntent.paymentMethod,
+      evidencePath: paymentIntent.evidencePath,
+      childOrdinaryTotal: rawChildOrdinaryTotal,
+      filePresent: Boolean(req.file)
+    });
+    if (gateResult.hardReject) {
+      throw createHttpError(
+        gateResult.hardReject.status,
+        gateResult.hardReject.message,
+        gateResult.hardReject.code
+      );
+    }
+    for (const missingField of gateResult.missing) {
+      if (!missingFields.includes(missingField)) {
+        missingFields.push(missingField);
       }
     }
-  }
-  if (rulesMap['payment_evidence'] === 'REQUIRED') {
-    // OTA_COLLECT bypasses payment_evidence requirement
-    if (paymentResponsibility !== 'OTA_COLLECT') {
-      const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
-      const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
-        ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
-        : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
-      const paymentEvidence = bookingPayload.bukti_bayar_path
-        || bookingPayload.initial_payment?.payment_evidence_path
-        || rawReservationPayloads[0]?.bukti_bayar_path
-        || (req.file ? true : null);
-      if (totalAmountPaid > 0 && !paymentEvidence) {
-        missingFields.push('payment_evidence');
+  } else {
+    if (rulesMap['payment_method'] === 'REQUIRED') {
+      // OTA_COLLECT bypasses payment_method requirement
+      if (paymentResponsibility !== 'OTA_COLLECT') {
+        const paymentMethod = bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method || rawReservationPayloads[0]?.payment_method;
+        if (!paymentMethod) {
+          missingFields.push('payment_method');
+        }
+      }
+    }
+    if (rulesMap['payment_amount'] === 'REQUIRED') {
+      // OTA_COLLECT bypasses payment_amount requirement
+      if (paymentResponsibility !== 'OTA_COLLECT') {
+        const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+          ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+          : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
+        if (totalAmountPaid <= 0) {
+          missingFields.push('payment_amount');
+        }
+      }
+    }
+    if (rulesMap['payment_evidence'] === 'REQUIRED') {
+      // OTA_COLLECT bypasses payment_evidence requirement
+      if (paymentResponsibility !== 'OTA_COLLECT') {
+        const totalAmountPaid = hasBookingLevelPaymentInput(bookingPayload)
+          ? Number(bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
+          : (rawReservationPayloads.reduce((sum: number, r: any) => sum + Number(r.amount_paid || 0), 0) || Number(bookingPayload.amount_paid || bookingPayload.initial_payment?.amount || 0));
+        const paymentEvidence = bookingPayload.bukti_bayar_path
+          || bookingPayload.initial_payment?.payment_evidence_path
+          || rawReservationPayloads[0]?.bukti_bayar_path
+          || (req.file ? true : null);
+        if (totalAmountPaid > 0 && !paymentEvidence) {
+          missingFields.push('payment_evidence');
+        }
       }
     }
   }
@@ -1555,10 +1798,90 @@ async function createCanonicalBooking(
     throw createHttpError(400, 'guest_name is required');
   }
 
+  // ── Unit 3B: explicit DP prerequisites + ordinary plan BEFORE any writer ──
+  let dpReceiptEvidence: ReturnType<typeof convertFileToEvidence> = null;
+  if (bookingPaymentExplicit && paymentIntent.mode === 'ADVANCE_PAYMENT') {
+    // Core 2A receipt method contract: reject unsupported method before writer.
+    validateDpReceiptMethod(paymentIntent.paymentMethod);
+    const hasEvidencePath = paymentIntent.evidencePath != null
+      && String(paymentIntent.evidencePath).trim().length > 0;
+    // OTA_COLLECT file is the OTA voucher, never DP evidence.
+    const dpEvidenceFile = paymentResponsibility === 'HOTEL_COLLECT' ? (req.file ?? null) : null;
+    if (hasEvidencePath && dpEvidenceFile) {
+      throw createHttpError(
+        400,
+        'DP evidence: both evidencePath and uploaded file are present; ambiguous source. ' +
+        'Provide exactly one evidence source (file upload OR path reference, not both).',
+        'DP_EVIDENCE_AMBIGUOUS'
+      );
+    }
+    if (hasEvidencePath && !dpEvidenceFile) {
+      throw createHttpError(
+        400,
+        'DP evidencePath (path-only reference) is not yet supported for quick-booking DP; ' +
+        'upload the file directly or leave evidencePath empty',
+        'DP_EVIDENCE_PATH_UNSUPPORTED'
+      );
+    }
+    if (dpEvidenceFile) {
+      // Validate once with the existing upload policy; the accepted DTO is reused
+      // by the DP receipt writer so the file is not validated/saved twice.
+      dpReceiptEvidence = convertFileToEvidence(dpEvidenceFile, validateEvidenceUpload);
+    }
+  }
+
+  let explicitOrdinaryPaymentPlan: ReturnType<typeof buildOrdinaryPaymentPlan> | null = null;
+  if (bookingPaymentExplicit && paymentIntent.mode === 'PAY_BILL') {
+    explicitOrdinaryPaymentPlan = buildOrdinaryPaymentPlan({
+      intent: paymentIntent,
+      propertyId: bookingPropertyId,
+      bookingId: 0,
+      rules: rulesMap,
+      channelType,
+      paymentResponsibility,
+      paymentMethod: paymentIntent.paymentMethod,
+      evidencePath: paymentIntent.evidencePath,
+      childOrdinaryTotal: rawChildOrdinaryTotal,
+      // OTA_COLLECT file is a voucher; ordinary hotel evidence is hotel-collect only.
+      file: paymentResponsibility === 'HOTEL_COLLECT' ? (req.file ?? null) : null,
+      validateEvidenceUpload,
+      actor: {
+        userId: req?.user?.id != null ? String(req.user.id) : '',
+        name: String(req?.user?.full_name || req?.user?.username || req?.user?.name || 'PMS'),
+        role: req?.user?.role != null ? String(req.user.role) : ''
+      },
+      headerKey: idempotencyHeaderKey,
+      bodyKey: bookingPayload.request_key,
+      childCount: rawReservationPayloads.length
+    });
+  }
+
   const client = await pool.connect();
   const savedEvidenceKeys: string[] = [];
+  let committed = false;
+  let commitAttempted = false;
+  let discardClient = false;
   try {
     await client.query('BEGIN');
+
+    // ── C: explicit context claim on the booking transaction client ─────────
+    const explicitContext = options.explicitContext;
+    if (explicitContext) {
+      const claimResult = await claimBookingCreateEndpoint(client, explicitContext);
+      if (claimResult.kind === 'replay') {
+        // Loser: no writers executed. Close the read-only transaction and release.
+        try {
+          await client.query('ROLLBACK');
+        } catch (closeErr: any) {
+          discardClient = true;
+          console.error('[createCanonicalBooking] claim replay close failed; discarding client:', closeErr?.message || closeErr);
+          throw closeErr;
+        }
+        // finally will release (discardClient=false → normal release)
+        return { kind: 'replay', response: claimResult.response, bookingId: claimResult.bookingId };
+      }
+      // kind === 'claimed' -> proceed with writer path
+    }
 
     const propertyResult = await client.query(
       'SELECT id, property_code, timezone FROM properties WHERE id = $1',
@@ -1572,7 +1895,7 @@ async function createCanonicalBooking(
 
     const bookingActor = String(req?.user?.full_name || req?.user?.username || req?.user?.name || 'PMS');
     const useGlobalDiscount = hasBookingGlobalDiscountInput(bookingPayload);
-    const useBookingLevelPayment = hasBookingLevelPaymentInput(bookingPayload);
+    let useBookingLevelPayment = hasBookingLevelPaymentInput(bookingPayload);
 
     let bookingLevelCash = useBookingLevelPayment
       ? (bookingPayload.amount_paid ?? bookingPayload.initial_payment?.amount ?? 0)
@@ -1583,6 +1906,25 @@ async function createCanonicalBooking(
     let bookingPaymentMethod = bookingPayload.payment_method
       || bookingPayload.initial_payment?.payment_method
       || null;
+
+    if (bookingPaymentExplicit) {
+      if (paymentIntent.mode === 'PAY_BILL') {
+        if (!explicitOrdinaryPaymentPlan) {
+          throw createHttpError(500, 'Explicit PAY_BILL payment plan was not prepared', 'PAYMENT_PLAN_MISSING');
+        }
+        useBookingLevelPayment = explicitOrdinaryPaymentPlan.useBookingLevelPayment;
+        bookingLevelCash = explicitOrdinaryPaymentPlan.bookingLevelCash;
+        bookingPaymentMethod = explicitOrdinaryPaymentPlan.method;
+        bookingPaymentEvidencePath = explicitOrdinaryPaymentPlan.evidencePath;
+      } else {
+        // ADVANCE_PAYMENT / UNPAID: no ordinary booking-level cash, no group payment.
+        useBookingLevelPayment = false;
+        bookingLevelCash = 0;
+        bookingPaymentMethod = paymentIntent.paymentMethod;
+        bookingPaymentEvidencePath = null;
+      }
+    }
+
     const otaVoucherFile = paymentResponsibility === 'OTA_COLLECT' ? req.file : null;
     if (paymentResponsibility === 'OTA_COLLECT' && !otaVoucherFile) {
       throw createHttpError(400, 'Voucher / bukti booking OTA wajib diunggah untuk OTA Collect');
@@ -1708,7 +2050,7 @@ async function createCanonicalBooking(
           discountPercent: useGlobalDiscount ? 0 : (child.discount_percent ?? child.discountPercent),
           discountAmount: useGlobalDiscount ? 0 : (child.discount_amount ?? child.discountAmount),
           discountReason: useGlobalDiscount ? null : (child.discount_reason || child.discountReason || bookingPayload.discount_reason),
-          amountPaid: paymentResponsibility === 'OTA_COLLECT'
+          amountPaid: paymentResponsibility === 'OTA_COLLECT' || explicitNonOrdinaryPayment
             ? 0
             : useBookingLevelPayment
               ? 0
@@ -1754,7 +2096,7 @@ async function createCanonicalBooking(
         discountType: childBilling.discountType,
         discountValue: childBilling.discountValue,
         discountReason: childBilling.reason,
-        amountPaid: paymentResponsibility === 'OTA_COLLECT'
+        amountPaid: paymentResponsibility === 'OTA_COLLECT' || explicitNonOrdinaryPayment
           ? 0
           : useBookingLevelPayment
             ? 0
@@ -1762,11 +2104,9 @@ async function createCanonicalBooking(
         paymentMethod: paymentResponsibility === 'OTA_COLLECT'
           ? null
           : child.payment_method || child.paymentMethod || (index === 0 ? (bookingPayload.payment_method || bookingPayload.initial_payment?.payment_method) : null) || 'CASH',
-        paymentStatus: paymentResponsibility === 'OTA_COLLECT'
+        paymentStatus: paymentResponsibility === 'OTA_COLLECT' || useBookingLevelPayment || explicitNonOrdinaryPayment
           ? null
-          : useBookingLevelPayment
-            ? null
-            : (child.payment_status || null),
+          : (child.payment_status || null),
         attachPaymentEvidence: false,
         bookingPaymentGroupId: null,
         bookingPaymentReferenceCode: null,
@@ -1908,7 +2248,8 @@ async function createCanonicalBooking(
           stayType: child.stayType,
           startAt: child.startAt,
           endAt: child.endAt,
-          bufferMinutes: 60
+          bufferMinutes: 60,
+          propertyTimezone
         }
       );
       if (hasRows(overlapResult)) {
@@ -2782,6 +3123,47 @@ async function createCanonicalBooking(
       });
     }
 
+    // ── Unit 3B Step 3: DP receipt — explicit ADVANCE_PAYMENT only ──────────
+    let dpReceiptResult: any = null;
+    let dpPlan: ReturnType<typeof buildDpReceiptPlan> | null = null;
+    if (bookingPaymentExplicit && paymentIntent.mode === 'ADVANCE_PAYMENT') {
+      dpPlan = buildDpReceiptPlan(
+        {
+          intent: paymentIntent,
+          propertyId: bookingPropertyId,
+          bookingId: Number(bookingRecord.id),
+          rules: rulesMap,
+          channelType,
+          paymentResponsibility,
+          paymentMethod: paymentIntent.paymentMethod,
+          evidencePath: paymentIntent.evidencePath,
+          childOrdinaryTotal: rawChildOrdinaryTotal,
+          file: null, // raw req.file not passed; preValidatedEvidence carries the accepted DTO
+          validateEvidenceUpload, // required by type; skipped when preValidatedEvidence is set
+          actor: {
+            userId: req?.user?.id != null ? String(req.user.id) : '',
+            name: String(req?.user?.full_name || req?.user?.username || req?.user?.name || 'PMS'),
+            role: req?.user?.role != null ? String(req.user.role) : ''
+          },
+          headerKey: idempotencyHeaderKey,
+          bodyKey: bookingPayload.request_key,
+          childCount: rawReservationPayloads.length,
+          preValidatedEvidence: dpReceiptEvidence
+        },
+        bookingRequestKey,
+        insertedChildren as any
+      );
+      dpReceiptResult = await callDpReceiptInBookingTransaction(
+        client,
+        dpPlan,
+        {
+          receiveDepositInTransaction,
+          propertyId: bookingPropertyId,
+          savedEvidenceKeys
+        }
+      );
+    }
+
     // ── 1B3C: Multi-room booking-level payment → single BOOKING_GROUP parent ──
     let groupPaymentResult: Awaited<ReturnType<typeof createBookingGroupPaymentWithAllocations>> | null = null;
     if (useGroupPayment) {
@@ -2934,7 +3316,51 @@ async function createCanonicalBooking(
       );
     }
 
+    // ── C: explicit finalize before COMMIT; legacy materializes after ─────────
+    const explicitCtx = options.explicitContext;
+    if (explicitCtx) {
+      const canonicalResult: CanonicalBookingResult = {
+        booking: {
+          id: Number(bookingRecord.id),
+          bid: String(bookingRecord.bid),
+          property_id: bookingPropertyId,
+          guest_name_snapshot: guestName,
+          guest_phone_snapshot: guestPhone,
+          booker_name: bookerName,
+          booker_phone: bookerPhone,
+          booking_channel: bookingChannel,
+          booking_source: bookingSource,
+          ota_source_id: otaSourceId,
+          referral: referral,
+          channel,
+          currency_code: currencyCode,
+          booking_status: 'ACTIVE',
+          legacy_booking_number: bookingLegacyNumber,
+          guest_id: newlyCreatedGuestIds[0] || null,
+          created_guest_ids: newlyCreatedGuestIds,
+          correlation_id: correlationId,
+          ...(groupPaymentResult ? { payment_id: groupPaymentResult.parentPayment.id } : {})
+        },
+        reservations: insertedChildren.map(withReservationHotelDates),
+        created_guest_ids: newlyCreatedGuestIds,
+        correlationId,
+        bookingLegacyNumber,
+        ...(dpReceiptResult && dpPlan ? (() => {
+          const dpMeta = buildDpResultMetadata(paymentIntent, dpReceiptResult, dpPlan);
+          return dpMeta ? { dp_metadata: dpMeta } : {};
+        })() : {})
+      };
+      const snapshot = await finalizeBookingCreateEndpoint(client, explicitCtx, canonicalResult);
+      commitAttempted = true;
+      await client.query('COMMIT');
+      committed = true;
+      return { kind: 'fresh', result: canonicalResult, response: snapshot };
+    }
+
+    // Legacy: COMMIT then materialize
+    commitAttempted = true;
     await client.query('COMMIT');
+    committed = true;
 
     return {
       booking: {
@@ -2961,19 +3387,50 @@ async function createCanonicalBooking(
       reservations: insertedChildren.map(withReservationHotelDates),
       created_guest_ids: newlyCreatedGuestIds,
       correlationId,
-      bookingLegacyNumber
+      bookingLegacyNumber,
+      ...(dpReceiptResult && dpPlan ? (() => {
+        const dpMeta = buildDpResultMetadata(paymentIntent, dpReceiptResult, dpPlan);
+        return dpMeta ? { dp_metadata: dpMeta } : {};
+      })() : {})
     };
   } catch (err: any) {
     try { require('fs').writeFileSync('debug_create_error.txt', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail, stack: err?.stack?.split('\n').slice(0, 8) }, null, 2)); } catch(_e) {}
-    for (const key of savedEvidenceKeys) {
-      await deleteEvidenceFile(key).catch((cleanupErr: any) => {
-        console.error(`[evidence cleanup] Failed to delete orphan file ${key}:`, cleanupErr?.message || cleanupErr);
+    if (committed) {
+      throw err;
+    }
+    // A rejected COMMIT can mean that only its acknowledgement was lost.
+    // Retain evidence and discard the connection until the outcome is reconciled.
+    if (commitAttempted) {
+      discardClient = true;
+      console.error('[createCanonicalBooking] COMMIT failed or unconfirmed; evidence retained for reconciliation:', {
+        propertyId: bookingPropertyId, correlationId, evidenceKeys: savedEvidenceKeys,
+        error: err?.message || err
+      });
+      throw err;
+    }
+    let rolledBack = false;
+    try {
+      await client.query('ROLLBACK');
+      rolledBack = true;
+    } catch (rollbackErr: any) {
+      discardClient = true;
+      console.error('[createCanonicalBooking] ROLLBACK failed; evidence retained for reconciliation:', {
+        propertyId: bookingPropertyId, correlationId, evidenceKeys: savedEvidenceKeys,
+        error: rollbackErr?.message || rollbackErr
       });
     }
-    await client.query('ROLLBACK');
+    if (rolledBack) {
+      for (const key of savedEvidenceKeys) {
+        try {
+          await deleteEvidenceFile(key);
+        } catch (cleanupErr: any) {
+          console.error(`[evidence cleanup] Failed to delete orphan file ${key}:`, cleanupErr?.message || cleanupErr);
+        }
+      }
+    }
     throw err;
   } finally {
-    client.release();
+    client.release(discardClient);
   }
 }
 
@@ -4820,16 +5277,261 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
 });
 
 app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('payment_evidence'), async (req, res) => {
+  // ── CA-F04: parse + validate BEFORE any cache lookup ───────────────────────
+  // Plain-object guard: req.body must be a plain object, not null/array/scalar.
+  if (req.body === null || req.body === undefined || typeof req.body !== 'object' || Array.isArray(req.body) || (Object.getPrototypeOf(req.body) !== null && Object.getPrototypeOf(req.body) !== Object.prototype)) {
+    return res.status(400).json({ status: 'ERROR', message: 'Request body must be a JSON object' });
+  }
+  let payload: any;
   try {
-    const payload = req.body.booking_payload ? JSON.parse(req.body.booking_payload) : req.body;
-    const reservations = payload.reservations;
-    if (!Array.isArray(reservations) || reservations.length < 1) {
-      const responseObj = { status: 'ERROR', message: 'reservations must be a non-empty array' };
-      await persistIdempotencyResult(req, res, 400, responseObj);
-      return res.status(400).json(responseObj);
+    // CA-F04: booking_payload, when present, MUST be a valid JSON string;
+    // a non-string booking_payload is a 400, not a silent fallback.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'booking_payload')) {
+      if (typeof req.body.booking_payload !== 'string') {
+        return res.status(400).json({ status: 'ERROR', message: 'booking_payload must be a JSON string when present' });
+      }
+      payload = JSON.parse(req.body.booking_payload);
+    } else {
+      payload = req.body;
+    }
+  } catch (_e) {
+    return res.status(400).json({ status: 'ERROR', message: 'Invalid booking_payload: malformed JSON' });
+  }
+  // CA-F04: parsed payload must be a plain object
+  if (payload === null || payload === undefined || typeof payload !== 'object' || Array.isArray(payload) || (Object.getPrototypeOf(payload) !== null && Object.getPrototypeOf(payload) !== Object.prototype)) {
+    return res.status(400).json({ status: 'ERROR', message: 'booking payload must be a JSON object' });
+  }
+
+  const reservations = payload.reservations;
+  if (!Array.isArray(reservations) || reservations.length < 1) {
+    return res.status(400).json({ status: 'ERROR', message: 'reservations must be a non-empty array' });
+  }
+
+  // CA-F04: property_id — positive safe integer, accept number or numeric string.
+  // Reject boolean, array, object, non-numeric strings.
+  const propertyIdRaw = payload.property_id;
+  let propertyId: number;
+  if (typeof propertyIdRaw === 'number') {
+    propertyId = propertyIdRaw;
+  } else if (typeof propertyIdRaw === 'string' && propertyIdRaw.trim() !== '') {
+    const parsed = Number(propertyIdRaw);
+    if (!Number.isFinite(parsed)) {
+      return res.status(400).json({ status: 'ERROR', message: 'property_id is required and must be a positive integer' });
+    }
+    propertyId = parsed;
+  } else {
+    return res.status(400).json({ status: 'ERROR', message: 'property_id is required and must be a positive integer' });
+  }
+  if (!Number.isInteger(propertyId) || propertyId <= 0 || propertyId > Number.MAX_SAFE_INTEGER) {
+    return res.status(400).json({ status: 'ERROR', message: 'property_id is required and must be a positive integer' });
+  }
+
+  // ── Property scope authorization ────────────────────────────────────────────
+  try {
+    await assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    const status = Number(scopeErr?.statusCode || 403);
+    const responseObj: Record<string, any> = { status: responseStatusTextForCode(status), message: scopeErr?.message || 'Property access denied' };
+    if (scopeErr?.code) responseObj.code = scopeErr.code;
+    return res.status(status).json(responseObj);
+  }
+
+  // ── Detect explicit payment mode (Unit 3B) ─────────────────────────────────
+  const rawPaymentMode = payload.payment_mode;
+  const hasExplicitPaymentMode = rawPaymentMode !== undefined && rawPaymentMode !== null && rawPaymentMode !== '';
+
+  // ── Explicit mode: bypass ALL global/scoped cache, no persistIdempotencyResult ──
+  if (hasExplicitPaymentMode) {
+    // ── C: prepare server-side explicit context ──────────────────────────────
+    let explicitCtx: ExplicitBookingCreateContext;
+    try {
+      const bookingSource = normalizeBookingSourceValue(payload.booking_source);
+      const collectionCtx = deriveBookingCollectionContext(
+        bookingSource, payload.booking_channel, payload.ota_source_id, payload.payment_responsibility
+      );
+      const idempotencyHeaderKey = req?.headers
+        ? (req.headers['idempotency-key'] ?? req.headers['Idempotency-Key'] ?? null)
+        : null;
+      explicitCtx = prepareExplicitBookingCreateContext({
+        payload,
+        propertyId,
+        headerKey: idempotencyHeaderKey,
+        bodyKey: payload.request_key,
+        upload: req.file ? { buffer: req.file.buffer, mimetype: req.file.mimetype, originalname: req.file.originalname || 'upload', size: req.file.size } : null,
+        channelType: collectionCtx.channelType,
+        paymentResponsibility: collectionCtx.paymentResponsibility,
+      });
+    } catch (ctxErr: any) {
+      // Unknown mode, missing key, property mismatch, OTA_COLLECT non-OTA, etc.
+      const statusCode = Number(ctxErr?.statusCode || 400);
+      const respObj: any = { status: responseStatusTextForCode(statusCode), message: String(ctxErr?.message || ctxErr) };
+      if (ctxErr?.code) respObj.code = ctxErr.code;
+      return res.status(statusCode).json(respObj);
     }
 
+    // ── C: early replay read on a read-only client ──────────────────────────
+    let earlyReplay: { kind: 'replay'; response: { responseStatus: number; responseBody: Record<string, unknown> }; bookingId: number } | null = null;
+    try {
+      const readClient = await pool.connect();
+      try {
+        earlyReplay = await readBookingCreateEndpointReplay(readClient, explicitCtx);
+      } finally {
+        readClient.release();
+      }
+    } catch (readErr: any) {
+      // PENDING / mismatch / readiness / unrelated DB error: all are accepted errors
+      const statusCode = Number(readErr?.statusCode || 500);
+      const respObj: any = { status: responseStatusTextForCode(statusCode), message: String(readErr?.message || readErr) };
+      if (readErr?.code) respObj.code = readErr.code;
+      return res.status(statusCode).json(respObj);
+    }
+
+    // Early FINAL hit: send stored response, no canonical/rules/availability/writer
+    if (earlyReplay && earlyReplay.kind === 'replay') {
+      return res.status(earlyReplay.response.responseStatus).json(earlyReplay.response.responseBody);
+    }
+
+    // Only a truly absent early read proceeds; PENDING is an error above.
+    try {
+      const outcome = await createCanonicalBooking(req, payload, reservations, {
+        requirePropertyId: true,
+        explicitContext: explicitCtx,
+      });
+
+      if (outcome.kind === 'replay') {
+        // Race loser: no broadcast, no writers; send stored snapshot
+        return res.status(outcome.response.responseStatus).json(outcome.response.responseBody);
+      }
+
+      // Fresh: broadcast events after COMMIT, then send the stored snapshot
+      const canonicalResult = outcome.result;
+      try {
+        broadcastEvent('BookingCreated', {
+          booking_id: canonicalResult.booking.id,
+          bid: canonicalResult.booking.bid,
+          booking_status: canonicalResult.booking.booking_status,
+          reservation_count: canonicalResult.reservations.length,
+          correlation_id: canonicalResult.correlationId,
+          timestamp: new Date().toISOString()
+        }, canonicalResult.booking.property_id);
+        for (const reservation of canonicalResult.reservations) {
+          broadcastEvent('ReservationCreated', {
+            reservation_id: reservation.id,
+            reservation_number: reservation.booking_number,
+            bid: reservation.bid,
+            booking_id: reservation.booking_id,
+            status: reservation.status || 'TENTATIVE',
+            guest: { name: reservation.guest_name, phone: reservation.guest_phone },
+            room_id: reservation.room_id,
+            check_in: reservation.check_in,
+            check_out: reservation.check_out,
+            correlation_id: canonicalResult.correlationId,
+            timestamp: new Date().toISOString()
+          }, canonicalResult.booking.property_id);
+        }
+      } catch (broadcastError) {
+        console.error('Failed to broadcast booking create events', broadcastError);
+      }
+      return res.status(outcome.response.responseStatus).json(outcome.response.responseBody);
+    } catch (err: any) {
+      if (res.headersSent) {
+        console.error('[booking-create] response failed after headers sent; FINAL retained', err);
+        return;
+      }
+      if (isRoomOverlapViolation(err)) {
+        return sendRoomOverlapConflict(res);
+      }
+      const message = String(err?.message || err);
+      const statusCode = Number(err?.statusCode || (message.includes('INVENTORY_INTEGRITY_ERROR') || message.includes('availability row missing') || message.includes('capacity exhausted') || message.includes('duplicate room usage') ? 409 : 500));
+      const responseObj: any = { status: responseStatusTextForCode(statusCode), message };
+      if (err?.code) responseObj.code = err.code;
+      if (err?.missing_fields || err?.missing) {
+        responseObj.missing_fields = err.missing_fields || err.missing;
+        responseObj.missing = err.missing || err.missing_fields;
+      }
+      return res.status(statusCode).json(responseObj);
+    }
+  }
+
+  // Trusted request context; no client override and no recomputation after writes.
+  let legacyCacheKey: string | null;
+  let legacyFingerprint: string;
+  const rawLegacyHeader = req.headers['idempotency-key'] ?? req.headers['Idempotency-Key'] ?? null;
+  try {
+    legacyCacheKey = buildLegacyBookingCacheKey(propertyId, rawLegacyHeader);
+    legacyFingerprint = legacyCacheKey === null ? '' : buildScopedBookingPayloadFingerprint(
+      payload, req.file ? req.file.buffer : null, req.file?.mimetype
+    );
+  } catch (contextError: any) {
+    return res.status(400).json({ status: 'ERROR', code: contextError?.code, message: contextError?.message || 'Invalid booking cache input' });
+  }
+
+  // CA-F01: claim gate — atomic placeholder BEFORE the writer.
+  // Legacy path with a scoped key: claim, then only the claim owner calls the writer.
+  let claimOwner = false; // only a successful atomic INSERT grants ownership
+  let legacyOwnerToken: string | undefined;
+  if (legacyCacheKey !== null) {
+    // CA-F01: scoped legacy cache lookup (read-only check before claiming)
+    try {
+      const scopedResult = await bookingScopedLegacyCacheLookup(pool, legacyCacheKey, legacyFingerprint, rawLegacyHeader as string);
+      if (scopedResult.status === 'hit') {
+        res.setHeader('X-Idempotency', 'HIT');
+        return res.status(scopedResult.statusCode || 200).json(scopedResult.body);
+      }
+      if (scopedResult.status === 'conflict') {
+        return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
+      }
+      if (scopedResult.status === 'unscoped_legacy') {
+        // CA-F03: active unscoped row without trusted binding → 409, no writer
+        return res.status(409).json({ status: 'FAILED', message: 'Legacy unscoped idempotency key in use; request cannot be processed under the scoped cache' });
+      }
+      // 'in_progress' → controlled in-progress response, NOT a second writer
+      if (scopedResult.status === 'in_progress') {
+        return res.status(202).json({ status: 'IN_PROGRESS', message: 'Booking creation in progress for this idempotency key; retry with the same key' });
+      }
+      // 'none' → no existing row; proceed to claim
+    } catch (_cacheErr) {
+      // CA-F01: cache read error → clear error response, NO writer call
+      console.error('[booking-legacy-cache] lookup error', _cacheErr);
+      return res.status(500).json({ status: 'ERROR', message: 'Idempotency cache read failed; request not processed' });
+    }
+
+    // CA-F01: atomic placeholder claim BEFORE createCanonicalBooking
+    try {
+      const claimResult = await bookingScopedLegacyCacheClaim(pool, legacyCacheKey, legacyFingerprint);
+      if (claimResult.claimed) {
+        claimOwner = true;
+        legacyOwnerToken = claimResult.ownerToken;
+      } else {
+        // Lost the race: read the winner's row
+        const wRow = claimResult.row;
+        if (!wRow || (wRow.expires_at && new Date(wRow.expires_at) < new Date())) {
+          return res.status(503).json({ status: 'ERROR', message: 'Idempotency claim cannot be confirmed; retry with the same key' });
+        }
+        if (wRow.request_hash !== legacyFingerprint) {
+          return res.status(409).json({ status: 'FAILED', message: 'Idempotency key conflict: different request payload' });
+        }
+        if (wRow && wRow.response_body) {
+          let parsed: any;
+          try { parsed = JSON.parse(wRow.response_body); } catch { parsed = wRow.response_body; }
+          res.setHeader('X-Idempotency', 'HIT');
+          return res.status(wRow.status_code || 200).json(parsed);
+        }
+        // PENDING, no response yet → in-progress
+        return res.status(202).json({ status: 'IN_PROGRESS', message: 'Booking creation in progress for this idempotency key; retry with the same key' });
+      }
+    } catch (_claimErr) {
+      // CA-F01: claim error → clear error response, NO writer call
+      console.error('[booking-legacy-cache] claim error', _claimErr);
+      return res.status(500).json({ status: 'ERROR', message: 'Idempotency claim failed; request not processed' });
+    }
+  }
+
+  // ── Legacy writer (only the claim owner or no-key path reaches here) ───────
+  let legacyWriterReturned = false;
+  try {
     const result = await createCanonicalBooking(req, payload, reservations, { requirePropertyId: true });
+    legacyWriterReturned = true;
     const responseObj = {
       status: 'SUCCESS',
       data: {
@@ -4877,11 +5579,17 @@ app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('paymen
       console.error('Failed to broadcast booking create events', broadcastError);
     }
 
-    await persistIdempotencyResult(req, res, 201, responseObj);
+    // CA-F02: persist with the SAME file descriptor used at claim time
+    if (claimOwner && legacyCacheKey !== null) {
+      await bookingScopedLegacyCachePersist(pool, legacyCacheKey, legacyFingerprint, legacyOwnerToken!, 201, responseObj)
+        .catch((e: any) => {
+          // CA-F01: booking committed but cache persist failed → log, keep PENDING, do NOT re-run writer
+          console.error('[booking-legacy-cache] persist failed after writer (PENDING state retained)', e);
+        });
+    }
     return res.status(201).json(responseObj);
   } catch (err: any) {
     if (isRoomOverlapViolation(err)) {
-      await persistIdempotencyResult(req, res, 409, ROOM_OVERLAP_RESPONSE);
       return sendRoomOverlapConflict(res);
     }
 
@@ -4893,7 +5601,12 @@ app.post('/api/bookings', requireAuth, quickBookingEvidenceUpload.single('paymen
       responseObj.missing_fields = err.missing_fields || err.missing;
       responseObj.missing = err.missing || err.missing_fields;
     }
-    await persistIdempotencyResult(req, res, statusCode, responseObj);
+    // A transport/post-COMMIT/unknown failure must not turn a possibly committed
+    // booking into a cached failure. Only an ordinary pre-return 4xx is finalized.
+    if (!legacyWriterReturned && statusCode >= 400 && statusCode < 500 && claimOwner && legacyCacheKey !== null) {
+      await bookingScopedLegacyCachePersist(pool, legacyCacheKey, legacyFingerprint, legacyOwnerToken!, statusCode, responseObj)
+        .catch((e: any) => console.error('[booking-legacy-cache] error-persist failed; PENDING retained', e));
+    }
     return res.status(statusCode).json(responseObj);
   }
 });

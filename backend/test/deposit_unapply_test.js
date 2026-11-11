@@ -457,6 +457,18 @@ function invokeStayRoute(mode) {
       if (text.includes('UPDATE availability_dates')) {
         return { rows: [{ id: 500 }], rowCount: 1 };
       }
+      // canonical availability: existing-dates lookup (to_char) — return empty so all dates are "missing"
+      if (text.includes("SELECT to_char(date::date") && text.includes('FROM availability_dates')) {
+        return { rows: [], rowCount: 0 };
+      }
+      // canonical availability: room-type label + active capacity lookup
+      if (text.includes('SELECT rt.id AS room_type_id') && text.includes('FROM room_types rt')) {
+        return { rows: [{ room_type_id: 7, room_type: 'Deluxe King', active_rooms: 10 }], rowCount: 1 };
+      }
+      // canonical availability: idempotent insert of missing date rows
+      if (text.startsWith('INSERT INTO availability_dates')) {
+        return { rows: [], rowCount: 0 };
+      }
       // idempotent folio lookup
       if (text.includes("FROM folio_entries") && text.includes("source_type = 'STAY_EXTENSION'")) {
         return { rows: [], rowCount: 0 };
