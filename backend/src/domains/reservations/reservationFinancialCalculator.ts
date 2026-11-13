@@ -14,6 +14,13 @@ import {
 // to avoid circular imports.
 // ============================================================================
 
+export type ReservationPaymentSource =
+  | 'CANONICAL_TRANSACTIONS'
+  | 'LEGACY_FOLIO_FALLBACK'
+  | 'LEGACY_SNAPSHOT_FALLBACK'
+  | 'OVERRIDE_FALLBACK'
+  | 'NONE';
+
 /**
  * Read-only canonical financial calculator.
  *
@@ -35,6 +42,8 @@ export async function calculateReservationFinancials(
   applied_deposit: number;
   remaining_balance: number;
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  payment_source: ReservationPaymentSource;
+  legacy_unreconciled_payment_exists: boolean;
   reservation: any;
 }> {
   // 1. Fetch current reservation details (read-only, no lock)
@@ -126,6 +135,10 @@ export async function calculateReservationFinancials(
     client, reservationId, propertyId
   );
   let ordinaryAmountPaid = payState.totalEffectivePaid;
+  let paymentSource: ReservationPaymentSource = payState.canonicalPaymentHistoryExists
+    ? 'CANONICAL_TRANSACTIONS'
+    : 'NONE';
+  let legacyUnreconciledPaymentExists = false;
 
   const depositApplyRes = await client.query(
     `SELECT COALESCE(SUM(
@@ -166,10 +179,23 @@ export async function calculateReservationFinancials(
     const folioPaid = Math.round(Number(folioPmtRes.rows[0]?.folio_paid || 0));
     if (folioPaid > 0) {
       ordinaryAmountPaid = folioPaid;
+      paymentSource = 'LEGACY_FOLIO_FALLBACK';
+      legacyUnreconciledPaymentExists = true;
+    } else if (ordinaryFallbackOverride !== undefined) {
+      ordinaryAmountPaid = Math.max(0, Math.round(ordinaryFallbackOverride));
+      if (ordinaryAmountPaid > 0) {
+        paymentSource = 'OVERRIDE_FALLBACK';
+        legacyUnreconciledPaymentExists = true;
+      }
+    } else if (chargeCount === 0) {
+      // Legacy fallback: only when no folio charge entries exist (pre-folio legacy reservation)
+      ordinaryAmountPaid = Math.max(0, Math.round(Number(resRow.amount_paid || 0)));
+      if (ordinaryAmountPaid > 0) {
+        paymentSource = 'LEGACY_SNAPSHOT_FALLBACK';
+        legacyUnreconciledPaymentExists = true;
+      }
     } else {
-      ordinaryAmountPaid = ordinaryFallbackOverride === undefined
-        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)))
-        : Math.max(0, Math.round(ordinaryFallbackOverride));
+      ordinaryAmountPaid = 0;
     }
   }
 
@@ -193,6 +219,8 @@ export async function calculateReservationFinancials(
     applied_deposit: appliedDeposit,
     remaining_balance: remainingBalance,
     payment_status: newPaymentStatus,
+    payment_source: paymentSource,
+    legacy_unreconciled_payment_exists: legacyUnreconciledPaymentExists,
     reservation: resRow
   };
 }

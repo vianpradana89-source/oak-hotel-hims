@@ -7,6 +7,8 @@ import {
   getMissingRequirementLabel,
   evaluatePrecheckinReadiness,
   buildCheckinReadinessRows,
+  resolveAuthoritativeReservationFinancials,
+  isChecklistRequirementActionable,
 } from '../src/features/calendar/precheckinGateUi.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -554,6 +556,84 @@ console.log('--- 5. Checklist Rows: Unknown & PRECHECKIN_EVALUATION_CODES Surfac
   const nameRow = rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING')!;
   check(nameRow.isMet === true, 'non-missing row with eligible=true => isMet=true');
   check(nameRow.label === 'Nama tamu lengkap', 'non-missing row with eligible=true uses positive MET label');
+}
+
+// --------------------------------------------------------------------------
+// 6. AUTHORITATIVE FINANCIALS & DECOUPLED PAYMENT EVIDENCE ACTIONABILITY (#1503)
+// --------------------------------------------------------------------------
+console.log('--- 6. Authoritative Financials & Decoupled Payment Evidence Action (#1503) ---');
+{
+  // Full payment (balance 0) without evidence: canShowPaymentForm=false, canManagePaymentEvidence=true
+  const fullPaidNoEvidence = resolveAuthoritativeReservationFinancials(
+    {
+      id: 150301,
+      status: 'BOOKED',
+      property_id: 1,
+      total_price: '500000.00',
+      amount_paid: '500000.00',
+      remaining_balance: '0.00',
+      payment_status: 'PAID',
+    },
+    {
+      authoritative_financials: {
+        total_price: 500000,
+        amount_paid: 500000,
+        applied_deposit: 0,
+        remaining_balance: 0,
+        payment_status: 'PAID',
+        payment_responsibility: 'HOTEL_COLLECT',
+      },
+    }
+  );
+  check(fullPaidNoEvidence.remainingBalance === 0, 'Full paid has remainingBalance = 0');
+  check(fullPaidNoEvidence.canShowPaymentForm === false, 'Full paid hides new payment form');
+  check(fullPaidNoEvidence.canManagePaymentEvidence === true, 'Full paid keeps evidence upload available');
+  check(
+    isChecklistRequirementActionable('PAYMENT_EVIDENCE_MISSING', {
+      canShowPaymentForm: fullPaidNoEvidence.canShowPaymentForm,
+      canManagePaymentEvidence: fullPaidNoEvidence.canManagePaymentEvidence,
+      hasGuaranteeSection: true,
+      canEditGuestData: true,
+    }) === true,
+    'PAYMENT_EVIDENCE_MISSING remains actionable even when canShowPaymentForm is false (balance = 0)'
+  );
+
+  // #1503 exact case: raw reservation row had stale 638,000 / 0 / PAID, while authoritative_financials has 699,000 / 638,000 / 61,000 / PARTIAL
+  const case1503 = resolveAuthoritativeReservationFinancials(
+    {
+      id: 1503,
+      status: 'BOOKED',
+      property_id: 1,
+      total_price: '638000.00',
+      amount_paid: '638000.00',
+      remaining_balance: '0.00',
+      payment_status: 'PAID',
+    },
+    {
+      authoritative_financials: {
+        total_price: 699000,
+        amount_paid: 638000,
+        applied_deposit: 0,
+        remaining_balance: 61000,
+        payment_status: 'PARTIAL',
+        payment_responsibility: 'HOTEL_COLLECT',
+      },
+    }
+  );
+  check(case1503.totalPrice === 699000, '#1503 uses authoritative totalPrice = 699,000 instead of stale 638,000');
+  check(case1503.amountPaid === 638000, '#1503 uses authoritative amountPaid = 638,000');
+  check(case1503.remainingBalance === 61000, '#1503 uses authoritative remainingBalance = 61,000 instead of stale 0');
+  check(case1503.paymentStatus === 'PARTIAL', '#1503 uses authoritative paymentStatus = PARTIAL instead of stale PAID');
+  check(case1503.canShowPaymentForm === true, '#1503 enables canShowPaymentForm so FO can pay remaining Rp 61,000');
+  check(
+    isChecklistRequirementActionable('PAYMENT_MISSING', {
+      canShowPaymentForm: case1503.canShowPaymentForm,
+      canManagePaymentEvidence: case1503.canManagePaymentEvidence,
+      hasGuaranteeSection: true,
+      canEditGuestData: true,
+    }) === true,
+    '#1503 enables PAYMENT_MISSING "Catat Pembayaran" button'
+  );
 }
 
 console.log(`\nAll ${assertions} test assertions passed successfully!`);

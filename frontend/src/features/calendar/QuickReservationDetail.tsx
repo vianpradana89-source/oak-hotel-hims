@@ -20,6 +20,7 @@ import {
   CANONICAL_CHECKIN_REQUIREMENT_LABELS,
   getMissingRequirementLabel,
   evaluatePrecheckinReadiness,
+  resolveAuthoritativeReservationFinancials,
 } from './precheckinGateUi';
 import { useWhatsAppQuickAction } from './useWhatsAppQuickAction';
 import WhatsAppQuickActionModal from './WhatsAppQuickActionModal';
@@ -297,18 +298,22 @@ export default function QuickReservationDetail({
   const hideRatePlan = isOtaReservation(data);
   const specialRequestsNote = reservationSpecialRequestsText(data);
 
-  // Financial status & values
-  const totalPrice = Number(data.total_price || 0);
-  const amountPaid = Number(data.amount_paid || 0);
-  const appliedDeposit = Number(data.applied_deposit || 0);
-  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
+  // Financial status & values (uses authoritative_financials when available)
+  const {
+    totalPrice,
+    amountPaid,
+    remainingBalance,
+    paymentStatus: canonicalPaymentStatus,
+  } = resolveAuthoritativeReservationFinancials(data, undefined, {
+    isCancelled,
+    activePropertyId: activePropId,
+  });
 
   const getPaymentStatus = () => {
-    const pStatus = String(data.payment_status || '').toUpperCase();
-    if (pStatus === 'PAID' || pStatus === 'LUNAS' || (totalPrice > 0 && amountPaid >= totalPrice)) {
+    if (canonicalPaymentStatus === 'PAID') {
       return { label: 'Lunas', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
     }
-    if (pStatus === 'PARTIAL' || pStatus === 'SEBAGIAN' || (amountPaid > 0 && amountPaid < totalPrice)) {
+    if (canonicalPaymentStatus === 'PARTIAL') {
       return { label: 'Sebagian', badgeClass: 'bg-amber-50 text-amber-800 border-amber-200' };
     }
     return { label: 'Belum Bayar', badgeClass: 'bg-rose-50 text-rose-800 border-rose-200' };

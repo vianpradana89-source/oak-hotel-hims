@@ -18,7 +18,8 @@ import {
 } from '../payments/paymentAllocationService';
 import {
   calculateReservationFinancials,
-  calculateHotelCollectibleBalance
+  calculateHotelCollectibleBalance,
+  type ReservationPaymentSource
 } from '../reservations/reservationFinancialCalculator';
 import { lockReservationFinancialState } from '../reservations/reservationLockService';
 
@@ -440,6 +441,8 @@ export async function recalculateReservationFinancials(
   applied_deposit: number;
   remaining_balance: number;
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  payment_source: ReservationPaymentSource;
+  legacy_unreconciled_payment_exists: boolean;
   reservation: any;
 }> {
   // 1. Fetch and lock the reservation row
@@ -493,7 +496,8 @@ export async function recalculateReservationFinancials(
 // Re-export from neutral module for backward compat with external callers.
 export {
   calculateReservationFinancials,
-  calculateHotelCollectibleBalance
+  calculateHotelCollectibleBalance,
+  type ReservationPaymentSource
 } from '../reservations/reservationFinancialCalculator';
 
 // ============================================================================

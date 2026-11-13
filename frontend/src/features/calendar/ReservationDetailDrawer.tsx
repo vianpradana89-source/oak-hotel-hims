@@ -21,7 +21,11 @@ import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
 import POSOrderPanel from '../pos/POSOrderPanel';
 import { getPosAccess } from '../pos/posPermissions';
 import { deriveGuaranteeCloseDecision, type GuaranteeLoadStatus } from '../deposits/guaranteeScopePolicy';
-import { buildCheckinReadinessRows } from './precheckinGateUi';
+import {
+  buildCheckinReadinessRows,
+  resolveAuthoritativeReservationFinancials,
+  isChecklistRequirementActionable,
+} from './precheckinGateUi';
 import {
   canEditReservationSpecialRequests,
   formatReservationRatePlanLabel,
@@ -103,6 +107,7 @@ interface CheckinReadinessChecklistProps {
   precheckinEligibility: any;
   missingRequirements: Array<{ code: string; label?: string }>;
   canShowPaymentForm: boolean;
+  canManagePaymentEvidence: boolean;
   hasGuaranteeSection: boolean;
   canEditGuestData: boolean;
   onNavigate: (tab: string, anchor: string) => void;
@@ -120,7 +125,7 @@ const REQUIREMENT_ACTION_MAP: Record<
     actionLabel: string;
     tab: string;
     anchor: string;
-    needsGate: 'payment' | 'guarantee' | null;
+    needsGate: 'payment_form' | 'payment_evidence' | 'guarantee' | null;
   }
 > = {
   PRIMARY_GUEST_NAME_MISSING: {
@@ -151,13 +156,13 @@ const REQUIREMENT_ACTION_MAP: Record<
     actionLabel: 'Catat Pembayaran',
     tab: 'pembayaran',
     anchor: 'payment-form',
-    needsGate: 'payment',
+    needsGate: 'payment_form',
   },
   PAYMENT_EVIDENCE_MISSING: {
     actionLabel: 'Upload Bukti',
     tab: 'pembayaran',
-    anchor: 'payment-form',
-    needsGate: 'payment',
+    anchor: 'payment-history-section',
+    needsGate: 'payment_evidence',
   },
   GUARANTEE_MISSING: {
     actionLabel: 'Tambah Jaminan',
@@ -171,6 +176,7 @@ function CheckinReadinessChecklist({
   precheckinEligibility,
   missingRequirements,
   canShowPaymentForm,
+  canManagePaymentEvidence,
   hasGuaranteeSection,
   canEditGuestData,
   onNavigate,
@@ -189,10 +195,17 @@ function CheckinReadinessChecklist({
   const unmetRows = rows.filter(r => !r.isMet);
   const displayRows = showAllRows ? rows : unmetRows;
 
-  const handleAction = (code: string, gate: 'payment' | 'guarantee' | null) => {
-    if (gate === 'payment' && !canShowPaymentForm) return;
-    if (gate === 'guarantee' && !hasGuaranteeSection) return;
-    if ((code === 'PRIMARY_GUEST_NAME_MISSING' || code === 'PRIMARY_GUEST_PHONE_MISSING') && !canEditGuestData) return;
+  const handleAction = (code: string) => {
+    if (
+      !isChecklistRequirementActionable(code, {
+        canShowPaymentForm,
+        canManagePaymentEvidence,
+        hasGuaranteeSection,
+        canEditGuestData,
+      })
+    ) {
+      return;
+    }
     const cfg = REQUIREMENT_ACTION_MAP[code];
     if (!cfg) return;
     onNavigate(cfg.tab, cfg.anchor);
@@ -225,15 +238,13 @@ function CheckinReadinessChecklist({
         const action = REQUIREMENT_ACTION_MAP[row.code];
         const hasActionableButton =
           !row.isMet &&
-          action &&
-          (() => {
-            if (action.needsGate === 'payment' && !canShowPaymentForm) return false;
-            if (action.needsGate === 'guarantee' && !hasGuaranteeSection) return false;
-            if (row.code === 'PRIMARY_GUEST_NAME_MISSING' || row.code === 'PRIMARY_GUEST_PHONE_MISSING') {
-              if (!canEditGuestData) return false;
-            }
-            return true;
-          })();
+          Boolean(action) &&
+          isChecklistRequirementActionable(row.code, {
+            canShowPaymentForm,
+            canManagePaymentEvidence,
+            hasGuaranteeSection,
+            canEditGuestData,
+          });
 
         // Primary (solid) vs secondary (outline) action styling:
         // "Catat Pembayaran" (PAYMENT_MISSING) is the primary solid-green action;
@@ -284,7 +295,7 @@ function CheckinReadinessChecklist({
             {!row.isMet && hasActionableButton && action && (
               <button
                 type="button"
-                onClick={() => handleAction(row.code, action.needsGate)}
+                onClick={() => handleAction(row.code)}
                 className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 cursor-pointer transition-colors ${
                   isPrimaryAction
                     ? 'bg-emerald-800 hover:bg-emerald-700 text-white'
@@ -712,6 +723,7 @@ export default function ReservationDetailDrawer({
         setActivePaymentEvidenceMime(result.data.data.evidence.mime_type);
         await loadFolio(data.id);
         await loadFullReservation(data.id);
+        onRefresh();
       } else {
         setEvidenceUploadError(result.errorMessage || 'Gagal menambahkan bukti');
       }
@@ -749,6 +761,7 @@ export default function ReservationDetailDrawer({
         setActivePaymentEvidenceMime(result.data.data.new_evidence.mime_type);
         await loadFolio(data.id);
         await loadFullReservation(data.id);
+        onRefresh();
       } else {
         setEvidenceUploadError(result.errorMessage || 'Gagal mengganti bukti');
       }
@@ -782,7 +795,10 @@ export default function ReservationDetailDrawer({
       );
       if (result.ok) {
         setIsEditingPhone(false);
-        await loadFullReservation(detailData.id);
+        await Promise.all([
+          loadFullReservation(detailData.id),
+          loadFolio(detailData.id)
+        ]);
         onRefresh();
       } else {
         alert(result.errorMessage || 'Gagal memperbarui nomor telepon');
@@ -960,7 +976,10 @@ export default function ReservationDetailDrawer({
   const handleComplimentarySuccess = useCallback(async () => {
     if (!complimentaryReservationId) return;
     await loadComplimentary();
-    await loadFolio(complimentaryReservationId);
+    await Promise.all([
+      loadFullReservation(complimentaryReservationId),
+      loadFolio(complimentaryReservationId)
+    ]);
     await Promise.resolve(onRefresh());
   }, [complimentaryReservationId, loadComplimentary, onRefresh]);
 
@@ -977,8 +996,24 @@ export default function ReservationDetailDrawer({
     if (!Number.isInteger(currentComplimentaryResId) || currentComplimentaryResId <= 0) return;
     if (complimentaryRefreshSignalResId !== currentComplimentaryResId) return;
     void loadComplimentary();
+    void loadFullReservation(currentComplimentaryResId);
+    void loadFolio(currentComplimentaryResId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [complimentaryRefreshVersionNum, complimentaryRefreshSignalResId, currentComplimentaryResId, loadComplimentary]);
+
+  // POS-ORDERS REALTIME: refresh reservation eligibility and folio when a POS order
+  // is billed or changed for this reservation while the drawer is open.
+  const posOrdersRefreshVersionNum = Number(posOrdersRefreshVersion) || 0;
+  const posOrdersRefreshSignalResId = Number(posOrdersRefreshReservationId);
+  useEffect(() => {
+    if (posOrdersRefreshVersionNum <= 0) return;
+    if (!Number.isInteger(posOrdersRefreshSignalResId) || posOrdersRefreshSignalResId <= 0) return;
+    if (!Number.isInteger(currentComplimentaryResId) || currentComplimentaryResId <= 0) return;
+    if (posOrdersRefreshSignalResId !== currentComplimentaryResId) return;
+    void loadFullReservation(currentComplimentaryResId);
+    void loadFolio(currentComplimentaryResId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posOrdersRefreshVersionNum, posOrdersRefreshSignalResId, currentComplimentaryResId]);
 
 
   if (!reservation) return null;
@@ -1033,39 +1068,22 @@ export default function ReservationDetailDrawer({
     }
   }, [specialRequestsNote, isEditingNotes]);
 
-  const totalPrice = Number(data.total_price || 0);
-  const amountPaid = Number(data.amount_paid || 0);
-  const appliedDeposit = Number(data.applied_deposit || 0);
-  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
-
-  // OTA_COLLECT: derive payment collection balance from authoritative folio financials.
-  // HOTEL_COLLECT continues to use canonical remainingBalance (unchanged).
-  const authoritativeFinancials = folioData?.authoritative_financials;
-  const paymentResponsibility = String(
-    authoritativeFinancials?.payment_responsibility || ''
-  ).trim().toUpperCase();
-  const isOtaCollect = paymentResponsibility === 'OTA_COLLECT';
-  const rawHotelCollectible = authoritativeFinancials?.hotel_collectible_remaining_balance;
-  const hasHotelCollectibleValue =
-    rawHotelCollectible !== null &&
-    rawHotelCollectible !== undefined &&
-    String(rawHotelCollectible).trim() !== '';
-  const parsedHotelCollectible = hasHotelCollectibleValue
-    ? Number(rawHotelCollectible)
-    : Number.NaN;
-  const hotelCollectibleValid = isOtaCollect
-    ? Number.isFinite(parsedHotelCollectible) && parsedHotelCollectible >= 0
-    : true;
-  // Fail-closed: OTA_COLLECT + invalid/missing collectible => null (no fallback to canonical balance).
-  const paymentCollectionBalance: number | null = isOtaCollect
-    ? (hotelCollectibleValid ? Math.max(0, parsedHotelCollectible) : null)
-    : remainingBalance;
-  const otaCollectUnavailable = isOtaCollect && !hotelCollectibleValid;
-  // Form visibility: always hidden when OTA_COLLECT balance is unavailable.
-  const canShowPaymentForm =
-    !isCancelled &&
-    paymentCollectionBalance !== null &&
-    paymentCollectionBalance > 0;
+  // Prefer authoritative folio financials (from GET /api/reservations/:id/folio or
+  // GET /api/reservations/:id) so checklist, payment summary, header status badge,
+  // and payment form all consume the exact same canonical financial state.
+  const {
+    totalPrice,
+    amountPaid,
+    remainingBalance,
+    isOtaCollect,
+    paymentCollectionBalance,
+    otaCollectUnavailable,
+    canShowPaymentForm,
+    canManagePaymentEvidence,
+  } = resolveAuthoritativeReservationFinancials(data, folioData, {
+    isCancelled,
+    activePropertyId: activePropId,
+  });
 
   // GROUP-GUARANTEE-CLOSE-WARNING: warn on close only when group is terminal AND guarantee is unresolved.
   // A soft warning — never blocks checkout, never mutates data.
@@ -1215,8 +1233,10 @@ export default function ReservationDetailDrawer({
       setPaymentDraft('');
       setPaymentEvidenceFile(null);
       if (paymentEvidenceInputRef.current) paymentEvidenceInputRef.current.value = '';
-      loadFullReservation();
-      loadFolio();
+      await Promise.all([
+        loadFullReservation(data.id),
+        loadFolio(data.id)
+      ]);
       onRefresh();
     } catch (err: any) {
       setPaymentError(err.message || 'Gagal mencatat pembayaran');
@@ -1236,7 +1256,11 @@ export default function ReservationDetailDrawer({
   // Scrolls to an anchor element within the drawer by id.
   // Fails gracefully if the target is not currently rendered.
   const scrollToSection = useCallback((sectionId: string) => {
-    const el = document.getElementById(sectionId);
+    const el =
+      document.getElementById(sectionId) ||
+      (sectionId === 'payment-history-section'
+        ? document.getElementById('payment-form') || document.getElementById('folio-section')
+        : null);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -1481,6 +1505,7 @@ export default function ReservationDetailDrawer({
                       precheckinEligibility={precheckinEligibility}
                       missingRequirements={missingRequirements}
                       canShowPaymentForm={canShowPaymentForm}
+                      canManagePaymentEvidence={canManagePaymentEvidence}
                       hasGuaranteeSection={Boolean(data.id && activePropId)}
                        canEditGuestData={!isCancelled && !isCheckedOut}
                        onNavigate={navigateToRequirementTarget}
@@ -2317,7 +2342,7 @@ export default function ReservationDetailDrawer({
               }
               if (payments.length === 0) return null;
               return (
-                <div className="mt-3 border border-stone-200 rounded-lg overflow-hidden text-xs">
+                <div id="payment-history-section" className="mt-3 border border-stone-200 rounded-lg overflow-hidden text-xs">
                   <div className="bg-emerald-50 px-3 py-2 font-bold text-emerald-950 text-xs flex items-center justify-between">
                     <span>Riwayat Pembayaran ({payments.length})</span>
                     <span className="font-mono text-emerald-800">

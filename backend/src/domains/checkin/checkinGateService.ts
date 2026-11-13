@@ -185,9 +185,11 @@ export async function evaluatePreCheckinEligibility(
   if (!paymentOk) missing.push({ code: 'PAYMENT_MISSING', label: MISSING_LABELS.PAYMENT_MISSING });
 
    // ── Gate 5: Payment Evidence ───────────────────────────────────────────
-   // Evidence REQUIRED only when ordinary payment exists AND balance is settled.
+   // Evidence REQUIRED when ordinary payment exists; if ordinary payment
+   // exists (even when partial / remaining_balance > 0), check its active
+   // evidence so we do not falsely report PAYMENT_EVIDENCE_MISSING when
+   // valid evidence is already attached.
    // Complimentary-only (no ordinary payment, zero balance) => evidence WAIVED.
-   // No payment at all => evidence not required (only PAYMENT_MISSING reported).
    let evidenceCount = 0;
    if (isOtaCollect) {
      const otaVoucherRes = await client.query(
@@ -201,8 +203,8 @@ export async function evaluatePreCheckinEligibility(
        [Number(row.booking_id), effectivePropertyId]
      );
      evidenceCount = otaVoucherRes.rowCount ?? 0;
-   } else if (paymentOk && payState.qualifyingPositivePaymentExists) {
-     // Ordinary payment exists and balance is zero: require evidence
+   } else if (payState.qualifyingPositivePaymentExists) {
+     // Ordinary payment exists (full or partial): verify active evidence
      const evidenceRows = await getQualifyingEvidenceForReservation(
        client, reservationId, effectivePropertyId
      );

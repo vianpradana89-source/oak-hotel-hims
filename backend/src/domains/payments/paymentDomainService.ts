@@ -10,7 +10,11 @@ import {
   deleteEvidenceFile,
   validateEvidenceUpload
 } from './evidenceStorageService';
-import { recalculateReservationFinancials, calculateHotelCollectibleBalance } from '../stayCharges/stayChargesService';
+import {
+  recalculateReservationFinancials,
+  calculateReservationFinancials,
+  calculateHotelCollectibleBalance
+} from '../stayCharges/stayChargesService';
 
 export interface CreatePaymentCoreInput {
   propertyId: number;
@@ -101,14 +105,46 @@ export async function createPaymentInTransaction(
     throw { statusCode: 403, code: 'CROSS_PROPERTY_RESERVATION', message: 'Reservation belongs to a different property' };
   }
 
-  // Compute existing canonical fields first (needed for both paths).
-  const currentPaid = Math.round(Number(reservationRes.rows[0].amount_paid || 0));
-  const currentAppliedDeposit = Math.round(Number(reservationRes.rows[0].applied_deposit || 0));
-  const totalPrice = Math.round(Number(reservationRes.rows[0].total_price || 0));
+  // Compute existing canonical fields from authoritative financial calculator.
+  const canonicalFinancials = await calculateReservationFinancials(
+    client,
+    reservationId,
+    propertyId
+  );
 
-  // Default overpayment guard: canonical remaining balance (preserves existing
-  // HOTEL_COLLECT behavior even when partial folio charges exist).
-  let currentRemaining = Math.max(totalPrice - currentPaid - currentAppliedDeposit, 0);
+  const totalPrice = canonicalFinancials.total_price;
+  const currentPaid = canonicalFinancials.amount_paid;
+  const currentAppliedDeposit = canonicalFinancials.applied_deposit;
+
+  // Fail-closed guard before any canonical payment write:
+  // If the reservation has a recognized legacy/fallback payment (either from
+  // legacy folio_entries PAYMENT rows without payment_transactions or from a
+  // pre-folio legacy reservation snapshot with chargeCount === 0), inserting the
+  // first canonical payment_transactions row would flip canonicalPaymentHistoryExists
+  // from false to true and cause recalculateReservationFinancials and all downstream
+  // readers to drop the un-reconciled legacy payment. Reject pre-write until the
+  // legacy payment is explicitly reconciled.
+  if (canonicalFinancials.legacy_unreconciled_payment_exists) {
+    throw {
+      statusCode: 409,
+      code: 'LEGACY_PAYMENT_RECONCILIATION_REQUIRED',
+      message:
+        `Reservasi ini memiliki pembayaran historis/legacy sebesar Rp${currentPaid.toLocaleString('id-ID')} ` +
+        `(${canonicalFinancials.payment_source}) yang belum tercatat pada transaksi pembayaran kanonikal (payment_transactions). ` +
+        `Rekonsiliasi pembayaran lama diperlukan terlebih dahulu sebelum mencatat pembayaran baru agar pembayaran lama tidak hilang dari perhitungan.`,
+      details: {
+        reservation_id: reservationId,
+        legacy_payment_source: canonicalFinancials.payment_source,
+        legacy_amount_paid: currentPaid,
+        total_price: totalPrice,
+        remaining_balance: canonicalFinancials.remaining_balance,
+        attempted_payment_amount: paymentAmount
+      }
+    };
+  }
+
+  // Default overpayment guard: canonical remaining balance.
+  let currentRemaining = canonicalFinancials.remaining_balance;
 
   // OTA_COLLECT override: use the hotel-collectible helper to bound the
   // overpayment guard to hotel_collectible_remaining_balance only.
@@ -207,22 +243,8 @@ export async function createPaymentInTransaction(
     created_at: new Date().toISOString(), timestamp: new Date().toISOString()
   }), corrId, propertyId]);
 
-  let updatedReservation: any;
-  if (input.recalculateFromFolio) {
-    const financials = await recalculateReservationFinancials(client, reservationId, propertyId, currentPaid);
-    updatedReservation = financials.reservation;
-  } else {
-    const updatedAmountPaid = currentPaid + paymentAmount;
-    const effectiveSettlement = updatedAmountPaid + currentAppliedDeposit;
-    const updatedRemaining = Math.max(0, totalPrice - effectiveSettlement);
-    const updatedPaymentStatus = effectiveSettlement <= 0 ? 'UNPAID' : updatedRemaining === 0 ? 'PAID' : 'PARTIAL';
-    const updated = await client.query(`
-      UPDATE reservations
-      SET amount_paid = $1, applied_deposit = $2, remaining_balance = $3, payment_status = $4
-      WHERE id = $5 RETURNING *
-    `, [updatedAmountPaid, currentAppliedDeposit, updatedRemaining, updatedPaymentStatus, reservationId]);
-    updatedReservation = updated.rows[0];
-  }
+  const financials = await recalculateReservationFinancials(client, reservationId, propertyId);
+  const updatedReservation = financials.reservation;
   return {
     payment: paymentRow,
     reservation: updatedReservation,

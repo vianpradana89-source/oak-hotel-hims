@@ -3702,6 +3702,7 @@ app.get('/api/reservations/:id', async (req, res) => {
         b.booking_source,
         COALESCE(b.booking_channel, r.booking_channel) AS booking_channel,
         b.property_id AS booking_property_id,
+        b.payment_responsibility,
         ota.name AS ota_source_name,
         r.rate_plan_id,
         r.rate_plan_code_snapshot,
@@ -3854,18 +3855,53 @@ app.get('/api/reservations/:id', async (req, res) => {
       };
     }
 
+    let authoritative_financials: any = null;
+    const responseData: any = { ...data };
+    try {
+      const folioFinancial = await calculateReservationFinancials(pool, reservationId, propertyId);
+      const authoritativeRemainingBalance = Number.isFinite(folioFinancial?.remaining_balance)
+        ? Number(folioFinancial.remaining_balance)
+        : null;
+      const hotelCollectible = await calculateHotelCollectibleBalance(
+        pool,
+        reservationId,
+        propertyId,
+        row.payment_responsibility
+      );
+      authoritative_financials = {
+        total_price: folioFinancial?.total_price ?? null,
+        amount_paid: folioFinancial?.amount_paid ?? null,
+        applied_deposit: folioFinancial?.applied_deposit ?? null,
+        remaining_balance: authoritativeRemainingBalance,
+        hotel_collectible_total: hotelCollectible.hotel_collectible_total,
+        hotel_collectible_remaining_balance: hotelCollectible.hotel_collectible_remaining_balance,
+        payment_responsibility: hotelCollectible.payment_responsibility,
+        payment_status: folioFinancial?.payment_status ?? null,
+      };
+      if (folioFinancial && Number.isFinite(folioFinancial.total_price)) {
+        responseData.total_price = Number(folioFinancial.total_price).toFixed(2);
+        responseData.amount_paid = Number(folioFinancial.amount_paid).toFixed(2);
+        responseData.applied_deposit = Number(folioFinancial.applied_deposit).toFixed(2);
+        responseData.remaining_balance = Number(folioFinancial.remaining_balance).toFixed(2);
+        responseData.payment_status = folioFinancial.payment_status;
+      }
+    } catch (_finErr) {
+      console.warn('[GET /api/reservations/:id] authoritative_financials evaluation error:', _finErr);
+    }
+
     res.json({
       status: 'OK',
       data: {
-        ...data,
+        ...responseData,
         readiness,
         checkout_inspection,
         require_checkout_inspection: requireCheckoutInspection,
-         sibling_reservations,
-         rate_snapshot,
-         primary_guest: primary_guest_data,
-         precheckin_eligibility,
-         checkin_progress: buildCheckinProgressSummary(sibling_reservations)
+        sibling_reservations,
+        rate_snapshot,
+        primary_guest: primary_guest_data,
+        precheckin_eligibility,
+        authoritative_financials,
+        checkin_progress: buildCheckinProgressSummary(sibling_reservations)
       }
     });
   } catch (err: any) {
@@ -4728,29 +4764,68 @@ app.patch('/api/reservations/:id', async (req, res) => {
     const guestSegment = ['Reguler', 'Group', 'Corporate'].includes(String(guestSegmentValue || 'Reguler'))
       ? String(guestSegmentValue || 'Reguler')
       : String(existing.guest_segment || 'Reguler');
-    const baseSubtotal = Number(
-      Object.prototype.hasOwnProperty.call(payload, 'subtotal_amount')
-       ? payload.subtotal_amount
-       : Object.prototype.hasOwnProperty.call(payload, 'total_price')
-         ? payload.total_price
-         : existing.total_price ?? existing.subtotal_amount ?? 0
-    );
-    const discountAmount = Number(
-      Object.prototype.hasOwnProperty.call(payload, 'discount_amount') ? payload.discount_amount : existing.discount_amount ?? 0
-    );
-    const discountPercent = Number(
-      Object.prototype.hasOwnProperty.call(payload, 'discount_percent') ? payload.discount_percent : existing.discount_percent ?? 0
-    );
-    const amountPaid = Number(
-      Object.prototype.hasOwnProperty.call(payload, 'amount_paid') ? payload.amount_paid : existing.amount_paid ?? 0
-    );
-    const totalPrice = Number(
-      Object.prototype.hasOwnProperty.call(payload, 'total_price') ? payload.total_price : baseSubtotal
-    );
-    const billingSummary = computeBillingSummary(totalPrice, discountAmount, discountPercent, amountPaid);
-    const paymentStatus = Object.prototype.hasOwnProperty.call(payload, 'payment_status')
-      ? payload.payment_status
-      : billingSummary.paymentStatus;
+    const hasFinancialPatchFields = [
+      'subtotal_amount',
+      'total_price',
+      'discount_amount',
+      'discount_percent',
+      'amount_paid',
+      'payment_status'
+    ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
+
+    let billingSummary: {
+      totalAfterDiscount: number;
+      discount: number;
+      discountPercent: number;
+      amountPaid: number;
+      remainingBalance: number;
+      paymentStatus: string;
+    };
+    let paymentStatus: string;
+
+    let preservedAppliedDeposit = Number(existing.applied_deposit ?? 0);
+    if (hasFinancialPatchFields) {
+      const baseSubtotal = Number(
+        Object.prototype.hasOwnProperty.call(payload, 'subtotal_amount')
+         ? payload.subtotal_amount
+         : Object.prototype.hasOwnProperty.call(payload, 'total_price')
+           ? payload.total_price
+           : existing.subtotal_amount ?? existing.total_price ?? 0
+      );
+      const discountAmount = Number(
+        Object.prototype.hasOwnProperty.call(payload, 'discount_amount') ? payload.discount_amount : existing.discount_amount ?? 0
+      );
+      const discountPercent = Number(
+        Object.prototype.hasOwnProperty.call(payload, 'discount_percent') ? payload.discount_percent : existing.discount_percent ?? 0
+      );
+      const amountPaid = Number(
+        Object.prototype.hasOwnProperty.call(payload, 'amount_paid') ? payload.amount_paid : existing.amount_paid ?? 0
+      );
+      const totalPrice = Number(
+        Object.prototype.hasOwnProperty.call(payload, 'total_price') ? payload.total_price : baseSubtotal
+      );
+      billingSummary = computeBillingSummary(totalPrice, discountAmount, discountPercent, amountPaid);
+      paymentStatus = Object.prototype.hasOwnProperty.call(payload, 'payment_status')
+        ? payload.payment_status
+        : billingSummary.paymentStatus;
+    } else {
+      // Metadata-only PATCH (e.g. guest_phone, guest_name, ktp_path):
+      // Never re-run computeBillingSummary on existing.total_price (which is already
+      // net of discounts and would double-subtract existing.discount_amount).
+      // Always synchronize with canonical reservation financials.
+      const effectivePropId = Number(reservationPropertyId || existing.property_id || 1);
+      const canonicalFin = await calculateReservationFinancials(client, reservationId, effectivePropId);
+      preservedAppliedDeposit = canonicalFin.applied_deposit;
+      billingSummary = {
+        totalAfterDiscount: canonicalFin.total_price,
+        discount: Number(existing.discount_amount ?? 0),
+        discountPercent: Number(existing.discount_percent ?? 0),
+        amountPaid: canonicalFin.amount_paid,
+        remainingBalance: canonicalFin.remaining_balance,
+        paymentStatus: canonicalFin.payment_status
+      };
+      paymentStatus = canonicalFin.payment_status;
+    }
     const ktpPath = Object.prototype.hasOwnProperty.call(payload, 'ktp_path') ? payload.ktp_path : existing.ktp_path;
     const buktiBayarPath = Object.prototype.hasOwnProperty.call(payload, 'bukti_bayar_path')
       ? payload.bukti_bayar_path
@@ -4781,8 +4856,9 @@ app.patch('/api/reservations/:id', async (req, res) => {
           bukti_bayar_path = $11,
           booking_type = $12,
           identity_number = $13,
-          has_valid_identity = $14
-      WHERE id = $15
+          has_valid_identity = $14,
+          applied_deposit = $15
+      WHERE id = $16
       RETURNING *`,
       [
        guestName,
@@ -4799,6 +4875,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
        bookingSource,
        identityNumber,
        hasValidIdentity,
+       preservedAppliedDeposit,
        reservationId
       ]
     );
@@ -8341,11 +8418,12 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
     }
 
     const oldAmount = Math.round(Number(originalPayment.amount || 0));
-    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
-    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
-    const currentAppliedDeposit = Math.round(Number(reservation.rows[0].applied_deposit || 0));
+    const canonicalBefore = await calculateReservationFinancials(client, reservationId, propertyId);
+    const totalPrice = canonicalBefore.total_price;
+    const currentPaid = canonicalBefore.amount_paid;
+    const currentAppliedDeposit = canonicalBefore.applied_deposit;
 
-    const resultingPaid = (currentPaid - oldAmount) + correctedAmount;
+    const resultingPaid = Math.max(0, currentPaid - oldAmount) + correctedAmount;
     const resultingEffectiveSettlement = resultingPaid + currentAppliedDeposit;
     if (resultingEffectiveSettlement > totalPrice) {
       await client.query('ROLLBACK');
@@ -8358,13 +8436,10 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
           resulting_paid: resultingPaid,
           applied_deposit: currentAppliedDeposit,
           total_price: totalPrice,
-          maximum_allowed_payment: totalPrice - currentAppliedDeposit - (currentPaid - oldAmount)
+          maximum_allowed_payment: totalPrice - currentAppliedDeposit - Math.max(0, currentPaid - oldAmount)
         }
       });
     }
-
-    const resultingRemaining = Math.max(0, totalPrice - resultingEffectiveSettlement);
-    const resultingPaymentStatus = resultingEffectiveSettlement <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     // 1. Mark original payment as CORRECTED
     await client.query(
@@ -8492,11 +8567,9 @@ app.post('/api/reservations/:id/payments/:paymentId/correct', handlePaymentUploa
       [reservationId, propertyId, `Pembayaran pengganti (koreksi #${paymentId})`, correctedAmount]
     );
 
-    // 6. Update reservation
-    const updated = await client.query(
-      `UPDATE reservations SET amount_paid = $1, applied_deposit = $2, remaining_balance = $3, payment_status = $4 WHERE id = $5 RETURNING *`,
-      [resultingPaid, currentAppliedDeposit, resultingRemaining, resultingPaymentStatus, reservationId]
-    );
+    // 6. Update reservation via canonical financial recalculation
+    const recalcAfterCorrect = await recalculateReservationFinancials(client, reservationId, propertyId);
+    const updated = { rows: [recalcAfterCorrect.reservation] };
 
     // 7. Audit log
     const auditPayload = {
@@ -8663,14 +8736,6 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
     }
 
     const oldAmount = Math.round(Number(originalPayment.amount || 0));
-    const totalPrice = Math.round(Number(reservation.rows[0].total_price || 0));
-    const currentPaid = Math.round(Number(reservation.rows[0].amount_paid || 0));
-    const currentAppliedDeposit = Math.round(Number(reservation.rows[0].applied_deposit || 0));
-
-    const resultingPaid = Math.max(0, currentPaid - oldAmount);
-    const resultingEffectiveSettlement = resultingPaid + currentAppliedDeposit;
-    const resultingRemaining = Math.max(0, totalPrice - resultingEffectiveSettlement);
-    const resultingPaymentStatus = resultingEffectiveSettlement <= 0 ? 'UNPAID' : resultingRemaining === 0 ? 'PAID' : 'PARTIAL';
 
     // 1. Mark original payment as VOIDED
     await client.query(
@@ -8712,11 +8777,9 @@ app.post('/api/reservations/:id/payments/:paymentId/void', async (req, res) => {
       [reservationId, propertyId, `Pembatalan pembayaran #${paymentId}`, oldAmount]
     );
 
-    // 4. Update reservation
-    const updated = await client.query(
-      `UPDATE reservations SET amount_paid = $1, applied_deposit = $2, remaining_balance = $3, payment_status = $4 WHERE id = $5 RETURNING *`,
-      [resultingPaid, currentAppliedDeposit, resultingRemaining, resultingPaymentStatus, reservationId]
-    );
+    // 4. Update reservation via canonical financial recalculation
+    const recalcAfterVoid = await recalculateReservationFinancials(client, reservationId, propertyId);
+    const updated = { rows: [recalcAfterVoid.reservation] };
 
     // 5. Audit log
     const auditPayload = {
@@ -8870,10 +8933,19 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
       reservation.rows[0].payment_responsibility
     );
 
+    const reservationDto = withReservationHotelDates(reservation.rows[0]);
+    if (folioFinancial && Number.isFinite(folioFinancial.total_price)) {
+      reservationDto.total_price = Number(folioFinancial.total_price).toFixed(2);
+      reservationDto.amount_paid = Number(folioFinancial.amount_paid).toFixed(2);
+      reservationDto.applied_deposit = Number(folioFinancial.applied_deposit).toFixed(2);
+      reservationDto.remaining_balance = Number(folioFinancial.remaining_balance).toFixed(2);
+      reservationDto.payment_status = folioFinancial.payment_status;
+    }
+
     res.json({
       status: 'OK',
       data: {
-        reservation: withReservationHotelDates(reservation.rows[0]),
+        reservation: reservationDto,
         payments: payments.rows,
         folio: folio.rows,
         entries: folio.rows,
