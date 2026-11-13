@@ -14,8 +14,8 @@ const { Pool } = require('pg');
 // or a known protected port. This prevents accidental writes to production
 // or unrelated databases in case the environment is misconfigured.
 const PROTECTED_PORTS = new Set([5432, 55457, 55451, 55449, 55458]);
-const PROTECTED_DBS   = new Set(['oak_hotel_db']);
-const EXPECTED_DB     = 'oak_hims_edit_reservasi';
+const PROTECTED_DBS   = new Set(['oak_hotel_db', 'oak_hims_qb_payment_uat_20261111']);
+const EXPECTED_DBS    = new Set(['oak_hims_edit_reservasi', 'oak_hotfix_04ee417_isolated_test']);
 const EXPECTED_PORT   = 55459;
 
 const targetPort = Number(process.env.DB_PORT);
@@ -25,14 +25,14 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function assertSafeTarget() {
   const portOk   = targetPort === EXPECTED_PORT;
-  const dbOk     = targetDb === EXPECTED_DB;
+  const dbOk     = EXPECTED_DBS.has(targetDb);
   if (!LOOPBACK_HOSTS.has(targetHost)) {
     const msg = `DB_HOST '${targetHost}' is not a loopback address. This suite must run on 127.0.0.1 or localhost.`;
     console.error(`GUARD: ${msg}`);
     process.exit(1);
   }
   if (!dbOk) {
-    const msg = `DB_NAME is '${targetDb || '(empty)'}' but this suite requires '${EXPECTED_DB}'. Set DB_NAME=${EXPECTED_DB}.`;
+    const msg = `DB_NAME is '${targetDb || '(empty)'}' but this suite requires one of [${Array.from(EXPECTED_DBS).join(', ')}].`;
     console.error(`GUARD: ${msg}`);
     process.exit(1);
   }
@@ -299,7 +299,7 @@ async function run() {
 
     guestValidId = await createGuest(client, tracked.propertyId, 'Tamu Valid KTP', { valid: true });
     guestMissingId = await createGuest(client, tracked.propertyId, 'Tamu Tanpa KTP', { valid: false });
-    guestSameNameId = await createGuest(client, tracked.propertyId, 'Nama Diperbarui', { valid: false });
+    guestSameNameId = await createGuest(client, tracked.propertyId, 'Tamu Valid KTP', { valid: false });
     guestValid2Id = await createGuest(client, tracked.propertyId, 'Tamu Valid Kedua', { valid: true });
     await client.query('COMMIT');
   } catch (error) {
@@ -324,7 +324,7 @@ async function run() {
     rate_plan_id: planBaseId,
     ...dates,
     guest_id: guestValidId,
-    guest_name: 'Nama Diperbarui',
+    guest_name: 'Tamu Valid KTP',
     guest_phone: '081299988877',
     notes: 'catatan diperbarui',
     idempotency_key: `${runId}-META`
@@ -349,7 +349,7 @@ async function run() {
     assert.strictEqual(metaAfter.payment_status, 'UNPAID');
   });
   check('A4 name/phone/notes are persisted on the same guest target', () => {
-    assert.strictEqual(metaAfter.guest_name, 'Nama Diperbarui');
+    assert.strictEqual(metaAfter.guest_name, 'Tamu Valid KTP');
     assert.strictEqual(metaAfter.guest_phone, '081299988877');
     assert.strictEqual(metaAfter.special_requests, 'catatan diperbarui');
   });
@@ -588,7 +588,7 @@ async function run() {
   const metaPreserveResult = await executeReservationEditWithPayment(pool, metaPreserveId, {
     property_id: tracked.propertyId, room_type_id: roomTypeId, room_id: roomIds[8],
     rate_plan_id: planBaseId, ...dates, guest_id: guestValidId,
-    guest_name: 'E-Preserve', notes: 'preserve test',
+    guest_name: 'Tamu Valid KTP', notes: 'preserve test',
     preserve_rate_plan: true,
     idempotency_key: `${runId}-PRESERVE`
   }, null, 'TEST');
@@ -645,6 +645,38 @@ async function run() {
     assert.strictEqual(ppResult.preserve_price_context, true);
     assert.strictEqual(Number(ppResult.price_difference), 0);
     assert.strictEqual(Number(ppResult.quote.grand_total), Number(ppResult.old_total));
+  });
+
+  // F. Explicit old/shared guest_id with a different guest_name must NOT overwrite master guest
+  let crossNameErr = null;
+  try {
+    await executeReservationEditWithPayment(pool, metaId, {
+      property_id: tracked.propertyId,
+      room_type_id: roomTypeId,
+      room_id: roomIds[0],
+      rate_plan_id: planBaseId,
+      ...dates,
+      guest_id: guestValidId,
+      guest_name: 'Orang Lain Berbeda',
+      idempotency_key: `${runId}-CROSS-NAME`
+    }, null, 'TEST');
+  } catch (e) {
+    crossNameErr = e;
+  }
+  const masterGuestAfterCrossName = (
+    await pool.query('SELECT full_name FROM guests WHERE id = $1', [guestValidId])
+  ).rows[0];
+  check('F1 explicit old/shared guest_id with different guest_name is rejected', () => {
+    assert.ok(crossNameErr, 'expected conflict when passing old guest_id with different name');
+    assert.strictEqual(crossNameErr.statusCode, 409);
+    assert.ok(
+      crossNameErr.code === 'SHARED_PRIMARY_GUEST_CONFLICT' ||
+        crossNameErr.code === 'GUEST_IDENTITY_TARGET_MISMATCH',
+      `unexpected code: ${crossNameErr.code}`
+    );
+  });
+  check('F2 master guest full_name remains untouched after rejected cross-name save', () => {
+    assert.strictEqual(masterGuestAfterCrossName.full_name, 'Tamu Valid KTP');
   });
 
 }

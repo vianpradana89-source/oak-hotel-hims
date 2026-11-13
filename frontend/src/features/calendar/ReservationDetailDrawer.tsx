@@ -2868,7 +2868,10 @@ export default function ReservationDetailDrawer({
              onClose={() => setIsIdentityModalOpen(false)}
              guestName={data.guest_name || data.booker_name || ''}
              guestPhone={data.guest_phone || data.booker_phone || ''}
-             guestId={detailData.primary_guest?.primary_guest_id || null}
+             guestId={null}
+             reservationId={detailData.id}
+             expectedPrimaryGuestId={detailData.primary_guest?.primary_guest_id || null}
+             relinkReservationPrimaryGuest={true}
              propertyId={activePropId}
              context="CHECKIN_IDENTITY_SCAN"
              onScanSuccess={handleIdentityScanSuccess}
@@ -2927,13 +2930,16 @@ export default function ReservationDetailDrawer({
                         if (!activePropId || !detailData?.id) return;
                         setReplacingPrimaryGuest(true);
                         try {
-                          // Step 1: Confirm identity for Guest B using FULL scanned data payload
+                          // Confirm identity & atomically replace PRIMARY_GUEST for Guest B
                           const s = ktpMismatchState.scannedData;
                           const identityRes = await authFetch('/api/identity/confirm', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                               property_id: activePropId,
+                              reservation_id: detailData.id,
+                              expected_primary_guest_id: ktpMismatchState.currentPrimaryGuestId,
+                              relink_reservation_primary_guest: true,
                               name: s.full_name || '',
                               nik: s.identity_number || '',
                               phone: undefined,
@@ -2958,30 +2964,16 @@ export default function ReservationDetailDrawer({
                           });
                          const identityJson = await identityRes.json();
                          if (!identityRes.ok) {
-                           throw new Error(identityJson.message || 'Gagal konfirmasi identitas');
-                         }
-                         const guestB = identityJson.data;
-
-                         // Step 2: Replace PRIMARY_GUEST
-                         const replaceRes = await authFetch(`/api/reservations/${detailData.id}/guests`, {
-                           method: 'POST',
-                           headers: { 'Content-Type': 'application/json' },
-                           body: JSON.stringify({
-                             property_id: activePropId,
-                             guest_id: guestB.id,
-                             role: 'PRIMARY_GUEST',
-                             is_staying: true,
-                             identity_verified: true,
-                             relation_source: 'CHECKIN_IDENTITY_CONFIRMATION',
-                             expected_primary_guest_id: ktpMismatchState.currentPrimaryGuestId
-                           })
-                         });
-                         const replaceJson = await replaceRes.json();
-                         if (!replaceRes.ok) {
-                           if (replaceJson.code === 'PRIMARY_GUEST_CHANGED') {
+                           if (identityJson.code === 'PRIMARY_GUEST_CHANGED') {
                              throw new Error('Status tamu berubah. Silakan segarkan halaman dan coba lagi.');
                            }
-                           throw new Error(replaceJson.message || 'Gagal mengganti Tamu Menginap');
+                           if (identityJson.code === 'DOCUMENT_UPLOAD_ALREADY_CONSUMED') {
+                             throw new Error(
+                               identityJson.message ||
+                                 'Unggahan identitas tidak dapat diverifikasi atau sudah digunakan. Silakan unggah ulang dokumen identitas.'
+                             );
+                           }
+                           throw new Error(identityJson.message || 'Gagal konfirmasi identitas');
                          }
 
                          // Success

@@ -118,11 +118,26 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
         : (Boolean(selectedGuest.identity_storage_key?.trim())
            && selectedGuest.has_valid_identity === true))
     : primaryIdentityOk;
+  const effectiveTargetName = String(
+    selectedGuest?.full_name || reservation?.primary_guest?.primary_guest_name || ''
+  )
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const normalizedDraftGuestName = String(guestName || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const targetNameAligned =
+    !normalizedDraftGuestName ||
+    !effectiveTargetName ||
+    normalizedDraftGuestName === effectiveTargetName;
   const identitySatisfied = effectiveGuestId != null
+    && targetNameAligned
     && (identityConfirmedGuestId === effectiveGuestId || selectedGuestIdentityOk);
   const identityBlocked = !identitySatisfied;
-  const identityBlockReason = !effectiveGuestId
-    ? 'Tamu menginap belum terhubung. Pilih tamu atau lengkapi KTP sebelum menyimpan.'
+  const identityBlockReason = !effectiveGuestId || !targetNameAligned
+    ? 'Tamu menginap belum terhubung atau berbeda dari profil saat ini. Pilih tamu yang sesuai atau lengkapi KTP sebelum menyimpan.'
     : 'Simpan dinonaktifkan — dokumen identitas tamu menginap wajib dilengkapi terlebih dahulu.';
 
   // Initialize form
@@ -1006,11 +1021,18 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       <IdentityExtractionModal
         isOpen={showIdentityModal}
         onClose={() => setShowIdentityModal(false)}
-        guestId={effectiveGuestId}
+        guestId={
+          selectedGuest && !guestNameTouched && Number(selectedGuest.id) !== Number(primaryGuestId)
+            ? selectedGuest.id
+            : null
+        }
+        reservationId={reservation?.id ?? null}
+        expectedPrimaryGuestId={primaryGuestId}
+        relinkReservationPrimaryGuest={false}
         guestName={guestName || selectedGuest?.full_name || reservation?.primary_guest?.primary_guest_name || ''}
         guestPhone={guestPhone || selectedGuest?.phone || reservation?.primary_guest?.primary_guest_phone || undefined}
         propertyId={propertyId}
-        context="CRM_EDIT"
+        context="RESERVATION_EDIT_IDENTITY"
         mode="UPLOAD"
         onIdentityConfirmed={(_data, savedGuest) => {
           const confirmedId = Number(savedGuest?.id ?? effectiveGuestId);

@@ -93,7 +93,13 @@ function superAdminPool(userId = 1) {
   };
 }
 
-function createConfirmPool({ upload, guestById = null, guestByNik = null, failAudit = false }) {
+function createConfirmPool({
+  upload,
+  guestById = null,
+  guestByNik = null,
+  failAudit = false,
+  auditBinding = undefined
+}) {
   const queries = [];
   const state = { began: false, rolledBack: false, committed: false };
   const client = {
@@ -105,6 +111,28 @@ function createConfirmPool({ upload, guestById = null, guestByNik = null, failAu
       if (text === 'ROLLBACK') { state.rolledBack = true; return { rows: [] }; }
       if (text.includes('FROM identity_document_uploads')) {
         return { rowCount: 1, rows: [upload] };
+      }
+      if (text.includes('SELECT') && text.includes('FROM audit_logs')) {
+        if (auditBinding === null) {
+          return { rowCount: 0, rows: [] };
+        }
+        const effectiveBinding = auditBinding || {
+          document_upload_id: upload.id,
+          property_id: upload.property_id,
+          actor_user_id: upload.uploaded_by_user_id,
+          confirmed_guest_id: upload.confirmed_guest_id,
+          requested_guest_id: guestById ? guestById.id : null,
+          reservation_id: null,
+          expected_primary_guest_id: null,
+          relink_reservation_primary_guest: false,
+          context: 'CRM_EDIT',
+          normalized_name: 'budi santoso',
+          normalized_nik: '3201010101010001'
+        };
+        return {
+          rowCount: 1,
+          rows: [{ new_value: JSON.stringify({ operation_binding: effectiveBinding }) }]
+        };
       }
       if (text.includes('SELECT') && text.includes('FROM guests') && text.includes('WHERE id = $1') && text.includes('FOR UPDATE')) {
         return guestById ? { rowCount: 1, rows: [guestById] } : { rowCount: 0, rows: [] };
@@ -516,6 +544,370 @@ async function main() {
         assert.equal(update.params[9], persisted.hash);
       } finally {
         await new Promise((resolve) => server.close(resolve));
+      }
+    });
+
+    await test('R1 repro 1: legacy CRM_EDIT without reservation_id cannot overwrite master guest with different person name', async () => {
+      const pool = createConfirmPool({
+        upload: pendingUpload,
+        guestById: {
+          id: 404,
+          created_property_id: 1,
+          full_name: 'SYNTHETIC GROUP',
+          identity_storage_key: null,
+          normalized_identity_number: null,
+          has_valid_identity: false,
+          total_res_count: 5
+        }
+      });
+      let threw = false;
+      try {
+        await confirmVerifiedIdentity(pool, {
+          document_upload_id: pendingUpload.id,
+          actor_user_id: 20,
+          is_platform_super_admin: false,
+          guest_id: 404,
+          property_id: 1,
+          name: 'SYNTHETIC PERSON NEW',
+          nik: '3201010101010099',
+          context: 'CRM_EDIT'
+        });
+      } catch (err) {
+        threw = true;
+        assert.equal(err.statusCode, 409);
+        assert.equal(err.code, 'GUEST_IDENTITY_TARGET_MISMATCH');
+      }
+      assert.equal(threw, true);
+      assert.equal(pool.queries.some((q) => q.text.includes('UPDATE guests')), false);
+      assert.equal(pool.state.rolledBack, true);
+    });
+
+    await test('R1 repro 2: CONFIRMED receipt replayed on another reservation with different primary guest is rejected', async () => {
+      const queries = [];
+      const state = { began: false, rolledBack: false, committed: false };
+      const synthPool = {
+        queries,
+        state,
+        async connect() {
+          return {
+            async query(sql, params = []) {
+              const text = String(sql);
+              queries.push({ text, params });
+              if (text === 'BEGIN') { state.began = true; return { rows: [] }; }
+              if (text === 'COMMIT') { state.committed = true; return { rows: [] }; }
+              if (text === 'ROLLBACK') { state.rolledBack = true; return { rows: [] }; }
+              if (text.includes('FROM identity_document_uploads')) {
+                return {
+                  rowCount: 1,
+                  rows: [{ ...pendingUpload, status: 'CONFIRMED', confirmed_guest_id: 900 }]
+                };
+              }
+              if (text.includes('FROM reservations r') && text.includes('FOR UPDATE OF r')) {
+                return {
+                  rowCount: 1,
+                  rows: [{
+                    id: 1503,
+                    guest_name: 'SYNTHETIC GROUP',
+                    guest_phone: '08120000',
+                    identity_number: null,
+                    has_valid_identity: false,
+                    ktp_path: null,
+                    property_id: 1
+                  }]
+                };
+              }
+              if (text.includes('FROM reservation_guests') && text.includes("role = 'PRIMARY_GUEST'")) {
+                return { rowCount: 1, rows: [{ id: 5001, guest_id: 800 }] };
+              }
+              if (text.includes('SELECT') && text.includes('FROM audit_logs')) {
+                return { rowCount: 0, rows: [] };
+              }
+              if (text.includes('SELECT * FROM guests WHERE id')) {
+                return {
+                  rowCount: 1,
+                  rows: [{ id: 900, full_name: 'SYNTHETIC PERSON A', identity_storage_key: pendingUpload.storage_key }]
+                };
+              }
+              throw new Error(`Unexpected query: ${text}`);
+            },
+            release() {}
+          };
+        }
+      };
+
+      let threw = false;
+      try {
+        await confirmVerifiedIdentity(synthPool, {
+          document_upload_id: pendingUpload.id,
+          actor_user_id: 20,
+          is_platform_super_admin: false,
+          property_id: 1,
+          reservation_id: 1503,
+          expected_primary_guest_id: 800,
+          guest_id: null,
+          name: 'SYNTHETIC PERSON A',
+          context: 'RESERVATION_IDENTITY_ASSIGN',
+          relink_reservation_primary_guest: true
+        });
+      } catch (err) {
+        threw = true;
+        assert.equal(err.statusCode, 409);
+        assert.equal(err.code, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');
+        assert.match(String(err.message), /unggah ulang/i);
+      }
+      assert.equal(threw, true);
+      assert.equal(state.committed, false);
+      assert.equal(state.rolledBack, true);
+    });
+
+    await test('CONFIRMED receipt without audit/binding in Edit Reservasi mode is rejected 409 after upload lock', async () => {
+      const queries = [];
+      const state = { began: false, rolledBack: false, committed: false };
+      const editUnboundPool = {
+        queries,
+        state,
+        async connect() {
+          return {
+            async query(sql, params = []) {
+              const text = String(sql);
+              queries.push({ text, params });
+              if (text === 'BEGIN') { state.began = true; return { rows: [] }; }
+              if (text === 'COMMIT') { state.committed = true; return { rows: [] }; }
+              if (text === 'ROLLBACK') { state.rolledBack = true; return { rows: [] }; }
+              if (text.includes('FROM identity_document_uploads')) {
+                return {
+                  rowCount: 1,
+                  rows: [{ ...pendingUpload, status: 'CONFIRMED', confirmed_guest_id: 900 }]
+                };
+              }
+              if (text.includes('FROM reservations r') && text.includes('FOR UPDATE OF r')) {
+                return {
+                  rowCount: 1,
+                  rows: [{
+                    id: 1503,
+                    guest_name: 'SYNTHETIC GROUP',
+                    guest_phone: '08120000',
+                    identity_number: null,
+                    has_valid_identity: false,
+                    ktp_path: null,
+                    property_id: 1
+                  }]
+                };
+              }
+              if (text.includes('FROM reservation_guests') && text.includes("role = 'PRIMARY_GUEST'")) {
+                return { rowCount: 1, rows: [{ id: 5001, guest_id: 800 }] };
+              }
+              if (text.includes('SELECT') && text.includes('FROM audit_logs')) {
+                return { rowCount: 0, rows: [] };
+              }
+              throw new Error(`Unexpected query: ${text}`);
+            },
+            release() {}
+          };
+        }
+      };
+
+      let threw = false;
+      try {
+        await confirmVerifiedIdentity(editUnboundPool, {
+          document_upload_id: pendingUpload.id,
+          actor_user_id: 20,
+          is_platform_super_admin: false,
+          property_id: 1,
+          reservation_id: 1503,
+          expected_primary_guest_id: 800,
+          guest_id: null,
+          name: 'SYNTHETIC PERSON A',
+          context: 'RESERVATION_EDIT_IDENTITY',
+          relink_reservation_primary_guest: false
+        });
+      } catch (err) {
+        threw = true;
+        assert.equal(err.statusCode, 409);
+        assert.equal(err.code, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');
+        assert.match(String(err.message), /unggah ulang/i);
+      }
+      assert.equal(threw, true);
+      assert.equal(state.committed, false);
+      assert.equal(state.rolledBack, true);
+      const uploadLockIdx = queries.findIndex((q) => q.text.includes('FROM identity_document_uploads') && q.text.includes('FOR UPDATE'));
+      const auditReadIdx = queries.findIndex((q) => q.text.includes('SELECT') && q.text.includes('FROM audit_logs'));
+      assert.ok(uploadLockIdx >= 0 && auditReadIdx > uploadLockIdx, 'Audit binding must be read after upload FOR UPDATE lock');
+    });
+
+    await test('CONFIRMED receipt without audit/binding in Assignment mode is rejected 409 even if primary guest and ktp_path match', async () => {
+      const queries = [];
+      const state = { began: false, rolledBack: false, committed: false };
+      const assignUnboundPool = {
+        queries,
+        state,
+        async connect() {
+          return {
+            async query(sql, params = []) {
+              const text = String(sql);
+              queries.push({ text, params });
+              if (text === 'BEGIN') { state.began = true; return { rows: [] }; }
+              if (text === 'COMMIT') { state.committed = true; return { rows: [] }; }
+              if (text === 'ROLLBACK') { state.rolledBack = true; return { rows: [] }; }
+              if (text.includes('FROM identity_document_uploads')) {
+                return {
+                  rowCount: 1,
+                  rows: [{ ...pendingUpload, status: 'CONFIRMED', confirmed_guest_id: 900 }]
+                };
+              }
+              if (text.includes('FROM reservations r') && text.includes('FOR UPDATE OF r')) {
+                return {
+                  rowCount: 1,
+                  rows: [{
+                    id: 1503,
+                    guest_name: 'SYNTHETIC PERSON A',
+                    guest_phone: '08120000',
+                    identity_number: '3201010101010001',
+                    has_valid_identity: true,
+                    ktp_path: persisted.apiPath,
+                    property_id: 1
+                  }]
+                };
+              }
+              if (text.includes('FROM reservation_guests') && text.includes("role = 'PRIMARY_GUEST'")) {
+                return { rowCount: 1, rows: [{ id: 5001, guest_id: 900 }] };
+              }
+              if (text.includes('SELECT') && text.includes('FROM audit_logs')) {
+                return { rowCount: 0, rows: [] };
+              }
+              throw new Error(`Unexpected query: ${text}`);
+            },
+            release() {}
+          };
+        }
+      };
+
+      let threw = false;
+      try {
+        await confirmVerifiedIdentity(assignUnboundPool, {
+          document_upload_id: pendingUpload.id,
+          actor_user_id: 20,
+          is_platform_super_admin: false,
+          property_id: 1,
+          reservation_id: 1503,
+          expected_primary_guest_id: 800,
+          guest_id: null,
+          name: 'SYNTHETIC PERSON A',
+          nik: '3201010101010001',
+          context: 'RESERVATION_IDENTITY_ASSIGN',
+          relink_reservation_primary_guest: true
+        });
+      } catch (err) {
+        threw = true;
+        assert.equal(err.statusCode, 409);
+        assert.equal(err.code, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');
+        assert.match(String(err.message), /unggah ulang/i);
+      }
+      assert.equal(threw, true);
+      assert.equal(state.committed, false);
+      assert.equal(state.rolledBack, true);
+    });
+
+    await test('valid identical retry in Edit Reservasi and Assignment modes reads binding after upload lock and succeeds', async () => {
+      for (const modeCase of [
+        { context: 'RESERVATION_EDIT_IDENTITY', relink: false, currentPg: 800 },
+        { context: 'RESERVATION_IDENTITY_ASSIGN', relink: true, currentPg: 900 }
+      ]) {
+        const queries = [];
+        const state = { began: false, rolledBack: false, committed: false };
+        const validRetryPool = {
+          queries,
+          state,
+          async connect() {
+            return {
+              async query(sql, params = []) {
+                const text = String(sql);
+                queries.push({ text, params });
+                if (text === 'BEGIN') { state.began = true; return { rows: [] }; }
+                if (text === 'COMMIT') { state.committed = true; return { rows: [] }; }
+                if (text === 'ROLLBACK') { state.rolledBack = true; return { rows: [] }; }
+                if (text.includes('FROM identity_document_uploads')) {
+                  return {
+                    rowCount: 1,
+                    rows: [{ ...pendingUpload, status: 'CONFIRMED', confirmed_guest_id: 900 }]
+                  };
+                }
+                if (text.includes('FROM reservations r') && text.includes('FOR UPDATE OF r')) {
+                  return {
+                    rowCount: 1,
+                    rows: [{
+                      id: 1503,
+                      guest_name: 'SYNTHETIC PERSON A',
+                      guest_phone: '08120000',
+                      identity_number: '3201010101010001',
+                      has_valid_identity: true,
+                      ktp_path: persisted.apiPath,
+                      property_id: 1
+                    }]
+                  };
+                }
+                if (text.includes('FROM reservation_guests') && text.includes("role = 'PRIMARY_GUEST'")) {
+                  return { rowCount: 1, rows: [{ id: 5001, guest_id: modeCase.currentPg }] };
+                }
+                if (text.includes('SELECT') && text.includes('FROM audit_logs')) {
+                  return {
+                    rowCount: 1,
+                    rows: [{
+                      new_value: JSON.stringify({
+                        operation_binding: {
+                          document_upload_id: pendingUpload.id,
+                          property_id: 1,
+                          actor_user_id: 20,
+                          confirmed_guest_id: 900,
+                          requested_guest_id: null,
+                          reservation_id: 1503,
+                          expected_primary_guest_id: 800,
+                          relink_reservation_primary_guest: modeCase.relink,
+                          context: modeCase.context,
+                          normalized_name: 'synthetic person a',
+                          normalized_nik: '3201010101010001'
+                        }
+                      })
+                    }]
+                  };
+                }
+                if (text.includes('SELECT * FROM guests WHERE id')) {
+                  return {
+                    rowCount: 1,
+                    rows: [{
+                      id: 900,
+                      full_name: 'SYNTHETIC PERSON A',
+                      normalized_identity_number: '3201010101010001',
+                      identity_storage_key: pendingUpload.storage_key
+                    }]
+                  };
+                }
+                throw new Error(`Unexpected query: ${text}`);
+              },
+              release() {}
+            };
+          }
+        };
+
+        const guest = await confirmVerifiedIdentity(validRetryPool, {
+          document_upload_id: pendingUpload.id,
+          actor_user_id: 20,
+          is_platform_super_admin: false,
+          property_id: 1,
+          reservation_id: 1503,
+          expected_primary_guest_id: 800,
+          guest_id: null,
+          name: 'SYNTHETIC PERSON A',
+          nik: '3201010101010001',
+          context: modeCase.context,
+          relink_reservation_primary_guest: modeCase.relink
+        });
+        assert.equal(guest.id, 900);
+        assert.equal(state.committed, true);
+        assert.equal(state.rolledBack, false);
+        const uploadLockIdx = queries.findIndex((q) => q.text.includes('FROM identity_document_uploads') && q.text.includes('FOR UPDATE'));
+        const auditReadIdx = queries.findIndex((q) => q.text.includes('SELECT') && q.text.includes('FROM audit_logs'));
+        assert.ok(uploadLockIdx >= 0 && auditReadIdx > uploadLockIdx, 'Audit binding must be read after upload FOR UPDATE lock');
       }
     });
   } finally {

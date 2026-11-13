@@ -126,6 +126,23 @@ function normalizeGender(gender?: string | null): 'MALE' | 'FEMALE' | null {
   return gender === 'MALE' || gender === 'FEMALE' ? gender : null;
 }
 
+function normalizeComparableName(value?: string | null): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+interface TargetGuestCandidate {
+  id: number;
+  identity_storage_key: string | null;
+  full_name?: string | null;
+  normalized_identity_number?: string | null;
+  has_valid_identity?: boolean;
+  total_res_count?: number;
+  matched_by?: 'ID' | 'NIK' | 'PHONE';
+}
+
 async function loadTargetGuest(
    client: PoolClient,
    propertyId: number,
@@ -134,10 +151,11 @@ async function loadTargetGuest(
    cleanPhone: string | null,
    normPhone: string | null,
    skipPhoneFallback: boolean = false
- ): Promise<{ id: number; identity_storage_key: string | null } | null> {
+ ): Promise<TargetGuestCandidate | null> {
    if (guestId) {
      const guestRes = await client.query(
-       `SELECT id, created_property_id, identity_storage_key
+       `SELECT id, created_property_id, identity_storage_key, full_name, normalized_identity_number, has_valid_identity,
+               (SELECT COUNT(DISTINCT rg.reservation_id)::int FROM reservation_guests rg WHERE rg.guest_id = guests.id) AS total_res_count
         FROM guests
         WHERE id = $1
         FOR UPDATE`,
@@ -150,43 +168,67 @@ async function loadTargetGuest(
      if (Number(guest.created_property_id) !== propertyId) {
        httpError('Tamu tidak berada pada properti yang berwenang.', 403, 'GUEST_PROPERTY_MISMATCH');
      }
-     return { id: Number(guest.id), identity_storage_key: guest.identity_storage_key || null };
+     return {
+       id: Number(guest.id),
+       identity_storage_key: guest.identity_storage_key || null,
+       full_name: guest.full_name,
+       normalized_identity_number: guest.normalized_identity_number,
+       has_valid_identity: guest.has_valid_identity,
+       total_res_count: guest.total_res_count !== undefined ? Number(guest.total_res_count) : undefined,
+       matched_by: 'ID'
+     };
    }
 
    if (normNik) {
      const nikRes = await client.query(
-       `SELECT id, identity_storage_key
+       `SELECT id, identity_storage_key, full_name, normalized_identity_number, has_valid_identity,
+               (SELECT COUNT(DISTINCT rg.reservation_id)::int FROM reservation_guests rg WHERE rg.guest_id = guests.id) AS total_res_count
         FROM guests
         WHERE normalized_identity_number = $1
           AND created_property_id = $2
+        ORDER BY id ASC
         LIMIT 1
         FOR UPDATE`,
        [normNik, propertyId]
      );
      if ((nikRes.rowCount ?? 0) > 0) {
+       const row = nikRes.rows[0];
        return {
-         id: Number(nikRes.rows[0].id),
-         identity_storage_key: nikRes.rows[0].identity_storage_key || null
+         id: Number(row.id),
+         identity_storage_key: row.identity_storage_key || null,
+         full_name: row.full_name,
+         normalized_identity_number: row.normalized_identity_number,
+         has_valid_identity: row.has_valid_identity,
+         total_res_count: row.total_res_count !== undefined ? Number(row.total_res_count) : undefined,
+         matched_by: 'NIK'
        };
      }
    }
 
-   // In CHECKIN_IDENTITY_SCAN context, skip phone fallback to prevent
+   // In reservation contexts, skip phone fallback to prevent
    // overwriting existing Guest A's CRM data when KTP B has the same phone.
    if (cleanPhone && !skipPhoneFallback) {
      const phoneRes = await client.query(
-       `SELECT id, identity_storage_key
+       `SELECT id, identity_storage_key, full_name, normalized_identity_number, has_valid_identity,
+               (SELECT COUNT(DISTINCT rg.reservation_id)::int FROM reservation_guests rg WHERE rg.guest_id = guests.id) AS total_res_count
         FROM guests
         WHERE created_property_id = $1
           AND (phone = $2 OR (normalized_phone IS NOT NULL AND normalized_phone = $3))
+        ORDER BY id ASC
         LIMIT 1
         FOR UPDATE`,
        [propertyId, cleanPhone, normPhone]
      );
      if ((phoneRes.rowCount ?? 0) > 0) {
+       const row = phoneRes.rows[0];
        return {
-         id: Number(phoneRes.rows[0].id),
-         identity_storage_key: phoneRes.rows[0].identity_storage_key || null
+         id: Number(row.id),
+         identity_storage_key: row.identity_storage_key || null,
+         full_name: row.full_name,
+         normalized_identity_number: row.normalized_identity_number,
+         has_valid_identity: row.has_valid_identity,
+         total_res_count: row.total_res_count !== undefined ? Number(row.total_res_count) : undefined,
+         matched_by: 'PHONE'
        };
      }
    }
@@ -217,16 +259,48 @@ export async function confirmVerifiedIdentity(
     httpError('Nama pada identitas wajib diisi', 400, 'VALIDATION_ERROR');
   }
 
-    const cleanNik = (input.nik || '').trim();
-   const cleanPhone = (input.phone || '').trim();
-   const normPhone = cleanPhone ? cleanPhone.replace(/\D/g, '') || null : null;
-   const normNik = cleanNik ? normalizeNik(cleanNik) : null;
-   const normGender = normalizeGender(input.gender);
-   const numConfidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
-   const identityType = String(input.identity_type || 'KTP');
-   const requestedGuestId = input.guest_id ? Number(input.guest_id) : null;
-   const context = input.context || 'CRM_EDIT';
-   const skipPhoneFallback = context === 'CHECKIN_IDENTITY_SCAN';
+  const rawReservationId = input.reservation_id;
+  const reservationId =
+    rawReservationId !== undefined && rawReservationId !== null && String(rawReservationId).trim() !== ''
+      ? Number(rawReservationId)
+      : null;
+  if (reservationId !== null && (!Number.isInteger(reservationId) || reservationId <= 0)) {
+    httpError('reservation_id tidak valid.', 400, 'INVALID_RESERVATION_ID');
+  }
+
+  const rawExpectedPrimaryGuestId = input.expected_primary_guest_id;
+  const expectedPrimaryGuestId =
+    rawExpectedPrimaryGuestId !== undefined &&
+    rawExpectedPrimaryGuestId !== null &&
+    String(rawExpectedPrimaryGuestId).trim() !== ''
+      ? Number(rawExpectedPrimaryGuestId)
+      : null;
+  if (
+    expectedPrimaryGuestId !== null &&
+    (!Number.isInteger(expectedPrimaryGuestId) || expectedPrimaryGuestId <= 0)
+  ) {
+    httpError('expected_primary_guest_id tidak valid.', 400, 'INVALID_EXPECTED_PRIMARY_GUEST_ID');
+  }
+
+  const cleanNik = (input.nik || '').trim();
+  const cleanPhone = (input.phone || '').trim();
+  const normPhone = cleanPhone ? cleanPhone.replace(/\D/g, '') || null : null;
+  const normNik = cleanNik ? normalizeNik(cleanNik) : null;
+  const normGender = normalizeGender(input.gender);
+  const numConfidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
+  const identityType = String(input.identity_type || 'KTP');
+  const requestedGuestId = input.guest_id ? Number(input.guest_id) : null;
+  const context = input.context || 'CRM_EDIT';
+  const isReservationContext =
+    context === 'CHECKIN_IDENTITY_SCAN' ||
+    context === 'RESERVATION_IDENTITY_ASSIGN' ||
+    context === 'RESERVATION_EDIT_IDENTITY' ||
+    reservationId !== null;
+  const skipPhoneFallback = isReservationContext;
+  const relinkReservationPrimaryGuest =
+    input.relink_reservation_primary_guest !== undefined
+      ? Boolean(input.relink_reservation_primary_guest)
+      : reservationId !== null && context !== 'RESERVATION_EDIT_IDENTITY';
 
   const client = await pool.connect();
   try {
@@ -269,7 +343,234 @@ export async function confirmVerifiedIdentity(
       httpError('Unggahan identitas tidak dapat dikonfirmasi.', 409, 'DOCUMENT_UPLOAD_FAILED');
     }
 
-    const targetGuest = await loadTargetGuest(
+    let lockedReservation: any = null;
+    let currentPrimaryRel: { id: number; guest_id: number } | null = null;
+    let currentPrimaryGuestId: number | null = null;
+
+    if (reservationId !== null) {
+      const resLock = await client.query(
+        `SELECT r.id, r.guest_name, r.guest_phone, r.identity_number, r.has_valid_identity, r.ktp_path,
+                b.property_id
+         FROM reservations r
+         JOIN bookings b ON b.id = r.booking_id
+         WHERE r.id = $1
+         FOR UPDATE OF r`,
+        [reservationId]
+      );
+      if ((resLock.rowCount ?? 0) === 0) {
+        httpError('Reservasi tidak ditemukan.', 404, 'RESERVATION_NOT_FOUND');
+      }
+      lockedReservation = resLock.rows[0];
+      if (Number(lockedReservation.property_id) !== propertyId) {
+        httpError('Reservasi tidak berada pada properti yang berwenang.', 403, 'RESERVATION_PROPERTY_MISMATCH');
+      }
+
+      const pgRelRes = await client.query(
+        `SELECT id, guest_id
+         FROM reservation_guests
+         WHERE reservation_id = $1 AND role = 'PRIMARY_GUEST'
+         FOR UPDATE`,
+        [reservationId]
+      );
+      if ((pgRelRes.rowCount ?? 0) > 0) {
+        currentPrimaryRel = {
+          id: Number(pgRelRes.rows[0].id),
+          guest_id: Number(pgRelRes.rows[0].guest_id)
+        };
+        currentPrimaryGuestId = currentPrimaryRel.guest_id;
+      }
+
+      if (expectedPrimaryGuestId !== null && upload.status !== IDENTITY_UPLOAD_STATUS.CONFIRMED) {
+        if (currentPrimaryGuestId === null || currentPrimaryGuestId !== expectedPrimaryGuestId) {
+          httpError(
+            'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.',
+            409,
+            'PRIMARY_GUEST_CHANGED'
+          );
+        }
+      }
+    }
+
+    if (upload.status === IDENTITY_UPLOAD_STATUS.CONFIRMED) {
+      const confirmedGuestId = upload.confirmed_guest_id ? Number(upload.confirmed_guest_id) : null;
+      if (
+        !confirmedGuestId ||
+        (requestedGuestId !== null && requestedGuestId !== confirmedGuestId)
+      ) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk tamu lain. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+
+      // Read operation binding AFTER the FOR UPDATE lock on identity_document_uploads
+      // is acquired so concurrent retries observe the latest committed audit record.
+      const auditBindRes = await client.query(
+        `SELECT new_value
+         FROM audit_logs
+         WHERE module = 'IDENTITY'
+           AND entity = 'GUEST'
+           AND record_id = $1
+           AND property_id = $2
+           AND (new_value::jsonb->>'document_upload_id') = $3
+         ORDER BY audit_id DESC
+         LIMIT 1`,
+        [String(confirmedGuestId), propertyId, documentUploadId]
+      );
+
+      let auditPayload: any = null;
+      const rawAuditValue = auditBindRes.rows[0]?.new_value;
+      if (rawAuditValue) {
+        try {
+          auditPayload =
+            typeof rawAuditValue === 'string' ? JSON.parse(rawAuditValue) : rawAuditValue;
+        } catch {
+          auditPayload = null;
+        }
+      }
+
+      const binding =
+        auditPayload &&
+        typeof auditPayload === 'object' &&
+        auditPayload.operation_binding &&
+        typeof auditPayload.operation_binding === 'object'
+          ? auditPayload.operation_binding
+          : null;
+      const currentRelink = Boolean(reservationId !== null && relinkReservationPrimaryGuest);
+      const hasVerifiableBinding = Boolean(
+        binding &&
+          binding.document_upload_id === documentUploadId &&
+          Number(binding.property_id) === propertyId &&
+          Number(binding.confirmed_guest_id) === confirmedGuestId &&
+          'reservation_id' in binding &&
+          'relink_reservation_primary_guest' in binding &&
+          typeof binding.context === 'string' &&
+          typeof binding.normalized_name === 'string' &&
+          'normalized_nik' in binding
+      );
+
+      if (!hasVerifiableBinding) {
+        httpError(
+          'Asal operasi unggahan identitas tidak dapat diverifikasi. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+
+      if (!input.is_platform_super_admin && Number(binding.actor_user_id) !== actorUserId) {
+        httpError('Anda tidak berwenang mengonfirmasi unggahan identitas ini.', 403, 'DOCUMENT_UPLOAD_NOT_OWNED');
+      }
+
+      const origReservationId = binding.reservation_id ?? null;
+      const origContext = String(binding.context);
+      const origRelink = Boolean(binding.relink_reservation_primary_guest);
+      const origRequestedGuestId = binding.requested_guest_id ?? null;
+      const origNormName = String(binding.normalized_name);
+      const origNormNik = binding.normalized_nik ?? null;
+
+      if (reservationId !== origReservationId) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk reservasi atau konteks lain. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      if (context !== origContext || currentRelink !== origRelink) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi dengan mode operasi berbeda. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      if (requestedGuestId !== origRequestedGuestId) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk target tamu berbeda. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      if (normalizeComparableName(cleanName) !== origNormName) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk nama tamu berbeda. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      if ((normNik || null) !== origNormNik) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk NIK berbeda. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+
+      if (reservationId !== null) {
+        if (currentRelink) {
+          if (currentPrimaryGuestId !== confirmedGuestId) {
+            httpError(
+              'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.',
+              409,
+              'PRIMARY_GUEST_CHANGED'
+            );
+          }
+          if (
+            expectedPrimaryGuestId !== null &&
+            expectedPrimaryGuestId !== confirmedGuestId &&
+            expectedPrimaryGuestId !== (binding.expected_primary_guest_id ?? null)
+          ) {
+            httpError(
+              'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.',
+              409,
+              'PRIMARY_GUEST_CHANGED'
+            );
+          }
+        } else {
+          if (expectedPrimaryGuestId !== null && currentPrimaryGuestId !== expectedPrimaryGuestId) {
+            httpError(
+              'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.',
+              409,
+              'PRIMARY_GUEST_CHANGED'
+            );
+          }
+          if (
+            binding.expected_primary_guest_id != null &&
+            currentPrimaryGuestId !== Number(binding.expected_primary_guest_id)
+          ) {
+            httpError(
+              'PRIMARY_GUEST has changed since the identity was confirmed. Please refresh and retry.',
+              409,
+              'PRIMARY_GUEST_CHANGED'
+            );
+          }
+        }
+      }
+
+      const existing = await client.query('SELECT * FROM guests WHERE id = $1', [confirmedGuestId]);
+      const existingRow = existing.rows[0];
+      if (!existingRow) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk tamu lain. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      if (
+        normNik &&
+        existingRow.normalized_identity_number &&
+        existingRow.normalized_identity_number !== normNik
+      ) {
+        httpError(
+          'Unggahan identitas sudah dikonfirmasi untuk tamu lain. Silakan unggah ulang dokumen identitas.',
+          409,
+          'DOCUMENT_UPLOAD_ALREADY_CONSUMED'
+        );
+      }
+      await client.query('COMMIT');
+      return omitIdentityStorageKey(existingRow);
+    }
+
+    let targetGuest = await loadTargetGuest(
        client,
        propertyId,
        Number.isInteger(requestedGuestId) && requestedGuestId! > 0 ? requestedGuestId : null,
@@ -279,26 +580,176 @@ export async function confirmVerifiedIdentity(
        skipPhoneFallback
      );
 
-     // SAFETY: In CHECKIN context, reject if explicit guest_id NIK doesn't match scanned NIK
-     if (skipPhoneFallback && targetGuest && requestedGuestId && normNik) {
-       const guestNikRes = await client.query(
-         `SELECT normalized_identity_number FROM guests WHERE id = $1`,
-         [targetGuest.id]
-       );
-       if (guestNikRes.rows[0] && guestNikRes.rows[0].normalized_identity_number !== normNik) {
+     // SAFETY: Validate target guest across ALL contexts (reservation AND legacy CRM_EDIT / null reservation_id)
+     // when confirming a PENDING upload so shared/group/verified profiles can never be overwritten by another person.
+     if (targetGuest && requestedGuestId) {
+       let guestNormNik = targetGuest.normalized_identity_number;
+       if (normNik && guestNormNik === undefined) {
+         const guestNikRes = await client.query(
+           `SELECT normalized_identity_number FROM guests WHERE id = $1`,
+           [targetGuest.id]
+         );
+         guestNormNik = guestNikRes.rows[0]?.normalized_identity_number;
+       }
+       if (normNik && guestNormNik && guestNormNik !== normNik) {
          httpError('NIK pada KTP tidak cocok dengan tamu yang dipilih. Gunakan opsi lain.', 409, 'NIK_MISMATCH');
        }
-     }
+       if (!normNik && targetGuest.has_valid_identity && guestNormNik) {
+         httpError(
+           'Profil tamu yang dipilih sudah terverifikasi dengan NIK; tidak dapat ditimpa tanpa NIK yang cocok.',
+           409,
+           'NIK_MISMATCH'
+         );
+       }
 
-     if (upload.status === IDENTITY_UPLOAD_STATUS.CONFIRMED) {
-      const confirmedGuestId = upload.confirmed_guest_id ? Number(upload.confirmed_guest_id) : null;
-      if (!confirmedGuestId || !targetGuest || confirmedGuestId !== targetGuest.id) {
-        httpError('Unggahan identitas sudah dikonfirmasi untuk tamu lain.', 409, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');
-      }
-      const existing = await client.query('SELECT * FROM guests WHERE id = $1', [confirmedGuestId]);
-      await client.query('COMMIT');
-      return omitIdentityStorageKey(existing.rows[0]);
-    }
+       if (typeof targetGuest.full_name === 'string' && targetGuest.full_name.trim() !== '') {
+         if (normalizeComparableName(targetGuest.full_name) !== normalizeComparableName(cleanName)) {
+           httpError(
+             'Nama pada identitas tidak cocok dengan profil tamu yang dipilih. Jangan menimpa profil tamu lama.',
+             409,
+             'GUEST_IDENTITY_TARGET_MISMATCH'
+           );
+         }
+
+         let isSharedGuest = false;
+         if (reservationId !== null) {
+           const sharedCheck = await client.query(
+             `SELECT COUNT(*)::int AS other_count
+              FROM reservation_guests
+              WHERE guest_id = $1
+                AND ($2::int IS NULL OR reservation_id <> $2)`,
+             [targetGuest.id, reservationId]
+           );
+           isSharedGuest =
+             Number(sharedCheck.rows[0]?.other_count || 0) > 0 ||
+             Number(targetGuest.total_res_count || 0) > 1;
+         } else if (targetGuest.total_res_count !== undefined) {
+           isSharedGuest = Number(targetGuest.total_res_count) > 1;
+         } else {
+           const sharedCheck = await client.query(
+             `SELECT COUNT(*)::int AS other_count
+              FROM reservation_guests
+              WHERE guest_id = $1
+                AND ($2::int IS NULL OR reservation_id <> $2)`,
+             [targetGuest.id, null]
+           );
+           isSharedGuest = Number(sharedCheck.rows[0]?.other_count || 0) > 1;
+         }
+
+         const hasStrongNikMatch = Boolean(
+           normNik &&
+           guestNormNik &&
+           guestNormNik === normNik
+         );
+         if (isSharedGuest && !hasStrongNikMatch) {
+           httpError(
+             'Profil tamu yang dipilih digunakan pada reservasi lain dan tidak memiliki kecocokan NIK yang kuat. Buat atau pilih profil tamu khusus untuk reservasi ini.',
+             409,
+             'SHARED_PRIMARY_GUEST_CONFLICT'
+           );
+         }
+       }
+     } else if (
+       targetGuest &&
+       !requestedGuestId &&
+       targetGuest.matched_by === 'NIK' &&
+       typeof targetGuest.full_name === 'string' &&
+       targetGuest.full_name.trim() !== ''
+     ) {
+       if (normalizeComparableName(targetGuest.full_name) !== normalizeComparableName(cleanName)) {
+         httpError(
+           'NIK pada KTP sudah terdaftar pada profil tamu lain dengan nama berbeda.',
+           409,
+           'NIK_MISMATCH'
+         );
+       }
+     } else if (
+       targetGuest &&
+       !requestedGuestId &&
+       targetGuest.matched_by === 'PHONE'
+     ) {
+       // Phone number alone is NEVER proof of identity for a different person,
+       // an already-verified guest with a different/missing NIK, or a shared group profile.
+       if (
+         typeof targetGuest.full_name === 'string' &&
+         targetGuest.full_name.trim() !== '' &&
+         normalizeComparableName(targetGuest.full_name) !== normalizeComparableName(cleanName)
+       ) {
+         httpError(
+           'Nomor telepon cocok dengan profil tamu lain dengan nama berbeda. Jangan menimpa profil tamu lama.',
+           409,
+           'GUEST_IDENTITY_TARGET_MISMATCH'
+         );
+       }
+       if (
+         (targetGuest.normalized_identity_number &&
+           normNik &&
+           targetGuest.normalized_identity_number !== normNik) ||
+         (targetGuest.has_valid_identity &&
+           (!normNik || targetGuest.normalized_identity_number !== normNik))
+       ) {
+         httpError(
+           'Nomor telepon cocok dengan profil tamu yang sudah memiliki identitas berbeda.',
+           409,
+           'NIK_MISMATCH'
+         );
+       }
+       const phoneSharedCount =
+         targetGuest.total_res_count !== undefined ? Number(targetGuest.total_res_count) : 0;
+       const hasStrongPhoneNikMatch = Boolean(
+         normNik &&
+         targetGuest.normalized_identity_number &&
+         targetGuest.normalized_identity_number === normNik
+       );
+       if (phoneSharedCount > 1 && !hasStrongPhoneNikMatch) {
+         httpError(
+           'Nomor telepon terhubung ke profil tamu bersama pada beberapa reservasi. Buat atau pilih profil tamu khusus.',
+           409,
+           'SHARED_PRIMARY_GUEST_CONFLICT'
+         );
+       }
+     } else if (
+       skipPhoneFallback &&
+       !targetGuest &&
+       !requestedGuestId &&
+       reservationId !== null &&
+       currentPrimaryGuestId !== null
+     ) {
+       // Only reuse the reservation's current PRIMARY_GUEST in-place if it is an
+       // isolated, unverified placeholder for the exact same person on this single reservation.
+       const candidateRes = await client.query(
+         `SELECT g.id, g.created_property_id, g.full_name, g.identity_storage_key,
+                 g.normalized_identity_number, g.has_valid_identity,
+                 (SELECT COUNT(*)::int FROM reservation_guests rg
+                  WHERE rg.guest_id = g.id AND rg.reservation_id <> $2) AS other_res_count
+          FROM guests g
+          WHERE g.id = $1
+          FOR UPDATE`,
+         [currentPrimaryGuestId, reservationId]
+       );
+       if ((candidateRes.rowCount ?? 0) > 0) {
+         const cand = candidateRes.rows[0];
+         const isSameProperty = Number(cand.created_property_id) === propertyId;
+         const isIsolatedToThisReservation = Number(cand.other_res_count || 0) === 0;
+         const isSamePersonName =
+           Boolean(cand.full_name) &&
+           normalizeComparableName(cand.full_name) === normalizeComparableName(cleanName);
+         const isUnverifiedPlaceholder =
+           !cand.has_valid_identity &&
+           !cand.identity_storage_key &&
+           (!cand.normalized_identity_number || cand.normalized_identity_number === normNik);
+         if (isSameProperty && isIsolatedToThisReservation && isSamePersonName && isUnverifiedPlaceholder) {
+           targetGuest = {
+             id: Number(cand.id),
+             identity_storage_key: cand.identity_storage_key || null,
+             full_name: cand.full_name,
+             normalized_identity_number: cand.normalized_identity_number || null,
+             has_valid_identity: Boolean(cand.has_valid_identity),
+             matched_by: 'ID'
+           };
+         }
+       }
+     }
 
     if (!(await identityDocumentExists(String(upload.storage_key)))) {
       httpError('File dokumen identitas tidak tersedia di penyimpanan.', 409, 'DOCUMENT_FILE_MISSING');
@@ -483,6 +934,91 @@ export async function confirmVerifiedIdentity(
       httpError('Unggahan identitas sudah dikonfirmasi untuk tamu lain.', 409, 'DOCUMENT_UPLOAD_ALREADY_CONSUMED');
     }
 
+    if (reservationId !== null && relinkReservationPrimaryGuest) {
+      let relationRecordId: number;
+      if (currentPrimaryRel) {
+        relationRecordId = currentPrimaryRel.id;
+        await client.query(
+          `UPDATE reservation_guests
+           SET guest_id = $1,
+               is_staying = TRUE,
+               identity_verified = TRUE,
+               relation_source = 'CHECKIN_IDENTITY_CONFIRMATION',
+               updated_at = NOW()
+           WHERE id = $2`,
+          [guestRow.id, currentPrimaryRel.id]
+        );
+      } else {
+        const insertedRel = await client.query(
+          `INSERT INTO reservation_guests (
+             reservation_id, guest_id, role, relationship, is_staying,
+             identity_verified, relation_source, created_at, updated_at
+           )
+           VALUES ($1, $2, 'PRIMARY_GUEST', 'STAYING', TRUE, TRUE, 'CHECKIN_IDENTITY_CONFIRMATION', NOW(), NOW())
+           RETURNING id`,
+          [reservationId, guestRow.id]
+        );
+        relationRecordId = Number(insertedRel.rows[0].id);
+      }
+
+      await client.query(
+        `UPDATE reservations
+         SET guest_name = $1,
+             guest_phone = COALESCE(NULLIF($2, ''), guest_phone),
+             identity_number = $3,
+             has_valid_identity = $4,
+             ktp_path = $5
+         WHERE id = $6`,
+        [
+          guestRow.full_name,
+          guestRow.phone || cleanPhone || null,
+          guestRow.identity_number || null,
+          Boolean(guestRow.has_valid_identity),
+          guestRow.identity_path || apiPath,
+          reservationId
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id, actor_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          'GUEST_CRM',
+          currentPrimaryGuestId !== Number(guestRow.id)
+            ? 'PRIMARY_GUEST_REPLACE'
+            : 'RESERVATION_GUEST_UPDATE',
+          'RESERVATION_GUEST',
+          String(relationRecordId),
+          JSON.stringify({
+            reservation_id: reservationId,
+            previous_guest_id: currentPrimaryGuestId,
+            new_guest_id: Number(guestRow.id),
+            role: 'PRIMARY_GUEST',
+            relation_source: 'CHECKIN_IDENTITY_CONFIRMATION',
+            before: lockedReservation
+              ? {
+                  guest_id: currentPrimaryGuestId,
+                  guest_name: lockedReservation.guest_name,
+                  guest_phone: lockedReservation.guest_phone,
+                  ktp_path: lockedReservation.ktp_path,
+                  has_valid_identity: Boolean(lockedReservation.has_valid_identity)
+                }
+              : null,
+            after: {
+              guest_id: Number(guestRow.id),
+              guest_name: guestRow.full_name,
+              guest_phone: guestRow.phone || lockedReservation?.guest_phone || null,
+              ktp_path: guestRow.identity_path || apiPath,
+              has_valid_identity: Boolean(guestRow.has_valid_identity)
+            }
+          }),
+          String(actorUserId),
+          propertyId,
+          String(actorUserId)
+        ]
+      );
+    }
+
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -495,13 +1031,43 @@ export async function confirmVerifiedIdentity(
         String(guestRow.id),
         JSON.stringify({
           guest_id: guestRow.id,
+          reservation_id: reservationId,
+          context,
           document_upload_id: documentUploadId,
           identity_storage_key: upload.storage_key,
           previous_identity_storage_key: previousStorageKey,
           identity_path: apiPath,
           identity_mime_type: upload.mime_type,
           identity_file_hash: upload.file_hash,
-          identity_uploaded_by: Number(upload.uploaded_by_user_id)
+          identity_uploaded_by: Number(upload.uploaded_by_user_id),
+          operation_binding: {
+            document_upload_id: documentUploadId,
+            property_id: propertyId,
+            actor_user_id: actorUserId,
+            confirmed_guest_id: Number(guestRow.id),
+            requested_guest_id: requestedGuestId,
+            reservation_id: reservationId,
+            expected_primary_guest_id: expectedPrimaryGuestId,
+            relink_reservation_primary_guest: Boolean(
+              reservationId !== null && relinkReservationPrimaryGuest
+            ),
+            context,
+            normalized_name: normalizeComparableName(cleanName),
+            normalized_nik: normNik || null
+          },
+          before: targetGuest
+            ? {
+                guest_id: targetGuest.id,
+                full_name: targetGuest.full_name ?? null,
+                identity_storage_key: previousStorageKey
+              }
+            : null,
+          after: {
+            guest_id: guestRow.id,
+            full_name: guestRow.full_name,
+            has_valid_identity: Boolean(guestRow.has_valid_identity),
+            identity_path: apiPath
+          }
         }),
         String(actorUserId),
         propertyId

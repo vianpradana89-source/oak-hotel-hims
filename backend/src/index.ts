@@ -4815,10 +4815,24 @@ app.patch('/api/reservations/:id', async (req, res) => {
       });
     }
 
+    const beforeDto = withReservationHotelDates(existing);
+    const afterDto = withReservationHotelDates(updated.rows[0]);
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      ['PMS', 'UPDATE', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null, reservationPropertyId]
+      [
+        'PMS',
+        'UPDATE',
+        'RESERVATION',
+        reservationId,
+        JSON.stringify({
+          ...afterDto,
+          before: beforeDto,
+          after: afterDto
+        }),
+        req.headers['x-correlation-id'] || null,
+        reservationPropertyId
+      ]
     );
 
     await client.query('COMMIT');
@@ -4830,13 +4844,20 @@ app.patch('/api/reservations/:id', async (req, res) => {
     }, reservationPropertyId);
 
     const canonicalDto = await getCanonicalReservationDto(pool, reservationId);
-    res.json({ status: 'SUCCESS', data: canonicalDto || withReservationHotelDates(updated.rows[0]) });
+    res.json({ status: 'SUCCESS', data: canonicalDto || afterDto });
   } catch (err: any) {
     await client.query('ROLLBACK');
     if (isRoomOverlapViolation(err)) {
       return sendRoomOverlapConflict(res);
     }
     const message = String(err?.message || err);
+    if (err?.statusCode) {
+      return res.status(Number(err.statusCode)).json({
+        status: 'ERROR',
+        code: err.code || 'RESERVATION_PATCH_ERROR',
+        message
+      });
+    }
     if (
       message.includes('availability row missing') ||
       message.includes('capacity exhausted') ||

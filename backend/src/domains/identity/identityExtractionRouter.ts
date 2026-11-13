@@ -263,6 +263,9 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       const isSuperAdmin = await isPlatformSuperAdmin(pool, user?.id);
       const {
          guest_id,
+         reservation_id,
+         expected_primary_guest_id,
+         relink_reservation_primary_guest,
          name,
          phone,
          nik,
@@ -290,6 +293,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
         return res.status(400).json({
           success: false,
           error: 'VALIDATION_ERROR',
+          code: 'VALIDATION_ERROR',
           message: 'Nama pada identitas wajib diisi'
         });
       }
@@ -298,7 +302,16 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
          document_upload_id: document_upload_id ? String(document_upload_id) : '',
          actor_user_id: Number(user!.id),
          is_platform_super_admin: isSuperAdmin,
-         guest_id: guest_id ? Number(guest_id) : null,
+         guest_id: guest_id != null && guest_id !== '' ? Number(guest_id) : null,
+         reservation_id: reservation_id != null && reservation_id !== '' ? Number(reservation_id) : null,
+         expected_primary_guest_id:
+           expected_primary_guest_id != null && expected_primary_guest_id !== ''
+             ? Number(expected_primary_guest_id)
+             : null,
+         relink_reservation_primary_guest:
+           typeof relink_reservation_primary_guest === 'boolean'
+             ? relink_reservation_primary_guest
+             : undefined,
          property_id: propertyId,
          name: String(name),
          phone: phone ? String(phone) : null,
@@ -332,6 +345,7 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
       return res.status(confirmErr.statusCode || 500).json({
         success: false,
         error: confirmErr.code || 'INTERNAL_ERROR',
+        code: confirmErr.code || 'INTERNAL_ERROR',
         message: confirmErr.message || 'Gagal menyimpan identitas tamu'
       });
     }

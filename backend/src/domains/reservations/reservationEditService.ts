@@ -559,6 +559,18 @@ export async function applyReservationEdit(
     : (current.special_requests ?? null);
 
   // 2.5. Handle canonical guest swap (guest_id / booker_guest_id)
+  const initialPgRes = await client.query(
+    `SELECT rg.id AS relation_id, rg.guest_id, g.full_name, g.phone,
+            g.identity_number, g.identity_path, g.has_valid_identity
+     FROM reservation_guests rg
+     JOIN guests g ON g.id = rg.guest_id
+     WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
+     FOR UPDATE OF rg, g`,
+    [reservationId]
+  );
+  const initialPrimaryRel = initialPgRes.rows[0] || null;
+  const initialPrimaryGuestId = initialPrimaryRel ? Number(initialPrimaryRel.guest_id) : null;
+
   let guestSwapped = false;
   let bookerSwapped = false;
   if (payload.guest_id !== undefined && payload.guest_id !== null) {
@@ -566,32 +578,46 @@ export async function applyReservationEdit(
     if (Number.isInteger(newGuestId) && newGuestId > 0) {
       // Validate new guest exists and belongs to property scope
       await assertGuestBelongsToProperty(client, newGuestId, propertyId);
-      const pgCheck = await client.query(
-        `SELECT rg.guest_id FROM reservation_guests rg WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'`,
-        [reservationId]
-      );
-      const currentGuestId = pgCheck.rows.length > 0 ? Number(pgCheck.rows[0].guest_id) : null;
+      const currentGuestId = initialPrimaryGuestId;
       if (currentGuestId !== newGuestId) {
-        if (currentGuestId !== null) {
+        let relationId: number;
+        if (currentGuestId !== null && initialPrimaryRel) {
+          relationId = Number(initialPrimaryRel.relation_id);
           await client.query(
             `UPDATE reservation_guests SET guest_id = $1, updated_at = NOW() WHERE reservation_id = $2 AND role = 'PRIMARY_GUEST'`,
             [newGuestId, reservationId]
           );
         } else {
-          await client.query(
+          const insertedRel = await client.query(
             `INSERT INTO reservation_guests (reservation_id, guest_id, role, relationship, is_staying, identity_verified, relation_source, created_at, updated_at)
-             VALUES ($1, $2, 'PRIMARY_GUEST', 'STAYING', TRUE, FALSE, 'RESERVATION_EDIT', NOW(), NOW())`,
+             VALUES ($1, $2, 'PRIMARY_GUEST', 'STAYING', TRUE, FALSE, 'RESERVATION_EDIT', NOW(), NOW())
+             RETURNING id`,
             [reservationId, newGuestId]
           );
+          relationId = Number(insertedRel.rows[0].id);
         }
         const guestSync = await client.query(
-          `SELECT full_name, phone FROM guests WHERE id = $1`,
+          `SELECT full_name, phone, identity_number, identity_path, has_valid_identity FROM guests WHERE id = $1`,
           [newGuestId]
         );
         if (guestSync.rows.length > 0) {
           targetGuestName = guestSync.rows[0].full_name;
           targetGuestPhone = guestSync.rows[0].phone;
         }
+        await writeGuestAudit(client, {
+          action: 'PRIMARY_GUEST_REPLACE',
+          entity: 'RESERVATION_GUEST',
+          recordId: relationId,
+          newValue: {
+            reservation_id: reservationId,
+            previous_guest_id: currentGuestId,
+            new_guest_id: newGuestId,
+            role: 'PRIMARY_GUEST',
+            relation_source: 'RESERVATION_EDIT'
+          },
+          propertyId,
+          correlationId: `${reservationId}-edit-${Date.now()}`
+        });
         guestSwapped = true;
       }
     }
@@ -709,6 +735,72 @@ export async function applyReservationEdit(
       ? Number(payload.guest_id)
       : null;
     await requirePrimaryGuestIdentity(client, reservationId, propertyId, requestedGuestId);
+  }
+
+  // 2.8. Enforce target guest name consistency and synchronize canonical identity snapshot
+  // so that:
+  // - an explicit old/shared guest_id cannot be silently renamed to a different person, and
+  // - a newly linked guest (including one without KTP) never inherits the old guest's KTP.
+  const finalPgRes = await client.query(
+    `SELECT rg.id AS relation_id, rg.guest_id, g.full_name, g.phone,
+            g.identity_number, g.identity_path, g.has_valid_identity
+     FROM reservation_guests rg
+     JOIN guests g ON g.id = rg.guest_id
+     WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
+     LIMIT 1`,
+    [reservationId]
+  );
+  const finalPrimaryGuest = finalPgRes.rows[0] || null;
+  let targetIdentityNumber: string | null = current.identity_number ?? null;
+  let targetHasValidIdentity: boolean = Boolean(current.has_valid_identity);
+  let targetKtpPath: string | null = current.ktp_path ?? null;
+
+  if (finalPrimaryGuest) {
+    const explicitGuestName =
+      payload.guest_name !== undefined && payload.guest_name !== null
+        ? String(payload.guest_name).trim()
+        : null;
+    const finalNormName = String(finalPrimaryGuest.full_name || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+    const explicitNormName = explicitGuestName
+      ? explicitGuestName.replace(/\s+/g, ' ').toLowerCase()
+      : null;
+
+    if (explicitNormName && finalNormName && explicitNormName !== finalNormName) {
+      const sharedRes = await client.query(
+        `SELECT COUNT(*)::int AS other_count
+         FROM reservation_guests
+         WHERE guest_id = $1 AND reservation_id <> $2`,
+        [finalPrimaryGuest.guest_id, reservationId]
+      );
+      const isSharedPrimaryGuest = Number(sharedRes.rows[0]?.other_count || 0) > 0;
+      const err: any = new Error(
+        isSharedPrimaryGuest
+          ? 'Profil tamu utama digunakan pada reservasi lain. Untuk mengganti tamu menginap pada reservasi ini, pilih profil tamu yang sesuai atau unggah KTP tamu baru.'
+          : 'Nama tamu menginap berbeda dengan profil tamu yang dipilih. Pilih profil tamu yang sesuai atau lengkapi KTP tamu baru.'
+      );
+      err.statusCode = 409;
+      err.code = isSharedPrimaryGuest
+        ? 'SHARED_PRIMARY_GUEST_CONFLICT'
+        : 'GUEST_IDENTITY_TARGET_MISMATCH';
+      throw err;
+    }
+
+    targetGuestName = finalPrimaryGuest.full_name;
+    if (guestSwapped) {
+      targetGuestPhone =
+        payload.guest_phone !== undefined &&
+        payload.guest_phone !== null &&
+        String(payload.guest_phone).trim() !== '' &&
+        String(payload.guest_phone).trim() !== String(current.guest_phone || '').trim()
+          ? String(payload.guest_phone).trim()
+          : finalPrimaryGuest.phone || targetGuestPhone;
+    }
+    targetIdentityNumber = finalPrimaryGuest.identity_number ?? null;
+    targetHasValidIdentity = Boolean(finalPrimaryGuest.has_valid_identity);
+    targetKtpPath = finalPrimaryGuest.identity_path ?? null;
   }
 
   // Targets must be resolved before the metadata-only determination so the
@@ -942,8 +1034,9 @@ export async function applyReservationEdit(
          stay_type = $13, start_at = $14, end_at = $15,
          subtotal_amount = $16, service_amount = $17, tax_amount = $18,
          total_price = $19, remaining_balance = $20, payment_status = $21,
-         special_requests = $22
-     WHERE id = $23
+         special_requests = $22, identity_number = $23, has_valid_identity = $24,
+         ktp_path = $25
+     WHERE id = $26
      RETURNING *`,
     [
       targetGuestName, targetGuestPhone, targetGuestSegment,
@@ -953,7 +1046,8 @@ export async function applyReservationEdit(
       targetStayType, startAt, endAt,
       finalSubtotal, finalService, finalTax,
       finalTotalAfterDiscount, remainingBalance, paymentStatus,
-      targetSpecialRequests,
+      targetSpecialRequests, targetIdentityNumber, targetHasValidIdentity,
+      targetKtpPath,
       reservationId
     ]
   );
@@ -1043,8 +1137,26 @@ export async function applyReservationEdit(
     [
       'PMS', 'UPDATE_RESERVATION_DETAIL', 'RESERVATION', reservationId,
       JSON.stringify({
-        before: { total_price: oldTotalPrice, amount_paid: amountPaid, payment_status: current.payment_status },
-        after: { total_price: finalTotalAfterDiscount, amount_paid: updatedRes.rows[0].amount_paid, payment_status: updatedRes.rows[0].payment_status },
+        before: {
+          total_price: oldTotalPrice,
+          amount_paid: amountPaid,
+          payment_status: current.payment_status,
+          primary_guest_id: initialPrimaryGuestId,
+          guest_name: current.guest_name,
+          guest_phone: current.guest_phone,
+          has_valid_identity: Boolean(current.has_valid_identity),
+          ktp_path: current.ktp_path ?? null
+        },
+        after: {
+          total_price: finalTotalAfterDiscount,
+          amount_paid: updatedRes.rows[0].amount_paid,
+          payment_status: updatedRes.rows[0].payment_status,
+          primary_guest_id: finalPrimaryGuest ? Number(finalPrimaryGuest.guest_id) : null,
+          guest_name: updatedRes.rows[0].guest_name,
+          guest_phone: updatedRes.rows[0].guest_phone,
+          has_valid_identity: Boolean(updatedRes.rows[0].has_valid_identity),
+          ktp_path: updatedRes.rows[0].ktp_path ?? null
+        },
         price_difference: priceDifference,
         quoted_price_difference: quotedPriceDifference,
         keep_current_price: keepCurrentPrice,

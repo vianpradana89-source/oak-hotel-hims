@@ -96,9 +96,16 @@ interface Props {
    guestName?: string;
    guestPhone?: string;
    guestId?: number | null;
+   reservationId?: number | null;
+   expectedPrimaryGuestId?: number | null;
+   relinkReservationPrimaryGuest?: boolean;
    propertyId?: number;
-   /** Context for identity confirm: 'CRM_EDIT' (default) or 'CHECKIN_IDENTITY_SCAN' (disables phone fallback). */
-   context?: 'CRM_EDIT' | 'CHECKIN_IDENTITY_SCAN';
+   /** Context for identity confirm: 'CRM_EDIT' (default) or reservation contexts (disable phone fallback & shared-master overwrite). */
+   context?:
+     | 'CRM_EDIT'
+     | 'CHECKIN_IDENTITY_SCAN'
+     | 'RESERVATION_IDENTITY_ASSIGN'
+     | 'RESERVATION_EDIT_IDENTITY';
    onIdentityConfirmed?: (data: ExtractedIdentityData, savedGuest?: any) => void;
    onScanSuccess?: (parsedData: ExtractedIdentityData) => void;
    onSelectExistingGuest?: (candidate: DuplicateCandidateInfo) => void;
@@ -366,6 +373,9 @@ export default function IdentityExtractionModal({
      guestName: _guestName = '',
      guestPhone,
      guestId,
+     reservationId = null,
+     expectedPrimaryGuestId = null,
+     relinkReservationPrimaryGuest,
      propertyId = 1,
      context = 'CRM_EDIT',
      onIdentityConfirmed,
@@ -851,6 +861,9 @@ export default function IdentityExtractionModal({
       // Default path (UPLOAD mode or DETAIL with new photo): use POST /api/identity/confirm
       const confirmPayload = {
          guest_id: guestId || null,
+         reservation_id: reservationId || null,
+         expected_primary_guest_id: expectedPrimaryGuestId || null,
+         relink_reservation_primary_guest: relinkReservationPrimaryGuest,
          property_id: propertyId || 1,
          name: finalData.full_name,
          nik: finalData.identity_number,

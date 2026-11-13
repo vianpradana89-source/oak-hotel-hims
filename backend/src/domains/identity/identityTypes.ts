@@ -77,11 +77,20 @@ export interface IdentityCandidate extends Partial<IdentityCandidateData> {
 
 export interface IdentityExtractionResult extends NormalizedIdentityExtractionResponse {}
 
+export type IdentityConfirmContext =
+  | 'CRM_EDIT'
+  | 'CHECKIN_IDENTITY_SCAN'
+  | 'RESERVATION_IDENTITY_ASSIGN'
+  | 'RESERVATION_EDIT_IDENTITY';
+
 export interface ConfirmIdentityInput {
    document_upload_id: string;
    actor_user_id: number;
    is_platform_super_admin: boolean;
    guest_id?: number | null;
+   reservation_id?: number | null;
+   expected_primary_guest_id?: number | null;
+   relink_reservation_primary_guest?: boolean;
    property_id: number;
    name: string;
    phone?: string | null;
@@ -103,6 +112,6 @@ export interface ConfirmIdentityInput {
    ocr_provider?: string;
    /** Foreign key to regencies.id — canonical KTP city/regency */
    ktp_regency_id?: number | null;
-   /** When 'CHECKIN_IDENTITY_SCAN', phone-based guest resolution is disabled to prevent CRM mutation of existing Guest A by KTP B. */
-   context?: 'CRM_EDIT' | 'CHECKIN_IDENTITY_SCAN';
+   /** In reservation contexts, phone-based guest resolution is disabled and shared-master overwrite is blocked. */
+   context?: IdentityConfirmContext;
  }
