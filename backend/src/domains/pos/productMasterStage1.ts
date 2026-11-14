@@ -96,7 +96,7 @@ export {
   type StockLocationType,
 };
 
-export const PRODUCT_TYPES = ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD'] as const;
+export const PRODUCT_TYPES = ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM'] as const;
 export type ProductType = (typeof PRODUCT_TYPES)[number];
 
 export const ACTIVE_PRODUCT_KINDS = ['STANDARD'] as const;
@@ -111,6 +111,7 @@ export const PRODUCT_TYPE_LABELS: Record<ProductType, string> = {
   RAW_MATERIAL: 'Bahan Baku',
   SEMI_FINISHED: 'Setengah Jadi',
   FINISHED_GOOD: 'Produk Jadi',
+  OPERATIONAL_ITEM: 'Item Operasional',
 };
 
 export const PRODUCT_KIND_LABELS: Record<ProductKind, string> = {
@@ -140,6 +141,12 @@ const PRODUCT_TYPE_ALIASES: Record<string, ProductType> = {
   'FINISHED GOOD': 'FINISHED_GOOD',
   PRODUK_JADI: 'FINISHED_GOOD',
   'PRODUK JADI': 'FINISHED_GOOD',
+  OPERATIONAL_ITEM: 'OPERATIONAL_ITEM',
+  'OPERATIONAL ITEM': 'OPERATIONAL_ITEM',
+  ITEM_OPERASIONAL: 'OPERATIONAL_ITEM',
+  'ITEM OPERASIONAL': 'OPERATIONAL_ITEM',
+  BARANG_OPERASIONAL: 'OPERATIONAL_ITEM',
+  'BARANG OPERASIONAL': 'OPERATIONAL_ITEM',
 };
 
 const ACTIVE_KIND_ALIASES: Record<string, ActiveProductKind> = {
@@ -482,7 +489,9 @@ export function parseStockTrackingInput(
     };
   }
   const defaultTracked =
-    options?.productType === 'RAW_MATERIAL' || options?.productType === 'SEMI_FINISHED';
+    options?.productType === 'RAW_MATERIAL' ||
+    options?.productType === 'SEMI_FINISHED' ||
+    options?.productType === 'OPERATIONAL_ITEM';
   return {
     ok: true,
     provided: false,

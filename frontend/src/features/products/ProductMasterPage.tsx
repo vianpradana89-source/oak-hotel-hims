@@ -5,7 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
 import ProductRecipeModal from './ProductRecipeModal';
 
-export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD';
+export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'OPERATIONAL_ITEM';
 export type ProductKindCode = 'STANDARD';
 export type RoadmapProductKindCode = 'WEIGHED' | 'UNLIMITED' | 'SERVICE' | 'BUNDLE' | 'FORMULA';
 export type UnitDimension = 'COUNT' | 'WEIGHT' | 'VOLUME';
@@ -320,7 +320,7 @@ interface Props {
 }
 
 type StatusFilter = 'active' | 'inactive' | 'all';
-type ProductTypeFilter = 'ALL' | 'FINISHED_GOOD' | 'SEMI_FINISHED' | 'RAW_MATERIAL';
+type ProductTypeFilter = 'ALL' | 'FINISHED_GOOD' | 'SEMI_FINISHED' | 'RAW_MATERIAL' | 'OPERATIONAL_ITEM';
 type SellableFilter = 'all' | 'sellable' | 'internal';
 type StockFilter = 'all' | 'tracked' | 'untracked';
 
@@ -398,12 +398,14 @@ export const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }>
   { key: 'FINISHED_GOOD', label: 'Produk Jadi' },
   { key: 'SEMI_FINISHED', label: 'Setengah Jadi' },
   { key: 'RAW_MATERIAL', label: 'Bahan Baku' },
+  { key: 'OPERATIONAL_ITEM', label: 'Item Operasional' },
 ];
 
 export const PRODUCT_TYPE_CHOICES: Array<{ value: ProductTypeCode; label: string; hint: string }> = [
   { value: 'FINISHED_GOOD', label: 'Produk Jadi', hint: 'Siap disajikan / dijual' },
   { value: 'SEMI_FINISHED', label: 'Setengah Jadi', hint: 'Olahan antara / prep' },
-  { value: 'RAW_MATERIAL', label: 'Bahan Baku', hint: 'Bahan mentah / stok dasar' },
+  { value: 'RAW_MATERIAL', label: 'Bahan Baku', hint: 'Bahan mentah / stok F&B' },
+  { value: 'OPERATIONAL_ITEM', label: 'Item Operasional', hint: 'Linen, handuk & amenities HK' },
 ];
 
 const COMMON_BASE_UNITS = ['Porsi', 'Pcs', 'Gelas', 'Botol', 'Kaleng', 'Cup', 'Pack', 'Box', 'Kg', 'Gram', 'Liter', 'Ml'];
@@ -419,7 +421,12 @@ export function createPackagingIdempotencyKey(propertyId: number | null | undefi
 }
 
 export function resolveInitialProductTypeFromTab(tab: ProductTypeFilter): string {
-  if (tab === 'FINISHED_GOOD' || tab === 'SEMI_FINISHED' || tab === 'RAW_MATERIAL') {
+  if (
+    tab === 'FINISHED_GOOD' ||
+    tab === 'SEMI_FINISHED' ||
+    tab === 'RAW_MATERIAL' ||
+    tab === 'OPERATIONAL_ITEM'
+  ) {
     return tab;
   }
   return '';
@@ -430,19 +437,28 @@ export function createInitialAddProductForm(tab: ProductTypeFilter): ProductForm
   return {
     ...EMPTY_PRODUCT_FORM,
     productType: initialType,
-    trackStock: initialType === 'RAW_MATERIAL' || initialType === 'SEMI_FINISHED',
+    isSellablePos: initialType === 'OPERATIONAL_ITEM' ? false : EMPTY_PRODUCT_FORM.isSellablePos,
+    trackStock:
+      initialType === 'RAW_MATERIAL' ||
+      initialType === 'SEMI_FINISHED' ||
+      initialType === 'OPERATIONAL_ITEM',
   };
 }
 
 export function applyProductTypeChange(form: ProductFormState, nextType: string): ProductFormState {
   const upperNext = nextType.trim().toUpperCase();
   const nextTrackStock =
-    upperNext === 'RAW_MATERIAL' || upperNext === 'SEMI_FINISHED'
+    upperNext === 'RAW_MATERIAL' ||
+    upperNext === 'SEMI_FINISHED' ||
+    upperNext === 'OPERATIONAL_ITEM'
       ? true
       : Boolean(form.trackStock);
+  const nextIsSellablePos =
+    upperNext === 'OPERATIONAL_ITEM' ? false : Boolean(form.isSellablePos);
   return {
     ...form,
     productType: nextType,
+    isSellablePos: nextIsSellablePos,
     trackStock: nextTrackStock,
   };
 }
@@ -509,7 +525,11 @@ export function isStockTrackedCanonical(item: {
   }
   if (!hasStock && !hasInv) {
     const rawType = String(item.product_type || '').trim().toUpperCase();
-    return rawType === 'RAW_MATERIAL' || rawType === 'SEMI_FINISHED';
+    return (
+      rawType === 'RAW_MATERIAL' ||
+      rawType === 'SEMI_FINISHED' ||
+      rawType === 'OPERATIONAL_ITEM'
+    );
   }
   // Tepat satu flag tersedia (kompatibilitas record parsial/legacy):
   if (hasStock) {
@@ -522,7 +542,10 @@ export function isStockTrackedCanonical(item: {
 
 export function buildEditProductForm(item: ProductItem): ProductFormState {
   const rawType = String(item.product_type || '').trim().toUpperCase();
-  const defaultTracked = rawType === 'RAW_MATERIAL' || rawType === 'SEMI_FINISHED';
+  const defaultTracked =
+    rawType === 'RAW_MATERIAL' ||
+    rawType === 'SEMI_FINISHED' ||
+    rawType === 'OPERATIONAL_ITEM';
   const effectiveTrackStock =
     typeof item.track_stock === 'boolean'
       ? item.track_inventory === false
@@ -569,6 +592,8 @@ export function formatProductTypeLabel(productType?: string | null): string {
       return 'Setengah Jadi';
     case 'RAW_MATERIAL':
       return 'Bahan Baku';
+    case 'OPERATIONAL_ITEM':
+      return 'Item Operasional';
     default:
       return 'Belum diatur';
   }
@@ -1142,6 +1167,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     const finishedCount = items.filter((i) => i.product_type === 'FINISHED_GOOD').length;
     const semiCount = items.filter((i) => i.product_type === 'SEMI_FINISHED').length;
     const rawCount = items.filter((i) => i.product_type === 'RAW_MATERIAL').length;
+    const operationalCount = items.filter((i) => i.product_type === 'OPERATIONAL_ITEM').length;
     const unsetTypeCount = items.filter((i) => !i.product_type).length;
     const stockTrackedCount = items.filter((i) => isStockTrackedCanonical(i)).length;
     return {
@@ -1152,6 +1178,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       finishedCount,
       semiCount,
       rawCount,
+      operationalCount,
       unsetTypeCount,
       stockTrackedCount,
       categories: categories.length,
@@ -1163,6 +1190,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     FINISHED_GOOD: stats.finishedCount,
     SEMI_FINISHED: stats.semiCount,
     RAW_MATERIAL: stats.rawCount,
+    OPERATIONAL_ITEM: stats.operationalCount,
   }), [stats]);
 
   const filteredItems = useMemo(() => {
@@ -2454,6 +2482,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         return 'bg-amber-50 text-amber-800 border-amber-200';
       case 'RAW_MATERIAL':
         return 'bg-sky-50 text-sky-800 border-sky-200';
+      case 'OPERATIONAL_ITEM':
+        return 'bg-purple-50 text-purple-800 border-purple-200';
       default:
         return 'bg-gray-50 text-gray-500 border-gray-200';
     }
@@ -3057,7 +3087,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Belum diatur
                     </button>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                  <div className="grid grid-cols-2 gap-2" role="group" aria-label="Pilihan tipe produk">
                     {PRODUCT_TYPE_CHOICES.map((choice) => {
                       const selected = newProduct.productType === choice.value;
                       return (
@@ -3464,7 +3494,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Belum diatur
                     </button>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                  <div className="grid grid-cols-2 gap-2" role="group" aria-label="Pilihan tipe produk">
                     {PRODUCT_TYPE_CHOICES.map((choice) => {
                       const selected = editProduct.productType === choice.value;
                       return (

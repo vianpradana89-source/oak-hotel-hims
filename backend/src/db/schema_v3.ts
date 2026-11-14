@@ -196,7 +196,7 @@ export async function initializeDatabase(pool: Pool) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT chk_pos_menu_items_product_type
-        CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD')),
+        CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')),
       CONSTRAINT chk_pos_menu_items_product_kind
         CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')),
       CONSTRAINT chk_pos_menu_items_base_unit_non_empty
@@ -824,9 +824,16 @@ export async function initializeDatabase(pool: Pool) {
     ALTER TABLE pos_menu_items ALTER COLUMN price DROP DEFAULT;
 
     DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_menu_items_product_type'
+          AND pg_get_constraintdef(oid) NOT LIKE '%OPERATIONAL_ITEM%'
+      ) THEN
+        ALTER TABLE pos_menu_items DROP CONSTRAINT chk_pos_menu_items_product_type;
+      END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_type') THEN
         ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
-          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD')) NOT VALID;
+          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')) NOT VALID;
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_kind') THEN
         ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_kind

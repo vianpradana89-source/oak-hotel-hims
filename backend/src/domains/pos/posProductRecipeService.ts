@@ -420,6 +420,7 @@ export async function getRawMaterialCandidates(
       FROM pos_menu_items
      WHERE property_id = $1
        AND is_active = TRUE
+       AND COALESCE(product_type, '') != 'OPERATIONAL_ITEM'
        AND ($2::int IS NULL OR id != $2::int)
        AND ($3::boolean = FALSE OR (COALESCE(track_stock, FALSE) = TRUE AND COALESCE(track_inventory, FALSE) = TRUE))
      ORDER BY

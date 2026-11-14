@@ -341,6 +341,7 @@ export async function getFoodCostOverview(
      WHERE p.property_id = $1
        AND p.is_active = TRUE
        AND p.is_sellable_pos = TRUE
+       AND COALESCE(p.product_type, '') != 'OPERATIONAL_ITEM'
   `;
   const queryParams: any[] = [propertyId];
 

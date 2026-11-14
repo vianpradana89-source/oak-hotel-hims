@@ -57,13 +57,22 @@ export async function runProductMasterStage1Migration(pool: Pool): Promise<void>
     // 5. Constraint idempotent (NOT VALID agar tidak memodifikasi/menggagalkan data historis jika ada, lalu divalidasi bila aman)
     await client.query(`
       DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_pos_menu_items_product_type'
+            AND conrelid = 'pos_menu_items'::regclass
+            AND pg_get_constraintdef(oid) NOT LIKE '%OPERATIONAL_ITEM%'
+        ) THEN
+          ALTER TABLE pos_menu_items DROP CONSTRAINT chk_pos_menu_items_product_type;
+        END IF;
+
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
           WHERE conname = 'chk_pos_menu_items_product_type'
             AND conrelid = 'pos_menu_items'::regclass
         ) THEN
           ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
-            CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD')) NOT VALID;
+            CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')) NOT VALID;
         END IF;
 
         IF NOT EXISTS (
