@@ -90,7 +90,38 @@ export async function getBookingSalesDetail(
   const bookingId = Number(booking.id);
 
   const reservationRes = await pool.query(
-    `SELECT
+    `WITH unapplied_deposits AS (
+       SELECT
+         d.reservation_id,
+         COALESCE(SUM(GREATEST(0,
+           COALESCE(ev.received, 0) - COALESCE(ev.reversed_received, 0)
+           - (COALESCE(ev.applied, 0) - COALESCE(ev.unapplied, 0))
+           - COALESCE(ev.refunded, 0)
+         )), 0) AS unapplied_advance_deposit,
+         MAX(CASE WHEN GREATEST(0,
+           COALESCE(ev.received, 0) - COALESCE(ev.reversed_received, 0)
+           - (COALESCE(ev.applied, 0) - COALESCE(ev.unapplied, 0))
+           - COALESCE(ev.refunded, 0)
+         ) > 0 THEN d.id ELSE NULL END) AS active_advance_deposit_id
+       FROM deposits d
+       LEFT JOIN (
+         SELECT
+           de.deposit_id,
+           SUM(CASE WHEN de.event_type = 'RECEIVED' THEN de.amount ELSE 0 END) AS received,
+           SUM(CASE WHEN de.event_type = 'APPLY' THEN de.amount ELSE 0 END) AS applied,
+           SUM(CASE WHEN de.event_type = 'UNAPPLY' THEN de.amount ELSE 0 END) AS unapplied,
+           SUM(CASE WHEN de.event_type = 'REFUND' THEN de.amount ELSE 0 END) AS refunded,
+           SUM(CASE WHEN de.event_type = 'REVERSAL' THEN de.amount ELSE 0 END) AS reversed_received
+         FROM deposit_events de
+         GROUP BY de.deposit_id
+       ) ev ON ev.deposit_id = d.id
+       WHERE d.property_id = $1
+         AND d.reservation_id IN (SELECT r2.id FROM reservations r2 WHERE r2.booking_id = $2)
+         AND d.status IN ('RECEIVED', 'PARTIALLY_USED')
+         AND COALESCE(d.purpose, 'ADVANCE_PAYMENT') = 'ADVANCE_PAYMENT'
+       GROUP BY d.reservation_id
+     )
+     SELECT
        r.id,
        r.room_id,
        r.stay_sequence,
@@ -103,11 +134,14 @@ export async function getBookingSalesDetail(
        r.remaining_balance,
        r.booked_room_type_name_snapshot,
        rm.room_number,
-       COALESCE(rt_current.name, rt_booked.name, r.booked_room_type_name_snapshot) AS room_type_name
+       COALESCE(rt_current.name, rt_booked.name, r.booked_room_type_name_snapshot) AS room_type_name,
+       COALESCE(ud.unapplied_advance_deposit, 0) AS unapplied_advance_deposit,
+       ud.active_advance_deposit_id
      FROM reservations r
      LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = $1
      LEFT JOIN room_types rt_current ON rt_current.id = rm.room_type_id AND rt_current.property_id = $1
      LEFT JOIN room_types rt_booked ON rt_booked.id = r.booked_room_type_id_snapshot AND rt_booked.property_id = $1
+     LEFT JOIN unapplied_deposits ud ON ud.reservation_id = r.id
      WHERE r.booking_id = $2
      ORDER BY r.stay_sequence ASC NULLS LAST, r.id ASC`,
     [propertyId, bookingId]

@@ -9,7 +9,7 @@ import multer from 'multer';
 import { Pool } from 'pg';
 import { createPostgresRealtimeBus } from './infrastructure/realtime/postgresRealtimeBus';
 import { generateBid } from './utils/bid';
-import { initializeDatabase } from './db/schema_v3';
+import { initializeDatabase, ensureBookingCreateRequestsSchema } from './db/schema_v3';
 import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
@@ -687,6 +687,7 @@ async function startServer() {
     await initializeDatabase(pool);
   } else {
     console.log('Database schema initialization skipped');
+    await ensureBookingCreateRequestsSchema(pool);
   }
   await seedSuperAdmin(pool);
   const sweepSummary = await sweepExpiredLocks();

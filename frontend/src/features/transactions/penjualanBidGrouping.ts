@@ -31,6 +31,8 @@ export interface PenjualanBidChild {
   pos_order_count?: number;
   /** POS: jumlah order status OPEN (hanya ada bila user punya pos.view) */
   pos_open_count?: number;
+  unapplied_advance_deposit?: number;
+  active_advance_deposit_id?: number | null;
 }
 
 export interface PenjualanBidGroup {
@@ -49,6 +51,7 @@ export interface PenjualanBidGroup {
   payment_status: PenjualanPaymentStatus;
   /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — derived from children */
   payment_responsibility?: string;
+  unapplied_advance_deposit?: number;
   operational_sheet: OperationalSheet;
   /** UI-1 audit overlay: canonical sheet before audit overlay applied */
   canonical_operational_sheet?: OperationalSheet;
@@ -122,7 +125,11 @@ export function isPeriodActivityGroup(group: Pick<PenjualanBidGroup, 'totals_sco
   return group.totals_scope === 'PERIOD_ACTIVITY';
 }
 
-export function shouldShowListSettlementAmounts(item: Pick<PenjualanListItem, 'kind'>): boolean {
+export function shouldShowListSettlementAmounts(
+  item: Pick<PenjualanListItem, 'kind'>,
+  operationalSheet?: string
+): boolean {
+  if (operationalSheet === 'PIUTANG') return true;
   return item.kind === 'standalone';
 }
 
@@ -493,6 +500,9 @@ export function groupPenjualanSaleRows(
           payment_status:
             normalizePaymentStatus(payload.payment_status) || deriveBookingPaymentStatus(paid, remaining),
           payment_responsibility: parentPaymentResponsibility,
+          ...(roundIdr((payload as any).unapplied_advance_deposit) > 0
+            ? { unapplied_advance_deposit: roundIdr((payload as any).unapplied_advance_deposit) }
+            : {}),
           operational_sheet: groupOperationalSheet,
           canonical_operational_sheet: groupCanonicalSheet,
           audit_verification_status: groupAuditStatus,

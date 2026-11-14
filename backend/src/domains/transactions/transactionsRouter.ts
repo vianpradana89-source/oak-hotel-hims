@@ -215,6 +215,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         includePosStats = false;
       }
       params.includePosStats = includePosStats;
+      params.includePiutangCount = true;
 
       const result = await getTransactions(pool, params);
       return res.json({

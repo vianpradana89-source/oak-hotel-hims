@@ -6263,5 +6263,76 @@ export async function initializeDatabase(pool: Pool) {
     `);
   }
 
+  await ensureBookingCreateRequestsSchema(pool);
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
+}
+
+
+export async function ensureBookingCreateRequestsSchema(pool: Pool): Promise<void> {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_bookings_id_property'
+      ) THEN
+        ALTER TABLE bookings
+          ADD CONSTRAINT uq_bookings_id_property UNIQUE (id, property_id);
+      END IF;
+    END $$;
+
+    CREATE TABLE IF NOT EXISTS booking_create_requests (
+      id            BIGSERIAL    PRIMARY KEY,
+      property_id   INTEGER      NOT NULL
+        REFERENCES properties(id) ON DELETE RESTRICT,
+      request_key   VARCHAR(200) NOT NULL
+        CHECK (request_key ~ '^[a-zA-Z0-9._-]+$' AND length(request_key) >= 1),
+      status        VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'FINAL')),
+      fingerprint   CHAR(64)     NOT NULL
+        CHECK (fingerprint ~ '^[a-f0-9]{64}$'),
+      fingerprint_version INTEGER NOT NULL DEFAULT 1
+        CHECK (fingerprint_version > 0),
+      payment_intent  JSONB      NULL,
+      booking_id      BIGINT     NULL
+        CHECK (booking_id IS NULL OR booking_id > 0),
+      result          JSONB      NULL
+        CHECK (
+          status = 'PENDING'
+          OR (
+            result IS NOT NULL
+            AND jsonb_typeof(result) = 'object'
+            AND NOT (result = 'null'::jsonb)
+          )
+        ),
+      response_status INTEGER    NULL
+        CHECK (
+          status = 'PENDING'
+          OR (response_status IS NOT NULL AND response_status >= 200 AND response_status <= 399)
+        ),
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finalized_at  TIMESTAMPTZ NULL
+        CHECK (status = 'PENDING' OR finalized_at IS NOT NULL),
+      CONSTRAINT chk_bcr_pending_clean CHECK (
+        status = 'FINAL'
+        OR (booking_id IS NULL AND result IS NULL AND finalized_at IS NULL)
+      ),
+      CONSTRAINT chk_bcr_final_complete CHECK (
+        status = 'PENDING'
+        OR (booking_id IS NOT NULL AND booking_id > 0)
+      ),
+      CONSTRAINT uq_bcr_property_key UNIQUE (property_id, request_key),
+      CONSTRAINT fk_bcr_booking_composite
+        FOREIGN KEY (booking_id, property_id)
+        REFERENCES bookings(id, property_id)
+        ON DELETE RESTRICT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bcr_prop_status
+      ON booking_create_requests (property_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_bcr_fp_lookup
+      ON booking_create_requests (fingerprint, fingerprint_version);
+  `);
 }

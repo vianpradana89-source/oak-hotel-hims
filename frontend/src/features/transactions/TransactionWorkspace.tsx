@@ -153,6 +153,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [totalCount, setTotalCount] = useState<number>(0);
   const [sheetCounts, setSheetCounts] = useState<TransactionSheetCounts>({
     proses: 0,
+    piutang: 0,
     selesai: 0,
     batal: 0,
     hapus: 0
@@ -514,6 +515,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setVerificationFilter('');
     if (!['PURCHASE', 'EXPENSE'].includes(tab) && operationalStatus === 'HAPUS') {
       setOperationalStatus('ALL');
+    }
+    if (['PURCHASE', 'EXPENSE'].includes(tab) && operationalStatus === 'PIUTANG') {
+      setOperationalStatus('PROSES');
     }
     setPage(1);
     setActiveEditor(null);
@@ -1233,12 +1237,25 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             {formatIdr(group.net)}
           </td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
-            {shouldShowListSettlementAmounts(item) ? formatIdr(group.paid) : '—'}
+            {shouldShowListSettlementAmounts(item, operationalStatus) ? (
+              <span className="text-slate-700">{formatIdr(group.paid)}</span>
+            ) : '—'}
           </td>
           <td className="py-2.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
-            {shouldShowListSettlementAmounts(item) ? formatIdr(group.remaining) : '—'}
+            {shouldShowListSettlementAmounts(item, operationalStatus) ? (
+              <span className="text-amber-700 font-semibold">{formatIdr(group.remaining)}</span>
+            ) : '—'}
           </td>
-          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(group.payment_status)}</td>
+          <td className="py-2.5 px-2 text-center whitespace-nowrap">
+            <div className="flex flex-col items-center gap-1">
+              {renderPaymentBadge(group.payment_status)}
+              {(group.unapplied_advance_deposit ?? 0) > 0 && (
+                <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700">
+                  DP Custody: {formatIdr(group.unapplied_advance_deposit)}
+                </span>
+              )}
+            </div>
+          </td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(group.payment_responsibility)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">
             {renderOperationalBadge({
@@ -1303,9 +1320,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(child.gross)}</td>
                             <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(child.discount)}</td>
                             <td className="py-1.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">{formatIdr(child.net)}</td>
-                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
-                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>—</td>
-                            <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentBadge(child.payment_status)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
+                              {shouldShowListSettlementAmounts(item, operationalStatus) ? (
+                                <span className="text-slate-700">{formatIdr(child.paid)}</span>
+                              ) : '—'}
+                            </td>
+                            <td className="py-1.5 px-3 text-right font-mono text-slate-400 whitespace-nowrap" title={settlementListHint}>
+                              {shouldShowListSettlementAmounts(item, operationalStatus) ? (
+                                <span className="text-amber-700 font-semibold">{formatIdr(child.remaining)}</span>
+                              ) : '—'}
+                            </td>
+                            <td className="py-1.5 px-3 text-center whitespace-nowrap">
+                              <div className="flex flex-col items-center gap-0.5">
+                                {renderPaymentBadge(child.payment_status)}
+                                {(child.unapplied_advance_deposit ?? 0) > 0 && (
+                                  <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700">
+                                    DP Custody: {formatIdr(child.unapplied_advance_deposit)}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
                             <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(child.payment_responsibility)}</td>
                             <td className="py-1.5 px-3 text-center whitespace-nowrap">
                               {showPosIndicator && posLabel ? (
@@ -1885,6 +1919,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               <span className="text-[11px] font-medium text-slate-400 px-2 whitespace-nowrap">Sheet:</span>
               {[
                 { key: 'PROSES', label: 'Proses', count: isQueryLoading ? null : sheetCounts.proses },
+                ...(!['PURCHASE', 'EXPENSE'].includes(activeTab)
+                  ? [{ key: 'PIUTANG', label: 'Piutang', count: isQueryLoading ? null : (sheetCounts.piutang ?? 0) }]
+                  : []),
                 { key: 'SELESAI', label: 'Selesai', count: isQueryLoading ? null : sheetCounts.selesai },
                 { key: 'BATAL', label: 'Batal', count: isQueryLoading ? null : sheetCounts.batal },
                 ...(['PURCHASE', 'EXPENSE'].includes(activeTab)
@@ -1901,6 +1938,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     operationalStatus === st.key
                       ? st.key === 'PROSES'
                         ? 'bg-amber-100 text-amber-800 font-bold'
+                        : st.key === 'PIUTANG'
+                        ? 'bg-orange-100 text-orange-800 font-bold'
                         : st.key === 'SELESAI'
                         ? 'bg-emerald-100 text-emerald-800 font-bold'
                         : st.key === 'BATAL'
@@ -1920,6 +1959,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         operationalStatus === st.key
                           ? st.key === 'PROSES'
                             ? 'bg-amber-200/80 text-amber-900'
+                            : st.key === 'PIUTANG'
+                            ? 'bg-orange-200/80 text-orange-900'
                             : st.key === 'SELESAI'
                             ? 'bg-emerald-200/80 text-emerald-900'
                             : st.key === 'BATAL'
@@ -3294,6 +3335,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         isOpen={bookingDetailOpen}
         bookingId={selectedBookingIdForDetail}
         propertyId={propertyId}
+        currentStaffName={currentStaffName}
+        onTransactionUpdated={() => {
+          loadTransactions();
+          void loadDailyCards();
+        }}
         onClose={() => {
           setBookingDetailOpen(false);
           setSelectedBookingIdForDetail(null);

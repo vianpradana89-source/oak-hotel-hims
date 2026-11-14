@@ -70,6 +70,9 @@ export interface BookingSalesChildRow {
   net: number;
   paid: number;
   remaining: number;
+  primary_transaction_id?: number | string | null;
+  unapplied_advance_deposit?: number;
+  active_advance_deposit_id?: number | null;
 }
 
 export interface BookingSalesPaymentRow {
@@ -122,6 +125,8 @@ export interface BookingSalesDetailReservationInput {
   stay_status?: string | null;
   amount_paid?: unknown;
   remaining_balance?: unknown;
+  unapplied_advance_deposit?: unknown;
+  active_advance_deposit_id?: unknown;
 }
 
 export interface BookingSalesDetailSaleInput {
@@ -257,6 +262,7 @@ export function assembleBookingSalesDetail(input: {
   const lifecycleGroups = groupSaleLifecycles(saleRows as any);
 
   type EffectiveGroup = {
+    primaryId: number | string;
     reservationId: number | null;
     sourceType: string;
     category: BookingSaleSourceCategory;
@@ -279,6 +285,7 @@ export function assembleBookingSalesDetail(input: {
       ? 0
       : unattachedPaid(group.primary, amounts.net);
     return {
+      primaryId: group.primary.id,
       reservationId,
       sourceType,
       category: mapSaleSourceCategory(sourceType),
@@ -376,6 +383,13 @@ export function assembleBookingSalesDetail(input: {
         net,
         paid,
         remaining,
+        primary_transaction_id: (groups.find((g) => g.category === 'ROOM') || groups[0])?.primaryId ?? null,
+        ...(roundIdr(reservation.unapplied_advance_deposit) > 0
+          ? {
+              unapplied_advance_deposit: roundIdr(reservation.unapplied_advance_deposit),
+              active_advance_deposit_id: asPositiveInt(reservation.active_advance_deposit_id),
+            }
+          : {}),
       } as BookingSalesChildRow;
     })
     .filter((row): row is BookingSalesChildRow => Boolean(row))

@@ -48,7 +48,8 @@ import {
   presentListWithSaleBidGrouping,
   loadBookingReservationLifecycle,
   type BookingReservationLifecycleRow,
-  applyAuditOverlay
+  applyAuditOverlay,
+  isPiutangPresentedRow
 } from './bookingBidGrouping';
 import { presentedListKey, queryPresentedPage } from './transactionListQuery';
 import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
@@ -3109,7 +3110,87 @@ export async function getTransactions(
   const hapusCount = Number(hapusCountRes.rows[0]?.count_hapus || 0);
   const unboundedAllTime = !params.start_date && !params.end_date && targetSheet !== 'HAPUS';
   const hasSearch = Boolean(params.search && params.search.trim());
-  const usePresentedSqlPaging = targetSheet !== 'HAPUS';
+  const usePresentedSqlPaging = targetSheet !== 'HAPUS' && targetSheet !== 'PIUTANG';
+
+  const buildDomainPresentedList = async (): Promise<{ listSource: any[]; groups: any[]; scopedRowCount: number }> => {
+    const candidateRes = await pool.query(
+      `${listSelectSql}
+       WHERE ${baseConditions.join(' AND ')}
+         AND t.deleted_at IS NULL
+       ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC`,
+      baseValues
+    );
+    const candidates = candidateRes.rows;
+    const candidateIds = new Set(candidates.map((row: any) => Number(row.id)));
+
+    let scopedRows = candidates;
+    const expansion = siblingExpansionIds(candidates);
+    if (candidates.length > 0) {
+      const siblingRes = await pool.query(
+        `${listSelectSql}
+         WHERE t.property_id = $1
+           AND t.deleted_at IS NULL
+           AND (
+             t.id = ANY($2::bigint[])
+             OR t.reversal_of_transaction_id = ANY($2::bigint[])
+             OR t.id = ANY($3::bigint[])
+             OR t.reversal_of_transaction_id = ANY($3::bigint[])
+             OR ($4::text[] <> '{}' AND t.correction_group_id = ANY($4::text[]))
+             OR t.metadata->>'restored_from_transaction_id' = ANY($5::text[])
+             OR t.metadata->>'reversal_transaction_id' = ANY($5::text[])
+           )`,
+        [
+          propertyId,
+          expansion.ids,
+          expansion.parentIds.length > 0 ? expansion.parentIds : [0],
+          expansion.groupIds,
+          expansion.ids.map(String),
+        ]
+      );
+      const byId = new Map<number, any>();
+      for (const row of [...candidates, ...siblingRes.rows]) {
+        byId.set(Number(row.id), row);
+      }
+      scopedRows = [...byId.values()];
+    }
+
+    const groups = groupSaleLifecycles(scopedRows).filter((group) => {
+      const primary = group.primary as any;
+      const effectiveDate = (primary.reservation_cancelled_at
+        && (primary.reservation_status === 'CANCELLED'
+            || primary.reservation_stay_status === 'CANCELLED'))
+        ? primary.reservation_cancelled_at?.toISOString?.().slice(0, 10) || primary.reservation_cancelled_at?.slice?.(0, 10)
+        : undefined;
+      if (!isLifecyclePrimaryInPeriod(effectiveDate || group.primary.transaction_date, params.start_date, params.end_date)) {
+        return false;
+      }
+      if (unboundedAllTime) return true;
+      return group.members.some((member) => candidateIds.has(Number(member.id)));
+    });
+
+    if (params.transaction_status) {
+      const wanted = String(params.transaction_status).toUpperCase();
+      for (let i = groups.length - 1; i >= 0; i -= 1) {
+        if (String(groups[i].primary.transaction_status || '').toUpperCase() !== wanted) {
+          groups.splice(i, 1);
+        }
+      }
+    }
+
+    const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
+    const listType = String(params.transaction_type || '').toUpperCase();
+    const saleBidGrouped = listType === 'SALE' || listType === ''
+      ? presentListWithSaleBidGrouping(presentedAll, {
+          lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean)),
+          includePosStats: params.includePosStats ?? false,
+        })
+      : null;
+    return {
+      listSource: saleBidGrouped || presentedAll,
+      groups,
+      scopedRowCount: scopedRows.length,
+    };
+  };
 
   if (usePresentedSqlPaging) {
     const pagePlan = await queryPresentedPage(pool, params, hapusCount);
@@ -3201,6 +3282,20 @@ export async function getTransactions(
     const presented = sheetFiltered
       .filter((row: any) => pageKeySet.has(presentedListKey(row, propertyId)))
       .sort(comparePresentedListRows);
+
+    if (params.includePiutangCount) {
+      if (
+        listType === 'PURCHASE' ||
+        listType === 'EXPENSE' ||
+        (pagePlan.sheet_counts.proses + pagePlan.sheet_counts.selesai === 0)
+      ) {
+        pagePlan.sheet_counts.piutang = 0;
+      } else {
+        const domainPresented = await buildDomainPresentedList();
+        pagePlan.sheet_counts.piutang = domainPresented.listSource.filter(isPiutangPresentedRow).length;
+      }
+    }
+
     return {
       transactions: presented,
       total_count: pagePlan.total_count,
@@ -3218,77 +3313,15 @@ export async function getTransactions(
     };
   }
 
-  const candidateRes = await pool.query(
-    `${listSelectSql}
-     WHERE ${baseConditions.join(' AND ')}
-       AND t.deleted_at IS NULL
-     ORDER BY t.transaction_date DESC, t.transaction_time DESC, t.id DESC`,
-    baseValues
-  );
-  const candidates = candidateRes.rows;
-  const candidateIds = new Set(candidates.map((row: any) => Number(row.id)));
-
-  let scopedRows = candidates;
-  const expansion = siblingExpansionIds(candidates);
-  if (candidates.length > 0) {
-    const siblingRes = await pool.query(
-      `${listSelectSql}
-       WHERE t.property_id = $1
-         AND t.deleted_at IS NULL
-         AND (
-           t.id = ANY($2::bigint[])
-           OR t.reversal_of_transaction_id = ANY($2::bigint[])
-           OR t.id = ANY($3::bigint[])
-           OR t.reversal_of_transaction_id = ANY($3::bigint[])
-           OR ($4::text[] <> '{}' AND t.correction_group_id = ANY($4::text[]))
-           OR t.metadata->>'restored_from_transaction_id' = ANY($5::text[])
-           OR t.metadata->>'reversal_transaction_id' = ANY($5::text[])
-         )`,
-      [
-        propertyId,
-        expansion.ids,
-        expansion.parentIds.length > 0 ? expansion.parentIds : [0],
-        expansion.groupIds,
-        expansion.ids.map(String),
-      ]
-    );
-    const byId = new Map<number, any>();
-    for (const row of [...candidates, ...siblingRes.rows]) {
-      byId.set(Number(row.id), row);
-    }
-    scopedRows = [...byId.values()];
-  }
-
-  const groups = groupSaleLifecycles(scopedRows).filter((group) => {
-    if (!isLifecyclePrimaryInPeriod(group.primary.transaction_date, params.start_date, params.end_date)) {
-      return false;
-    }
-    if (unboundedAllTime) return true;
-    return group.members.some((member) => candidateIds.has(Number(member.id)));
-  });
-
-  if (params.transaction_status) {
-    const wanted = String(params.transaction_status).toUpperCase();
-    for (let i = groups.length - 1; i >= 0; i -= 1) {
-      if (String(groups[i].primary.transaction_status || '').toUpperCase() !== wanted) {
-        groups.splice(i, 1);
-      }
-    }
-  }
-
-  const presentedAll = groups.map((group) => presentLifecyclePrimary(group)).sort(comparePresentedListRows);
-  const listType = String(params.transaction_type || '').toUpperCase();
-  const saleBidGrouped = listType === 'SALE' || listType === ''
-    ? presentListWithSaleBidGrouping(presentedAll, {
-        lifecycleReservations: await loadBookingReservationLifecycle(pool, propertyId, presentedAll.map(p => p.reservation_id).filter(Boolean)),
-      })
-    : null;
-  const sheetSource = saleBidGrouped || groups.map((group) => ({ operational_sheet: group.sheet }));
+  const { listSource, groups, scopedRowCount } = await buildDomainPresentedList();
+  const sheetSource = listSource || groups.map((group) => ({ operational_sheet: group.sheet }));
+  const piutangCount = listSource.filter(isPiutangPresentedRow).length;
   const sheet_counts: TransactionSheetCounts = {
     proses: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'PROSES').length,
     selesai: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'SELESAI').length,
     batal: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'BATAL').length,
     hapus: hapusCount,
+    ...(params.includePiutangCount || targetSheet === 'PIUTANG' ? { piutang: piutangCount } : {}),
   };
 
   // SCOPE A: Pure property + date period snapshot.
@@ -3394,6 +3427,7 @@ export async function getTransactions(
         selesai: sheet_counts.selesai,
         batal: sheet_counts.batal,
         hapus: hapusCount,
+        ...(params.includePiutangCount ? { piutang: piutangCount } : {}),
       },
       limit,
       offset,
@@ -3406,10 +3440,11 @@ export async function getTransactions(
     };
   }
 
-  const listSource = saleBidGrouped || presentedAll;
-  const presented = [...(targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
-    ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
-    : listSource)].sort(comparePresentedListRows);
+  const presented = [...(targetSheet === 'PIUTANG'
+    ? listSource.filter(isPiutangPresentedRow)
+    : targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
+      ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
+      : listSource)].sort(comparePresentedListRows);
   const transactions = presented.slice(offset, offset + limit);
 
   const saleNetOf = (row: any) => {
@@ -3446,7 +3481,7 @@ export async function getTransactions(
     offset,
     list_fetch_stats: {
       mode: unboundedAllTime ? 'ALL_TIME' : 'PERIOD',
-      fetched_transaction_rows: scopedRows.length,
+      fetched_transaction_rows: scopedRowCount,
       presented_total: presented.length,
       presented_page: transactions.length,
     },

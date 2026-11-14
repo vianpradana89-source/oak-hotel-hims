@@ -202,6 +202,7 @@ export interface TransactionRecord {
     payment_status: string;
     /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
     payment_responsibility?: string;
+    unapplied_advance_deposit?: number;
     operational_sheet: OperationalSheet;
     children: Array<{
       reservation_id: number | null;
@@ -220,6 +221,8 @@ export interface TransactionRecord {
       payment_status: string;
       /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
       payment_responsibility?: string;
+      unapplied_advance_deposit?: number;
+      active_advance_deposit_id?: number | null;
       reservation_status: string | null;
       operational_sheet: OperationalSheet;
     }>;
@@ -340,10 +343,11 @@ export interface DepartmentOption {
 }
 
 export type OperationalSheet = 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
-export type OperationalStatus = 'ALL' | 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
+export type OperationalStatus = 'ALL' | 'PROSES' | 'PIUTANG' | 'SELESAI' | 'BATAL' | 'HAPUS';
 
 export interface TransactionSheetCounts {
   proses: number;
+  piutang?: number;
   selesai: number;
   batal: number;
   hapus?: number;
@@ -763,11 +767,15 @@ export interface BookingSalesDetail {
     reservation_status: string | null;
     operational_sheet: OperationalSheet;
     payment_status: string;
+    payment_responsibility?: string;
     gross: number;
     discount: number;
     net: number;
     paid: number;
     remaining: number;
+    primary_transaction_id?: number | string | null;
+    unapplied_advance_deposit?: number;
+    active_advance_deposit_id?: number | null;
   }>;
   payments: Array<{
     payment_id: number;

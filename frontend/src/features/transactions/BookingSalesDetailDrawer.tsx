@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import type { BookingSalesDetail, BookingSaleSourceCategory } from './transactionDomainTypes';
 import { formatReservationStayType } from './transactionDomainTypes';
-import { fetchBookingSalesDetailApi } from './transactionClient';
+import { fetchBookingSalesDetailApi, settleTransactionPaymentApi } from './transactionClient';
+import { depositApi } from '../deposits/depositApi';
 import { formatReservationSourceLabel } from '../calendar/reservationContextMetadata';
 import { formatStayShortDate, paymentStatusBadgeClass } from './penjualanBidGrouping';
 
@@ -9,6 +10,8 @@ interface BookingSalesDetailDrawerProps {
   isOpen: boolean;
   bookingId: number | string | null;
   propertyId: number;
+  currentStaffName?: string;
+  onTransactionUpdated?: () => void;
   onClose: () => void;
 }
 
@@ -45,22 +48,41 @@ export const BookingSalesDetailDrawer: React.FC<BookingSalesDetailDrawerProps> =
   isOpen,
   bookingId,
   propertyId,
+  currentStaffName = 'Staff Front Desk',
+  onTransactionUpdated,
   onClose
 }) => {
   const [data, setData] = useState<BookingSalesDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [applyingDepositResId, setApplyingDepositResId] = useState<number | null>(null);
+  const [settleTargetChild, setSettleTargetChild] = useState<BookingSalesDetail['children'][number] | null>(null);
+  const [settleAmount, setSettleAmount] = useState<string>('');
+  const [settleMethod, setSettleMethod] = useState<string>('TRANSFER');
+  const [settleNotes, setSettleNotes] = useState<string>('');
+  const [isSettling, setIsSettling] = useState(false);
+
+  const reloadDetail = async () => {
+    if (bookingId == null || bookingId === '') return;
+    const detail = await fetchBookingSalesDetailApi(bookingId, propertyId);
+    setData(detail);
+  };
 
   useEffect(() => {
     if (!isOpen || bookingId == null || bookingId === '') {
       setData(null);
       setError(null);
+      setActionMessage(null);
+      setSettleTargetChild(null);
       return;
     }
 
     let cancelled = false;
     setIsLoading(true);
     setError(null);
+    setActionMessage(null);
+    setSettleTargetChild(null);
     fetchBookingSalesDetailApi(bookingId, propertyId)
       .then((detail) => {
         if (!cancelled) setData(detail);
@@ -76,6 +98,71 @@ export const BookingSalesDetailDrawer: React.FC<BookingSalesDetailDrawerProps> =
       cancelled = true;
     };
   }, [isOpen, bookingId, propertyId]);
+
+  const handleApplyDeposit = async (child: BookingSalesDetail['children'][number]) => {
+    if (!child.active_advance_deposit_id || !child.unapplied_advance_deposit || child.remaining <= 0) return;
+    const applyAmount = Math.min(child.unapplied_advance_deposit, child.remaining);
+    setApplyingDepositResId(child.reservation_id);
+    setError(null);
+    setActionMessage(null);
+    try {
+      await depositApi.apply(child.active_advance_deposit_id, {
+        property_id: propertyId,
+        reservation_id: child.reservation_id,
+        amount: applyAmount,
+        idempotency_key: `piutang-dp-apply-${child.active_advance_deposit_id}-${Date.now()}`,
+        notes: `Apply DP dari Detail Penjualan Booking (${currentStaffName})`,
+      });
+      await reloadDetail();
+      setActionMessage(`DP sebesar ${formatIdr(applyAmount)} berhasil di-apply ke kamar ${child.room_number || '#' + child.reservation_id}.`);
+      if (onTransactionUpdated) onTransactionUpdated();
+    } catch (err: any) {
+      setError(err.message || 'Gagal meng-apply Uang Muka (DP)');
+    } finally {
+      setApplyingDepositResId(null);
+    }
+  };
+
+  const handleOpenSettleForm = (child: BookingSalesDetail['children'][number]) => {
+    setSettleTargetChild(child);
+    setSettleAmount(String(child.remaining || 0));
+    setSettleMethod('TRANSFER');
+    setSettleNotes('');
+    setError(null);
+    setActionMessage(null);
+  };
+
+  const handleSubmitSettlement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!settleTargetChild || !settleTargetChild.primary_transaction_id) return;
+    const numAmt = Math.round(Number(settleAmount) || 0);
+    if (numAmt <= 0) {
+      setError('Nominal pelunasan harus lebih dari Rp 0');
+      return;
+    }
+    setIsSettling(true);
+    setError(null);
+    setActionMessage(null);
+    try {
+      await settleTransactionPaymentApi(settleTargetChild.primary_transaction_id, propertyId, {
+        amount: numAmt,
+        payment_method: settleMethod,
+        notes: settleNotes.trim() || undefined,
+        actor_name: currentStaffName,
+      });
+      const settledRoom = settleTargetChild.room_number || `#${settleTargetChild.reservation_id}`;
+      setSettleTargetChild(null);
+      setSettleAmount('');
+      setSettleNotes('');
+      await reloadDetail();
+      setActionMessage(`Pelunasan sebesar ${formatIdr(numAmt)} berhasil dicatat untuk kamar ${settledRoom}.`);
+      if (onTransactionUpdated) onTransactionUpdated();
+    } catch (err: any) {
+      setError(err.message || 'Gagal mencatat pelunasan');
+    } finally {
+      setIsSettling(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -118,6 +205,11 @@ export const BookingSalesDetailDrawer: React.FC<BookingSalesDetailDrawerProps> =
           {error && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-semibold">
               {error}
+            </div>
+          )}
+          {actionMessage && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-semibold">
+              {actionMessage}
             </div>
           )}
           {data && booking && financial && (
@@ -226,30 +318,135 @@ export const BookingSalesDetailDrawer: React.FC<BookingSalesDetailDrawerProps> =
                         <th className="py-1.5 px-3 text-right">Dibayar</th>
                         <th className="py-1.5 px-3 text-right">Sisa</th>
                         <th className="py-1.5 px-3 text-center">Status</th>
+                        <th className="py-1.5 px-3 text-right">Aksi</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {data.children.map((child) => (
-                        <tr key={child.reservation_id} className="border-t border-slate-100">
-                          <td className="py-1.5 px-3 font-semibold text-slate-800">
-                            {child.room_number || '-'}
-                            <div className="text-[10px] font-normal text-slate-400">
-                              {formatReservationStayType(child.stay_type || '')}
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-3 text-slate-700">{child.room_type_name || '-'}</td>
-                          <td className="py-1.5 px-3 text-right font-mono font-semibold">{formatIdr(child.net)}</td>
-                          <td className="py-1.5 px-3 text-right font-mono">{formatIdr(child.paid)}</td>
-                          <td className="py-1.5 px-3 text-right font-mono">{formatIdr(child.remaining)}</td>
-                          <td className="py-1.5 px-3 text-center">
-                            <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${paymentStatusBadgeClass(child.payment_status)}`}>
-                              {child.payment_status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {data.children.map((child) => {
+                        const hasUnappliedDp = (child.unapplied_advance_deposit ?? 0) > 0 && Boolean(child.active_advance_deposit_id);
+                        const canSettle = child.remaining > 0 && Boolean(child.primary_transaction_id);
+                        return (
+                          <tr key={child.reservation_id} className="border-t border-slate-100">
+                            <td className="py-1.5 px-3 font-semibold text-slate-800">
+                              {child.room_number || '-'}
+                              <div className="text-[10px] font-normal text-slate-400">
+                                {formatReservationStayType(child.stay_type || '')}
+                              </div>
+                            </td>
+                            <td className="py-1.5 px-3 text-slate-700">{child.room_type_name || '-'}</td>
+                            <td className="py-1.5 px-3 text-right font-mono font-semibold">{formatIdr(child.net)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono">{formatIdr(child.paid)}</td>
+                            <td className="py-1.5 px-3 text-right font-mono">{formatIdr(child.remaining)}</td>
+                            <td className="py-1.5 px-3 text-center">
+                              <div className="flex flex-col items-center gap-0.5">
+                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${paymentStatusBadgeClass(child.payment_status)}`}>
+                                  {child.payment_status}
+                                </span>
+                                {child.payment_responsibility === 'OTA_COLLECT' && (
+                                  <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.3 rounded border border-amber-300 bg-amber-50 text-amber-800">
+                                    DITANGGUNG OTA
+                                  </span>
+                                )}
+                                {(child.unapplied_advance_deposit ?? 0) > 0 && (
+                                  <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700">
+                                    DP Custody: {formatIdr(child.unapplied_advance_deposit)}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-1.5 px-3 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center justify-end gap-1">
+                                {hasUnappliedDp && child.remaining > 0 && (
+                                  <button
+                                    type="button"
+                                    disabled={applyingDepositResId === child.reservation_id}
+                                    onClick={() => handleApplyDeposit(child)}
+                                    className="px-2 py-1 text-[10px] font-bold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md cursor-pointer disabled:opacity-50"
+                                  >
+                                    {applyingDepositResId === child.reservation_id ? 'Memproses...' : 'Gunakan DP'}
+                                  </button>
+                                )}
+                                {canSettle && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenSettleForm(child)}
+                                    className="px-2 py-1 text-[10px] font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md cursor-pointer"
+                                  >
+                                    + Catat Pelunasan
+                                  </button>
+                                )}
+                                {!hasUnappliedDp && !canSettle && (
+                                  <span className="text-[10px] text-slate-300">—</span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
+                )}
+                {settleTargetChild && (
+                  <form onSubmit={handleSubmitSettlement} className="p-3 bg-emerald-50/60 border-t border-emerald-200 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-emerald-900">
+                        Catat Pelunasan — Kamar {settleTargetChild.room_number || `#${settleTargetChild.reservation_id}`} (Sisa: {formatIdr(settleTargetChild.remaining)})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSettleTargetChild(null)}
+                        className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-0.5">Nominal (Rp)</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={settleTargetChild.remaining}
+                          value={settleAmount}
+                          onChange={(e) => setSettleAmount(e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-800"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-0.5">Metode</label>
+                        <select
+                          value={settleMethod}
+                          onChange={(e) => setSettleMethod(e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg font-semibold text-slate-800"
+                        >
+                          <option value="TRANSFER">Transfer Bank</option>
+                          <option value="CASH">Tunai (Cash)</option>
+                          <option value="QRIS">QRIS</option>
+                          <option value="CARD">Kartu Debit/Kredit</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-0.5">Catatan</label>
+                        <input
+                          type="text"
+                          value={settleNotes}
+                          onChange={(e) => setSettleNotes(e.target.value)}
+                          placeholder="Ref / keterangan..."
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-slate-800"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="submit"
+                        disabled={isSettling}
+                        className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        {isSettling ? 'Menyimpan...' : 'Simpan Pelunasan'}
+                      </button>
+                    </div>
+                  </form>
                 )}
               </section>
 

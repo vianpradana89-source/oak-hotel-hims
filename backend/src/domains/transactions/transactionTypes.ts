@@ -457,6 +457,11 @@ export interface TransactionFilterParams {
    * dari permission pos.view. Default: false — field tidak ada.
    */
   includePosStats?: boolean;
+  /**
+   * Ketika true (atau saat operational_sheet === 'PIUTANG'), sheet_counts.piutang
+   * dihitung dan disertakan pada respons.
+   */
+  includePiutangCount?: boolean;
 }
 
 export interface TransactionSummary {
@@ -472,6 +477,7 @@ export interface TransactionSummary {
 
 export interface TransactionSheetCounts {
   proses: number;
+  piutang?: number;
   selesai: number;
   batal: number;
   hapus?: number;
