@@ -6420,6 +6420,8 @@ export interface GlobalStockMovementItem {
   counterpart_location_id: number | null;
   counterpart_location_code: string | null;
   counterpart_location_name: string | null;
+  reason_code?: string | null;
+  reason_label?: string | null;
   notes: string | null;
   display_keterangan: string;
   created_by: number | null;
@@ -6495,6 +6497,15 @@ export interface GlobalStockMovementsReportResult {
   movements: GlobalStockMovementItem[];
 }
 
+const STOCK_ADJUSTMENT_REASON_LABELS: Record<string, string> = {
+  RUSAK: 'RUSAK — Barang Rusak / Pecah / Cacat',
+  HILANG: 'HILANG — Selisih / Barang Hilang',
+  KADALUARSA: 'KADALUARSA — Kadaluarsa / Expired',
+  PEMAKAIAN_INTERNAL: 'PEMAKAIAN_INTERNAL — Pemakaian Internal / Operasional Hotel',
+  KOREKSI_ADMIN: 'KOREKSI_ADMIN — Koreksi Administrasi / Kesalahan Input',
+  SAMPLE: 'SAMPLE — Sample / Uji Coba',
+};
+
 export function resolveGlobalMovementOperationDisplay(params: {
   operationType: string;
   quantityDelta: number;
@@ -6509,16 +6520,31 @@ export function resolveGlobalMovementOperationDisplay(params: {
   operationCategory: string;
   operationLabel: string;
   referenceNo: string | null;
+  reasonCode: string | null;
+  reasonLabel: string | null;
   displayKeterangan: string;
 } {
   const opType = String(params.operationType || '').trim().toUpperCase();
   const isPositive = params.quantityDelta >= 0;
   const cleanNotes = params.notes ? String(params.notes).trim() : '';
-  const meta = params.metadata && typeof params.metadata === 'object' ? params.metadata : {};
+  const meta =
+    params.metadata && typeof params.metadata === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(params.metadata);
+          } catch {
+            return {};
+          }
+        })()
+      : params.metadata && typeof params.metadata === 'object'
+      ? params.metadata
+      : {};
 
   let operationCategory = opType;
   let operationLabel = opType;
   let referenceNo: string | null = params.operationKey ? String(params.operationKey) : null;
+  let reasonCode: string | null = null;
+  let reasonLabel: string | null = null;
 
   if (opType === 'OPENING_BALANCE') {
     operationLabel = 'Saldo Awal';
@@ -6537,6 +6563,10 @@ export function resolveGlobalMovementOperationDisplay(params: {
     operationLabel = 'Opname Fisik';
   } else if (opType === 'STOCK_ADJUSTMENT') {
     operationLabel = 'Penyesuaian Stok';
+    if (meta.reason_code) {
+      reasonCode = String(meta.reason_code).trim().toUpperCase();
+      reasonLabel = STOCK_ADJUSTMENT_REASON_LABELS[reasonCode] || reasonCode;
+    }
   } else if (opType === 'POS_SALE') {
     operationLabel = 'Penjualan POS';
     if (meta.transaction_no) {
@@ -6557,6 +6587,8 @@ export function resolveGlobalMovementOperationDisplay(params: {
       ? `${params.counterpartLocationCode} (${params.counterpartLocationName})`
       : params.counterpartLocationName;
     parts.push(isPositive ? `dari ${peerLabel}` : `ke ${peerLabel}`);
+  } else if (opType === 'STOCK_ADJUSTMENT' && reasonLabel) {
+    parts.push(`(Alasan: ${reasonLabel})`);
   } else if (opType === 'PURCHASE_RECEIPT' && (params.grnNumber || params.transactionNumber)) {
     parts.push(`Ref: ${params.grnNumber || params.transactionNumber}`);
   } else if (opType === 'POS_SALE' && referenceNo) {
@@ -6574,6 +6606,8 @@ export function resolveGlobalMovementOperationDisplay(params: {
     operationCategory,
     operationLabel,
     referenceNo,
+    reasonCode,
+    reasonLabel,
     displayKeterangan: parts.join(' '),
   };
 }
@@ -7221,6 +7255,8 @@ export async function getGlobalStockMovements(
         counterpart_location_id: row.counterpart_location_id ? Number(row.counterpart_location_id) : null,
         counterpart_location_code: row.counterpart_location_code ?? null,
         counterpart_location_name: row.counterpart_location_name ?? null,
+        reason_code: resolvedDisplay.reasonCode,
+        reason_label: resolvedDisplay.reasonLabel,
         notes: row.notes ?? null,
         display_keterangan: resolvedDisplay.displayKeterangan,
         created_by: row.created_by ? Number(row.created_by) : null,

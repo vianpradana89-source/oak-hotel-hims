@@ -260,6 +260,8 @@ export interface GlobalStockMovementItem {
   counterpart_location_id: number | null;
   counterpart_location_code: string | null;
   counterpart_location_name: string | null;
+  reason_code?: string | null;
+  reason_label?: string | null;
   notes: string | null;
   display_keterangan: string;
   created_by: number | null;

@@ -114,6 +114,7 @@ export default function StockMovementHistorySection({
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showPartitionSummary, setShowPartitionSummary] = useState<boolean>(false);
+  const [selectedAdjustmentDetail, setSelectedAdjustmentDetail] = useState<GlobalStockMovementItem | null>(null);
 
   // Print Preview Modal state (holds single consistent export_all=true snapshot)
   const [previewOpen, setPreviewOpenState] = useState<boolean>(false);
@@ -1063,15 +1064,32 @@ export default function StockMovementHistorySection({
                         {/* Keterangan */}
                         <td className="px-3.5 py-3 max-w-xs">
                           <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                                mov.direction === 'IN'
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                  : 'bg-rose-50 text-rose-800 border-rose-200'
-                              }`}
-                            >
-                              {mov.operation_label}
-                            </span>
+                            {mov.operation_type === 'STOCK_ADJUSTMENT' ? (
+                              <button
+                                type="button"
+                                data-testid={`mutation-adjustment-detail-btn-${mov.movement_id}`}
+                                onClick={() => setSelectedAdjustmentDetail(mov)}
+                                title="Klik untuk melihat Alasan Penyesuaian & Catatan"
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors cursor-pointer ${
+                                  mov.direction === 'IN'
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                    : 'bg-rose-50 text-rose-800 border-rose-300 hover:bg-rose-100'
+                                }`}
+                              >
+                                <span>{mov.operation_label}</span>
+                                <span className="text-[10px] opacity-80">ⓘ</span>
+                              </button>
+                            ) : (
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                  mov.direction === 'IN'
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : 'bg-rose-50 text-rose-800 border-rose-200'
+                                }`}
+                              >
+                                {mov.operation_label}
+                              </span>
+                            )}
                             {mov.reference_no && (
                               <span className="text-[10px] font-mono text-gray-500">
                                 {mov.reference_no}
@@ -1139,6 +1157,67 @@ export default function StockMovementHistorySection({
           </>
         )}
       </div>
+
+      {/* Modal Ringkasan Simpel Penyesuaian Stok (Hanya Alasan Penyesuaian & Catatan) */}
+      {selectedAdjustmentDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs"
+          onClick={() => setSelectedAdjustmentDetail(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            data-testid="adjustment-reason-notes-modal"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="px-5 py-3.5 bg-[#1b4332] text-white flex items-center justify-between">
+              <h3 className="text-xs font-extrabold tracking-wide uppercase">
+                Detail Penyesuaian Stok
+              </h3>
+              <button
+                type="button"
+                onClick={() => setSelectedAdjustmentDetail(null)}
+                className="text-white/70 hover:text-white text-sm font-bold cursor-pointer"
+                aria-label="Tutup"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5 space-y-3.5 text-xs">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">
+                  Alasan Penyesuaian
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#faf9f5] border border-gray-200 font-bold text-gray-900">
+                  {selectedAdjustmentDetail.reason_label ||
+                    selectedAdjustmentDetail.reason_code ||
+                    'Tidak tercatat'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">
+                  Catatan
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#faf9f5] border border-gray-200 text-gray-700 whitespace-pre-wrap">
+                  {selectedAdjustmentDetail.notes && selectedAdjustmentDetail.notes.trim()
+                    ? selectedAdjustmentDetail.notes.trim()
+                    : '-'}
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedAdjustmentDetail(null)}
+                className="px-4 py-1.5 rounded-xl bg-[#1b4332] hover:bg-[#2d6a4f] text-white text-xs font-bold cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Pratinjau & Cetak Laporan Mutasi Barang (8 Kolom) */}
       {previewOpen && (
