@@ -1090,6 +1090,57 @@ async function main() {
     assert.equal(child204.payment_status, 'PAID', 'AE: OTA child with paid extras exceeding zero collectible → PAID');
   });
 
+  await test('AF. BILLED_TO_ROOM POS (paid_amount = 0) does not double-count remaining in booking detail', async () => {
+    const detail = assembleBookingSalesDetail({
+      booking: { ...booking, bid: 'LWG-261111-GMWEXB52' },
+      reservations: [{
+        ...reservations[0],
+        id: 1498,
+        room_number: '102',
+        amount_paid: 579000,
+        remaining_balance: 0,
+      }],
+      sales: [
+        sale({
+          id: 7001,
+          reservation_id: 1498,
+          source_type: 'ROOM_CHARGE',
+          source_id: '850',
+          amount: 510000,
+          discount_amount: 51000,
+          net_amount: 459000,
+        }),
+        sale({
+          id: 7002,
+          reservation_id: 1498,
+          source_type: 'POS_ORDER',
+          source_id: '9901',
+          amount: 120000,
+          discount_amount: 0,
+          net_amount: 120000,
+          paid_amount: 0,
+        }),
+      ],
+      payments: [],
+      reservationFinancials: new Map([
+        [1498, {
+          amount_paid: 579000,
+          applied_deposit: 0,
+          hotel_collectible_total: 579000,
+          hotel_collectible_remaining_balance: 0,
+          payment_responsibility: 'HOTEL_COLLECT',
+        }],
+      ]),
+    });
+    assert.equal(detail.financial.net, 579000);
+    assert.equal(detail.financial.paid, 579000);
+    assert.equal(detail.financial.remaining, 0);
+    assert.equal(detail.children[0].net, 579000);
+    assert.equal(detail.children[0].paid, 579000);
+    assert.equal(detail.children[0].remaining, 0);
+    assert.equal(detail.children[0].payment_status, 'PAID');
+  });
+
   if (failed > 0) {
     console.error(`\nFAILED ${failed} | passed ${passed}`);
     process.exit(1);

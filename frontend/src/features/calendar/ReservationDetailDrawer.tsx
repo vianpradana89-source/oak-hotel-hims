@@ -2556,6 +2556,14 @@ export default function ReservationDetailDrawer({
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
               onOpenCashPayment={onOpenCashPayment}
               reservationStatus={data?.status}
+              folioRemainingBalance={remainingBalance}
+              onOrderBilledToRoom={() => {
+                if (data?.id) {
+                  loadFullReservation(data.id);
+                  loadFolio(data.id);
+                }
+                onRefresh();
+              }}
             />
           )}
 

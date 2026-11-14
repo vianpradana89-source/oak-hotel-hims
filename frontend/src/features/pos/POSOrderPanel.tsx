@@ -81,6 +81,8 @@ export interface POSOrderPanelProps {
   onOpenCashPayment?: (ctx: PosPayCashOrderContext) => void;
   /** Callback saat pesanan berhasil ditagihkan ke kamar */
   onOrderBilledToRoom?: (info: { orderId: number; reservationId: number }) => void;
+  /** Sisa tagihan folio kamar otoritatif untuk menampilkan status lunas pendamping pada order BILLED_TO_ROOM */
+  folioRemainingBalance?: number | null;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -168,6 +170,7 @@ export default function POSOrderPanel({
   onOpenCashPayment,
   reservationStatus,
   onOrderBilledToRoom,
+  folioRemainingBalance,
 }: POSOrderPanelProps) {
   const [roomChargeOrder, setRoomChargeOrder] = useState<PosOrderRecord | null>(null);
   const [chargeNotes, setChargeNotes] = useState('');
@@ -443,6 +446,18 @@ const handleConfirmRoomCharge = useCallback(async () => {
                   {formatIDR(Number(order.total_amount || 0))}
                 </span>
                 <div className="flex items-center gap-1.5">
+                  {/* Status pelunasan pendamping untuk order yang ditagihkan ke folio kamar */}
+                  {order.status === 'BILLED_TO_ROOM' && folioRemainingBalance != null && (
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        folioRemainingBalance <= 0
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                          : 'bg-amber-100 text-amber-800 border border-amber-300'
+                      }`}
+                    >
+                      {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
+                    </span>
+                  )}
                   {/* Tagihkan ke Kamar hanya untuk order OPEN + status reservasi aktif (BOOKED / CHECKED_IN) */}
                   {canEditPos && order.status === 'OPEN' && (reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
                     <button
@@ -529,8 +544,21 @@ const handleConfirmRoomCharge = useCallback(async () => {
                     Belum Dibayar
                   </span>
                 ) : selectedOrder.status === 'BILLED_TO_ROOM' ? (
+                  <span className="inline-flex items-center gap-1 flex-wrap">
                   <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 border border-blue-300 rounded-full font-bold text-[10px]">
                     Ditagihkan ke Kamar
+                  </span>
+                  {folioRemainingBalance != null && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full font-bold text-[10px] ${
+                        folioRemainingBalance <= 0
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                          : 'bg-amber-100 text-amber-800 border border-amber-300'
+                      }`}
+                    >
+                      {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
+                    </span>
+                  )}
                   </span>
                 ) : (
                   <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-full font-bold text-[10px]">

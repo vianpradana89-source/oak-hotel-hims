@@ -301,7 +301,7 @@ function reservationPaid(row: any): number {
   // Jangan pakai canonical_effective_paid / reservation_amount_paid karena
   // itu mengukur pembayaran kamar, bukan pembayaran POS langsung.
   const srcType = String(row.source_type || '').toUpperCase();
-  if (srcType === 'POS_ORDER' || srcType === 'POS') {
+  if ((srcType === 'POS_ORDER' || srcType === 'POS') && (roundIdr(row.paid_amount) > 0 || !(Number(row.reservation_id) > 0))) {
     return roundIdr(row.paid_amount);
   }
   if (row.canonical_effective_paid != null) {
@@ -317,7 +317,7 @@ function reservationRemaining(row: any, net: number, paid: number): number {
   // POS SALE: pakai net - paid (yang sudah termasuk pos_settlements dari LATERAL JOIN).
   // Jangan pakai canonical_remaining_balance karena itu menghitung sisa kamar.
   const srcType = String(row.source_type || '').toUpperCase();
-  if (srcType === 'POS_ORDER' || srcType === 'POS') {
+  if ((srcType === 'POS_ORDER' || srcType === 'POS') && (roundIdr(row.paid_amount) > 0 || !(Number(row.reservation_id) > 0))) {
     return Math.max(0, net - paid);
   }
   if (row.canonical_remaining_balance != null) {
@@ -415,8 +415,9 @@ export function buildChild(reservationId: number | null, members: any[], include
     const st = String(row.source_type || '').toUpperCase();
     return st === 'POS_ORDER' || st === 'POS';
   };
-  const posMembers = members.filter(isPosMember);
-  const roomMembers = members.filter((row) => !isPosMember(row));
+  const isDirectPosMember = (row: any): boolean => isPosMember(row) && roundIdr(row.paid_amount) > 0;
+  const posMembers = members.filter(isDirectPosMember);
+  const roomMembers = members.filter((row) => !isDirectPosMember(row));
 
   // POS paid: sum of paid_amount across all POS members.
   // Each POS SALE member's paid_amount already includes its own pos_settlements
@@ -438,7 +439,7 @@ export function buildChild(reservationId: number | null, members: any[], include
   let unappliedAdvanceDeposit = 0;
   let activeAdvanceDepositId: number | null = null;
   if (roomMembers.length > 0) {
-    const roomRef = roomMembers[0];
+    const roomRef = roomMembers.find((row) => !isPosMember(row)) || roomMembers[0];
     roomPaid = reservationPaid(roomRef);
     roomRemaining = reservationRemaining(roomRef, roomNet, roomPaid);
     unappliedAdvanceDeposit = roundIdr(roomRef.unapplied_advance_deposit);

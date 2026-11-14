@@ -2461,7 +2461,12 @@ export async function settleTransactionPayment(
     if (canonicalCollectible) {
       const { hotel_collectible_remaining_balance } = canonicalCollectible;
       if (hotel_collectible_remaining_balance <= 0) {
-        throw new Error('Tidak dapat menyetor ke reservasi ini — tidak ada sisa tagihan hotel (hotel_collectible_remaining_balance = 0). Tagihan kamar OTA sudah diselesaikan di luar hotel.');
+        const isOtaCollect = String(tx.payment_responsibility || '').toUpperCase() === 'OTA_COLLECT';
+        throw new Error(
+          isOtaCollect
+            ? 'Tidak dapat menyetor ke reservasi ini — tidak ada sisa tagihan hotel (hotel_collectible_remaining_balance = 0). Tagihan kamar OTA sudah diselesaikan di luar hotel.'
+            : 'Tidak dapat menyetor ke reservasi ini — seluruh tagihan folio reservasi sudah lunas (hotel_collectible_remaining_balance = 0).'
+        );
       }
       if (amount > hotel_collectible_remaining_balance) {
         throw new Error(`Nominal pelunasan (Rp ${amount.toLocaleString('id-ID')}) melebihi sisa tagihan hotel (Rp ${hotel_collectible_remaining_balance.toLocaleString('id-ID')}). Sisa tagihan hotel yang dapat disetor: Rp ${hotel_collectible_remaining_balance.toLocaleString('id-ID')}.`);

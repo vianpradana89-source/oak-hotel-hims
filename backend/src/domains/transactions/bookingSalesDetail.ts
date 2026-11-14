@@ -281,7 +281,9 @@ export function assembleBookingSalesDetail(input: {
     // Untuk POS terhubung reservation, tetap hitung paid dari LATERAL JOIN
     // (tidak di-kanonisasi ke reservation financials kamar).
     const isPosSource = sourceType === 'POS_ORDER' || sourceType === 'POS';
-    const paid = (reservationId && !isPosSource)
+    const isDirectSettledPos = isPosSource && roundIdr((group.primary as any).paid_amount) > 0;
+    const isBilledToReservationFolio = Boolean(reservationId) && !isDirectSettledPos;
+    const paid = isBilledToReservationFolio
       ? 0
       : unattachedPaid(group.primary, amounts.net);
     return {
@@ -293,7 +295,7 @@ export function assembleBookingSalesDetail(input: {
       discount: amounts.discount,
       net: amounts.net,
       paid,
-      remaining: (reservationId && !isPosSource)
+      remaining: isBilledToReservationFolio
         ? 0
         : Math.max(0, amounts.net - paid),
     };

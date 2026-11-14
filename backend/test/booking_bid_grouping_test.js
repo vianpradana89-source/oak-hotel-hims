@@ -620,4 +620,49 @@ const posSale = sale({
 const posGroup = presentBidGroupedSales([posSale]);
 expect(posGroup.length === 1 && !posGroup[0].booking_bid_group, 'UI1-POS. non-reservation POS stays standalone');
 
+// BILLED_TO_ROOM POS (paid_amount = 0) on a paid reservation must NOT double-count remaining
+const billedToRoomRoom = sale({
+  id: 7001,
+  reservation_id: 1498,
+  booking_id: 1498,
+  booking_bid: 'LWG-261111-GMWEXB52',
+  room_number_snapshot: '102',
+  room_type_name: 'DELUXE KING',
+  source_type: 'ROOM_CHARGE',
+  amount: 510000,
+  discount_amount: 51000,
+  net_amount: 459000,
+  effective_net_amount: 459000,
+  canonical_effective_paid: 579000,
+  canonical_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+});
+const billedToRoomPos = sale({
+  id: 7002,
+  reservation_id: 1498,
+  booking_id: 1498,
+  booking_bid: 'LWG-261111-GMWEXB52',
+  room_number_snapshot: '102',
+  room_type_name: 'DELUXE KING',
+  source_type: 'POS_ORDER',
+  amount: 120000,
+  discount_amount: 0,
+  net_amount: 120000,
+  effective_net_amount: 120000,
+  paid_amount: 0,
+  canonical_effective_paid: 579000,
+  canonical_remaining_balance: 0,
+  reservation_status: 'CHECKED_OUT',
+  reservation_stay_status: 'CHECKED_OUT',
+  operational_sheet: 'SELESAI',
+});
+const billedToRoomGroup = presentBidGroupedSales([billedToRoomRoom, billedToRoomPos])[0].booking_bid_group;
+expect(billedToRoomGroup.net === 579000, 'BILLED_TO_ROOM: net is 459000 + 120000 = 579000');
+expect(billedToRoomGroup.paid === 579000, 'BILLED_TO_ROOM: paid is 579000');
+expect(billedToRoomGroup.remaining === 0, 'BILLED_TO_ROOM: remaining is 0 (no double-count of POS net)');
+expect(billedToRoomGroup.payment_status === 'PAID', 'BILLED_TO_ROOM: payment_status is PAID');
+expect(billedToRoomGroup.operational_sheet === 'SELESAI', 'BILLED_TO_ROOM: operational_sheet is SELESAI');
+
 console.log(`PASS | booking BID grouping | ${assertions} assertions`);
