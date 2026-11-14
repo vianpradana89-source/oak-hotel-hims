@@ -6819,6 +6819,20 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS average_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS last_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
 
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_menu_items_product_type'
+          AND pg_get_constraintdef(oid) NOT LIKE '%OPERATIONAL_ITEM%'
+      ) THEN
+        ALTER TABLE pos_menu_items DROP CONSTRAINT chk_pos_menu_items_product_type;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_type') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
+          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')) NOT VALID;
+      END IF;
+    END $$;
+
     CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
       ON pos_menu_items(property_id, track_inventory)
       WHERE track_inventory = TRUE;
