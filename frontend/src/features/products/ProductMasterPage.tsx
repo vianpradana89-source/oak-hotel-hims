@@ -2484,16 +2484,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         </div>
 
         <div className="flex items-center gap-2">
-          {capabilities.canCreate && (
-            <button
-              type="button"
-              onClick={openAddModal}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 5v14m7-7H5"/></svg>
-              Tambah Produk
-            </button>
-          )}
           <button
             type="button"
             onClick={handleRefresh}
@@ -3051,238 +3041,259 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 )}
 
-                {/* 1. Nama Produk */}
+                {/* 1. Tipe Produk (Paling Atas) */}
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
-                  <input
-                    ref={addNameInputRef}
-                    autoFocus
-                    type="text"
-                    required
-                    placeholder="Contoh: Nasi Goreng Spesial / Beras Pandan Wangi"
-                    value={newProduct.name}
-                    onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
-                  />
-                </div>
-
-                {/* MPUI-F02: SKU manual bagian identitas, tidak tersembunyi di Detail Opsional */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
-                  <input
-                    type="text"
-                    placeholder="Contoh: FNB-001"
-                    value={newProduct.code}
-                    onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                </div>
-
-                {/* 2. Kategori */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
-                  <select
-                    value={newProduct.category}
-                    onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Tanpa Kategori —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={String(c.id)}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* 3. Tipe Produk & Jenis Produk */}
-                <div className="space-y-3">
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
-                      <button
-                        type="button"
-                        onClick={() => setNewProduct(applyProductTypeChange(newProduct, ''))}
-                        className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
-                          newProduct.productType === ''
-                            ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
-                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        Belum diatur
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
-                      {PRODUCT_TYPE_CHOICES.map((choice) => {
-                        const selected = newProduct.productType === choice.value;
-                        return (
-                          <button
-                            key={choice.value}
-                            type="button"
-                            aria-pressed={selected}
-                            onClick={() => setNewProduct(applyProductTypeChange(newProduct, choice.value))}
-                            className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
-                              selected
-                                ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
-                                : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
-                            }`}
-                          >
-                            <div className="text-xs font-bold">{choice.label}</div>
-                            <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
-                    <select
-                      value={newProduct.productKind}
-                      onChange={(e) => setNewProduct({ ...newProduct, productKind: e.target.value })}
-                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
+                    <button
+                      type="button"
+                      onClick={() => setNewProduct(applyProductTypeChange(newProduct, ''))}
+                      className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                        newProduct.productType === ''
+                          ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
+                          : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+                      }`}
                     >
-                      <option value="">— Belum diatur —</option>
-                      <option value="STANDARD">Biasa</option>
-                      <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
-                      <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
-                      <option value="SERVICE" disabled>Jasa (Roadmap)</option>
-                      <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
-                      <option value="FORMULA" disabled>Formula (Roadmap)</option>
-                    </select>
+                      Belum diatur
+                    </button>
                   </div>
-                </div>
-
-                {/* 4. Satuan Dasar */}
-                <div className="space-y-2">
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar</label>
-                  <select
-                    aria-label="Pilih satuan dasar kanonik"
-                    value={newProduct.canonicalBaseUnitCode || ''}
-                    onChange={(e) => setNewProduct(applyCanonicalUnitSelection(newProduct, e.target.value, canonicalUnitsCatalog))}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Belum diatur (Pilih Satuan Standar Kanonik) —</option>
-                    {canonicalUnitsCatalog.map((unit) => (
-                      <option key={unit.code} value={unit.code}>
-                        {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Pecahan 3 desimal' : 'Bilangan bulat'})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    list="oak-product-base-units"
-                    maxLength={50}
-                    placeholder="Contoh: Porsi, Pcs, Kg, Liter"
-                    value={newProduct.baseUnit}
-                    onChange={(e) => setNewProduct(applyBaseUnitTextChange(newProduct, e.target.value, canonicalUnitsCatalog))}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  />
-                  <div className="text-[11px] text-gray-500">
-                    {newProduct.canonicalBaseUnitCode ? (
-                      <span className="text-emerald-800 font-medium">
-                        Terpetakan ke satuan kanonik: <strong>{newProduct.canonicalBaseUnitCode}</strong>
-                      </span>
-                    ) : newProduct.baseUnit.trim() !== '' ? (
-                      <span className="text-amber-700">
-                        Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
-                      </span>
-                    ) : (
-                      <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* 5. Dijual di POS */}
-                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={newProduct.isSellablePos}
-                      onChange={(e) => setNewProduct({ ...newProduct, isSellablePos: e.target.checked })}
-                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                    />
-                    <div>
-                      <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
-                      <div className="text-[11px] text-gray-500">
-                        Matikan untuk produk non-POS seperti bahan baku atau barang setengah jadi yang tidak dijual langsung di kasir POS.
-                      </div>
-                    </div>
-                  </label>
-                </div>
-
-                {/* 5b. Pelacakan Stok & Penerimaan Gudang (GRN) */}
-                <div className="p-3.5 rounded-xl bg-teal-50/50 border border-teal-200/80 space-y-2">
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      data-testid="add-product-track-stock-checkbox"
-                      aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
-                      checked={Boolean(newProduct.trackStock)}
-                      onChange={(e) => setNewProduct({ ...newProduct, trackStock: e.target.checked })}
-                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                    />
-                    <div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-xs font-bold text-gray-900">
-                          Lacak Stok &amp; Penerimaan Gudang (GRN)
-                        </span>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                            newProduct.trackStock
-                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                              : 'bg-gray-100 text-gray-600 border-gray-200'
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                    {PRODUCT_TYPE_CHOICES.map((choice) => {
+                      const selected = newProduct.productType === choice.value;
+                      return (
+                        <button
+                          key={choice.value}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setNewProduct(applyProductTypeChange(newProduct, choice.value))}
+                          className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
+                            selected
+                              ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
+                              : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
                           }`}
                         >
-                          {newProduct.trackStock ? 'Stok Fisik Dilacak (Siap PO & GRN)' : 'Non-Stok / Menu Resep'}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-gray-600 mt-0.5">
-                        Aktifkan untuk barang fisik yang dibeli/diterima ke gudang dan dilacak saldonya per satuan dasar (contoh: Air Mineral Botol, Bahan Baku, Barang Setengah Jadi). Biarkan nonaktif untuk menu racikan berbasis resep/BOM (contoh: Nasi Goreng, Kopi) atau jasa yang tidak diterima langsung melalui GRN.
+                          <div className="text-xs font-bold">{choice.label}</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. Identitas & Foto Produk (Ringkas) */}
+                <div className="space-y-3 pt-1 border-t border-gray-100">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
+                    <input
+                      ref={addNameInputRef}
+                      autoFocus
+                      type="text"
+                      required
+                      placeholder="Contoh: Nasi Goreng Spesial / Beras Pandan Wangi"
+                      value={newProduct.name}
+                      onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                      <select
+                        value={newProduct.category}
+                        onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                      >
+                        <option value="">— Tanpa Kategori —</option>
+                        {categories.map((c) => (
+                          <option key={c.id} value={String(c.id)}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* MPUI-F02: SKU manual bagian identitas */}
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                      <input
+                        type="text"
+                        placeholder="Contoh: FNB-001"
+                        value={newProduct.code}
+                        onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Foto Produk (Ringkas 1 Baris di bawah Identitas) */}
+                  <div className="p-2.5 rounded-xl bg-gray-50 border border-gray-200 flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      {addPhotoPreviewUrl ? (
+                        <img
+                          src={addPhotoPreviewUrl}
+                          alt="Preview foto produk baru"
+                          className="w-11 h-11 rounded-lg object-cover border border-gray-200 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center text-gray-400 shrink-0">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-gray-800 truncate">
+                          {addPhotoPreviewUrl ? (addPhotoFile?.name || 'Foto dipilih') : 'Foto Produk (Opsional)'}
+                        </div>
+                        <div className={`text-[11px] truncate ${addPhotoPreviewUrl ? 'text-emerald-700' : 'text-gray-400'}`}>
+                          {addPhotoPreviewUrl ? 'Akan diunggah saat Simpan Produk' : 'PNG, JPEG, WebP • Maks. 2 MB'}
+                        </div>
                       </div>
                     </div>
-                  </label>
-                </div>
 
-                {/* 6. Harga Jual (IDR) */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    Harga Jual (IDR) {newProduct.isSellablePos ? '*' : '(Opsional untuk Produk non-POS)'}
-                  </label>
-                  <input
-                    type="number"
-                    required={newProduct.isSellablePos}
-                    min="0"
-                    step="1"
-                    placeholder={newProduct.isSellablePos ? 'Contoh: 45000 (isi 0 secara eksplisit bila Rp 0)' : 'Kosongkan bila tidak dijual di POS'}
-                    value={newProduct.price}
-                    onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                  <div className="text-[11px] text-gray-400 mt-0.5">
-                    {newProduct.isSellablePos
-                      ? 'Wajib berupa Rupiah utuh (>= 0). Isi 0 secara eksplisit bila harga Rp 0.'
-                      : 'Produk non-POS boleh disimpan tanpa harga jual (ditampilkan "Belum diatur").'}
+                    <input
+                      ref={addGalleryInputRef}
+                      type="file"
+                      accept={PRODUCT_PHOTO_ACCEPT}
+                      data-photo-source="gallery"
+                      aria-label="Input file galeri tambah produk"
+                      onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                    <input
+                      ref={addCameraInputRef}
+                      type="file"
+                      accept={PRODUCT_PHOTO_ACCEPT}
+                      capture="environment"
+                      data-photo-source="camera"
+                      aria-label="Input file kamera tambah produk"
+                      onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Pilih foto dari galeri"
+                        onClick={() => addGalleryInputRef.current?.click()}
+                        className="px-2.5 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
+                      >
+                        {addPhotoFile ? 'Ganti Galeri' : 'Galeri'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Ambil foto dari kamera"
+                        onClick={() => addCameraInputRef.current?.click()}
+                        className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
+                      >
+                        Kamera
+                      </button>
+                      {addPhotoPreviewUrl && (
+                        <button
+                          type="button"
+                          disabled={saving}
+                          aria-label="Hapus foto produk"
+                          onClick={clearAddPhoto}
+                          className="px-2 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
+                        >
+                          Hapus
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                {/* 7. Barcode (Opsional) */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
-                  <input
-                    type="text"
-                    maxLength={100}
-                    aria-label="Barcode produk"
-                    placeholder="Contoh: 0012345678905 (pertahankan angka nol awal)"
-                    value={newProduct.barcode}
-                    onChange={(e) => setNewProduct({ ...newProduct, barcode: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                  <div className="text-[11px] text-gray-400 mt-0.5">
-                    Unik per properti (maksimal 100 karakter). Tidak diisi otomatis dari SKU.
+                {/* 3. Satuan & Harga */}
+                <div className="space-y-3 pt-1 border-t border-gray-100">
+                  <div className="space-y-1.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Satuan Dasar (Kanonik)</label>
+                        <select
+                          aria-label="Pilih satuan dasar kanonik"
+                          value={newProduct.canonicalBaseUnitCode || ''}
+                          onChange={(e) => setNewProduct(applyCanonicalUnitSelection(newProduct, e.target.value, canonicalUnitsCatalog))}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                        >
+                          <option value="">— Pilih Satuan Kanonik —</option>
+                          {canonicalUnitsCatalog.map((unit) => (
+                            <option key={unit.code} value={unit.code}>
+                              {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Desimal' : 'Bulat'})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Label Satuan Dasar</label>
+                        <input
+                          type="text"
+                          list="oak-product-base-units"
+                          maxLength={50}
+                          placeholder="Contoh: Porsi, Pcs, Kg, Liter"
+                          value={newProduct.baseUnit}
+                          onChange={(e) => setNewProduct(applyBaseUnitTextChange(newProduct, e.target.value, canonicalUnitsCatalog))}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-gray-500">
+                      {newProduct.canonicalBaseUnitCode ? (
+                        <span className="text-emerald-800 font-medium">
+                          Terpetakan ke satuan kanonik: <strong>{newProduct.canonicalBaseUnitCode}</strong>
+                        </span>
+                      ) : newProduct.baseUnit.trim() !== '' ? (
+                        <span className="text-amber-700">
+                          Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
+                        </span>
+                      ) : (
+                        <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Harga Jual (IDR) {newProduct.isSellablePos ? '*' : '(Opsional)'}
+                      </label>
+                      <input
+                        type="number"
+                        required={newProduct.isSellablePos}
+                        min="0"
+                        step="1"
+                        placeholder={newProduct.isSellablePos ? 'Contoh: 45000 (0 bila Rp 0)' : 'Kosongkan bila non-POS'}
+                        value={newProduct.price}
+                        onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        {newProduct.isSellablePos
+                          ? 'Rupiah utuh (>= 0). Isi 0 bila Rp 0.'
+                          : 'Boleh dikosongkan untuk produk non-POS.'}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
+                      <select
+                        value={newProduct.productKind}
+                        onChange={(e) => setNewProduct({ ...newProduct, productKind: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                      >
+                        <option value="">— Belum diatur —</option>
+                        <option value="STANDARD">Biasa</option>
+                        <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
+                        <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
+                        <option value="SERVICE" disabled>Jasa (Roadmap)</option>
+                        <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
+                        <option value="FORMULA" disabled>Formula (Roadmap)</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
 
-                {/* MPUI-F02: SKU sudah dipindah ke bagian identitas (setelah Nama); bagian ini hanya berisi Deskripsi */}
-                {/* Bagian Opsional (Deskripsi) */}
+                {/* 4. Detail Opsional (Barcode & Deskripsi — Lipat/Collapsible) */}
                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
                   <button
                     type="button"
@@ -3291,8 +3302,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
                   >
                     <span className="flex items-center gap-2">
-                      <span>Detail Opsional (Deskripsi)</span>
-                      {(newProduct.description.trim() !== '') && (
+                      <span>Detail Opsional (Barcode &amp; Deskripsi)</span>
+                      {(newProduct.barcode.trim() !== '' || newProduct.description.trim() !== '') && (
                         <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                           Terisi
                         </span>
@@ -3302,6 +3313,21 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </button>
                   {showAddOptional && (
                     <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
+                        <input
+                          type="text"
+                          maxLength={100}
+                          aria-label="Barcode produk"
+                          placeholder="Contoh: 0012345678905 (pertahankan angka nol awal)"
+                          value={newProduct.barcode}
+                          onChange={(e) => setNewProduct({ ...newProduct, barcode: e.target.value })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                        />
+                        <div className="text-[11px] text-gray-400 mt-0.5">
+                          Unik per properti (maksimal 100 karakter). Tidak diisi otomatis dari SKU.
+                        </div>
+                      </div>
                       <div>
                         <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
                         <textarea
@@ -3315,85 +3341,57 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     </div>
                   )}
                 </div>
-                {/* 8. Foto Produk (Opsional) */}
-                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="block text-xs font-semibold text-gray-700">Foto Produk (Opsional)</label>
-                    <span className="text-[11px] text-gray-400">PNG, JPEG, WebP • Maks. 2 MB</span>
-                  </div>
 
-                  {addPhotoPreviewUrl && (
-                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
-                      <img
-                        src={addPhotoPreviewUrl}
-                        alt="Preview foto produk baru"
-                        className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
+                {/* 5. Pengaturan POS & Gudang (Paling Bawah — Berdampingan Ringkas) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1 border-t border-gray-100">
+                  <div className="p-3 rounded-xl bg-gray-50 border border-gray-200 flex items-start">
+                    <label className="flex items-start gap-2.5 cursor-pointer w-full">
+                      <input
+                        type="checkbox"
+                        checked={newProduct.isSellablePos}
+                        onChange={(e) => setNewProduct({ ...newProduct, isSellablePos: e.target.checked })}
+                        className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600 shrink-0"
                       />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-semibold text-gray-800 truncate">
-                          {addPhotoFile?.name || 'Foto dipilih'}
-                        </div>
-                        <div className="text-[11px] text-emerald-700">
-                          Akan diunggah saat Simpan Produk
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-gray-900">Dijual di POS (Kasir)</div>
+                        <div className="text-[11px] text-gray-500 mt-0.5">
+                          Tampilkan di menu kasir POS. Matikan untuk bahan baku / non-POS.
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Hapus foto produk"
-                        onClick={clearAddPhoto}
-                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
-                      >
-                        Hapus Foto
-                      </button>
-                    </div>
-                  )}
-
-                  <input
-                    ref={addGalleryInputRef}
-                    type="file"
-                    accept={PRODUCT_PHOTO_ACCEPT}
-                    data-photo-source="gallery"
-                    aria-label="Input file galeri tambah produk"
-                    onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
-                    className="hidden"
-                  />
-                  <input
-                    ref={addCameraInputRef}
-                    type="file"
-                    accept={PRODUCT_PHOTO_ACCEPT}
-                    capture="environment"
-                    data-photo-source="camera"
-                    aria-label="Input file kamera tambah produk"
-                    onChange={(e) => selectAddPhoto(e.target.files?.[0] || null)}
-                    className="hidden"
-                  />
-
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Pilih foto dari galeri"
-                      onClick={() => addGalleryInputRef.current?.click()}
-                      className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
-                    >
-                      {addPhotoFile ? 'Ganti dari Galeri' : 'Pilih dari Galeri'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Ambil foto dari kamera"
-                      onClick={() => addCameraInputRef.current?.click()}
-                      className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
-                    >
-                      Ambil dari Kamera
-                    </button>
+                    </label>
                   </div>
-                </div>
 
-                {/* Bagian Opsional (Deskripsi) — satu-satunya; SKU sudah di bagian identitas */}
-                <div className="text-[11px] text-gray-400 bg-gray-50/80 border border-gray-200/70 rounded-lg px-3 py-2">
-                  Konversi kemasan, stok awal, HPP, dan mutasi stok akan diaktifkan pada tahap inventori berikutnya.
+                  <div className="p-3 rounded-xl bg-teal-50/50 border border-teal-200/80 flex items-start">
+                    <label className="flex items-start gap-2.5 cursor-pointer w-full">
+                      <input
+                        type="checkbox"
+                        data-testid="add-product-track-stock-checkbox"
+                        aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
+                        checked={Boolean(newProduct.trackStock)}
+                        onChange={(e) => setNewProduct({ ...newProduct, trackStock: e.target.checked })}
+                        className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="text-xs font-bold text-gray-900">
+                            Lacak Stok &amp; GRN
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold border ${
+                              newProduct.trackStock
+                                ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                                : 'bg-gray-100 text-gray-600 border-gray-200'
+                            }`}
+                          >
+                            {newProduct.trackStock ? 'Stok Fisik' : 'Non-Stok'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-gray-600 mt-0.5">
+                          Aktifkan untuk barang fisik gudang (PO &amp; GRN). Nonaktif untuk menu resep/BOM.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -3450,396 +3448,316 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 )}
 
-                {/* 1. Nama Produk */}
+                {/* 1. Tipe Produk (Paling Atas) */}
                 <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
-                  <input
-                    type="text"
-                    required
-                    value={editProduct.name}
-                    onChange={(e) => setEditProduct({ ...editProduct, name: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
-                  />
-                </div>
-
-                {/* MPUI-F02: SKU bagian identitas, tidak tersembunyi di Detail Opsional */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
-                  <input
-                    type="text"
-                    value={editProduct.code}
-                    onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                </div>
-
-                {/* 2. Kategori */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
-                  <select
-                    value={editProduct.category}
-                    onChange={(e) => setEditProduct({ ...editProduct, category: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                  >
-                    <option value="">— Tanpa Kategori —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={String(c.id)}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* 3. Tipe Produk & Jenis Produk */}
-                <div className="space-y-3">
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
-                      <button
-                        type="button"
-                        onClick={() => setEditProduct(applyProductTypeChange(editProduct, ''))}
-                        className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
-                          editProduct.productType === ''
-                            ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
-                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        Belum diatur
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
-                      {PRODUCT_TYPE_CHOICES.map((choice) => {
-                        const selected = editProduct.productType === choice.value;
-                        return (
-                          <button
-                            key={choice.value}
-                            type="button"
-                            aria-pressed={selected}
-                            onClick={() => setEditProduct(applyProductTypeChange(editProduct, choice.value))}
-                            className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
-                              selected
-                                ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
-                                : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
-                            }`}
-                          >
-                            <div className="text-xs font-bold">{choice.label}</div>
-                            <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
-                    <select
-                      value={editProduct.productKind}
-                      onChange={(e) => setEditProduct({ ...editProduct, productKind: e.target.value })}
-                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold text-gray-700">Tipe Produk</label>
+                    <button
+                      type="button"
+                      onClick={() => setEditProduct(applyProductTypeChange(editProduct, ''))}
+                      className={`text-[11px] font-medium px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                        editProduct.productType === ''
+                          ? 'bg-gray-200/80 text-gray-800 border-gray-300 font-semibold'
+                          : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+                      }`}
                     >
-                      <option value="">— Belum diatur —</option>
-                      <option value="STANDARD">Biasa</option>
-                      <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
-                      <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
-                      <option value="SERVICE" disabled>Jasa (Roadmap)</option>
-                      <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
-                      <option value="FORMULA" disabled>Formula (Roadmap)</option>
-                    </select>
+                      Belum diatur
+                    </button>
                   </div>
-                </div>
-
-                {/* 4. Satuan Dasar */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Buka formula resep BOM produk"
-                        onClick={() => openRecipeModal(editingItem)}
-                        className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
-                      >
-                        Resep (BOM)
-                      </button>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Buka kelola kemasan produk"
-                        onClick={() => openPackagingModal(editingItem)}
-                        className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
-                      >
-                        Kelola Kemasan
-                      </button>
-                    </div>
-                  </div>
-                  <select
-                    aria-label="Pilih satuan dasar kanonik"
-                    disabled={saving || Boolean(editingItem.is_base_unit_locked)}
-                    value={editProduct.canonicalBaseUnitCode || ''}
-                    onChange={(e) => setEditProduct(applyCanonicalUnitSelection(editProduct, e.target.value, canonicalUnitsCatalog))}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    <option value="">— Belum diatur (Pilih Satuan Standar Kanonik) —</option>
-                    {canonicalUnitsCatalog.map((unit) => (
-                      <option key={unit.code} value={unit.code}>
-                        {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Pecahan 3 desimal' : 'Bilangan bulat'})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    list="oak-product-base-units"
-                    maxLength={50}
-                    disabled={saving || Boolean(editingItem.is_base_unit_locked)}
-                    placeholder="Belum diatur (contoh: Porsi, Pcs, Kg)"
-                    value={editProduct.baseUnit}
-                    onChange={(e) => setEditProduct(applyBaseUnitTextChange(editProduct, e.target.value, canonicalUnitsCatalog))}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                  />
-                  {editingItem.is_base_unit_locked ? (
-                    <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
-                      Satuan dasar terkunci (<strong>{editingItem.canonical_base_unit_code || editingItem.base_unit}</strong>) karena produk sudah memiliki konversi kemasan atau pergerakan stok.
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-gray-500">
-                      {editProduct.canonicalBaseUnitCode ? (
-                        <span className="text-emerald-800 font-medium">
-                          Terpetakan ke satuan kanonik: <strong>{editProduct.canonicalBaseUnitCode}</strong>
-                        </span>
-                      ) : editProduct.baseUnit.trim() !== '' ? (
-                        <span className="text-amber-700">
-                          Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
-                        </span>
-                      ) : (
-                        <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* 5. Dijual di POS */}
-                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editProduct.isSellablePos}
-                      onChange={(e) => setEditProduct({ ...editProduct, isSellablePos: e.target.checked })}
-                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                    />
-                    <div>
-                      <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
-                      <div className="text-[11px] text-gray-500">
-                        Matikan bila produk ini merupakan bahan baku atau produk non-POS yang tidak dijual langsung di kasir POS.
-                      </div>
-                    </div>
-                  </label>
-                </div>
-
-                {/* 5b. Pelacakan Stok & Penerimaan Gudang (GRN) */}
-                <div className="p-3.5 rounded-xl bg-teal-50/50 border border-teal-200/80 space-y-2.5">
-                  {Array.isArray(editingItem.packaging_conversions) &&
-                    editingItem.packaging_conversions.some((p) => p.is_active) &&
-                    !editProduct.trackStock && (
-                      <div
-                        data-testid="edit-product-untracked-packaging-warning"
-                        className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-[11px] space-y-1.5"
-                      >
-                        <div className="font-bold">
-                          ⚠ Produk ini sudah memiliki konversi kemasan pembelian, tetapi Pelacakan Stok &amp; GRN masih nonaktif.
-                        </div>
-                        <div>
-                          Centang opsi di bawah lalu klik <strong>Simpan Perubahan</strong> agar produk ini dapat disimpan dan diposting pada Penerimaan Barang (GRN) tanpa mengubah ID produk maupun kemasan.
-                        </div>
-                      </div>
-                    )}
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      data-testid="edit-product-track-stock-checkbox"
-                      aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
-                      checked={Boolean(editProduct.trackStock)}
-                      onChange={(e) => setEditProduct({ ...editProduct, trackStock: e.target.checked })}
-                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
-                    />
-                    <div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-xs font-bold text-gray-900">
-                          Lacak Stok &amp; Penerimaan Gudang (GRN)
-                        </span>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                            editProduct.trackStock
-                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                              : 'bg-gray-100 text-gray-600 border-gray-200'
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2" role="group" aria-label="Pilihan tipe produk">
+                    {PRODUCT_TYPE_CHOICES.map((choice) => {
+                      const selected = editProduct.productType === choice.value;
+                      return (
+                        <button
+                          key={choice.value}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setEditProduct(applyProductTypeChange(editProduct, choice.value))}
+                          className={`text-left px-3 py-2 rounded-xl border transition-all cursor-pointer ${
+                            selected
+                              ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-1 ring-emerald-600'
+                              : 'bg-gray-50/80 border-gray-200 text-gray-700 hover:bg-gray-100'
                           }`}
                         >
-                          {editProduct.trackStock ? 'Stok Fisik Dilacak (Siap PO & GRN)' : 'Non-Stok / Menu Resep'}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-gray-600 mt-0.5">
-                        Aktifkan untuk barang fisik yang dibeli/diterima ke gudang dan dilacak saldonya per satuan dasar (contoh: Air Mineral Botol, Bahan Baku, Barang Setengah Jadi). Biarkan nonaktif untuk menu racikan berbasis resep/BOM atau jasa yang tidak diterima langsung melalui GRN.
-                      </div>
+                          <div className="text-xs font-bold">{choice.label}</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">{choice.hint}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. Identitas & Foto Produk (Ringkas) */}
+                <div className="space-y-3 pt-1 border-t border-gray-100">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Produk *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editProduct.name}
+                      onChange={(e) => setEditProduct({ ...editProduct, name: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                      <select
+                        value={editProduct.category}
+                        onChange={(e) => setEditProduct({ ...editProduct, category: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                      >
+                        <option value="">— Tanpa Kategori —</option>
+                        {categories.map((c) => (
+                          <option key={c.id} value={String(c.id)}>{c.name}</option>
+                        ))}
+                      </select>
                     </div>
-                  </label>
-                </div>
 
-                {/* 6. Harga Jual (IDR) */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    Harga Jual (IDR) {editProduct.isSellablePos ? '' : '(Opsional untuk Produk non-POS)'}
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    placeholder={editProduct.isSellablePos ? 'Rupiah utuh >= 0' : 'Kosong = tanpa harga jual (Belum diatur)'}
-                    value={editProduct.price}
-                    onChange={(e) => setEditProduct({ ...editProduct, price: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                  <div className="text-[11px] text-gray-400 mt-0.5">
-                    {editProduct.isSellablePos
-                      ? 'Gunakan angka Rupiah utuh (>= 0). Kosong = tidak mengubah harga existing; 0 = Rp 0.'
-                      : 'Kosongkan untuk menyimpan produk non-POS tanpa harga jual POS ("Belum diatur").'}
-                  </div>
-                </div>
-
-                {/* 7. Barcode (Opsional) */}
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
-                  <input
-                    type="text"
-                    maxLength={100}
-                    aria-label="Barcode produk"
-                    placeholder="Kosongkan untuk menghapus barcode (pertahankan angka nol awal)"
-                    value={editProduct.barcode}
-                    onChange={(e) => setEditProduct({ ...editProduct, barcode: e.target.value })}
-                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                  />
-                  <div className="text-[11px] text-gray-400 mt-0.5">
-                    Kosongkan nilai ini lalu simpan bila ingin menghapus barcode produk.
-                  </div>
-                </div>
-
-                {/* 8. Foto Produk (Opsional) */}
-                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="block text-xs font-semibold text-gray-700">Foto Produk (Opsional)</label>
-                    <span className="text-[11px] text-gray-400">PNG, JPEG, WebP • Maks. 2 MB</span>
-                  </div>
-
-                  {editPhotoPreviewUrl ? (
-                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
-                      <img
-                        src={editPhotoPreviewUrl}
-                        alt="Preview foto produk pengganti"
-                        className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
+                    {/* MPUI-F02: SKU bagian identitas */}
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                      <input
+                        type="text"
+                        value={editProduct.code}
+                        onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
                       />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-semibold text-gray-800 truncate">
-                          {editPhotoFile?.name || 'Foto baru dipilih'}
-                        </div>
-                        <div className="text-[11px] text-emerald-700">
-                          Foto baru akan diterapkan saat Simpan Perubahan
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Hapus foto produk"
-                        onClick={handleEditRemovePhotoClick}
-                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
-                      >
-                        Hapus Foto
-                      </button>
                     </div>
-                  ) : editRemovePhoto ? (
-                    <div className="flex items-center justify-between gap-3 p-2.5 bg-amber-50 rounded-lg border border-amber-200">
-                      <div className="text-xs text-amber-900">
-                        Foto produk ditandai untuk dihapus saat <strong>Simpan Perubahan</strong>.
-                      </div>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Urungkan hapus foto"
-                        onClick={handleUndoEditRemovePhoto}
-                        className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-white hover:bg-amber-100 rounded-lg border border-amber-300 cursor-pointer shrink-0 disabled:opacity-50"
-                      >
-                        Urungkan Hapus Foto
-                      </button>
-                    </div>
-                  ) : editingItem.has_photo ? (
-                    <div className="flex items-center gap-3 p-2.5 bg-white rounded-lg border border-gray-200">
-                      {editingItem.photo_url && photoBlobUrls[editingItem.photo_url] ? (
-                        <img
-                          src={photoBlobUrls[editingItem.photo_url]}
-                          alt={editingItem.name}
-                          className="w-14 h-14 rounded-lg object-cover border border-gray-200 shrink-0"
-                        />
-                      ) : (
-                        <div className="w-14 h-14 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-[10px] text-gray-500 shrink-0">
-                          Foto
-                        </div>
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-semibold text-gray-800">Foto produk tersimpan</div>
-                        <div className="text-[11px] text-gray-500">Pilih foto baru untuk mengganti atau hapus foto.</div>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        aria-label="Hapus foto produk"
-                        onClick={handleEditRemovePhotoClick}
-                        className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
-                      >
-                        Hapus Foto
-                      </button>
-                    </div>
-                  ) : null}
+                  </div>
 
-                  <input
-                    ref={editGalleryInputRef}
-                    type="file"
-                    accept={PRODUCT_PHOTO_ACCEPT}
-                    data-photo-source="gallery"
-                    aria-label="Input file galeri edit produk"
-                    onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
-                    className="hidden"
-                  />
-                  <input
-                    ref={editCameraInputRef}
-                    type="file"
-                    accept={PRODUCT_PHOTO_ACCEPT}
-                    capture="environment"
-                    data-photo-source="camera"
-                    aria-label="Input file kamera edit produk"
-                    onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
-                    className="hidden"
-                  />
+                  {/* Foto Produk (Ringkas di bawah Identitas) */}
+                  <div className="p-2.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        {editPhotoPreviewUrl ? (
+                          <img
+                            src={editPhotoPreviewUrl}
+                            alt="Preview foto produk pengganti"
+                            className="w-11 h-11 rounded-lg object-cover border border-gray-200 shrink-0"
+                          />
+                        ) : !editRemovePhoto && editingItem.has_photo ? (
+                          editingItem.photo_url && photoBlobUrls[editingItem.photo_url] ? (
+                            <img
+                              src={photoBlobUrls[editingItem.photo_url]}
+                              alt={editingItem.name}
+                              className="w-11 h-11 rounded-lg object-cover border border-gray-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-11 h-11 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-[10px] text-gray-500 shrink-0">
+                              Foto
+                            </div>
+                          )
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center text-gray-400 shrink-0">
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                            </svg>
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-gray-800 truncate">
+                            {editPhotoPreviewUrl
+                              ? (editPhotoFile?.name || 'Foto baru dipilih')
+                              : editRemovePhoto
+                                ? 'Foto ditandai untuk dihapus'
+                                : editingItem.has_photo
+                                  ? 'Foto produk tersimpan'
+                                  : 'Foto Produk (Opsional)'}
+                          </div>
+                          <div className={`text-[11px] truncate ${editPhotoPreviewUrl ? 'text-emerald-700' : editRemovePhoto ? 'text-amber-800' : 'text-gray-400'}`}>
+                            {editPhotoPreviewUrl
+                              ? 'Diterapkan saat Simpan Perubahan'
+                              : editRemovePhoto
+                                ? 'Klik Urungkan bila batal menghapus'
+                                : 'PNG, JPEG, WebP • Maks. 2 MB'}
+                          </div>
+                        </div>
+                      </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Pilih foto dari galeri"
-                      onClick={() => editGalleryInputRef.current?.click()}
-                      className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
-                    >
-                      {editPhotoFile || (!editRemovePhoto && editingItem.has_photo) ? 'Ganti dari Galeri' : 'Pilih dari Galeri'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Ambil foto dari kamera"
-                      onClick={() => editCameraInputRef.current?.click()}
-                      className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
-                    >
-                      Ambil dari Kamera
-                    </button>
+                      <input
+                        ref={editGalleryInputRef}
+                        type="file"
+                        accept={PRODUCT_PHOTO_ACCEPT}
+                        data-photo-source="gallery"
+                        aria-label="Input file galeri edit produk"
+                        onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
+                        className="hidden"
+                      />
+                      <input
+                        ref={editCameraInputRef}
+                        type="file"
+                        accept={PRODUCT_PHOTO_ACCEPT}
+                        capture="environment"
+                        data-photo-source="camera"
+                        aria-label="Input file kamera edit produk"
+                        onChange={(e) => selectEditPhoto(e.target.files?.[0] || null)}
+                        className="hidden"
+                      />
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          aria-label="Pilih foto dari galeri"
+                          onClick={() => editGalleryInputRef.current?.click()}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-gray-700 bg-white hover:bg-gray-100 rounded-lg border border-gray-300 cursor-pointer disabled:opacity-50"
+                        >
+                          {editPhotoFile || (!editRemovePhoto && editingItem.has_photo) ? 'Ganti Galeri' : 'Galeri'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          aria-label="Ambil foto dari kamera"
+                          onClick={() => editCameraInputRef.current?.click()}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 cursor-pointer disabled:opacity-50"
+                        >
+                          Kamera
+                        </button>
+                        {(editPhotoPreviewUrl || (!editRemovePhoto && editingItem.has_photo)) && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            aria-label="Hapus foto produk"
+                            onClick={handleEditRemovePhotoClick}
+                            className="px-2 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 cursor-pointer disabled:opacity-50"
+                          >
+                            Hapus
+                          </button>
+                        )}
+                        {editRemovePhoto && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            aria-label="Urungkan hapus foto"
+                            onClick={handleUndoEditRemovePhoto}
+                            className="px-2 py-1.5 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 rounded-lg border border-amber-300 cursor-pointer disabled:opacity-50"
+                          >
+                            Urungkan
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                {/* MPUI-F02: SKU sudah dipindah ke bagian identitas; bagian ini hanya berisi Deskripsi */}
-                {/* Bagian Opsional (Deskripsi) */}
+                {/* 3. Satuan & Harga */}
+                <div className="space-y-3 pt-1 border-t border-gray-100">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          aria-label="Buka formula resep BOM produk"
+                          onClick={() => openRecipeModal(editingItem)}
+                          className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                        >
+                          Resep (BOM)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          aria-label="Buka kelola kemasan produk"
+                          onClick={() => openPackagingModal(editingItem)}
+                          className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                        >
+                          Kelola Kemasan
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <select
+                        aria-label="Pilih satuan dasar kanonik"
+                        disabled={saving || Boolean(editingItem.is_base_unit_locked)}
+                        value={editProduct.canonicalBaseUnitCode || ''}
+                        onChange={(e) => setEditProduct(applyCanonicalUnitSelection(editProduct, e.target.value, canonicalUnitsCatalog))}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        <option value="">— Pilih Satuan Kanonik —</option>
+                        {canonicalUnitsCatalog.map((unit) => (
+                          <option key={unit.code} value={unit.code}>
+                            {unit.code} — {unit.label_id} ({unit.allow_decimal ? 'Desimal' : 'Bulat'})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        list="oak-product-base-units"
+                        maxLength={50}
+                        disabled={saving || Boolean(editingItem.is_base_unit_locked)}
+                        placeholder="Label satuan (contoh: Porsi, Pcs, Kg)"
+                        value={editProduct.baseUnit}
+                        onChange={(e) => setEditProduct(applyBaseUnitTextChange(editProduct, e.target.value, canonicalUnitsCatalog))}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                      />
+                    </div>
+
+                    {editingItem.is_base_unit_locked ? (
+                      <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
+                        Satuan dasar terkunci (<strong>{editingItem.canonical_base_unit_code || editingItem.base_unit}</strong>) karena produk sudah memiliki konversi kemasan atau pergerakan stok.
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-gray-500">
+                        {editProduct.canonicalBaseUnitCode ? (
+                          <span className="text-emerald-800 font-medium">
+                            Terpetakan ke satuan kanonik: <strong>{editProduct.canonicalBaseUnitCode}</strong>
+                          </span>
+                        ) : editProduct.baseUnit.trim() !== '' ? (
+                          <span className="text-amber-700">
+                            Teks satuan bebas (belum dipetakan ke kode satuan kanonik).
+                          </span>
+                        ) : (
+                          <span>Pilih satuan kanonik atau ketik label satuan dasar produk.</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Harga Jual (IDR) {editProduct.isSellablePos ? '' : '(Opsional)'}
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder={editProduct.isSellablePos ? 'Rupiah utuh >= 0' : 'Kosong = Belum diatur'}
+                        value={editProduct.price}
+                        onChange={(e) => setEditProduct({ ...editProduct, price: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                      />
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        {editProduct.isSellablePos
+                          ? 'Kosong = tetap; 0 = Rp 0.'
+                          : 'Kosong = tanpa harga jual POS.'}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Jenis Produk</label>
+                      <select
+                        value={editProduct.productKind}
+                        onChange={(e) => setEditProduct({ ...editProduct, productKind: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                      >
+                        <option value="">— Belum diatur —</option>
+                        <option value="STANDARD">Biasa</option>
+                        <option value="WEIGHED" disabled>Timbangan (Roadmap)</option>
+                        <option value="UNLIMITED" disabled>Unlimited (Roadmap)</option>
+                        <option value="SERVICE" disabled>Jasa (Roadmap)</option>
+                        <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
+                        <option value="FORMULA" disabled>Formula (Roadmap)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Detail Opsional (Barcode & Deskripsi — Lipat/Collapsible) */}
                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
                   <button
                     type="button"
@@ -3848,8 +3766,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
                   >
                     <span className="flex items-center gap-2">
-                      <span>Detail Opsional (Deskripsi)</span>
-                      {(editProduct.description.trim() !== '') && (
+                      <span>Detail Opsional (Barcode &amp; Deskripsi)</span>
+                      {(editProduct.barcode.trim() !== '' || editProduct.description.trim() !== '') && (
                         <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                           Terisi
                         </span>
@@ -3859,6 +3777,21 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </button>
                   {showEditOptional && (
                     <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Barcode (Opsional)</label>
+                        <input
+                          type="text"
+                          maxLength={100}
+                          aria-label="Barcode produk"
+                          placeholder="Kosongkan untuk menghapus barcode (pertahankan angka nol awal)"
+                          value={editProduct.barcode}
+                          onChange={(e) => setEditProduct({ ...editProduct, barcode: e.target.value })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
+                        />
+                        <div className="text-[11px] text-gray-400 mt-0.5">
+                          Kosongkan nilai ini lalu simpan bila ingin menghapus barcode produk.
+                        </div>
+                      </div>
                       <div>
                         <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
                         <textarea
@@ -3870,6 +3803,76 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* 5. Pengaturan POS & Gudang (Paling Bawah — Berdampingan Ringkas) */}
+                <div className="space-y-2.5 pt-1 border-t border-gray-100">
+                  {Array.isArray(editingItem.packaging_conversions) &&
+                    editingItem.packaging_conversions.some((p) => p.is_active) &&
+                    !editProduct.trackStock && (
+                      <div
+                        data-testid="edit-product-untracked-packaging-warning"
+                        className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-[11px] space-y-1"
+                      >
+                        <div className="font-bold">
+                          ⚠ Produk ini sudah memiliki konversi kemasan pembelian, tetapi Pelacakan Stok &amp; GRN masih nonaktif.
+                        </div>
+                        <div>
+                          Centang <strong>Lacak Stok &amp; GRN</strong> di bawah lalu klik <strong>Simpan Perubahan</strong>.
+                        </div>
+                      </div>
+                    )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="p-3 rounded-xl bg-gray-50 border border-gray-200 flex items-start">
+                      <label className="flex items-start gap-2.5 cursor-pointer w-full">
+                        <input
+                          type="checkbox"
+                          checked={editProduct.isSellablePos}
+                          onChange={(e) => setEditProduct({ ...editProduct, isSellablePos: e.target.checked })}
+                          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-gray-900">Dijual di POS (Kasir)</div>
+                          <div className="text-[11px] text-gray-500 mt-0.5">
+                            Tampilkan di menu kasir POS. Matikan untuk bahan baku / non-POS.
+                          </div>
+                        </div>
+                      </label>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-teal-50/50 border border-teal-200/80 flex items-start">
+                      <label className="flex items-start gap-2.5 cursor-pointer w-full">
+                        <input
+                          type="checkbox"
+                          data-testid="edit-product-track-stock-checkbox"
+                          aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
+                          checked={Boolean(editProduct.trackStock)}
+                          onChange={(e) => setEditProduct({ ...editProduct, trackStock: e.target.checked })}
+                          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="text-xs font-bold text-gray-900">
+                              Lacak Stok &amp; GRN
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold border ${
+                                editProduct.trackStock
+                                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                                  : 'bg-gray-100 text-gray-600 border-gray-200'
+                              }`}
+                            >
+                              {editProduct.trackStock ? 'Stok Fisik' : 'Non-Stok'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-gray-600 mt-0.5">
+                            Aktifkan untuk barang fisik gudang (PO &amp; GRN). Nonaktif untuk menu resep/BOM.
+                          </div>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -4634,6 +4637,22 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         onClose={closeRecipeModal}
         canEdit={capabilities.canEdit}
       />
+
+      {/* Floating Action Button (+) Tambah Produk di kanan bawah */}
+      {capabilities.canCreate && (
+        <button
+          type="button"
+          onClick={openAddModal}
+          title="Tambah Produk Baru"
+          aria-label="Tambah Produk"
+          data-testid="fab-add-product"
+          className="fixed bottom-6 right-6 z-40 w-14 h-14 rounded-full bg-[#1db954] hover:bg-emerald-600 active:scale-95 text-white shadow-lg shadow-emerald-950/25 flex items-center justify-center transition-all cursor-pointer focus:outline-hidden focus:ring-4 focus:ring-emerald-500/30"
+        >
+          <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" d="M12 5v14m7-7H5" />
+          </svg>
+        </button>
+      )}
 
       {/* MPUI-F01: Portal-based three-dot menu — rendered outside table overflow context */}
       {openMenuRowId !== null && (() => {
