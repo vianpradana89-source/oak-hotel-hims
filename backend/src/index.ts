@@ -226,6 +226,7 @@ import {
   createOpnameVarianceHandler,
   createGlobalStockMovementsHandler,
   createRemoveZeroStockBalanceHandler,
+  createUpdateStockSublocationHandler,
 } from './domains/pos/stockInventoryService';
 import {
   createPosProductUomsHandler,
@@ -6185,7 +6186,7 @@ app.get('/api/pos/menu', async (req, res) => {
         pool,
         propertyId,
         Number((req as any).user.id),
-        ['Master Produk'],
+        ['Master Produk', 'Inventori', 'POS', 'Laporan'],
         'view'
       );
       if (!canViewMasterProduct) {
@@ -6350,6 +6351,7 @@ app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool
 app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
 app.delete('/api/pos/stock/balances', createRemoveZeroStockBalanceHandler({ pool, assertPropertyScope }));
+app.patch('/api/pos/stock/balances/sublocation', createUpdateStockSublocationHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/purchase-receipt', createPurchaseReceiptHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/purchase-receipts', createPurchaseReceiptsQueryHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/adjustments', createStockAdjustmentHandler({ pool, assertPropertyScope }));

@@ -177,22 +177,28 @@ export async function submitStockTransfer(payload: StockTransferPayload): Promis
 export async function fetchStockTrackedProducts(propertyId: number): Promise<StockTrackedProductOption[]> {
   let rawRows: any[] = [];
   try {
-    const res = await authenticatedFetch(`/api/pos/raw-materials?property_id=${propertyId}`);
+    const res = await authenticatedFetch(
+      `/api/pos/menu?property_id=${propertyId}&scope=master&status=active&include_internal=true&sellable=all`
+    );
     if (res.ok) {
-      const body = await res.json();
-      const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
-      rawRows = list;
+      const data = await handleResponse<any>(res, 'Gagal memuat daftar produk master');
+      rawRows = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
     }
   } catch {
     // Fallback below
   }
 
   if (rawRows.length === 0) {
-    const res = await authenticatedFetch(
-      `/api/pos/menu?property_id=${propertyId}&scope=master&status=active&include_internal=true&sellable=all`
-    );
-    const data = await handleResponse<any>(res, 'Gagal memuat daftar produk master');
-    rawRows = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+    try {
+      const res = await authenticatedFetch(`/api/pos/raw-materials?property_id=${propertyId}`);
+      if (res.ok) {
+        const body = await res.json();
+        const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+        rawRows = list;
+      }
+    } catch {
+      // Ignore fallback error
+    }
   }
 
   return rawRows
@@ -205,6 +211,7 @@ export async function fetchStockTrackedProducts(propertyId: number): Promise<Sto
         .trim()
         .toUpperCase(),
       track_stock: true,
+      storage_sublocation: row.storage_sublocation ? String(row.storage_sublocation).trim() : null,
     }))
     .sort((a, b) => a.name.localeCompare(b.name, 'id-ID'));
 }
@@ -235,6 +242,9 @@ export async function fetchGlobalStockMovements(
   if (params?.warehouse_id) qs.set('warehouse_id', String(params.warehouse_id));
   if (params?.location_id && !params?.warehouse_id) qs.set('location_id', String(params.location_id));
   if (params?.warehouse_code) qs.set('warehouse_code', String(params.warehouse_code));
+  if (params?.storage_sublocation && params.storage_sublocation !== 'ALL') {
+    qs.set('storage_sublocation', String(params.storage_sublocation).trim());
+  }
   if (params?.product_id) qs.set('product_id', String(params.product_id));
   if (params?.start_date) qs.set('start_date', params.start_date);
   if (params?.end_date) qs.set('end_date', params.end_date);
@@ -289,5 +299,36 @@ export async function removeZeroStockBalanceFromLocation(params: {
     'Gagal menghapus produk dari lokasi penyimpanan'
   );
 }
+
+/**
+ * Mengatur atau mengubah Tempat Penyimpanan (storage_sublocation, mis. Showcase, Chiller, Rak)
+ * untuk suatu produk pada lokasi gudang tertentu.
+ */
+export async function updateStockBalanceSublocation(params: {
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  storage_sublocation: string | null;
+}): Promise<{
+  property_id: number;
+  product_id: number;
+  location_id: number;
+  storage_sublocation: string | null;
+}> {
+  const res = await authenticatedFetch('/api/pos/stock/balances/sublocation', {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(params),
+  });
+  return await handleResponse<{
+    property_id: number;
+    product_id: number;
+    location_id: number;
+    storage_sublocation: string | null;
+  }>(res, 'Gagal memperbarui tempat penyimpanan produk');
+}
+
 
 

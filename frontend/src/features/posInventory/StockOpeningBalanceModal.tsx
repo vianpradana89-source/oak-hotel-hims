@@ -57,6 +57,7 @@ export default function StockOpeningBalanceModal({
   const [loadingProducts, setLoadingProducts] = useState<boolean>(false);
   const [selectedProductId, setSelectedProductId] = useState<number | ''>('');
   const [selectedLocationId, setSelectedLocationId] = useState<number | ''>('');
+  const [storageSublocation, setStorageSublocation] = useState<string>('');
   const [quantityStr, setQuantityStr] = useState<string>('');
   const [unitCostStr, setUnitCostStr] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
@@ -82,6 +83,7 @@ export default function StockOpeningBalanceModal({
 
     setSelectedProductId('');
     setSelectedLocationId(activeLocations.length > 0 ? activeLocations[0].id : '');
+    setStorageSublocation('');
     setQuantityStr('');
     setUnitCostStr('');
     setNotes('');
@@ -132,6 +134,14 @@ export default function StockOpeningBalanceModal({
     [products, selectedProductId]
   );
 
+  useEffect(() => {
+    if (selectedProduct) {
+      setStorageSublocation(selectedProduct.storage_sublocation || '');
+    } else {
+      setStorageSublocation('');
+    }
+  }, [selectedProduct]);
+
   const selectedLocation = useMemo(
     () => activeLocations.find((l) => l.id === Number(selectedLocationId)) || null,
     [activeLocations, selectedLocationId]
@@ -169,6 +179,9 @@ export default function StockOpeningBalanceModal({
               Number(it.location_id) === Number(selectedLocationId)
           ) || null;
         setFetchedTargetItem(matched);
+        if (matched?.storage_sublocation) {
+          setStorageSublocation(matched.storage_sublocation);
+        }
         setTargetBalanceStatus('READY');
         setTargetBalanceError(null);
       })
@@ -347,6 +360,7 @@ export default function StockOpeningBalanceModal({
         property_id: propertyId,
         product_id: selectedProduct.id,
         location_id: selectedLocation.id,
+        storage_sublocation: storageSublocation.trim() || null,
         quantity: quantityValidation.canonicalStr,
         unit_cost: costValidation.canonicalStr,
         operation_key: operationKey,
@@ -497,6 +511,39 @@ export default function StockOpeningBalanceModal({
                 </span>
               </div>
             </div>
+          </div>
+
+          {/* Tempat Penyimpanan (Sub-Lokasi di dalam Gudang/Lokasi) */}
+          <div>
+            <label
+              htmlFor="opening-balance-sublocation"
+              className="block text-xs font-bold text-gray-700 mb-1"
+            >
+              Tempat Penyimpanan (Contoh: Showcase, Chiller, Rak)
+            </label>
+            <input
+              id="opening-balance-sublocation"
+              data-testid="opening-balance-sublocation-input"
+              type="text"
+              list="opening-balance-sublocations-list"
+              placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen..."
+              value={storageSublocation}
+              onChange={(e) => setStorageSublocation(e.target.value)}
+              disabled={submitting}
+              className="w-full px-3 py-2 text-xs border border-gray-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+            />
+            <datalist id="opening-balance-sublocations-list">
+              <option value="Showcase" />
+              <option value="Chiller" />
+              <option value="Freezer" />
+              <option value="Rak Kering" />
+              <option value="Lemari Linen" />
+              <option value="Rak Amenities" />
+              <option value="Gudang Kering" />
+            </datalist>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              Akan tampil di sebelah kolom Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, dan Cetak Laporan Mutasi Barang.
+            </p>
           </div>
 
           {/* Jumlah Stok Lama yang Belum Tercatat */}

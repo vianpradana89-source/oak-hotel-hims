@@ -6,7 +6,7 @@
  * serta Pratinjau & Cetak Laporan Mutasi Barang sesuai format standar Owner.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   fetchGlobalStockMovements,
   fetchStockTrackedProducts,
@@ -97,6 +97,7 @@ export default function StockMovementHistorySection({
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | 'ALL'>('ALL');
+  const [selectedSublocation, setSelectedSublocation] = useState<string>('ALL');
   const [selectedProductId, setSelectedProductId] = useState<number | 'ALL'>('ALL');
   const [operationType, setOperationType] = useState<GlobalMovementOperationFilter>('ALL');
   const [direction, setDirection] = useState<'ALL' | 'IN' | 'OUT'>('ALL');
@@ -141,6 +142,7 @@ export default function StockMovementHistorySection({
   const filterContextKey = [
     propertyId,
     selectedWarehouseId,
+    selectedSublocation,
     selectedProductId,
     startDate,
     endDate,
@@ -227,6 +229,21 @@ export default function StockMovementHistorySection({
     };
   }, [propertyId, asyncGuard]);
 
+  const sublocationOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    const addSub = (val: string | null | undefined) => {
+      if (!val || !val.trim()) return;
+      const trimmed = val.trim();
+      const key = trimmed.toLowerCase();
+      if (!map.has(key)) map.set(key, trimmed);
+    };
+    (report?.available_sublocations || []).forEach(addSub);
+    productOptions.forEach((p) => addSub(p.storage_sublocation));
+    ['Showcase', 'Chiller', 'Freezer', 'Rak Kering', 'Lemari Linen', 'Rak Amenities', 'Gudang Kering'].forEach(addSub);
+    if (selectedSublocation !== 'ALL') addSub(selectedSublocation);
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'id-ID'));
+  }, [report?.available_sublocations, productOptions, selectedSublocation]);
+
   const loadMovements = useCallback(async () => {
     const reqId = ++asyncGuard.movementsReqSeq;
     const reqContextKey = `${tableContextKey}|page:${effectivePage}`;
@@ -236,6 +253,7 @@ export default function StockMovementHistorySection({
     try {
       const res = await fetchGlobalStockMovements(propertyId, {
         warehouse_id: selectedWarehouseId === 'ALL' ? null : selectedWarehouseId,
+        storage_sublocation: selectedSublocation === 'ALL' ? null : selectedSublocation,
         product_id: selectedProductId === 'ALL' ? null : selectedProductId,
         start_date: startDate || null,
         end_date: endDate || null,
@@ -275,6 +293,7 @@ export default function StockMovementHistorySection({
     effectivePage,
     propertyId,
     selectedWarehouseId,
+    selectedSublocation,
     selectedProductId,
     startDate,
     endDate,
@@ -304,6 +323,7 @@ export default function StockMovementHistorySection({
     try {
       const exportData = await fetchGlobalStockMovements(propertyId, {
         warehouse_id: selectedWarehouseId === 'ALL' ? null : selectedWarehouseId,
+        storage_sublocation: selectedSublocation === 'ALL' ? null : selectedSublocation,
         product_id: selectedProductId === 'ALL' ? null : selectedProductId,
         start_date: startDate || null,
         end_date: endDate || null,
@@ -351,6 +371,7 @@ export default function StockMovementHistorySection({
     filterContextKey,
     propertyId,
     selectedWarehouseId,
+    selectedSublocation,
     selectedProductId,
     startDate,
     endDate,
@@ -385,6 +406,7 @@ export default function StockMovementHistorySection({
     setStartDate('');
     setEndDate('');
     setSelectedWarehouseId('ALL');
+    setSelectedSublocation('ALL');
     setSelectedProductId('ALL');
     setOperationType('ALL');
     setDirection('ALL');
@@ -633,6 +655,26 @@ export default function StockMovementHistorySection({
             </select>
           </div>
 
+          {/* Tempat Penyimpanan (Sub-Location) */}
+          <div>
+            <label className="block text-[11px] font-bold text-gray-600 mb-1">
+              Tempat Penyimpanan
+            </label>
+            <select
+              data-testid="mutation-filter-sublocation"
+              value={selectedSublocation}
+              onChange={(e) => setSelectedSublocation(e.target.value)}
+              className="w-full px-3 py-2 text-xs border border-gray-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700 cursor-pointer"
+            >
+              <option value="ALL">Semua Tempat Penyimpanan</option>
+              {sublocationOptions.map((sub) => (
+                <option key={sub} value={sub}>
+                  📍 {sub}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Item / Product */}
           <div>
             <label className="block text-[11px] font-bold text-gray-600 mb-1">
@@ -855,6 +897,7 @@ export default function StockMovementHistorySection({
               <thead className="bg-gray-50 border-b border-gray-200 text-[10px] font-bold uppercase text-gray-600">
                 <tr>
                   <th className="px-3 py-2">Lokasi</th>
+                  <th className="px-3 py-2">Tempat Penyimpanan</th>
                   <th className="px-3 py-2">Kode</th>
                   <th className="px-3 py-2">Nama Barang</th>
                   <th className="px-3 py-2 text-right">Saldo Awal</th>
@@ -869,6 +912,15 @@ export default function StockMovementHistorySection({
                   <tr key={`${ps.product_id}-${ps.location_id}`} className="hover:bg-gray-50/70">
                     <td className="px-3 py-2 font-semibold text-gray-700">
                       {ps.location_code} ({ps.location_name})
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {ps.storage_sublocation ? (
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-[#1b4332] border border-emerald-200">
+                          📍 {ps.storage_sublocation}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">-</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 font-mono text-[11px] text-gray-600">{ps.product_code}</td>
                     <td className="px-3 py-2 font-bold text-gray-900">{ps.product_name}</td>
@@ -922,6 +974,7 @@ export default function StockMovementHistorySection({
                   <tr>
                     <th className="px-3.5 py-3">Tgl (WIB)</th>
                     <th className="px-3.5 py-3">Lokasi</th>
+                    <th className="px-3.5 py-3">Tempat Penyimpanan</th>
                     <th className="px-3.5 py-3">Kode</th>
                     <th className="px-3.5 py-3">Nama Barang</th>
                     <th className="px-3.5 py-3 text-right">Saldo Awal</th>
@@ -957,6 +1010,17 @@ export default function StockMovementHistorySection({
                           <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-700 border border-gray-200">
                             {mov.location_code} ({mov.location_name})
                           </span>
+                        </td>
+
+                        {/* Tempat Penyimpanan */}
+                        <td className="px-3.5 py-3 whitespace-nowrap">
+                          {mov.storage_sublocation ? (
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-[#1b4332] border border-emerald-200">
+                              📍 {mov.storage_sublocation}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )}
                         </td>
 
                         {/* Kode */}

@@ -23,6 +23,7 @@ export interface RecordOpeningBalanceParams {
   created_by?: number | null;
   cutover_id?: number | null;
   notes?: string | null;
+  storage_sublocation?: string | null;
 }
 
 export interface OpeningBalanceResult {
@@ -40,6 +41,7 @@ export interface OpeningBalanceResult {
   packaging_label: string | null;
   unit_cost: string | null;
   current_balance: string;
+  storage_sublocation?: string | null;
   is_replay: boolean;
   notes?: string | null;
   created_at: string | Date;
@@ -69,6 +71,7 @@ export interface StockBalanceItem {
   location_code: string;
   location_name: string;
   location_type: string;
+  storage_sublocation?: string | null;
   quantity: string;
   updated_at: string | Date;
 }
@@ -828,6 +831,32 @@ export async function recordOpeningBalance(
     );
     const balRow = balUpsertRes.rows[0];
 
+    const cleanStorageSublocation =
+      params.storage_sublocation !== undefined &&
+      params.storage_sublocation !== null &&
+      String(params.storage_sublocation).trim() !== ''
+        ? String(params.storage_sublocation).trim().slice(0, 100)
+        : null;
+
+    if (cleanStorageSublocation !== null) {
+      await client
+        .query(
+          `UPDATE stock_balances
+              SET storage_sublocation = $1
+            WHERE property_id = $2 AND product_id = $3 AND location_id = $4`,
+          [cleanStorageSublocation, propertyId, productId, locationId]
+        )
+        .catch(() => {});
+      await client
+        .query(
+          `UPDATE pos_menu_items
+              SET storage_sublocation = COALESCE(NULLIF(TRIM(storage_sublocation), ''), $1)
+            WHERE id = $2 AND property_id = $3`,
+          [cleanStorageSublocation, productId, propertyId]
+        )
+        .catch(() => {});
+    }
+
     // 4. Perbarui biaya rata-rata kanonik produk (pos_menu_items.average_cost & last_cost) secara atomik
     if ((nextAverageCostStr !== null || resetDepletedCostToUnknown) && product.has_avg_cost_col) {
       const avgCostParam = resetDepletedCostToUnknown
@@ -870,6 +899,7 @@ export async function recordOpeningBalance(
       packaging_label: packagingLabel,
       unit_cost: formattedUnitCost,
       current_balance: String(balRow.quantity),
+      storage_sublocation: cleanStorageSublocation,
       is_replay: false,
       notes,
       created_at: movRow.created_at,
@@ -957,6 +987,7 @@ export async function getStockBalances(
       sl.code AS location_code,
       sl.name AS location_name,
       sl.location_type,
+      COALESCE(NULLIF(TRIM(sb.storage_sublocation), ''), NULLIF(TRIM(pmi.storage_sublocation), '')) AS storage_sublocation,
       sb.quantity::text AS quantity,
       sb.updated_at
     FROM stock_balances sb
@@ -983,6 +1014,7 @@ export async function getStockBalances(
     location_code: String(row.location_code || ''),
     location_name: String(row.location_name || ''),
     location_type: String(row.location_type || ''),
+    storage_sublocation: row.storage_sublocation ?? null,
     quantity: String(row.quantity ?? '0.000'),
     updated_at: row.updated_at,
   }));
@@ -1030,6 +1062,7 @@ export function createStockOpeningBalanceHandler(deps: StockInventoryDeps) {
         unit_cost,
         cutover_id,
         notes,
+        storage_sublocation,
       } = req.body || {};
 
       const headerKey =
@@ -1061,6 +1094,8 @@ export function createStockOpeningBalanceHandler(deps: StockInventoryDeps) {
         created_by: createdBy,
         cutover_id: cutover_id !== undefined && cutover_id !== null ? Number(cutover_id) : null,
         notes: notes !== undefined && notes !== null ? String(notes) : null,
+        storage_sublocation:
+          storage_sublocation !== undefined && storage_sublocation !== null ? String(storage_sublocation) : null,
       });
 
       return res.status(result.is_replay ? 200 : 201).json({
@@ -5076,6 +5111,7 @@ export interface InventoryValuationFilterParams {
   location_id?: number | null;
   product_id?: number | null;
   category_id?: number | null;
+  storage_sublocation?: string | null;
   search?: string | null;
 }
 
@@ -5091,6 +5127,7 @@ export interface InventoryValuationItem {
   location_code: string;
   location_name: string;
   location_type: string;
+  storage_sublocation?: string | null;
   base_unit_code: string;
   quantity: string;
   unit_cost: string | null;
@@ -5110,6 +5147,7 @@ export interface InventoryValuationReportResult {
     location_id: number | null;
     product_id: number | null;
     category_id: number | null;
+    storage_sublocation?: string | null;
     search: string | null;
   };
   summary: {
@@ -5516,8 +5554,23 @@ export async function getInventoryValuationReport(
     conditions.push(`pmi.category_id = $${pIdx++}`);
     queryParams.push(Number(params.category_id));
   }
+  const cleanValSublocation =
+    params.storage_sublocation &&
+    typeof params.storage_sublocation === 'string' &&
+    params.storage_sublocation.trim() &&
+    params.storage_sublocation.trim().toUpperCase() !== 'ALL'
+      ? params.storage_sublocation.trim()
+      : null;
+  if (cleanValSublocation) {
+    conditions.push(
+      `UPPER(TRIM(COALESCE(NULLIF(TRIM(sb.storage_sublocation), ''), NULLIF(TRIM(pmi.storage_sublocation), '')))) = UPPER(TRIM($${pIdx++}))`
+    );
+    queryParams.push(cleanValSublocation);
+  }
   if (params.search && typeof params.search === 'string' && params.search.trim()) {
-    conditions.push(`(pmi.name ILIKE $${pIdx} OR pmi.item_code ILIKE $${pIdx})`);
+    conditions.push(
+      `(pmi.name ILIKE $${pIdx} OR pmi.item_code ILIKE $${pIdx} OR COALESCE(sb.storage_sublocation, pmi.storage_sublocation, '') ILIKE $${pIdx})`
+    );
     queryParams.push(`%${params.search.trim()}%`);
     pIdx++;
   }
@@ -5537,6 +5590,7 @@ export async function getInventoryValuationReport(
       sl.code AS location_code,
       sl.name AS location_name,
       sl.location_type,
+      COALESCE(NULLIF(TRIM(sb.storage_sublocation), ''), NULLIF(TRIM(pmi.storage_sublocation), '')) AS storage_sublocation,
       sb.quantity,
       sb.updated_at,
       CASE
@@ -5724,6 +5778,7 @@ export async function getInventoryValuationReport(
       location_code: row.location_code,
       location_name: row.location_name,
       location_type: row.location_type,
+      storage_sublocation: row.storage_sublocation ?? null,
       base_unit_code: row.base_unit_code,
       quantity: qty.toFixed(3),
       unit_cost: unitCostStr,
@@ -5744,6 +5799,7 @@ export async function getInventoryValuationReport(
       location_id: params.location_id ? Number(params.location_id) : null,
       product_id: params.product_id ? Number(params.product_id) : null,
       category_id: params.category_id ? Number(params.category_id) : null,
+      storage_sublocation: cleanValSublocation,
       search: params.search ?? null,
     },
     summary: {
@@ -6128,6 +6184,7 @@ export function createInventoryValuationHandler(deps: StockInventoryDeps) {
         location_id: req.query?.location_id ? Number(req.query.location_id) : undefined,
         product_id: req.query?.product_id ? Number(req.query.product_id) : undefined,
         category_id: req.query?.category_id ? Number(req.query.category_id) : undefined,
+        storage_sublocation: req.query?.storage_sublocation ? String(req.query.storage_sublocation) : undefined,
         search: req.query?.search ? String(req.query.search) : undefined,
       });
 
@@ -6316,6 +6373,7 @@ export interface GlobalStockMovementsFilterParams {
   warehouse_id?: number | null;
   location_id?: number | null;
   warehouse_code?: string | null;
+  storage_sublocation?: string | null;
   product_id?: number | null;
   start_date?: string | null;
   end_date?: string | null;
@@ -6342,6 +6400,7 @@ export interface GlobalStockMovementItem {
   location_code: string;
   location_name: string;
   location_type: string;
+  storage_sublocation?: string | null;
   operation_type: string;
   operation_category: string;
   operation_label: string;
@@ -6384,6 +6443,7 @@ export interface GlobalStockMovementPartitionSummary {
   location_id: number;
   location_code: string;
   location_name: string;
+  storage_sublocation?: string | null;
   base_unit_code: string;
   movement_count: number;
   opening_balance: string;
@@ -6398,6 +6458,7 @@ export interface GlobalStockMovementsReportResult {
   property_name: string;
   report_header_title: string;
   storage_sublocation_label: string;
+  available_sublocations?: string[];
   snapshot: {
     as_of_timestamp: string;
     as_of_wib: string;
@@ -6407,6 +6468,7 @@ export interface GlobalStockMovementsReportResult {
     warehouse_id: number | null;
     warehouse_code: string | null;
     warehouse_name: string | null;
+    storage_sublocation?: string | null;
     product_id: number | null;
     start_date: string | null;
     end_date: string | null;
@@ -6777,6 +6839,21 @@ export async function getGlobalStockMovements(
       sqlParams.push(resolvedProductId);
     }
 
+    const cleanStorageSublocation =
+      params.storage_sublocation &&
+      typeof params.storage_sublocation === 'string' &&
+      params.storage_sublocation.trim() !== '' &&
+      params.storage_sublocation.trim().toUpperCase() !== 'ALL'
+        ? params.storage_sublocation.trim()
+        : null;
+
+    if (cleanStorageSublocation !== null) {
+      partitionConditions.push(
+        `UPPER(TRIM(COALESCE(NULLIF(TRIM(sb.storage_sublocation), ''), NULLIF(TRIM(pmi.storage_sublocation), '')))) = UPPER(TRIM($${pIdx++}))`
+      );
+      sqlParams.push(cleanStorageSublocation);
+    }
+
     // Bangun kondisi pasca-partisi (filtered_movements)
     const filterConditions: string[] = ['1 = 1'];
 
@@ -6815,6 +6892,7 @@ export async function getGlobalStockMovements(
         OR pl.product_code ILIKE $${searchParamIdx}
         OR pl.location_name ILIKE $${searchParamIdx}
         OR pl.location_code ILIKE $${searchParamIdx}
+        OR COALESCE(pl.storage_sublocation, '') ILIKE $${searchParamIdx}
         OR COALESCE(pl.notes, '') ILIKE $${searchParamIdx}
         OR COALESCE(pl.operation_key, '') ILIKE $${searchParamIdx}
         OR COALESCE(pl.grn_number, '') ILIKE $${searchParamIdx}
@@ -6838,6 +6916,7 @@ export async function getGlobalStockMovements(
           sl.code AS location_code,
           sl.name AS location_name,
           sl.location_type,
+          COALESCE(NULLIF(TRIM(sb.storage_sublocation), ''), NULLIF(TRIM(pmi.storage_sublocation), '')) AS storage_sublocation,
           so.operation_type,
           so.operation_key,
           so.transaction_id,
@@ -6885,6 +6964,10 @@ export async function getGlobalStockMovements(
         JOIN stock_locations sl
           ON sl.id = sm.location_id
          AND sl.property_id = sm.property_id
+        LEFT JOIN stock_balances sb
+          ON sb.property_id = sm.property_id
+         AND sb.product_id = sm.product_id
+         AND sb.location_id = sm.location_id
         LEFT JOIN LATERAL (
           SELECT pgr_row.grn_number
           FROM pos_goods_receipts pgr_row
@@ -7003,6 +7086,7 @@ export async function getGlobalStockMovements(
         location_id,
         location_code,
         location_name,
+        storage_sublocation,
         base_unit_code,
         COUNT(*)::int AS movement_count,
         MIN(first_balance_before)::numeric(18,3) AS opening_balance,
@@ -7019,6 +7103,7 @@ export async function getGlobalStockMovements(
         location_id,
         location_code,
         location_name,
+        storage_sublocation,
         base_unit_code
       ORDER BY location_code ASC, product_code ASC, product_id ASC
     `;
@@ -7031,6 +7116,7 @@ export async function getGlobalStockMovements(
       location_id: Number(row.location_id),
       location_code: String(row.location_code || ''),
       location_name: String(row.location_name || ''),
+      storage_sublocation: row.storage_sublocation ?? null,
       base_unit_code: String(row.base_unit_code || 'PCS'),
       movement_count: Number(row.movement_count || 0),
       opening_balance: formatNumeric18_3Exact(row.opening_balance),
@@ -7060,6 +7146,28 @@ export async function getGlobalStockMovements(
       ${paginationClause}
     `;
     const movRes = await client.query(movementsSql, movParams);
+
+    const sublocListRes = await client
+      .query(
+        `SELECT DISTINCT subloc
+           FROM (
+             SELECT NULLIF(TRIM(storage_sublocation), '') AS subloc
+               FROM pos_menu_items
+              WHERE property_id = $1
+             UNION
+             SELECT NULLIF(TRIM(storage_sublocation), '') AS subloc
+               FROM stock_balances
+              WHERE property_id = $1
+                AND ($2::int IS NULL OR location_id = $2::int)
+           ) t
+          WHERE subloc IS NOT NULL
+          ORDER BY subloc ASC`,
+        [propertyId, resolvedLocationId]
+      )
+      .catch(() => ({ rows: [] as any[] }));
+    const availableSublocations: string[] = (sublocListRes.rows || [])
+      .map((r: any) => String(r.subloc || '').trim())
+      .filter(Boolean);
 
     await client.query('COMMIT');
 
@@ -7093,6 +7201,7 @@ export async function getGlobalStockMovements(
         location_code: String(row.location_code || ''),
         location_name: String(row.location_name || ''),
         location_type: String(row.location_type || ''),
+        storage_sublocation: row.storage_sublocation ?? null,
         operation_type: String(row.operation_type || ''),
         operation_category: resolvedDisplay.operationCategory,
         operation_label: resolvedDisplay.operationLabel,
@@ -7122,11 +7231,25 @@ export async function getGlobalStockMovements(
     const effectivePage = isExportAll ? 1 : page;
     const totalPages = isExportAll ? 1 : Math.max(1, Math.ceil(totalRows / limit));
 
+    const distinctReportSublocations = Array.from(
+      new Set(
+        partitionSummaries
+          .map((p) => (p.storage_sublocation ? String(p.storage_sublocation).trim() : ''))
+          .filter(Boolean)
+      )
+    );
+    const resolvedSublocationLabel = cleanStorageSublocation
+      ? `Tempat penyimpanan: ${cleanStorageSublocation}`
+      : distinctReportSublocations.length > 0
+      ? `Tempat penyimpanan: ${distinctReportSublocations.join(', ')}`
+      : 'Tempat penyimpanan: Belum dirinci';
+
     return {
       property_id: propertyId,
       property_name: propertyName,
       report_header_title: 'OAK Lawang',
-      storage_sublocation_label: 'Tempat penyimpanan: Belum dirinci',
+      storage_sublocation_label: resolvedSublocationLabel,
+      available_sublocations: availableSublocations,
       snapshot: {
         as_of_timestamp: asOfTimestamp,
         as_of_wib: asOfWib,
@@ -7136,6 +7259,7 @@ export async function getGlobalStockMovements(
         warehouse_id: resolvedLocationId,
         warehouse_code: resolvedWarehouseCode,
         warehouse_name: resolvedWarehouseName,
+        storage_sublocation: cleanStorageSublocation,
         product_id: resolvedProductId,
         start_date: dateBounds.startDate,
         end_date: dateBounds.endDate,
@@ -7222,6 +7346,7 @@ export function createGlobalStockMovementsHandler(deps: StockInventoryDeps) {
             ? Number(req.query.location_id)
             : undefined,
         warehouse_code: req.query?.warehouse_code ? String(req.query.warehouse_code) : undefined,
+        storage_sublocation: req.query?.storage_sublocation ? String(req.query.storage_sublocation) : undefined,
         product_id:
           req.query?.product_id !== undefined && String(req.query.product_id).trim() !== ''
             ? Number(req.query.product_id)
@@ -7838,6 +7963,124 @@ export function createRemoveZeroStockBalanceHandler(deps: StockInventoryDeps) {
     }
   };
 }
+
+/**
+ * Handler: PATCH /api/pos/stock/balances/sublocation
+ * Mengatur atau mengubah Tempat Penyimpanan (storage_sublocation, mis. Showcase, Chiller, Rak)
+ * untuk suatu produk pada lokasi gudang tertentu (serta menyelaraskan default pada pos_menu_items bila belum diatur).
+ */
+export function createUpdateStockSublocationHandler(deps: StockInventoryDeps) {
+  return async function handleUpdateStockSublocation(req: Request, res: Response) {
+    const propertyId = Number(req.body?.property_id ?? req.query?.property_id);
+    const productId = Number(req.body?.product_id ?? req.query?.product_id);
+    const locationId = Number(req.body?.location_id ?? req.query?.location_id);
+    const rawSublocation = req.body?.storage_sublocation;
+
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'property_id wajib berupa bilangan bulat positif',
+      });
+    }
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'product_id wajib berupa bilangan bulat positif',
+      });
+    }
+    if (!Number.isInteger(locationId) || locationId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'location_id wajib berupa bilangan bulat positif',
+      });
+    }
+
+    const cleanSublocation =
+      rawSublocation === null || rawSublocation === undefined || String(rawSublocation).trim() === ''
+        ? null
+        : String(rawSublocation).trim();
+
+    if (cleanSublocation !== null && cleanSublocation.length > 100) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'Tempat penyimpanan maksimal 100 karakter',
+      });
+    }
+
+    try {
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canEdit = await checkInventoryPermission(
+          authUser,
+          ['inventory.edit', 'inventory.create'],
+          deps.pool
+        );
+        if (!canEdit) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.edit',
+          });
+        }
+      }
+
+      const updRes = await deps.pool.query(
+        `UPDATE stock_balances
+            SET storage_sublocation = $1,
+                updated_at = NOW()
+          WHERE property_id = $2
+            AND product_id = $3
+            AND location_id = $4
+          RETURNING id, storage_sublocation`,
+        [cleanSublocation, propertyId, productId, locationId]
+      );
+
+      if ((updRes.rowCount ?? 0) === 0) {
+        return res.status(404).json({
+          status: 'ERROR',
+          code: 'STOCK_BALANCE_NOT_FOUND',
+          message: 'Data saldo produk pada lokasi ini tidak ditemukan.',
+        });
+      }
+
+      await deps.pool
+        .query(
+          `UPDATE pos_menu_items
+              SET storage_sublocation = $1
+            WHERE id = $2
+              AND property_id = $3
+              AND ($1::varchar IS NOT NULL OR (SELECT COUNT(*) FROM stock_balances WHERE property_id = $3 AND product_id = $2) <= 1)`,
+          [cleanSublocation, productId, propertyId]
+        )
+        .catch(() => {});
+
+      return res.status(200).json({
+        status: 'OK',
+        data: {
+          property_id: propertyId,
+          product_id: productId,
+          location_id: locationId,
+          storage_sublocation: cleanSublocation,
+        },
+      });
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal memperbarui tempat penyimpanan produk',
+      });
+    }
+  };
+}
+
 
 
 

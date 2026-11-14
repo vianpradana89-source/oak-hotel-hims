@@ -6880,5 +6880,7 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
   await pool.query(`
     ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
     CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
+    ALTER TABLE stock_balances ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
   `);
 }

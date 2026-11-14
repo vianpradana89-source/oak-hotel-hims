@@ -281,6 +281,38 @@ export function parseBaseUnitInput(raw: unknown): ParsedFieldResult<string | nul
 }
 
 /**
+ * Normalisasi input storage_sublocation (Tempat Penyimpanan) pada POST/PATCH.
+ * Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen.
+ */
+export function parseStorageSublocationInput(raw: unknown): ParsedFieldResult<string | null> {
+  if (raw === undefined) {
+    return { ok: true, provided: false, value: undefined };
+  }
+  if (raw === null) {
+    return { ok: true, provided: true, value: null };
+  }
+  if (typeof raw !== 'string') {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'storage_sublocation harus berupa teks tempat penyimpanan (maksimal 100 karakter) atau null',
+    };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return { ok: true, provided: true, value: null };
+  }
+  if (trimmed.length > 100) {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'Tempat penyimpanan (storage_sublocation) maksimal 100 karakter',
+    };
+  }
+  return { ok: true, provided: true, value: trimmed };
+}
+
+/**
  * Normalisasi input barcode pada POST/PATCH (MP-02B).
  * - undefined -> provided: false, value: undefined
  * - null atau string kosong/whitespace -> provided: true, value: null
@@ -561,6 +593,10 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
     packaging_conversions: packagingConversions,
     track_stock: trackStock,
     track_inventory: trackInventory,
+    storage_sublocation:
+      safeRow.storage_sublocation === null || safeRow.storage_sublocation === undefined || String(safeRow.storage_sublocation).trim() === ''
+        ? null
+        : String(safeRow.storage_sublocation).trim(),
     barcode,
     has_photo: hasPhoto,
     photo_url: photoUrl,
@@ -844,6 +880,17 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         setClauses.push(`track_inventory = $${params.length}`);
       }
 
+      let parsedPatchStorageSublocation: { provided: boolean; value: string | null } | null = null;
+      if (body.storage_sublocation !== undefined) {
+        const ss = parseStorageSublocationInput(body.storage_sublocation);
+        if (!ss.ok) {
+          return res.status(400).json({ status: 'ERROR', code: ss.code, message: ss.message });
+        }
+        parsedPatchStorageSublocation = { provided: true, value: ss.value ?? null };
+        params.push(parsedPatchStorageSublocation.value);
+        setClauses.push(`storage_sublocation = $${params.length}`);
+      }
+
       if (setClauses.length === 0 && !hasAnyUnitField) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
       }
@@ -946,6 +993,14 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
               message: `menu item ${itemId} not found for property ${propertyId}`,
             });
           }
+          if (parsedPatchStorageSublocation) {
+            await client
+              .query(
+                'UPDATE stock_balances SET storage_sublocation = $1 WHERE property_id = $2 AND product_id = $3',
+                [parsedPatchStorageSublocation.value, propertyId, itemId]
+              )
+              .catch(() => {});
+          }
           await client.query('COMMIT');
           const updatedRow = {
             ...result.rows[0],
@@ -974,6 +1029,14 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         );
         if ((result.rowCount ?? 0) === 0) {
           return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `menu item ${itemId} not found for property ${propertyId}` });
+        }
+        if (parsedPatchStorageSublocation) {
+          await deps.pool
+            .query(
+              'UPDATE stock_balances SET storage_sublocation = $1 WHERE property_id = $2 AND product_id = $3',
+              [parsedPatchStorageSublocation.value, propertyId, itemId]
+            )
+            .catch(() => {});
         }
         res.json({ status: 'OK', data: formatPosMenuItemRow(result.rows[0]) });
       } catch (updateErr: any) {
@@ -1128,6 +1191,16 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
         return res.status(400).json({ status: 'ERROR', code: parsedBarcode.code, message: parsedBarcode.message });
       }
       const barcodeVal = parsedBarcode.provided ? parsedBarcode.value : null;
+
+      const parsedStorageSublocation = parseStorageSublocationInput(body.storage_sublocation);
+      if (!parsedStorageSublocation.ok) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: parsedStorageSublocation.code,
+          message: parsedStorageSublocation.message,
+        });
+      }
+      const storageSublocationVal = parsedStorageSublocation.provided ? parsedStorageSublocation.value : null;
 
       let isActiveVal = true;
       if (is_active !== undefined) {
@@ -1318,14 +1391,26 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
                   barcodeVal,
                 ]
               );
+        let row = insertRes.rows[0];
+        if (storageSublocationVal !== null && row?.id) {
+          const subRes = await client.query(
+            `UPDATE pos_menu_items SET storage_sublocation = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
+            [storageSublocationVal, row.id, propId]
+          );
+          if ((subRes.rowCount ?? 0) > 0) {
+            row = subRes.rows[0];
+          } else {
+            row = { ...row, storage_sublocation: storageSublocationVal };
+          }
+        }
         await client.query('COMMIT');
-        const row = insertRes.rows[0];
         res.status(201).json({
           status: 'OK',
           data: formatPosMenuItemRow({
             canonical_base_unit_code: canonicalBaseUnitVal,
             track_stock: trackStockVal,
             track_inventory: trackInventoryVal,
+            storage_sublocation: storageSublocationVal,
             ...row,
             category_name: finalCategoryName,
           }),

@@ -291,6 +291,7 @@ export interface ProductItem {
   is_sellable_pos?: boolean;
   track_stock?: boolean;
   track_inventory?: boolean;
+  storage_sublocation?: string | null;
   product_type?: ProductTypeCode | string | null;
   product_type_label?: string;
   product_kind?: ProductKindCode | string | null;
@@ -337,6 +338,7 @@ export interface ProductFormState {
   canonicalBaseUnitCode?: string;
   isSellablePos: boolean;
   trackStock?: boolean;
+  storageSublocation?: string;
 }
 
 export const EMPTY_PRODUCT_FORM: ProductFormState = {
@@ -352,6 +354,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   canonicalBaseUnitCode: '',
   isSellablePos: true,
   trackStock: false,
+  storageSublocation: '',
 };
 
 export const PRODUCT_PHOTO_MAX_BYTES = 2 * 1024 * 1024;
@@ -372,6 +375,7 @@ export function matchesProductSearch(item: ProductItem, query: string): boolean 
   if (item.name && item.name.toLowerCase().includes(q)) return true;
   if (item.item_code && item.item_code.toLowerCase().includes(q)) return true;
   if (item.barcode && item.barcode.toLowerCase().includes(q)) return true;
+  if (item.storage_sublocation && item.storage_sublocation.toLowerCase().includes(q)) return true;
   return false;
 }
 
@@ -409,6 +413,18 @@ export const PRODUCT_TYPE_CHOICES: Array<{ value: ProductTypeCode; label: string
 ];
 
 const COMMON_BASE_UNITS = ['Porsi', 'Pcs', 'Gelas', 'Botol', 'Kaleng', 'Cup', 'Pack', 'Box', 'Kg', 'Gram', 'Liter', 'Ml'];
+const COMMON_STORAGE_SUBLOCATIONS = [
+  'Showcase',
+  'Chiller',
+  'Freezer',
+  'Rak Kering',
+  'Gudang Kering',
+  'Lemari Linen',
+  'Rak Amenities',
+  'Pantry',
+  'Bar Counter',
+  'Minibar',
+];
 
 let packagingIdempotencyCounter = 0;
 
@@ -568,6 +584,7 @@ export function buildEditProductForm(item: ProductItem): ProductFormState {
     canonicalBaseUnitCode: item.canonical_base_unit_code || '',
     isSellablePos: item.is_sellable_pos !== false,
     trackStock: effectiveTrackStock,
+    storageSublocation: typeof item.storage_sublocation === 'string' ? item.storage_sublocation : '',
   };
 }
 
@@ -1394,6 +1411,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       if (canonicalCodeClean !== '') {
         productPayload.canonical_base_unit_code = canonicalCodeClean;
       }
+      const addSublocationClean = (newProduct.storageSublocation || '').trim();
+      if (addSublocationClean !== '') {
+        productPayload.storage_sublocation = addSublocationClean;
+      }
 
       let targetItemId: number | null = pendingCreatedItem ? pendingCreatedItem.id : null;
 
@@ -1557,6 +1578,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         product_type: editProduct.productType === '' ? null : editProduct.productType,
         product_kind: editProduct.productKind === '' ? null : editProduct.productKind,
       };
+      const origSublocation = typeof editingItem.storage_sublocation === 'string' ? editingItem.storage_sublocation.trim() : '';
+      const nextSublocation = (editProduct.storageSublocation || '').trim();
+      if (nextSublocation !== origSublocation || nextSublocation !== '') {
+        patch.storage_sublocation = nextSublocation === '' ? null : nextSublocation;
+      }
       if (unitUnchanged) {
         if (origCanonicalCode !== '' && origBaseUnit === '') {
           // Produk memiliki canonical_base_unit_code tanpa teks base_unit;
@@ -2914,6 +2940,14 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                                     <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                                   </span>
                                 )}
+                                {item.storage_sublocation && (
+                                  <span
+                                    title={`Tempat penyimpanan: ${item.storage_sublocation}`}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-semibold"
+                                  >
+                                    <span>📍 {item.storage_sublocation}</span>
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -3319,6 +3353,24 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
                         <option value="FORMULA" disabled>Formula (Roadmap)</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      Tempat Penyimpanan (Sub-Lokasi Gudang / Outlet)
+                    </label>
+                    <input
+                      type="text"
+                      list="oak-storage-sublocations"
+                      maxLength={100}
+                      placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen"
+                      value={newProduct.storageSublocation || ''}
+                      onChange={(e) => setNewProduct({ ...newProduct, storageSublocation: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                    />
+                    <div className="text-[10px] text-gray-400 mt-0.5">
+                      Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
                     </div>
                   </div>
                 </div>
@@ -3783,6 +3835,24 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         <option value="BUNDLE" disabled>Bundle (Roadmap)</option>
                         <option value="FORMULA" disabled>Formula (Roadmap)</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      Tempat Penyimpanan (Sub-Lokasi Gudang / Outlet)
+                    </label>
+                    <input
+                      type="text"
+                      list="oak-storage-sublocations"
+                      maxLength={100}
+                      placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen"
+                      value={editProduct.storageSublocation || ''}
+                      onChange={(e) => setEditProduct({ ...editProduct, storageSublocation: e.target.value })}
+                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                    />
+                    <div className="text-[10px] text-gray-400 mt-0.5">
+                      Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
                     </div>
                   </div>
                 </div>
@@ -4744,6 +4814,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             document.body
           );
         })()}
+
+      <datalist id="oak-storage-sublocations">
+        {COMMON_STORAGE_SUBLOCATIONS.map((subloc) => (
+          <option key={subloc} value={subloc} />
+        ))}
+      </datalist>
     </div>
   );
 }

@@ -26,6 +26,7 @@ export interface InventoryValuationItem {
   location_code: string;
   location_name: string;
   location_type: string;
+  storage_sublocation?: string | null;
   base_unit_code: string;
   quantity: string;
   unit_cost: string | null;
@@ -96,6 +97,7 @@ export interface StockTrackedProductOption {
   item_code: string | null;
   base_unit_code: string;
   track_stock: boolean;
+  storage_sublocation?: string | null;
 }
 
 export interface StockOpeningBalancePayload {
@@ -106,6 +108,7 @@ export interface StockOpeningBalancePayload {
   unit_cost: string;
   operation_key: string;
   notes?: string;
+  storage_sublocation?: string | null;
 }
 
 export interface StockLedgerCardData {
@@ -210,6 +213,7 @@ export interface GlobalStockMovementsFilterParams {
   warehouse_id?: number | null;
   location_id?: number | null;
   warehouse_code?: string | null;
+  storage_sublocation?: string | null;
   product_id?: number | null;
   start_date?: string | null;
   end_date?: string | null;
@@ -236,6 +240,7 @@ export interface GlobalStockMovementItem {
   location_code: string;
   location_name: string;
   location_type: string;
+  storage_sublocation?: string | null;
   operation_type: string;
   operation_category: string;
   operation_label: string;
@@ -278,6 +283,7 @@ export interface GlobalStockMovementPartitionSummary {
   location_id: number;
   location_code: string;
   location_name: string;
+  storage_sublocation?: string | null;
   base_unit_code: string;
   movement_count: number;
   opening_balance: string;
@@ -292,6 +298,7 @@ export interface GlobalStockMovementsReport {
   property_name: string;
   report_header_title: string;
   storage_sublocation_label: string;
+  available_sublocations?: string[];
   snapshot: {
     as_of_timestamp: string;
     as_of_wib: string;
@@ -301,6 +308,7 @@ export interface GlobalStockMovementsReport {
     warehouse_id: number | null;
     warehouse_code: string | null;
     warehouse_name: string | null;
+    storage_sublocation?: string | null;
     product_id: number | null;
     start_date: string | null;
     end_date: string | null;

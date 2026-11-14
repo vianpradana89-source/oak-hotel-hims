@@ -9,6 +9,7 @@ import {
   fetchInventoryValuation,
   fetchStockLocations,
   removeZeroStockBalanceFromLocation,
+  updateStockBalanceSublocation,
 } from './posInventoryApi';
 import type {
   StockLocation,
@@ -58,6 +59,7 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
   const [activeSubTab, setActiveSubTab] = useState<InventorySubTab>('VALUATION');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedLocationId, setSelectedLocationId] = useState<number | 'ALL'>('ALL');
+  const [selectedSublocation, setSelectedSublocation] = useState<string>('ALL');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [stockStatusFilter, setStockStatusFilter] = useState<StockStatusFilter>('ALL');
 
@@ -70,6 +72,10 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
   const [removeLocationItem, setRemoveLocationItem] = useState<InventoryValuationItem | null>(null);
   const [removingLocationItem, setRemovingLocationItem] = useState<boolean>(false);
   const [removeLocationError, setRemoveLocationError] = useState<string | null>(null);
+  const [editSublocationItem, setEditSublocationItem] = useState<InventoryValuationItem | null>(null);
+  const [editSublocationValue, setEditSublocationValue] = useState<string>('');
+  const [savingSublocation, setSavingSublocation] = useState<boolean>(false);
+  const [editSublocationError, setEditSublocationError] = useState<string | null>(null);
 
   // Row Overflow Menu (⋮) state keyed by `${product_id}-${location_id}`
   const [openRowMenuKey, setOpenRowMenuKey] = useState<string | null>(null);
@@ -196,9 +202,28 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
     return Array.from(set).sort();
   }, [items]);
 
+  // Distinct storage sublocations for filter
+  const sublocations = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((it) => {
+      if (it.storage_sublocation && it.storage_sublocation.trim()) {
+        set.add(it.storage_sublocation.trim());
+      }
+    });
+    return Array.from(set).sort();
+  }, [items]);
+
   // Filtered items
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
+      // Sublocation filter
+      if (selectedSublocation !== 'ALL') {
+        const sub = (item.storage_sublocation || '').trim();
+        if (sub.toLowerCase() !== selectedSublocation.toLowerCase()) {
+          return false;
+        }
+      }
+
       // Category filter
       if (selectedCategory !== 'ALL' && item.category_name !== selectedCategory) {
         return false;
@@ -212,7 +237,7 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
 
       return true;
     });
-  }, [items, selectedCategory, stockStatusFilter]);
+  }, [items, selectedSublocation, selectedCategory, stockStatusFilter]);
 
   // Aggregated status counts
   const statusCounts = useMemo(() => {
@@ -460,6 +485,22 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
             ))}
           </select>
 
+          {/* Storage Sublocation Filter */}
+          {sublocations.length > 0 && (
+            <select
+              value={selectedSublocation}
+              onChange={(e) => setSelectedSublocation(e.target.value)}
+              className="px-3 py-2 text-xs border border-gray-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700 cursor-pointer"
+            >
+              <option value="ALL">Semua Tempat Penyimpanan</option>
+              {sublocations.map((sub) => (
+                <option key={sub} value={sub}>
+                  📍 {sub}
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Category Filter */}
           {categories.length > 0 && (
             <select
@@ -540,6 +581,7 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
                   <th className="px-4 py-3">Produk &amp; SKU</th>
                   <th className="px-4 py-3">Kategori</th>
                   <th className="px-4 py-3">Lokasi</th>
+                  <th className="px-4 py-3">Tempat Penyimpanan</th>
                   <th className="px-4 py-3 text-right">Stok Tercatat</th>
                   <th className="px-4 py-3 text-center">Status</th>
                   <th className="px-4 py-3 text-right">Biaya Satuan (Rata-Rata)</th>
@@ -575,6 +617,32 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
                         <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-700 border border-gray-200">
                           {item.location_name}
                         </span>
+                      </td>
+
+                      {/* Storage Sublocation */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditSublocationError(null);
+                            setEditSublocationValue(item.storage_sublocation || '');
+                            setEditSublocationItem(item);
+                          }}
+                          title="Klik untuk mengatur atau mengubah Tempat Penyimpanan (Contoh: Showcase, Chiller, Rak)"
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border transition-colors cursor-pointer ${
+                            item.storage_sublocation
+                              ? 'bg-emerald-50 text-[#1b4332] border-emerald-200 hover:bg-emerald-100'
+                              : 'bg-stone-50 text-stone-400 border-dashed border-stone-300 hover:border-emerald-500 hover:text-emerald-700'
+                          }`}
+                        >
+                          {item.storage_sublocation ? (
+                            <>
+                              <span>📍 {item.storage_sublocation}</span>
+                            </>
+                          ) : (
+                            <span>+ Atur Tempat</span>
+                          )}
+                        </button>
                       </td>
 
                       {/* Recorded Stock Balance */}
@@ -743,6 +811,20 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
               onClick={() => {
                 setOpenRowMenuKey(null);
                 setRowMenuCoords(null);
+                setEditSublocationError(null);
+                setEditSublocationValue(activeRowItem.storage_sublocation || '');
+                setEditSublocationItem(activeRowItem);
+              }}
+              className="w-full text-left px-3 py-2 font-semibold text-stone-700 hover:bg-emerald-50 hover:text-emerald-900 flex items-center gap-2 transition-colors cursor-pointer"
+            >
+              <span>Atur Tempat Penyimpanan</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpenRowMenuKey(null);
+                setRowMenuCoords(null);
                 setAdjustmentItem(activeRowItem);
               }}
               className="w-full text-left px-3 py-2 font-semibold text-stone-700 hover:bg-amber-50 hover:text-amber-900 flex items-center gap-2 transition-colors cursor-pointer"
@@ -892,6 +974,137 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
         }
         onSuccess={() => handleActionSuccess('Transfer stok antar lokasi berhasil dikirim!')}
       />
+
+      {/* Edit Storage Sublocation Modal */}
+      {editSublocationItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-sublocation-title"
+            className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-md overflow-hidden"
+          >
+            <div className="px-6 py-4 bg-[#1b4332] text-white flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase font-bold tracking-wider text-[#d4af37]">
+                  Lokasi Gudang: {editSublocationItem.location_name}
+                </div>
+                <h3 id="edit-sublocation-title" className="text-sm font-extrabold text-white mt-0.5">
+                  Atur Tempat Penyimpanan — {editSublocationItem.product_name}
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={savingSublocation}
+                onClick={() => {
+                  setEditSublocationItem(null);
+                  setEditSublocationError(null);
+                }}
+                className="text-white/70 hover:text-white text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-6 space-y-3 text-xs text-gray-600">
+              {editSublocationError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 font-medium">
+                  {editSublocationError}
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Tempat Penyimpanan di {editSublocationItem.location_name}
+                </label>
+                <input
+                  type="text"
+                  list="workspace-sublocation-suggestions"
+                  placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen..."
+                  value={editSublocationValue}
+                  onChange={(e) => setEditSublocationValue(e.target.value)}
+                  disabled={savingSublocation}
+                  autoFocus
+                  className="w-full px-3 py-2 text-xs border border-gray-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                />
+                <datalist id="workspace-sublocation-suggestions">
+                  <option value="Showcase" />
+                  <option value="Chiller" />
+                  <option value="Freezer" />
+                  <option value="Rak Kering" />
+                  <option value="Lemari Linen" />
+                  <option value="Rak Amenities" />
+                  <option value="Gudang Kering" />
+                </datalist>
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {['Showcase', 'Chiller', 'Freezer', 'Rak Kering', 'Lemari Linen', 'Rak Amenities'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setEditSublocationValue(preset)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                        editSublocationValue === preset
+                          ? 'bg-[#1b4332] text-white border-[#1b4332]'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-emerald-50 hover:border-emerald-300'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="text-[11px] text-gray-500 bg-[#faf9f5] p-3 rounded-xl border border-gray-200/80">
+                Tempat penyimpanan ini akan tampil di sebelah kolom <strong>Lokasi</strong> pada tabel{' '}
+                <strong>Saldo &amp; Valuasi</strong>, <strong>Riwayat Mutasi</strong>, serta ikut tercetak pada{' '}
+                <strong>Laporan Mutasi Barang</strong>.
+              </p>
+            </div>
+            <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={savingSublocation}
+                onClick={() => {
+                  setEditSublocationItem(null);
+                  setEditSublocationError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 text-xs font-semibold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={savingSublocation}
+                onClick={async () => {
+                  setSavingSublocation(true);
+                  setEditSublocationError(null);
+                  try {
+                    await updateStockBalanceSublocation({
+                      property_id: activePropertyId,
+                      product_id: editSublocationItem.product_id,
+                      location_id: editSublocationItem.location_id,
+                      storage_sublocation: editSublocationValue.trim() || null,
+                    });
+                    const prodName = editSublocationItem.product_name;
+                    const locName = editSublocationItem.location_name;
+                    const subVal = editSublocationValue.trim();
+                    setEditSublocationItem(null);
+                    handleActionSuccess(
+                      subVal
+                        ? `Tempat penyimpanan "${prodName}" di ${locName} diatur ke "${subVal}".`
+                        : `Tempat penyimpanan "${prodName}" di ${locName} dikosongkan.`
+                    );
+                  } catch (err: any) {
+                    setEditSublocationError(err?.message || 'Gagal menyimpan tempat penyimpanan');
+                  } finally {
+                    setSavingSublocation(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-[#1b4332] hover:bg-[#2d6a4f] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {savingSublocation ? 'Menyimpan...' : 'Simpan Tempat Penyimpanan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Remove Zero-Stock Product from Location Confirmation Modal */}
       {removeLocationItem && (
