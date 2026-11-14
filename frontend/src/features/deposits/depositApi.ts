@@ -52,6 +52,10 @@ export interface Deposit {
   updated_at: string;
   events: DepositEvent[];
   balance: DepositBalance;
+  releaseEligible?: boolean;
+  releaseBlockReason?: string | null;
+  activeChildCount?: number;
+  groupLifecycleStatus?: string;
 }
 
 export interface IdentityCustodyRecord {
@@ -71,6 +75,10 @@ export interface IdentityCustodyRecord {
   returned_at?: string | null;
   created_at: string;
   updated_at: string;
+  releaseEligible?: boolean;
+  releaseBlockReason?: string | null;
+  activeChildCount?: number;
+  groupLifecycleStatus?: string;
 }
 
 const AUTH_TOKEN_KEY = 'oak_hims_auth_token';

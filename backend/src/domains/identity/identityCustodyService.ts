@@ -217,9 +217,9 @@ export async function returnIdentity(pool: Pool, input: {
         throw err;
       }
       const state = deriveGroupGuaranteeStateFromChildren(children, bookingId, input.propertyId);
-      if (!state.releaseEligible) {
+      if (!state.custodyReleaseEligible) {
         throw domainError(409, 'BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE',
-          state.releaseBlockReason || 'Group guarantee is not eligible for release');
+          state.custodyReleaseBlockReason || 'Group guarantee is not eligible for release');
       }
     }
 
@@ -287,7 +287,7 @@ export async function getIdentityCustodyByReservation(
   // Enrich group-scope rows with release metadata (read-only, no lock required).
   const client = await pool.connect();
   try {
-    await enrichGroupRowsWithReleaseMetadata(rows, client, propertyId);
+    await enrichGroupRowsWithReleaseMetadata(rows, client, propertyId, { target: 'IDENTITY_CUSTODY' });
   } finally {
     client.release();
   }

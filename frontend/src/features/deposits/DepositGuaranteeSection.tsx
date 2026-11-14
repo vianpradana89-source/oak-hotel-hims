@@ -494,6 +494,11 @@ export default function DepositGuaranteeSection({
               <div className="text-[10px] text-violet-600 mt-1.5">
                 Diterima: {fmtDt(actionableGroupCustody.created_at)} • Oleh: {actionableGroupCustody.received_by}
               </div>
+              {actionableGroupCustody.releaseEligible === false && actionableGroupCustody.releaseBlockReason && (
+                <div className="mt-2 px-2.5 py-1.5 bg-amber-50 border border-amber-200 rounded-md text-[11px] text-amber-800">
+                  Belum dapat dikembalikan: {actionableGroupCustody.releaseBlockReason}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -653,6 +658,11 @@ export default function DepositGuaranteeSection({
               onChange={e => (window as any).__reverseReason = e.target.value}
               placeholder="Masukkan alasan..." />
           </div>
+          {error && (
+            <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+              {error}
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <button onClick={() => { setShowReverse(false); setError(null); }}
               className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
@@ -691,6 +701,11 @@ export default function DepositGuaranteeSection({
           <p className="text-sm text-stone-600 mb-4">
             Mengembalikan {actionableRoomCustody.document_type} milik {actionableRoomCustody.document_holder_name}.
           </p>
+          {error && (
+            <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+              {error}
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <button onClick={() => { setShowReturnId(false); setError(null); }}
               className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
@@ -715,10 +730,20 @@ export default function DepositGuaranteeSection({
           <p className="text-sm text-stone-600 mb-4">
             Mengembalikan {actionableGroupCustody.document_type} milik {actionableGroupCustody.document_holder_name} (KTP Grup).
           </p>
+          {actionableGroupCustody.releaseEligible === false && actionableGroupCustody.releaseBlockReason && (
+            <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+              Belum dapat dikembalikan: {actionableGroupCustody.releaseBlockReason}
+            </div>
+          )}
+          {error && (
+            <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+              {error}
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <button onClick={() => { setShowGroupReturnId(false); setError(null); }}
               className="px-3 py-1.5 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
-            <button disabled={busy} onClick={async () => {
+            <button disabled={busy || actionableGroupCustody.releaseEligible === false} onClick={async () => {
               setBusy(true); setError(null);
               try {
                 await identityCustodyApi.returnDoc(actionableGroupCustody.id, propertyId);

@@ -38,6 +38,10 @@ export interface BookingGroupGuaranteeState {
   releaseEligible: boolean;
   /** Count of children still in an active state (BOOKED | CHECKED_IN). */
   activeChildCount: number;
+  /** Count of BOOKED children. */
+  bookedCount: number;
+  /** Count of CHECKED_IN children. */
+  checkedInCount: number;
   /** IDs of children blocking release (active ones). Empty when eligible. */
   blockingChildIds: number[];
   /** Total number of reservations in this booking. */
@@ -52,6 +56,15 @@ export interface BookingGroupGuaranteeState {
   unknownChildIds: number[];
   /** Human-readable reason shown to the operator when not eligible. */
   releaseBlockReason: string | null;
+  /**
+   * True when BOOKING_GROUP identity custody (KTP Grup) may be returned:
+   * - Either all children are in terminal states (CHECKED_OUT | CANCELLED), OR
+   * - Pre-check-in correction: no child has checked in or checked out yet
+   *   (checkedInCount === 0 && checkedOutCount === 0 && bookedCount > 0 && unknownStatusCount === 0).
+   */
+  custodyReleaseEligible: boolean;
+  /** Human-readable block reason for identity custody return when not eligible. */
+  custodyReleaseBlockReason: string | null;
 }
 
 // ─── Pure derive function (no DB I/O) ────────────────────────────────────────
@@ -70,6 +83,8 @@ export function deriveGroupGuaranteeStateFromChildren(
   propertyId: number
 ): BookingGroupGuaranteeState {
   let activeCount = 0;
+  let bookedCount = 0;
+  let checkedInCount = 0;
   let checkedOutCount = 0;
   let cancelledCount = 0;
   let unknownCount = 0;
@@ -78,8 +93,13 @@ export function deriveGroupGuaranteeStateFromChildren(
 
   for (const c of children) {
     const s = String(c.status || '').toUpperCase();
-    if (s === 'BOOKED' || s === 'CHECKED_IN') {
+    if (s === 'BOOKED') {
       activeCount++;
+      bookedCount++;
+      blockingIds.push(Number(c.id));
+    } else if (s === 'CHECKED_IN') {
+      activeCount++;
+      checkedInCount++;
       blockingIds.push(Number(c.id));
     } else if (s === 'CHECKED_OUT') {
       checkedOutCount++;
@@ -103,6 +123,8 @@ export function deriveGroupGuaranteeStateFromChildren(
       lifecycleTerminal: false,
       releaseEligible: false,
       activeChildCount: 0,
+      bookedCount: 0,
+      checkedInCount: 0,
       blockingChildIds: [],
       totalChildCount: 0,
       checkedOutCount: 0,
@@ -110,6 +132,8 @@ export function deriveGroupGuaranteeStateFromChildren(
       unknownStatusCount: 0,
       unknownChildIds: [],
       releaseBlockReason: 'Booking tidak memiliki reservasi tercakup',
+      custodyReleaseEligible: false,
+      custodyReleaseBlockReason: 'Booking tidak memiliki reservasi tercakup',
     };
   }
 
@@ -118,6 +142,18 @@ export function deriveGroupGuaranteeStateFromChildren(
   const allChildrenRecognizedTerminal = recognizedTerminalCount === total;
   const terminal = activeCount === 0 && unknownCount === 0 && allChildrenRecognizedTerminal;
   const releaseEligible = terminal;
+
+  // Identity custody (KTP Grup) release eligibility (Opsi A):
+  // - Eligible when all children are terminal (CHECKED_OUT / CANCELLED), OR
+  // - Eligible before any room in the group has started check-in/stay
+  //   (checkedInCount === 0 && checkedOutCount === 0 && bookedCount > 0 && unknownCount === 0).
+  const preCheckInCustodyEligible =
+    total > 0 &&
+    unknownCount === 0 &&
+    checkedInCount === 0 &&
+    checkedOutCount === 0 &&
+    bookedCount > 0;
+  const custodyReleaseEligible = terminal || preCheckInCustodyEligible;
 
   const lifecycleStatus = deriveLifecycleStatus(activeCount, checkedOutCount, cancelledCount, unknownCount, total);
   const releaseBlockReason = terminal
@@ -130,6 +166,14 @@ export function deriveGroupGuaranteeStateFromChildren(
         ? 'Status reservasi tercakup tidak dikenali'
         : 'Data tidak lengkap';
 
+  const custodyReleaseBlockReason = custodyReleaseEligible
+    ? null
+    : checkedInCount > 0
+      ? checkedInCount === 1
+        ? '1 kamar sedang check-in (check-out kamar terlebih dahulu)'
+        : `${checkedInCount} kamar sedang check-in (check-out kamar terlebih dahulu)`
+      : releaseBlockReason;
+
   return {
     bookingId,
     propertyId,
@@ -137,6 +181,8 @@ export function deriveGroupGuaranteeStateFromChildren(
     lifecycleTerminal: terminal,
     releaseEligible,
     activeChildCount: activeCount,
+    bookedCount,
+    checkedInCount,
     blockingChildIds: blockingIds,
     totalChildCount: total,
     checkedOutCount,
@@ -144,6 +190,8 @@ export function deriveGroupGuaranteeStateFromChildren(
     unknownStatusCount: unknownCount,
     unknownChildIds: unknownIds,
     releaseBlockReason,
+    custodyReleaseEligible,
+    custodyReleaseBlockReason,
   };
 }
 
@@ -224,7 +272,8 @@ export async function getBookingGroupGuaranteeReleaseState(
 export async function enrichGroupRowsWithReleaseMetadata<T extends Record<string, unknown>>(
   rows: T[],
   client: PoolClient,
-  propertyId: number
+  propertyId: number,
+  options?: { target?: 'DEPOSIT' | 'IDENTITY_CUSTODY' }
 ): Promise<void> {
   // Collect unique booking_ids from group-scope rows with integrity validation.
   const seenBookings = new Set<number>();
@@ -259,8 +308,11 @@ export async function enrichGroupRowsWithReleaseMetadata<T extends Record<string
     const bid = Number((row as any).booking_id);
     const state = stateCache.get(bid);
     if (!state) continue;
-    (row as any).releaseEligible = state.releaseEligible;
-    (row as any).releaseBlockReason = state.releaseBlockReason;
+    const isIdentityCustody =
+      options?.target === 'IDENTITY_CUSTODY' ||
+      ('document_type' in row && !('deposit_number' in row));
+    (row as any).releaseEligible = isIdentityCustody ? state.custodyReleaseEligible : state.releaseEligible;
+    (row as any).releaseBlockReason = isIdentityCustody ? state.custodyReleaseBlockReason : state.releaseBlockReason;
     (row as any).activeChildCount = state.activeChildCount;
     (row as any).groupLifecycleStatus = state.lifecycleStatus;
   }
