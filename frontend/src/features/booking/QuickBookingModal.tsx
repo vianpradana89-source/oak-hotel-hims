@@ -971,36 +971,30 @@ export default function QuickBookingModal({
 
    const [extractedKtpData, setExtractedKtpData] = useState<ExtractedIdentityData | null>(null);
 
-  // Build initial identity data for DETAIL mode from selectedCrmGuest (primary) or extractedKtpData (fallback for same-session uploads)
+  // Build initial identity data from selectedCrmGuest (primary) or extractedKtpData (fallback for same-session uploads)
   const initialIdentityDataForModal = useMemo<InitialIdentityData | null>(() => {
-    if (!selectedCrmGuest) return null;
+    if (!selectedCrmGuest && !extractedKtpData) return null;
     return {
-      full_name: selectedCrmGuest.full_name || '',
-      identity_number: selectedCrmGuest.identity_number,
-      birth_place: selectedCrmGuest.birth_place,
-      birth_date: selectedCrmGuest.birth_date,
-      gender: selectedCrmGuest.gender,
-      address: selectedCrmGuest.address,
-      rt_rw: selectedCrmGuest.rt_rw,
-      village_kelurahan: selectedCrmGuest.village_kelurahan,
-      district_kecamatan: selectedCrmGuest.district_kecamatan,
-      religion: selectedCrmGuest.religion,
-      marital_status: selectedCrmGuest.marital_status,
-      occupation: selectedCrmGuest.occupation,
-      citizenship: selectedCrmGuest.citizenship,
-      valid_until: selectedCrmGuest.valid_until,
-      identity_path: selectedCrmGuest.identity_path,
-      ktp_regency_id: selectedCrmGuest.ktp_regency_id,
-      ktp_ocr_confidence: selectedCrmGuest.ktp_ocr_confidence,
-      ktp_ocr_provider: selectedCrmGuest.ktp_ocr_provider,
+      full_name: selectedCrmGuest?.full_name || extractedKtpData?.full_name || guestName || '',
+      identity_number: selectedCrmGuest?.identity_number || extractedKtpData?.identity_number || identityNumber || null,
+      birth_place: selectedCrmGuest?.birth_place || extractedKtpData?.birth_place || null,
+      birth_date: selectedCrmGuest?.birth_date || extractedKtpData?.birth_date || null,
+      gender: selectedCrmGuest?.gender || extractedKtpData?.gender || null,
+      address: selectedCrmGuest?.address || extractedKtpData?.address || null,
+      rt_rw: selectedCrmGuest?.rt_rw || extractedKtpData?.rt_rw || null,
+      village_kelurahan: selectedCrmGuest?.village_kelurahan || extractedKtpData?.village_kelurahan || null,
+      district_kecamatan: selectedCrmGuest?.district_kecamatan || extractedKtpData?.district_kecamatan || null,
+      religion: selectedCrmGuest?.religion || extractedKtpData?.religion || null,
+      marital_status: selectedCrmGuest?.marital_status || extractedKtpData?.marital_status || null,
+      occupation: selectedCrmGuest?.occupation || extractedKtpData?.occupation || null,
+      citizenship: selectedCrmGuest?.citizenship || extractedKtpData?.citizenship || 'WNI',
+      valid_until: selectedCrmGuest?.valid_until || extractedKtpData?.valid_until || null,
+      identity_path: selectedCrmGuest?.identity_path || extractedKtpData?.file_path || ktpPath || null,
+      ktp_regency_id: selectedCrmGuest?.ktp_regency_id ?? extractedKtpData?.ktp_regency_id ?? null,
+      ktp_ocr_confidence: selectedCrmGuest?.ktp_ocr_confidence ?? extractedKtpData?.confidence ?? 1.0,
+      ktp_ocr_provider: selectedCrmGuest?.ktp_ocr_provider || extractedKtpData?.provider || 'MANUAL',
     };
-  }, [selectedCrmGuest?.id, selectedCrmGuest?.full_name, selectedCrmGuest?.identity_number,
-     selectedCrmGuest?.birth_place, selectedCrmGuest?.birth_date, selectedCrmGuest?.gender,
-     selectedCrmGuest?.address, selectedCrmGuest?.rt_rw, selectedCrmGuest?.village_kelurahan,
-     selectedCrmGuest?.district_kecamatan, selectedCrmGuest?.religion, selectedCrmGuest?.marital_status,
-     selectedCrmGuest?.occupation, selectedCrmGuest?.citizenship, selectedCrmGuest?.valid_until,
-     selectedCrmGuest?.identity_path, selectedCrmGuest?.ktp_regency_id,
-     selectedCrmGuest?.ktp_ocr_confidence, selectedCrmGuest?.ktp_ocr_provider]);
+  }, [selectedCrmGuest, extractedKtpData, guestName, identityNumber, ktpPath]);
 
   // OCR Identity confirmation
   const handleIdentityConfirmed = (data: ExtractedIdentityData, savedGuest?: Guest | null) => {

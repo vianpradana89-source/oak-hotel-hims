@@ -422,11 +422,11 @@ export default function IdentityExtractionModal({
   const [formValidUntil, setFormValidUntil] = useState('');
   const [formKtpRegencyId, setFormKtpRegencyId] = useState<number | null>(null);
 
-  // Secure existing KTP photo in DETAIL mode
-  const existingPhotoPath = (mode === 'DETAIL' && initialIdentityData?.identity_path) || null;
+  // Secure existing KTP photo when initialIdentityData provides identity_path
+  const existingPhotoPath = initialIdentityData?.identity_path || null;
   const { blobUrl: secureExistingBlobUrl } = useSecureDocumentBlob(
     existingPhotoPath,
-    mode === 'DETAIL' && Boolean(existingPhotoPath)
+    isOpen && Boolean(existingPhotoPath)
   );
 
   // Effective preview: new upload takes priority over secure existing blob
@@ -483,8 +483,11 @@ export default function IdentityExtractionModal({
     if (cameraInputRef.current) cameraInputRef.current.value = '';
   }, []);
 
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
       resetModalState();
 
       // Fetch provinces on open
@@ -497,54 +500,73 @@ export default function IdentityExtractionModal({
         })
         .catch(() => {});
 
-      // DETAIL mode: pre-populate form from existing identity data
-      if (mode === 'DETAIL' && initialIdentityData) {
-        const d = initialIdentityData;
-        setFormName(d.full_name || '');
-        setFormNik(d.identity_number || '');
-        setFormBirthPlace(d.birth_place || '');
-        setFormBirthDate(normalizeDateForHtmlInput(d.birth_date));
-        setFormGender((d.gender === 'MALE' || d.gender === 'FEMALE') ? d.gender : '');
-        setFormAddress(d.address || '');
-        setFormRtRw(d.rt_rw || '');
-        setFormKelurahan(d.village_kelurahan || '');
-        setFormKecamatan(d.district_kecamatan || '');
-        setFormAgama(d.religion || '');
-        setFormStatus(d.marital_status || '');
-        setFormPekerjaan(d.occupation || '');
-        setFormCitizenship(d.citizenship || '');
-        setFormValidUntil(d.valid_until || '');
-        setFormKtpRegencyId(d.ktp_regency_id || null);
+      // Always initialize form & extractedData immediately on open (no intermediate chooser step)
+      const d = initialIdentityData;
+      const defaultName = d?.full_name || _guestName || '';
+      const defaultCitizenship = d?.citizenship || 'WNI';
+      setFormName(defaultName);
+      setFormNik(d?.identity_number || '');
+      setFormBirthPlace(d?.birth_place || '');
+      setFormBirthDate(normalizeDateForHtmlInput(d?.birth_date));
+      setFormGender((d?.gender === 'MALE' || d?.gender === 'FEMALE') ? d.gender : '');
+      setFormAddress(d?.address || '');
+      setFormRtRw(d?.rt_rw || '');
+      setFormKelurahan(d?.village_kelurahan || '');
+      setFormKecamatan(d?.district_kecamatan || '');
+      setFormAgama(d?.religion || '');
+      setFormStatus(d?.marital_status || '');
+      setFormPekerjaan(d?.occupation || '');
+      setFormCitizenship(defaultCitizenship);
+      setFormValidUntil(d?.valid_until || '');
+      setFormKtpRegencyId(d?.ktp_regency_id || null);
 
-        setExtractedData({
-          full_name: d.full_name || '',
-          identity_number: d.identity_number || '',
-          birth_place: d.birth_place || undefined,
-          birth_date: d.birth_date || undefined,
-          gender: (d.gender === 'MALE' || d.gender === 'FEMALE') ? d.gender : undefined,
-          address: d.address || undefined,
-          rt_rw: d.rt_rw || undefined,
-          village_kelurahan: d.village_kelurahan || undefined,
-          district_kecamatan: d.district_kecamatan || undefined,
-          religion: d.religion || undefined,
-          marital_status: d.marital_status || undefined,
-          occupation: d.occupation || undefined,
-          citizenship: d.citizenship || undefined,
-          valid_until: d.valid_until || undefined,
-          confidence: (d.ktp_ocr_confidence ?? 1.0) as number,
-          recognized_fields_count: 0,
-          total_fields_count: 13,
-          provider: d.ktp_ocr_provider || 'MANUAL',
-          file_path: d.identity_path || '',
-          document_upload_id: null,
-          ktp_regency_id: d.ktp_regency_id || null,
-          raw_lines: []
-        });
-      }
-    } else {
+      setExtractedData({
+        full_name: defaultName,
+        identity_number: d?.identity_number || '',
+        birth_place: d?.birth_place || undefined,
+        birth_date: d?.birth_date || undefined,
+        gender: (d?.gender === 'MALE' || d?.gender === 'FEMALE') ? d.gender : undefined,
+        address: d?.address || undefined,
+        rt_rw: d?.rt_rw || undefined,
+        village_kelurahan: d?.village_kelurahan || undefined,
+        district_kecamatan: d?.district_kecamatan || undefined,
+        religion: d?.religion || undefined,
+        marital_status: d?.marital_status || undefined,
+        occupation: d?.occupation || undefined,
+        citizenship: defaultCitizenship,
+        valid_until: d?.valid_until || undefined,
+        confidence: (d?.ktp_ocr_confidence ?? 1.0) as number,
+        recognized_fields_count: 0,
+        total_fields_count: 13,
+        provider: d?.ktp_ocr_provider || 'MANUAL',
+        file_path: d?.identity_path || '',
+        document_upload_id: null,
+        ktp_regency_id: d?.ktp_regency_id || null,
+        raw_lines: []
+      });
+    } else if (isOpen && wasOpenRef.current && initialIdentityData) {
+      // If CRM guest data finishes loading while modal is already open, fill only empty fields without resetting uploaded photo
+      const d = initialIdentityData;
+      if (d.full_name) setFormName(prev => prev || d.full_name || "");
+      if (d.identity_number) setFormNik(prev => prev || d.identity_number || "");
+      if (d.birth_place) setFormBirthPlace(prev => prev || d.birth_place || "");
+      if (d.birth_date) setFormBirthDate(prev => prev || normalizeDateForHtmlInput(d.birth_date));
+      if (d.gender === 'MALE' || d.gender === 'FEMALE') { const g = d.gender; setFormGender(prev => prev || g); }
+      if (d.address) setFormAddress(prev => prev || d.address || "");
+      if (d.rt_rw) setFormRtRw(prev => prev || d.rt_rw || "");
+      if (d.village_kelurahan) setFormKelurahan(prev => prev || d.village_kelurahan || "");
+      if (d.district_kecamatan) setFormKecamatan(prev => prev || d.district_kecamatan || "");
+      if (d.religion) setFormAgama(prev => prev || d.religion || "");
+      if (d.marital_status) setFormStatus(prev => prev || d.marital_status || "");
+      if (d.occupation) setFormPekerjaan(prev => prev || d.occupation || "");
+      if (d.citizenship) setFormCitizenship(prev => prev || d.citizenship || "");
+      if (d.valid_until) setFormValidUntil(prev => prev || d.valid_until || "");
+      if (d.ktp_regency_id) setFormKtpRegencyId(prev => prev ?? d.ktp_regency_id ?? null);
+    } else if (!isOpen && wasOpenRef.current) {
+      wasOpenRef.current = false;
       resetModalState();
     }
-  }, [isOpen, resetModalState, mode, initialIdentityData]);
+  }, [isOpen, resetModalState, mode, initialIdentityData, _guestName]);
 
   const startCamera = async (mode: 'environment' | 'user' = facingMode) => {
     try {
@@ -587,10 +609,8 @@ export default function IdentityExtractionModal({
     canvas.toBlob((blob) => {
       if (blob) {
         const capturedFile = new File([blob], `scan-ktp-${Date.now()}.jpg`, { type: 'image/jpeg' });
-        setFile(capturedFile);
-        setPreviewUrl(URL.createObjectURL(blob));
         stopCamera();
-        processFileExtraction(capturedFile);
+        processReplacementUpload(capturedFile);
       }
     }, 'image/jpeg', 0.95);
   };
@@ -676,7 +696,7 @@ export default function IdentityExtractionModal({
       );
       setScanSuccessBanner(null);
       setInfoBanner(
-        `Foto KTP berhasil diperbarui (ID baru: ${newDocumentUploadId.slice(0, 8)}…).`
+        `Dokumen KTP berhasil diunggah dan tersimpan (ID: ${newDocumentUploadId.slice(0, 8)}…).`
       );
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal mengganti foto KTP.');
@@ -793,6 +813,10 @@ export default function IdentityExtractionModal({
   const handleConfirm = async () => {
     const finalData = getFinalData();
 
+    if (!finalData.document_upload_id && !existingPhotoPath) {
+      setErrorMsg('Harap unggah atau ambil foto KTP terlebih dahulu pada bagian atas formulir.');
+      return;
+    }
     if (!finalData.full_name) {
       setErrorMsg('Nama lengkap KTP wajib diisi.');
       return;
@@ -817,8 +841,9 @@ export default function IdentityExtractionModal({
       setSaving(true);
       setErrorMsg(null);
 
-      // DETAIL mode without new photo: use PATCH /api/guests/:id
-      if (mode === 'DETAIL' && guestId && !finalData.document_upload_id) {
+      // Existing photo without new photo upload: use PATCH /api/guests/:id
+      const patchTargetGuestId = guestId || expectedPrimaryGuestId;
+      if (patchTargetGuestId && existingPhotoPath && !finalData.document_upload_id) {
         const patchPayload = {
           property_id: propertyId || 1,
           full_name: finalData.full_name,
@@ -839,7 +864,7 @@ export default function IdentityExtractionModal({
           ktp_regency_id: isIndonesian ? formKtpRegencyId : null
         };
 
-        const res = await authenticatedFetch(`/api/guests/${guestId}`, {
+        const res = await authenticatedFetch(`/api/guests/${patchTargetGuestId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patchPayload)
@@ -1072,50 +1097,48 @@ export default function IdentityExtractionModal({
               </div>
             )}
 
-            {!file && !extractedData && !isCameraActive && mode === 'UPLOAD' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Option 1: Live Camera Capture */}
-                <button
-                  type="button"
-                  onClick={() => startCamera('environment')}
-                  className="border-2 border-dashed border-emerald-800/40 hover:border-emerald-700 bg-white hover:bg-emerald-50/40 rounded-2xl p-5 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 group shadow-2xs"
-                >
-                  <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-800 group-hover:scale-110 flex items-center justify-center transition-transform shadow-xs">
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-stone-800 group-hover:text-emerald-900">
-                      Gunakan Kamera / Webcam
-                    </p>
-                    <p className="text-[11px] text-stone-500">Ambil foto KTP / Paspor langsung secara live</p>
-                  </div>
-                </button>
-
-                {/* Option 2: Upload Image File */}
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-stone-300 hover:border-emerald-700 bg-white hover:bg-stone-50 rounded-2xl p-5 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 group shadow-2xs"
-                >
-                  <div className="w-12 h-12 rounded-full bg-stone-100 text-stone-700 group-hover:bg-emerald-100 group-hover:text-emerald-800 group-hover:scale-110 flex items-center justify-center transition-transform shadow-xs">
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-stone-800 group-hover:text-emerald-900">
-                      Pilih File dari Perangkat
-                    </p>
-                    <p className="text-[11px] text-stone-500">Mendukung file JPG, PNG, atau WebP</p>
-                  </div>
-                </button>
+            {/* Loading indicator while uploading photo */}
+            {extracting && (
+              <div className="flex items-center justify-center gap-2.5 p-4 bg-white rounded-xl border border-emerald-200 text-xs text-emerald-900 shadow-xs">
+                <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin shrink-0" />
+                <span className="font-semibold">Menyimpan foto KTP ke server...</span>
               </div>
             )}
 
-             {/* KTP Preview with toolbar */}
+            {/* Compact Upload Box at top of form when no photo is present yet */}
+            {!effectivePreviewUrl && !isCameraActive && !extracting && (
+              <div className="flex flex-col items-center gap-3 p-4 bg-white rounded-xl border-2 border-dashed border-emerald-800/30 shadow-xs">
+                <div className="text-center space-y-0.5">
+                  <p className="text-xs font-bold text-stone-800">Foto KTP Tamu Belum Diunggah</p>
+                  <p className="text-[11px] text-stone-500">Pilih file gambar KTP (JPG/PNG/WebP) atau ambil foto langsung menggunakan kamera</p>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2.5 w-full">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    Unggah Foto KTP
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => startCamera('environment')}
+                    className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold border border-stone-300 flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Gunakan Kamera
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* KTP Preview with toolbar */}
             {effectivePreviewUrl && !extracting && (
               <div className="flex flex-col items-center gap-2 p-3.5 bg-white rounded-xl border border-stone-200 shadow-xs">
                 {/* Compact KTP preview — constrained to modal width, rotation-safe overflow */}
@@ -1127,13 +1150,13 @@ export default function IdentityExtractionModal({
                     style={{ transform: `rotate(${ktpRotation}deg)` }}
                   />
                 </div>
-                {/* Toolbar: Putar 90° and Ganti Foto compact, same row */}
-                <div className="flex items-center gap-2 w-full justify-center">
+                {/* Toolbar: Putar 90°, Ganti Foto, Gunakan Kamera */}
+                <div className="flex items-center gap-2 w-full justify-center flex-wrap">
                   <button
                     type="button"
                     onClick={() => setKtpRotation(r => (r + 90) % 360)}
                     title="Putar 90° searah jarum jam"
-                    className="px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg text-xs font-medium border border-emerald-300 flex items-center gap-1 transition-colors"
+                    className="px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg text-xs font-medium border border-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -1144,16 +1167,28 @@ export default function IdentityExtractionModal({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     title="Ganti Foto KTP"
-                    className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium border border-stone-300 flex items-center gap-1 transition-colors"
+                    className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium border border-stone-300 flex items-center gap-1 transition-colors cursor-pointer"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                     </svg>
                     Ganti Foto
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => startCamera('environment')}
+                    title="Ambil Foto dengan Kamera"
+                    className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium border border-stone-300 flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Kamera
+                  </button>
                 </div>
                 <div className="text-[10px] text-stone-400 font-mono truncate w-full text-center">
-                  {file ? (file?.name + ' · ' + (file?.size ? (file.size / 1024).toFixed(0) : '—') + ' KB') : (mode === 'DETAIL' ? 'Foto KTP Existing' : '')}
+                  {file ? (file?.name + ' · ' + (file?.size ? (file.size / 1024).toFixed(0) : '—') + ' KB') : (existingPhotoPath ? 'Foto KTP Tersimpan' : '')}
                 </div>
               </div>
             )}
@@ -1173,9 +1208,9 @@ export default function IdentityExtractionModal({
                 <button
                   type="button"
                   onClick={() => { fileInputRef.current?.click(); }}
-                  className="text-stone-500 hover:text-stone-800 text-xs underline font-medium"
+                  className="text-stone-500 hover:text-stone-800 text-xs underline font-medium cursor-pointer"
                 >
-                  Ganti Foto
+                  {effectivePreviewUrl ? 'Ganti Foto' : 'Unggah Foto'}
                 </button>
               </div>
 

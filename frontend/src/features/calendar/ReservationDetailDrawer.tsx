@@ -878,6 +878,7 @@ export default function ReservationDetailDrawer({
       if (!detailData?.id || !activePropId) return;
       setIsIdentityModalOpen(false);
       await loadFullReservation(detailData.id);
+      setGuestCrmRetryCount((prev) => prev + 1);
       onRefresh();
     };
 
@@ -2907,6 +2908,27 @@ export default function ReservationDetailDrawer({
              relinkReservationPrimaryGuest={true}
              propertyId={activePropId}
              context="CHECKIN_IDENTITY_SCAN"
+             mode={Boolean(ktpDocPath || ktpIdentityVerified || ktpIdentityAttached) ? 'DETAIL' : 'UPLOAD'}
+             initialIdentityData={{
+               full_name: guestCrmData?.full_name || primaryGuestName || data.guest_name || '',
+               identity_number: guestCrmData?.identity_number || ktpIdentityNumber || null,
+               birth_place: guestCrmData?.birth_place || null,
+               birth_date: guestCrmData?.birth_date || null,
+               gender: guestCrmData?.gender || null,
+               address: guestCrmData?.address || null,
+               rt_rw: guestCrmData?.rt_rw || null,
+               village_kelurahan: guestCrmData?.village_kelurahan || null,
+               district_kecamatan: guestCrmData?.district_kecamatan || null,
+               religion: guestCrmData?.religion || null,
+               marital_status: guestCrmData?.marital_status || null,
+               occupation: guestCrmData?.occupation || null,
+               citizenship: guestCrmData?.citizenship || 'WNI',
+               valid_until: guestCrmData?.valid_until || null,
+               ktp_regency_id: guestCrmData?.ktp_regency_id || null,
+               identity_path: ktpDocPath || guestCrmData?.identity_path || null,
+               ktp_ocr_provider: guestCrmData?.ktp_ocr_provider || 'MANUAL',
+               ktp_ocr_confidence: guestCrmData?.ktp_ocr_confidence ?? 1.0,
+             }}
              onScanSuccess={handleIdentityScanSuccess}
              onIdentityConfirmed={handleIdentityConfirmed}
            />
