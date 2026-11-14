@@ -1,18 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   formatReservationStayType,
+  formatTransactionBusinessDate,
   stayTypeBadgeClass,
   getPurchaseReceivingClass,
-  getPurchaseWorkflowClass,
   isTransactionEditable,
   isTransactionVerificationEditable
 } from './transactionDomainTypes';
-import { formatStayShortDate } from './penjualanBidGrouping';
 import type {
   TransactionRecord,
   TransactionAttachment,
   VerificationStatus,
-  ReceivingStatus,
   AttachmentPurpose
 } from './transactionDomainTypes';
 import {
@@ -21,7 +19,6 @@ import {
   deleteTransactionAttachmentApi,
   settleTransactionPaymentApi,
   updatePurchaseLifecycleApi,
-  updateExpenseLifecycleApi,
   verifyTransactionApi,
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
@@ -98,9 +95,12 @@ interface TransactionDetailDrawerProps {
   onOpenSoftDeleteModal?: (tx: TransactionRecord) => void;
   /** EDIT-1B: Open expense editor in edit mode */
   onEditExpense?: (tx: TransactionRecord) => void;
+  /** Open purchase editor in edit mode */
+  onEditPurchase?: (tx: TransactionRecord) => void;
   onNavigateToReservation?: (reservationId: number) => void;
   onNavigateToFolio?: (reservationId: number) => void;
   onTransactionUpdated?: () => void;
+  onNavigateToInventory?: () => void;
 }
 
 export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = ({
@@ -113,9 +113,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   onOpenVoidModal,
   onOpenSoftDeleteModal,
   onEditExpense,
+  onEditPurchase,
   onNavigateToReservation,
   onNavigateToFolio,
-  onTransactionUpdated
+  onTransactionUpdated,
+  onNavigateToInventory
 }) => {
   const [data, setData] = useState<TransactionRecord | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -134,11 +136,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const [verifyNote, setVerifyNote] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // Receiving Status Form State
-  const [isUpdatingReceiving, setIsUpdatingReceiving] = useState(false);
-
   // Workflow Status Form State
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
+
+  // Approval Status Form State
+  const [isUpdatingApproval, setIsUpdatingApproval] = useState(false);
 
   // Attachment Upload
   const [uploadingPurpose, setUploadingPurpose] = useState<AttachmentPurpose>('RECEIPT');
@@ -214,10 +216,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     const map: Record<string, string> = {
       RECEIPT: 'Bukti Nota / Struk',
       PAYMENT_PROOF: 'Bukti Bayar / Transfer',
-      INVOICE: 'Invoice',
-      OTHER: 'Lainnya',
+      INVOICE: 'Faktur Tagihan',
+      OTHER: 'Dokumen Lain',
     };
-    return map[purpose ?? ''] || purpose || 'BUKTI';
+    return map[purpose ?? ''] || purpose || 'Dokumen Lain';
   };
 
   // PURCHASE-2C3: Copy bank account with toast
@@ -233,6 +235,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const handleSettleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tx) return;
+    if (!canSettle || settleCeiling <= 0) {
+      setShowSettleForm(false);
+      return;
+    }
     const numAmt = Math.round(Number(settleAmount) || 0);
     if (numAmt <= 0) {
       alert('Nominal pelunasan harus lebih dari Rp 0');
@@ -286,55 +292,50 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     }
   };
 
-  const handleReceivingChange = async (newStatus: ReceivingStatus) => {
-    if (!tx || isUpdatingReceiving) return;
-    setIsUpdatingReceiving(true);
+  const handleArchiveToggle = async () => {
+    if (!tx || isUpdatingWorkflow || tx.transaction_type !== 'PURCHASE') return;
+    const isArchived = Boolean(tx.archived_at) || String(tx.workflow_status || '').toUpperCase() === 'ARCHIVED';
+    setIsUpdatingWorkflow(true);
     try {
       await updatePurchaseLifecycleApi(tx.id, {
         property_id: propertyId,
-        action: 'SET_RECEIVING',
-        receiving_status: newStatus,
-        actor_name: currentStaffName
+        action: isArchived ? 'UNARCHIVE' : 'ARCHIVE',
+        actor_name: currentStaffName,
+        actor_user_id: currentUserId || undefined,
       });
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui status penerimaan');
+      alert(err.message || 'Gagal memperbarui status arsip pembelian');
     } finally {
-      setIsUpdatingReceiving(false);
+      setIsUpdatingWorkflow(false);
     }
   };
 
-  const handleWorkflowChange = async (newWorkflow: string) => {
-    if (!tx || isUpdatingWorkflow) return;
-    setIsUpdatingWorkflow(true);
+  const handleApprovalChange = async (newApproval: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED') => {
+    if (!tx || isUpdatingApproval || tx.transaction_type !== 'PURCHASE') return;
+    let reason: string | null = null;
+    if (newApproval === 'REJECTED') {
+      const input = window.prompt('Masukkan alasan penolakan persetujuan pembelian:');
+      if (!input || !input.trim()) return;
+      reason = input.trim();
+    }
+    setIsUpdatingApproval(true);
     try {
-      // BLOCKER 3 FIX: route only for types that support lifecycle workflow mutations.
-      // Only EXPENSE and PURCHASE have workflow_status columns; other types (SALE, INCOME)
-      // must not fall through to purchase endpoint.
-      if (tx.transaction_type === 'EXPENSE') {
-        await updateExpenseLifecycleApi(tx.id, {
-          property_id: propertyId,
-          action: 'SET_WORKFLOW',
-          workflow_status: newWorkflow,
-          actor_name: currentStaffName
-        });
-      } else if (tx.transaction_type === 'PURCHASE') {
-        await updatePurchaseLifecycleApi(tx.id, {
-          property_id: propertyId,
-          action: 'SET_WORKFLOW',
-          workflow_status: newWorkflow,
-          actor_name: currentStaffName
-        });
-      } else {
-        return; // No workflow mutation for other transaction types
-      }
+      await updatePurchaseLifecycleApi(tx.id, {
+        property_id: propertyId,
+        action: 'SET_APPROVAL',
+        approval_status: newApproval,
+        reason,
+        actor_name: currentStaffName,
+        actor_user_id: currentUserId || undefined
+      });
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui status alur');
+      alert(err.message || 'Gagal memperbarui status persetujuan pembelian');
     } finally {
-      setIsUpdatingWorkflow(false);
+      setIsUpdatingApproval(false);
     }
   };
 
@@ -432,7 +433,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {tx ? `${formatStayShortDate(tx.transaction_date)} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
+                {tx ? `${formatTransactionBusinessDate(tx.transaction_date)} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
               </p>
             </div>
           </div>
@@ -535,46 +536,119 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {tx.transaction_type === 'PURCHASE' && (
                   <>
                     <div>
-                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Fisik</span>
-                      {(() => {
-                        const rc = getPurchaseReceivingClass(tx.receiving_status || 'BELUM_DITERIMA');
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Otorisasi PO</span>
+                      {tx.po_id ? (
+                        <div className="mt-1 flex flex-col gap-0.5">
+                          <span className="inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 w-fit">
+                            Disetujui via PO
+                          </span>
+                          <span className="text-[10px] font-mono font-bold text-slate-600">
+                            {tx.po_number || `PO #${tx.po_id}`}
+                          </span>
+                        </div>
+                      ) : (() => {
+                        const appStatus = tx.approval_status || 'PENDING_APPROVAL';
+                        const appClass =
+                          appStatus === 'APPROVED'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : appStatus === 'REJECTED'
+                            ? 'bg-rose-50 border-rose-200 text-rose-800'
+                            : 'bg-amber-50 border-amber-200 text-amber-800';
                         return (
-                          <select
-                            value={tx.receiving_status || 'BELUM_DITERIMA'}
-                            onChange={(e) => handleReceivingChange(e.target.value as ReceivingStatus)}
-                            disabled={isUpdatingReceiving || !isTransactionEditable(tx)}
-                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${rc.bg} ${rc.border} ${rc.text} border hover:bg-opacity-80 disabled:opacity-60`}
-                          >
-                            <option value="BELUM_DITERIMA">Belum Diterima</option>
-                            <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                            <option value="DITERIMA">Diterima</option>
-                            <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
-                          </select>
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <select
+                              value={appStatus}
+                              onChange={(e) => handleApprovalChange(e.target.value as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED')}
+                              disabled={isUpdatingApproval || tx.transaction_status !== 'POSTED'}
+                              className={`text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer border ${appClass} disabled:opacity-60`}
+                            >
+                              <option value="PENDING_APPROVAL">Menunggu</option>
+                              <option value="APPROVED">Disetujui</option>
+                              <option value="REJECTED">Ditolak</option>
+                            </select>
+                          </div>
                         );
                       })()}
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Status Alur</span>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Barang</span>
                       {(() => {
-                        const ws = tx.operational_sheet || 'PROSES';
-                        const wc = getPurchaseWorkflowClass(ws);
-                        if (ws === 'BATAL' || ws === 'HAPUS') {
-                          return (
-                            <span className={`inline-flex items-center text-xs font-bold mt-1 ${wc.bg} ${wc.border} ${wc.text} border rounded-md px-2 py-0.5 cursor-default`}>
-                              {ws === 'BATAL' ? 'Batal' : 'Dihapus'}
-                            </span>
-                          );
-                        }
+                        const recvStatus = tx.receiving_status || 'BELUM_DITERIMA';
+                        const isFullReceived = recvStatus === 'DITERIMA' || recvStatus === 'DITERIMA_LENGKAP';
+                        const rc = getPurchaseReceivingClass(recvStatus);
+                        const label = isFullReceived
+                          ? 'Diterima Lengkap'
+                          : recvStatus === 'DITERIMA_SEBAGIAN'
+                          ? 'Diterima Sebagian'
+                          : 'Belum Diterima';
                         return (
-                          <select
-                            value={ws}
-                            onChange={(e) => handleWorkflowChange(e.target.value)}
-                            disabled={isUpdatingWorkflow}
-                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${wc.bg} ${wc.border} ${wc.text} border hover:bg-opacity-80 disabled:opacity-60`}
-                          >
-                            <option value="PROSES">Proses</option>
-                            <option value="SELESAI">Selesai</option>
-                          </select>
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            <span
+                              className={`inline-flex items-center text-xs font-bold rounded-lg px-2.5 py-0.5 border ${rc.bg} ${rc.border} ${rc.text}`}
+                              title="Status penerimaan barang stok mengikuti dokumen Penerimaan Barang (GRN) yang di-Post"
+                            >
+                              {label}
+                            </span>
+                            {tx.approval_status === 'APPROVED' && !isFullReceived && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  try {
+                                    sessionStorage.setItem('oak_hims_pending_grn_purchase_tx_id', String(tx.id));
+                                  } catch { /* ignore */ }
+                                  onClose();
+                                  if (onNavigateToInventory) onNavigateToInventory();
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white rounded-md transition-colors cursor-pointer"
+                              >
+                                Terima Barang
+                              </button>
+                            )}
+                            {isFullReceived && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  try {
+                                    sessionStorage.setItem(
+                                      'oak_hims_pending_grn_search',
+                                      String(tx.po_number || tx.transaction_no || '')
+                                    );
+                                  } catch { /* ignore */ }
+                                  onClose();
+                                  if (onNavigateToInventory) onNavigateToInventory();
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-md transition-colors cursor-pointer"
+                              >
+                                Lihat Penerimaan
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Arsip Dokumen</span>
+                      {(() => {
+                        const isArchived = Boolean(tx.archived_at) || String(tx.workflow_status || '').toUpperCase() === 'ARCHIVED';
+                        return (
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <span className={`inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-md border ${
+                              isArchived ? 'bg-slate-200 text-slate-700 border-slate-300' : 'bg-white text-slate-700 border-slate-200'
+                            }`}>
+                              {isArchived ? 'Diarsipkan' : 'Aktif'}
+                            </span>
+                            {tx.transaction_status === 'POSTED' && (
+                              <button
+                                type="button"
+                                disabled={isUpdatingWorkflow}
+                                onClick={() => void handleArchiveToggle()}
+                                className="text-[10px] font-bold text-slate-600 hover:text-emerald-800 underline cursor-pointer disabled:opacity-50"
+                                title="Tindakan administratif penyimpanan arsip (bukan pembatalan, pelunasan, atau penerimaan)"
+                              >
+                                {isArchived ? 'Buka Arsip' : 'Arsipkan'}
+                              </button>
+                            )}
+                          </div>
                         );
                       })()}
                     </div>
@@ -586,7 +660,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
               {tx.verification_status && tx.verification_status !== 'UNVERIFIED' && (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <div className="text-[11px] font-bold text-slate-800 flex items-center justify-between">
-                    <span>Diverifikasi oleh: {tx.verified_by_name_snapshot || 'Auditor'}</span>
+                    <span>Pemeriksaan Tagihan oleh: {tx.verified_by_name_snapshot || 'Auditor'}</span>
                     <span className="text-slate-400 font-normal">
                       {tx.verified_at ? new Date(tx.verified_at).toLocaleString('id-ID') : ''}
                     </span>
@@ -594,6 +668,110 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   {tx.verification_note && (
                     <div className="text-[11px] text-slate-600 italic">"{tx.verification_note}"</div>
                   )}
+                </div>
+              )}
+
+              {/* Tahap 1A: PO Variance Alert & Linked Goods Receipts */}
+              {tx.transaction_type === 'PURCHASE' && tx.has_po_variance && (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl space-y-1.5 text-amber-900">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span>⚠</span>
+                    <span>Selisih terhadap PO Terdeteksi ({tx.po_number || `PO #${tx.po_id}`})</span>
+                  </div>
+                  {typeof tx.po_variance_summary === 'string' && tx.po_variance_summary.trim() !== '' ? (
+                    <div className="text-[11px] text-amber-800">{tx.po_variance_summary}</div>
+                  ) : tx.po_variance_summary &&
+                    typeof tx.po_variance_summary === 'object' &&
+                    Array.isArray((tx.po_variance_summary as any).variances) &&
+                    (tx.po_variance_summary as any).variances.length > 0 ? (
+                    <ul className="text-[11px] text-amber-800 list-disc pl-4 space-y-0.5">
+                      {(tx.po_variance_summary as any).variances.map((v: any, idx: number) => (
+                        <li key={idx}>
+                          {v.type === 'LINE_VARIANCE' ? (
+                            <>
+                              <strong>{v.description || `Baris #${v.line_index}`}</strong>:{' '}
+                              {Number(v.po_unit_price) !== Number(v.invoice_unit_price) && (
+                                <span>
+                                  Harga PO {formatIdr(Number(v.po_unit_price || 0))} &rarr; Nota{' '}
+                                  {formatIdr(Number(v.invoice_unit_price || 0))}
+                                  {Number(v.po_qty) !== Number(v.invoice_qty) ? ' • ' : ''}
+                                </span>
+                              )}
+                              {Number(v.po_qty) !== Number(v.invoice_qty) && (
+                                <span>
+                                  Qty PO {v.po_qty} &rarr; Nota {v.invoice_qty}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span>{v.message || v.description || 'Selisih baris tagihan terhadap PO'}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-[11px] text-amber-800">
+                      Terdapat perbedaan harga satuan atau kuantitas antara PO dan Nota tagihan aktual.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {tx.transaction_type === 'PURCHASE' && tx.linked_goods_receipts && tx.linked_goods_receipts.length > 0 && (
+                <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      Dokumen Penerimaan Barang (GRN Terkait: {tx.linked_goods_receipts.length})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        try {
+                          sessionStorage.setItem(
+                            'oak_hims_pending_grn_search',
+                            String(tx.po_number || tx.transaction_no || '')
+                          );
+                        } catch { /* ignore */ }
+                        onClose();
+                        if (onNavigateToInventory) onNavigateToInventory();
+                      }}
+                      className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
+                    >
+                      Lihat Penerimaan di Inventori &rarr;
+                    </button>
+                  </div>
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="py-2 px-3">No. GRN</th>
+                          <th className="py-2 px-2">Tanggal</th>
+                          <th className="py-2 px-2">Status</th>
+                          <th className="py-2 px-3 text-right">Petugas</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {tx.linked_goods_receipts.map((grn) => (
+                          <tr key={grn.id} className="hover:bg-slate-50/60">
+                            <td className="py-2 px-3 font-mono font-bold text-[#1b4332]">{grn.grn_number}</td>
+                            <td className="py-2 px-2 text-slate-600">{formatTransactionBusinessDate(grn.receipt_date)}</td>
+                            <td className="py-2 px-2">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                grn.status === 'POSTED' || grn.status === 'COMPLETED'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : grn.status === 'DRAFT'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-200'
+                              }`}>
+                                {grn.status === 'POSTED' || grn.status === 'COMPLETED' ? 'Diposting' : grn.status}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-600">{grn.received_by || grn.posted_by || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -791,7 +969,21 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       <tbody className="divide-y divide-slate-100 font-medium">
                         {lines.map((l) => (
                           <tr key={l.id} className="hover:bg-slate-50/60">
-                            <td className="py-2 px-3 font-semibold text-slate-800">{l.description_snapshot}</td>
+                            <td className="py-2 px-3 font-semibold text-slate-800">
+                              <div>{l.description_snapshot}</div>
+                              {l.product_id && (
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className="text-[10px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded">
+                                    Produk #{l.product_id}
+                                  </span>
+                                  {Number(l.received_quantity || 0) > 0 && (
+                                    <span className="text-[10px] font-mono bg-sky-50 text-sky-800 border border-sky-200 px-1.5 py-0.2 rounded">
+                                      Diterima: {Number(l.received_quantity)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </td>
                             <td className="py-2 px-2 text-right font-mono font-bold">{l.quantity}</td>
                             <td className="py-2 px-2 text-slate-500">{l.unit}</td>
                             <td className="py-2 px-2 text-right font-mono">{formatIdr(l.unit_price)}</td>
@@ -908,7 +1100,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 </div>
 
                 {/* Settle Form */}
-                {showSettleForm && (
+                {showSettleForm && canSettle && !isPosTx && (
                   <form onSubmit={handleSettleSubmit} className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-2xl space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-emerald-900 text-xs">Form Pelunasan Pembayaran</span>
@@ -1175,6 +1367,20 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 <button
                   type="button"
                   onClick={() => onEditExpense(tx)}
+                  className="px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 bg-emerald-50 border border-emerald-200 rounded-xl transition-colors cursor-pointer"
+                >
+                  Edit/Revisi
+                </button>
+              )}
+
+            {/* Edit/Revisi button for PURCHASE when editable */}
+            {tx &&
+              tx.transaction_type === 'PURCHASE' &&
+              isTransactionEditable(tx) &&
+              onEditPurchase && (
+                <button
+                  type="button"
+                  onClick={() => onEditPurchase(tx)}
                   className="px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 bg-emerald-50 border border-emerald-200 rounded-xl transition-colors cursor-pointer"
                 >
                   Edit/Revisi

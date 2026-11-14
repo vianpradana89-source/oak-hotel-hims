@@ -1,7 +1,9 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
+import ProductRecipeModal from './ProductRecipeModal';
 
 export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD';
 export type ProductKindCode = 'STANDARD';
@@ -287,6 +289,8 @@ export interface ProductItem {
   price: number | string | null;
   is_active?: boolean;
   is_sellable_pos?: boolean;
+  track_stock?: boolean;
+  track_inventory?: boolean;
   product_type?: ProductTypeCode | string | null;
   product_type_label?: string;
   product_kind?: ProductKindCode | string | null;
@@ -316,8 +320,9 @@ interface Props {
 }
 
 type StatusFilter = 'active' | 'inactive' | 'all';
-type ProductTypeFilter = 'ALL' | 'FINISHED_GOOD' | 'SEMI_FINISHED' | 'RAW_MATERIAL' | 'UNSET';
+type ProductTypeFilter = 'ALL' | 'FINISHED_GOOD' | 'SEMI_FINISHED' | 'RAW_MATERIAL';
 type SellableFilter = 'all' | 'sellable' | 'internal';
+type StockFilter = 'all' | 'tracked' | 'untracked';
 
 export interface ProductFormState {
   code: string;
@@ -331,6 +336,7 @@ export interface ProductFormState {
   baseUnit: string;
   canonicalBaseUnitCode?: string;
   isSellablePos: boolean;
+  trackStock?: boolean;
 }
 
 export const EMPTY_PRODUCT_FORM: ProductFormState = {
@@ -345,6 +351,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   baseUnit: '',
   canonicalBaseUnitCode: '',
   isSellablePos: true,
+  trackStock: false,
 };
 
 export const PRODUCT_PHOTO_MAX_BYTES = 2 * 1024 * 1024;
@@ -391,7 +398,6 @@ export const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }>
   { key: 'FINISHED_GOOD', label: 'Produk Jadi' },
   { key: 'SEMI_FINISHED', label: 'Setengah Jadi' },
   { key: 'RAW_MATERIAL', label: 'Bahan Baku' },
-  { key: 'UNSET', label: 'Belum diatur' },
 ];
 
 export const PRODUCT_TYPE_CHOICES: Array<{ value: ProductTypeCode; label: string; hint: string }> = [
@@ -420,16 +426,24 @@ export function resolveInitialProductTypeFromTab(tab: ProductTypeFilter): string
 }
 
 export function createInitialAddProductForm(tab: ProductTypeFilter): ProductFormState {
+  const initialType = resolveInitialProductTypeFromTab(tab);
   return {
     ...EMPTY_PRODUCT_FORM,
-    productType: resolveInitialProductTypeFromTab(tab),
+    productType: initialType,
+    trackStock: initialType === 'RAW_MATERIAL' || initialType === 'SEMI_FINISHED',
   };
 }
 
 export function applyProductTypeChange(form: ProductFormState, nextType: string): ProductFormState {
+  const upperNext = nextType.trim().toUpperCase();
+  const nextTrackStock =
+    upperNext === 'RAW_MATERIAL' || upperNext === 'SEMI_FINISHED'
+      ? true
+      : Boolean(form.trackStock);
   return {
     ...form,
     productType: nextType,
+    trackStock: nextTrackStock,
   };
 }
 
@@ -480,7 +494,43 @@ export function applyBaseUnitTextChange(
   };
 }
 
+// MPUI-F04: satu normalisasi stok terlacak untuk ikon, filter, KPI dan form.
+// false eksplisit pada track_inventory selalu menang; fallback tipe mengikuti
+// semantik buildEditProductForm (RAW_MATERIAL/SEMI_FINISHED default terlacak).
+export function isStockTrackedCanonical(item: {
+  product_type?: string | null;
+  track_stock?: boolean | null;
+  track_inventory?: boolean | null;
+}): boolean {
+  const hasStock = typeof item.track_stock === 'boolean';
+  const hasInv = typeof item.track_inventory === 'boolean';
+  if (hasStock && hasInv) {
+    return item.track_stock === true && item.track_inventory !== false;
+  }
+  if (!hasStock && !hasInv) {
+    const rawType = String(item.product_type || '').trim().toUpperCase();
+    return rawType === 'RAW_MATERIAL' || rawType === 'SEMI_FINISHED';
+  }
+  // Tepat satu flag tersedia (kompatibilitas record parsial/legacy):
+  if (hasStock) {
+    // track_stock diketahui; track_inventory absen -> hormati true, false eksplisit tidak ada
+    return item.track_stock === true;
+  }
+  // Hanya track_inventory diketahui
+  return item.track_inventory === true;
+}
+
 export function buildEditProductForm(item: ProductItem): ProductFormState {
+  const rawType = String(item.product_type || '').trim().toUpperCase();
+  const defaultTracked = rawType === 'RAW_MATERIAL' || rawType === 'SEMI_FINISHED';
+  const effectiveTrackStock =
+    typeof item.track_stock === 'boolean'
+      ? item.track_inventory === false
+        ? false
+        : item.track_stock
+      : typeof item.track_inventory === 'boolean'
+        ? item.track_inventory
+        : defaultTracked;
   return {
     code: item.item_code || '',
     barcode: typeof item.barcode === 'string' ? item.barcode : '',
@@ -494,6 +544,7 @@ export function buildEditProductForm(item: ProductItem): ProductFormState {
     baseUnit: item.base_unit || '',
     canonicalBaseUnitCode: item.canonical_base_unit_code || '',
     isSellablePos: item.is_sellable_pos !== false,
+    trackStock: effectiveTrackStock,
   };
 }
 
@@ -550,12 +601,17 @@ export function formatBaseUnitLabel(baseUnit?: string | null): string {
   return baseUnit.trim();
 }
 
-export function formatSellingPriceDisplay(price: number | string | null | undefined): {
+export function formatSellingPriceDisplay(
+  price: number | string | null | undefined,
+  isSellablePos?: boolean
+): {
   text: string;
   isUnset: boolean;
 } {
+  // MPUI-F02: harga produk non-POS yang belum diisi tampil tanda pisah (tidak berlaku),
+  // tanpa menyentuh nilai harga yang tersimpan.
   if (price === null || price === undefined || (typeof price === 'string' && price.trim() === '')) {
-    return { text: 'Belum diatur', isUnset: true };
+    return { text: isSellablePos === false ? '—' : 'Belum diatur', isUnset: true };
   }
   const num = Number(price);
   if (!Number.isFinite(num) || num < 0) {
@@ -581,6 +637,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>('ALL');
   const [sellableFilter, setSellableFilter] = useState<SellableFilter>('all');
+  const [stockFilter, setStockFilter] = useState<StockFilter>('all');
+  // MPUI-F03: kontrol urutan (stabil, tanpa mutasi items/props)
+  const [sortKey, setSortKey] = useState<'default' | 'name_asc' | 'name_desc'>('default');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddOptional, setShowAddOptional] = useState(false);
@@ -588,6 +647,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [editingItem, setEditingItem] = useState<ProductItem | null>(null);
   const [saving, setSaving] = useState(false);
+  // kategori dropdown state
+  const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
+  const [categorySearchQuery, setCategorySearchQuery] = useState('');
+  const categoryDropdownRef = useRef<HTMLButtonElement | null>(null);
+  const categoryPanelRef = useRef<HTMLDivElement | null>(null);
+  // MPUI-F01: posisi dropdown kategori terikat tombol trigger (portal, clamp viewport)
+  const [categoryMenuPosition, setCategoryMenuPosition] = useState<{ top: number; right: number } | null>(null);
+  // MPUI-F01: state toggle per row untuk menu tiga titik (portal-based, tidak clipped)
+  const [openMenuRowId, setOpenMenuRowId] = useState<number | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ top: number | null; bottom: number | null; right: number }>({ top: null, bottom: null, right: 0 });
+  const menuButtonRef = useRef<HTMLElement | null>(null);
+  const menuPortalRef = useRef<HTMLDivElement | null>(null);
   // Harga disimpan sebagai string agar "kosong" bisa dibedakan dari "0".
   const [newProduct, setNewProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
   const [editProduct, setEditProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
@@ -666,6 +737,95 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     roomId: '',
     notes: '',
   });
+
+  // ── MP-04C: State Formula Resep / Bill of Materials (BOM) ──
+  const [recipeModalItem, setRecipeModalItem] = useState<ProductItem | null>(null);
+
+  const openRecipeModal = (item: ProductItem) => {
+    setRecipeModalItem(item);
+  };
+
+  const closeRecipeModal = () => {
+    setRecipeModalItem(null);
+  };
+
+  // ── MPUI-F01: Handler portal-based three-dot menu ──────────────────────────
+  const toggleRowMenu = (e: React.MouseEvent | React.KeyboardEvent, item: ProductItem) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const btn = (e.currentTarget as HTMLElement) ?? null;
+    const menuBtnRef = (menuButtonRef as React.MutableRefObject<HTMLElement | null>).current;
+    // If this exact button is already open, close it
+    if (openMenuRowId === item.id && menuBtnRef === btn) {
+      setOpenMenuRowId(null);
+      btn?.focus();
+      return;
+    }
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const viewportH = window.innerHeight;
+    const estimatedMenuH = 120; // 3 items ≈ 3×28px + padding
+    const openUp = rect.bottom + estimatedMenuH > viewportH;
+    // Buka-ke-bawah: menu menempel di bawah tombol.
+    // Buka-ke-atas: menu menempel di atas tombol, dihitung sekali dari rect.top (tanpa offset ganda).
+    const top = openUp ? null : rect.bottom + 4;
+    const bottom = openUp ? window.innerHeight - rect.top + 4 : null;
+    const right = Math.max(4, window.innerWidth - rect.right);
+    setMenuPosition({ top, bottom, right });
+    // Simpan trigger aktif secara stabil agar Escape/fokus kembali ke tombol yang membuka.
+    (menuButtonRef as React.MutableRefObject<HTMLElement | null>).current = btn;
+    setOpenMenuRowId(item.id);
+  };
+
+  const closeRowMenu = (focusBack = true) => {
+    const btn = (menuButtonRef as React.MutableRefObject<HTMLElement | null>).current;
+    setOpenMenuRowId(null);
+    if (focusBack && btn) {
+      btn.focus();
+    }
+  };
+
+  // Close on outside click / Escape
+  useEffect(() => {
+    if (openMenuRowId === null) return;
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      const menuEl = menuPortalRef.current;
+      const triggerBtn = (menuButtonRef as React.MutableRefObject<HTMLElement | null>).current;
+      if (menuEl && menuEl.contains(target)) return;
+      if (triggerBtn && triggerBtn.contains(target)) return;
+      closeRowMenu(false);
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeRowMenu(true);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('touchstart', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('touchstart', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [openMenuRowId]);
+
+      {/* MPUI-F01/F03: tutup dropdown kategori bila filter berubah (stale guard) */}
+  useEffect(() => {
+    if (categoryDropdownOpen) {
+      setCategoryDropdownOpen(false);
+      setCategoryMenuPosition(null);
+      setCategorySearchQuery('');
+    }
+  }, [searchQuery, productTypeFilter, sellableFilter, stockFilter, statusFilter]);
+
+  // Close/revalidate menu when filters change (stale action protection)
+  useEffect(() => {
+    if (openMenuRowId !== null) {
+      setOpenMenuRowId(null);
+    }
+  }, [searchQuery, selectedCategory, productTypeFilter, sellableFilter, stockFilter, statusFilter]);
 
   const revokeObjectUrlSafe = useCallback((url: string | null | undefined) => {
     if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
@@ -806,6 +966,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       setSelectedCategory('ALL');
       setProductTypeFilter('ALL');
       setSellableFilter('all');
+      setStockFilter('all');
       setSearchQuery('');
       setErrorMsg(null);
       setSuccessMsg(null);
@@ -822,6 +983,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setSelectedCategory('ALL');
     setProductTypeFilter('ALL');
     setSellableFilter('all');
+    setStockFilter('all');
     setSearchQuery('');
     setErrorMsg(null);
     setSuccessMsg(null);
@@ -942,23 +1104,56 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     [categories]
   );
 
+  // Click-outside handler for the category dropdown
+  useEffect(() => {
+    if (!categoryDropdownOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      const triggerBtn = (categoryDropdownRef as React.RefObject<HTMLButtonElement | null>).current;
+      const target = e.target as Node;
+      // Klik pada tombol trigger ATAU di dalam panel portal tidak dianggap klik luar;
+      // mencari/ketik/memilih kategori tetap menjaga panel terbuka pada tahap mousedown.
+      if (triggerBtn && triggerBtn.contains(target)) return;
+      if (categoryPanelRef.current && categoryPanelRef.current.contains(target)) return;
+      setCategoryDropdownOpen(false);
+      setCategorySearchQuery('');
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setCategoryDropdownOpen(false);
+        setCategorySearchQuery('');
+        const triggerBtn = (categoryDropdownRef as React.RefObject<HTMLButtonElement | null>).current;
+        triggerBtn?.focus();
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [categoryDropdownOpen]);
+
   // Statistik berdasarkan data OAK aktual yang dimuat pada filter status saat ini.
   const stats = useMemo(() => {
     const total = items.length;
+    const activeCount = items.filter((i) => i.is_active !== false).length;
     const sellableCount = items.filter((i) => i.is_sellable_pos !== false).length;
     const internalCount = items.filter((i) => i.is_sellable_pos === false).length;
     const finishedCount = items.filter((i) => i.product_type === 'FINISHED_GOOD').length;
     const semiCount = items.filter((i) => i.product_type === 'SEMI_FINISHED').length;
     const rawCount = items.filter((i) => i.product_type === 'RAW_MATERIAL').length;
     const unsetTypeCount = items.filter((i) => !i.product_type).length;
+    const stockTrackedCount = items.filter((i) => isStockTrackedCanonical(i)).length;
     return {
       total,
+      activeCount,
       sellableCount,
       internalCount,
       finishedCount,
       semiCount,
       rawCount,
       unsetTypeCount,
+      stockTrackedCount,
       categories: categories.length,
     };
   }, [items, categories]);
@@ -968,11 +1163,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     FINISHED_GOOD: stats.finishedCount,
     SEMI_FINISHED: stats.semiCount,
     RAW_MATERIAL: stats.rawCount,
-    UNSET: stats.unsetTypeCount,
   }), [stats]);
 
   const filteredItems = useMemo(() => {
-    return items.filter((item) => {
+    const list = items.filter((item) => {
       const matchSearch = matchesProductSearch(item, searchQuery);
       const matchCategory =
         selectedCategory === 'ALL' ||
@@ -980,20 +1174,30 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           ? (item.category_name || 'Tanpa Kategori') === selectedCategory
           : item.category_name === null || item.category_name === undefined || item.category_name === '');
       const matchProductType =
-        productTypeFilter === 'ALL' ||
-        (productTypeFilter === 'UNSET'
-          ? !item.product_type
-          : item.product_type === productTypeFilter);
+        productTypeFilter === 'ALL' || item.product_type === productTypeFilter;
       const itemSellable = item.is_sellable_pos !== false;
       const matchSellable =
         sellableFilter === 'all' ||
         (sellableFilter === 'sellable' ? itemSellable : !itemSellable);
+      const isStockTracked = isStockTrackedCanonical(item);
+      const matchStock =
+        stockFilter === 'all' ||
+        (stockFilter === 'tracked' ? isStockTracked : !isStockTracked);
       const matchStatus =
         statusFilter === 'all' ||
         (statusFilter === 'active' ? item.is_active !== false : item.is_active === false);
-      return matchSearch && matchCategory && matchProductType && matchSellable && matchStatus;
+      return matchSearch && matchCategory && matchProductType && matchSellable && matchStock && matchStatus;
     });
-  }, [items, searchQuery, selectedCategory, productTypeFilter, sellableFilter, statusFilter]);
+    // MPUI-F03: urutan hasil filter — salinan, tanpa memutasi items/props; ties stabil (id)
+    if (sortKey !== 'default') {
+      const dir = sortKey === 'name_asc' ? 1 : -1;
+      return [...list].sort((a, b) => {
+        const cmp = (a.name || '').localeCompare((b.name || ''), 'id', { sensitivity: 'base' }) * dir;
+        return cmp !== 0 ? cmp : a.id - b.id;
+      });
+    }
+    return list;
+  }, [items, searchQuery, selectedCategory, productTypeFilter, sellableFilter, stockFilter, statusFilter, sortKey]);
 
   const handleRefresh = async () => {
     const { propertyId: pid, statusFilter: sf } = ctxRef.current;
@@ -1152,6 +1356,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         category_id: newProduct.category === '' ? null : Number(newProduct.category) || null,
         price: priceVal,
         is_sellable_pos: newProduct.isSellablePos,
+        track_stock: Boolean(newProduct.trackStock),
+        track_inventory: Boolean(newProduct.trackStock),
         product_type: newProduct.productType === '' ? null : newProduct.productType,
         product_kind: newProduct.productKind === '' ? null : newProduct.productKind,
         base_unit: baseUnitClean === '' ? null : baseUnitClean,
@@ -1318,6 +1524,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         description: editProduct.description.trim() === '' ? null : editProduct.description.trim(),
         category_id: editProduct.category === '' ? null : Number(editProduct.category) || null,
         is_sellable_pos: editProduct.isSellablePos,
+        track_stock: Boolean(editProduct.trackStock),
+        track_inventory: Boolean(editProduct.trackStock),
         product_type: editProduct.productType === '' ? null : editProduct.productType,
         product_kind: editProduct.productKind === '' ? null : editProduct.productKind,
       };
@@ -2264,18 +2472,28 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider bg-emerald-50 text-emerald-800 border border-emerald-200/60 uppercase">
-              Master Data Manajemen
+              Manajemen Persediaan
             </span>
             <span className="text-xs text-gray-400">•</span>
             <span className="text-xs text-gray-500">Property #{propertyId || 1}</span>
           </div>
-          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Master Produk &amp; Inventori Dasar</h1>
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Master Barang &amp; Produk</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Klasifikasi produk jadi, setengah jadi, dan bahan baku beserta satuan dasar serta pengaturan visibilitas katalog POS.
+            Katalog barang operasional hotel, bahan baku, dan produk/menu POS beserta satuan dasar serta pengaturan visibilitas katalog POS.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
+          {capabilities.canCreate && (
+            <button
+              type="button"
+              onClick={openAddModal}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 5v14m7-7H5"/></svg>
+              Tambah Produk
+            </button>
+          )}
           <button
             type="button"
             onClick={handleRefresh}
@@ -2296,7 +2514,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
-              {capabilities.canCreate || capabilities.canEdit ? 'Kelola Lokasi Stok' : 'Lihat Lokasi Stok'}
+              {capabilities.canCreate || capabilities.canEdit ? 'Kelola Penyimpanan' : 'Lihat Penyimpanan'}
             </button>
           )}
           {capabilities.canManageCategory && (
@@ -2338,37 +2556,41 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
           <div className="text-xs text-gray-500 font-medium">
-            Produk {statusFilter === 'all' ? 'Terdaftar' : statusFilter === 'active' ? 'Aktif' : 'Nonaktif'}
+            {statusFilter === 'all' ? 'Total Produk' : `Produk (${statusFilter === 'active' ? 'Aktif' : 'Nonaktif'})`}
           </div>
           <div className="text-2xl font-black text-gray-900 mt-1">{stats.total}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">
-            Jadi: {stats.finishedCount} • Setengah Jadi: {stats.semiCount} • Bahan Baku: {stats.rawCount}
+            {statusFilter === 'all'
+              ? `Jadi: ${stats.finishedCount} • Setengah Jadi: ${stats.semiCount} • Bahan Baku: ${stats.rawCount}`
+              : `Mengikuti filter status ${statusFilter === 'active' ? 'Aktif' : 'Nonaktif'} yang dimuat saat ini`}
+          </div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
+          <div className="text-xs text-gray-500 font-medium">Aktif</div>
+          <div className="text-2xl font-black text-emerald-700 mt-1">{stats.activeCount}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">
+            Produk yang sedang aktif
           </div>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
           <div className="text-xs text-gray-500 font-medium">Dijual di POS</div>
           <div className="text-2xl font-black text-emerald-700 mt-1">{stats.sellableCount}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">
-            Tampil di katalog kasir POS (saat status Aktif)
+            Tampil di katalog kasir POS
           </div>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Produk non-POS</div>
-          <div className="text-2xl font-black text-slate-700 mt-1">{stats.internalCount}</div>
+          <div className="text-xs text-gray-500 font-medium">Lacak Persediaan</div>
+          <div className="text-2xl font-black text-teal-700 mt-1">{stats.stockTrackedCount}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">
-            Tidak dijual di POS (disembunyikan dari katalog kasir)
+            {`Produk terlacak pada filter ${statusFilter === 'all' ? 'semua status' : statusFilter === 'active' ? 'Aktif' : 'Nonaktif'} saat ini`}
           </div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-xs">
-          <div className="text-xs text-gray-500 font-medium">Kategori Produk</div>
-          <div className="text-2xl font-black text-gray-900 mt-1">{stats.categories}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">Kategori yang tersedia di properti ini</div>
         </div>
       </div>
 
       {/* Product Type Classification Tabs & Search/Filter Toolbar */}
       <div className="bg-white border border-gray-200/90 rounded-2xl p-4 shadow-xs flex flex-col gap-3.5">
-        {/* Baris 1: Tab Tipe Produk (Referensi Santai Scale: Semua, Produk Jadi, Setengah Jadi, Bahan Baku, Belum diatur) */}
+        {/* Baris 1: Tab Tipe Produk: Semua Tipe, Produk Jadi, Setengah Jadi, Bahan Baku */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 border-b border-gray-100">
           {PRODUCT_TYPE_TABS.map((tab) => {
             const active = productTypeFilter === tab.key;
@@ -2397,7 +2619,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           })}
         </div>
 
-        {/* Baris 2: Pencarian + Filter Kategori */}
+        {/* Baris 2: Pencarian + Filter Kategori + Urutkan */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="relative w-full sm:w-80">
             <svg className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2412,36 +2634,114 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             />
           </div>
 
-          <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
+          <div className="relative flex items-center gap-2 w-full sm:w-auto">
             <button
               type="button"
-              onClick={() => setSelectedCategory('ALL')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer ${
-                selectedCategory === 'ALL'
-                  ? 'bg-emerald-800 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              ref={categoryDropdownRef}
+              onClick={(e) => {
+                if (categoryDropdownOpen) {
+                  setCategoryDropdownOpen(false);
+                  setCategoryMenuPosition(null);
+                  return;
+                }
+                const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                // Panel lebar 224px; rata kiri dengan tombol, clamp agar tidak melewati tepi kanan viewport.
+                const PANEL_W = 224;
+                const left = Math.max(4, Math.min(rect.left, window.innerWidth - PANEL_W - 4));
+                setCategoryMenuPosition({
+                  top: rect.bottom + 4,
+                  right: window.innerWidth - (left + PANEL_W),
+                });
+                setCategoryDropdownOpen(true);
+              }}
+              aria-haspopup="listbox"
+              aria-expanded={categoryDropdownOpen}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer border flex items-center gap-1.5 ${
+                selectedCategory !== 'ALL'
+                  ? 'bg-emerald-800 text-white border-emerald-700'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-gray-200'
               }`}
             >
-              Semua Kategori
+              <span>{selectedCategory === 'ALL' ? 'Semua Kategori' : selectedCategory}</span>
+              <svg className={`w-3 h-3 transition-transform ${categoryDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7"/></svg>
             </button>
-            {categoryNames.map((cat) => (
-              <button
-                key={cat}
-                type="button"
-                onClick={() => setSelectedCategory(cat)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer ${
-                  selectedCategory === cat
-                    ? 'bg-emerald-800 text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                {cat}
-              </button>
-            ))}
+            {categoryDropdownOpen && categoryMenuPosition && (() => {
+              const panelStyle: React.CSSProperties = {
+                position: 'fixed',
+                top: Math.max(4, categoryMenuPosition.top),
+                right: categoryMenuPosition.right,
+                width: 224,
+                zIndex: 9999,
+              };
+              return createPortal(
+                <div ref={categoryPanelRef} style={panelStyle} className="bg-white border border-gray-200 rounded-xl shadow-lg max-h-64 flex flex-col overflow-hidden">
+                  <div className="p-2 border-b border-gray-100">
+                    <input
+                      type="text"
+                      placeholder="Cari kategori…"
+                      value={categorySearchQuery}
+                      onChange={(e) => setCategorySearchQuery(e.target.value)}
+                      autoFocus
+                      className="w-full px-2 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    />
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-1">
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedCategory('ALL'); setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setCategorySearchQuery(''); }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                        selectedCategory === 'ALL' ? 'bg-emerald-50 text-emerald-800' : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      Semua Kategori
+                    </button>
+                    {categoryNames
+                      .filter((c) => c.toLowerCase().includes(categorySearchQuery.toLowerCase()))
+                      .map((cat) => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => { setSelectedCategory(cat); setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setCategorySearchQuery(''); }}
+                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center justify-between ${
+                            selectedCategory === cat ? 'bg-emerald-50 text-emerald-800' : 'text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span>{cat}</span>
+                          {selectedCategory === cat && (
+                            <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"/></svg>
+                          )}
+                        </button>
+                      ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setShowCategoryModal(true); }}
+                    className="px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-50 border-t border-gray-100 cursor-pointer"
+                  >
+                    + Tambah Kategori
+                  </button>
+                </div>,
+                document.body
+              );
+            })()}
           </div>
+
         </div>
 
-        {/* Baris 3: Filter Status & Filter Visibilitas POS */}
+        {/* MPUI-F03: kontrol urutan nama */}
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <label className="text-xs text-gray-400 font-medium shrink-0" htmlFor="product-sort-select">Urutkan:</label>
+          <select
+            id="product-sort-select"
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value as 'default' | 'name_asc' | 'name_desc')}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-gray-100 text-gray-700 border border-gray-200 cursor-pointer focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+          >
+            <option value="default">Default (ID)</option>
+            <option value="name_asc">Nama A–Z</option>
+            <option value="name_desc">Nama Z–A</option>
+          </select>
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400 font-medium shrink-0">Status:</span>
@@ -2482,6 +2782,28 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               </button>
             ))}
           </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400 font-medium shrink-0">Persediaan:</span>
+            {([
+              { key: 'all', label: 'Semua' },
+              { key: 'tracked', label: 'Lacak Persediaan' },
+              { key: 'untracked', label: 'Tidak Dilacak' },
+            ] as const).map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setStockFilter(opt.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                  stockFilter === opt.key
+                    ? 'bg-teal-700 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -2511,13 +2833,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             <table className="w-full text-left text-xs sm:text-sm">
               <thead className="bg-gray-50/80 border-b border-gray-200 text-gray-600 font-semibold uppercase text-[11px] tracking-wider">
                 <tr>
-                  <th className="py-3 px-4">Kode / SKU</th>
-                  <th className="py-3 px-4">Nama Produk</th>
-                  <th className="py-3 px-4">Tipe &amp; Jenis</th>
+                  <th className="py-3 px-4">Produk</th>
+                  <th className="py-3 px-4">Tipe</th>
                   <th className="py-3 px-4">Kategori</th>
-                  <th className="py-3 px-4">Satuan Dasar</th>
-                  <th className="py-3 px-4 text-center">Dijual di POS</th>
-                  <th className="py-3 px-4 text-right">Harga Jual (IDR)</th>
+                  <th className="py-3 px-4">Satuan</th>
+                  <th className="py-3 px-4 text-right">Harga Jual</th>
                   <th className="py-3 px-4 text-center">Status</th>
                   <th className="py-3 px-4 text-right">Aksi</th>
                 </tr>
@@ -2525,29 +2845,23 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <tbody className="divide-y divide-gray-100">
                 {filteredItems.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="py-12 text-center text-gray-400">
+                    <td colSpan={7} className="py-12 text-center text-gray-400">
                       Tidak ada produk yang cocok dengan filter pencarian.
                     </td>
                   </tr>
                 ) : (
                   filteredItems.map((item) => {
-                    const priceDisplay = formatSellingPriceDisplay(item.price);
-                    const typeLabel = item.product_type_label || formatProductTypeLabel(item.product_type);
-                    const kindLabel = item.product_kind_label || formatProductKindLabel(item.product_kind);
-                    const unitLabel = formatBaseUnitLabel(item.base_unit);
                     const isSellable = item.is_sellable_pos !== false;
+                    const priceDisplay = formatSellingPriceDisplay(item.price, isSellable);
+                    const typeLabel = item.product_type_label || formatProductTypeLabel(item.product_type);
+                    const unitLabel = formatBaseUnitLabel(item.base_unit);
+                    const isStockTracked = isStockTrackedCanonical(item);
+                    const isActive = item.is_active !== false;
                     return (
                       <tr key={item.id} className="hover:bg-gray-50/60 transition-colors">
-                        <td className="py-3 px-4 font-mono font-medium text-gray-600">
-                          <div>{item.item_code || `PRD-${String(item.id).padStart(4, '0')}`}</div>
-                          {item.barcode && (
-                            <div className="text-[11px] text-gray-400 font-mono mt-0.5">
-                              Barcode: {item.barcode}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 font-semibold text-gray-900">
-                          <div className="flex items-center gap-3">
+                        {/* Kolom Produk: foto + nama + ikon POS/stok + SKU */}
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-3 min-w-0">
                             {item.has_photo && item.photo_url && photoBlobUrls[item.photo_url] ? (
                               <img
                                 src={photoBlobUrls[item.photo_url]}
@@ -2557,29 +2871,40 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             ) : (
                               <div
                                 aria-hidden="true"
-                                className="w-10 h-10 rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center text-[10px] text-gray-400 shrink-0"
+                                className="w-10 h-10 rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center shrink-0"
                               >
-                                Foto
+                                <svg className="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-6l-1.586-1.586a2 2 0 00-2.828 0L4 16m16 0l-4.586-4.586a2 2 0 00-2.828 0L8 16" />
+                                </svg>
                               </div>
                             )}
-                            <div>
-                              <div>{item.name}</div>
-                              {item.description && (
-                                <div className="text-[11px] text-gray-400 font-normal mt-0.5">{item.description}</div>
-                              )}
+                            <div className="min-w-0 flex-1">
+                              <div className="font-semibold text-gray-900 text-xs sm:text-sm break-words" title={item.name}>
+                                {item.name}
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{item.item_code || '—'}</span>
+                                {isSellable && (
+                                  <span title="Dijual di POS" className="inline-flex items-center justify-center w-4 h-4 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                                  </span>
+                                )}
+                                {isStockTracked && (
+                                  <span title="Lacak Persediaan" className="inline-flex items-center justify-center w-4 h-4 rounded bg-teal-50 text-teal-700 border border-teal-200">
+                                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </td>
+                        {/* Kolom Tipe */}
                         <td className="py-3 px-4">
-                          <div className="flex flex-col items-start gap-0.5">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border ${getProductTypeBadgeClass(item.product_type)}`}>
-                              {typeLabel}
-                            </span>
-                            <span className="text-[11px] text-gray-400">
-                              Jenis: {kindLabel}
-                            </span>
-                          </div>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border ${getProductTypeBadgeClass(item.product_type)}`}>
+                            {typeLabel}
+                          </span>
                         </td>
+                        {/* Kolom Kategori */}
                         <td className="py-3 px-4">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${
                             item.category_name
@@ -2589,43 +2914,21 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             {item.category_name || 'Tanpa Kategori'}
                           </span>
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="flex flex-col items-start gap-1">
-                            <span className={item.base_unit ? 'font-medium text-gray-800' : 'text-xs text-gray-400 italic'}>
-                              {unitLabel}
-                            </span>
-                            <div className="flex flex-wrap items-center gap-1">
-                              {item.canonical_base_unit_code && (
-                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                                  {item.canonical_base_unit_code}
-                                </span>
-                              )}
-                              {item.is_base_unit_locked && (
-                                <span
-                                  title="Satuan dasar terkunci karena kemasan atau pergerakan stok"
-                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200"
-                                >
-                                  Terkunci
-                                </span>
-                              )}
-                              {Array.isArray(item.packaging_conversions) &&
-                                item.packaging_conversions.filter((p) => p.is_active).length > 0 && (
-                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-50 text-sky-800 border border-sky-200">
-                                    {item.packaging_conversions.filter((p) => p.is_active).length} Kemasan
-                                  </span>
-                                )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
-                            isSellable
-                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                              : 'bg-slate-100 text-slate-600 border-slate-200'
-                          }`}>
-                            {formatPosSellabilityBadge(isSellable)}
+                        {/* Kolom Satuan */}
+                        <td className="py-3 px-4 text-gray-700 text-xs">
+                          <span className={item.base_unit ? 'font-medium text-gray-800' : 'text-gray-400 italic'}>
+                            {unitLabel}
                           </span>
+                          {/* MPUI-F02: kode canonical hanya ditampilkan bila benar berbeda dari label,
+                              agar tidak muncul pengulangan "BOTOL BOTOL"; aturan/kode tetap ada di detail */}
+                          {item.canonical_base_unit_code &&
+                            item.canonical_base_unit_code.toUpperCase() !== String(unitLabel).trim().toUpperCase() && (
+                              <span className="ml-1.5 inline-flex items-center px-1 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                {item.canonical_base_unit_code}
+                              </span>
+                            )}
                         </td>
+                        {/* Kolom Harga Jual */}
                         <td className="py-3 px-4 text-right">
                           {priceDisplay.isUnset ? (
                             <span className="text-xs text-gray-400 italic">{priceDisplay.text}</span>
@@ -2633,54 +2936,51 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             <span className="font-bold text-gray-900">{priceDisplay.text}</span>
                           )}
                         </td>
+                        {/* Kolom Status */}
                         <td className="py-3 px-4 text-center">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
-                            item.is_active !== false
+                            isActive
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                               : 'bg-amber-50 text-amber-700 border-amber-200'
                           }`}>
-                            {item.is_active !== false ? 'Aktif' : 'Nonaktif'}
+                            {isActive ? 'Aktif' : 'Nonaktif'}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
+                        {/* Kolom Aksi: Edit + menu ⋮ */}
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
                           {(capabilities.canEdit || capabilities.canToggleStatus) ? (
-                            <>
-                              {(capabilities.canEdit || capabilities.canCreate) && (
-                                <button
-                                  type="button"
-                                  aria-label={`Kelola kemasan ${item.name}`}
-                                  onClick={() => openPackagingModal(item)}
-                                  disabled={saving}
-                                  className="text-xs text-sky-700 hover:text-sky-900 font-medium px-2 py-1 rounded hover:bg-sky-50 transition-colors cursor-pointer"
-                                >
-                                  Kemasan
-                                </button>
-                              )}
+                            <div className="flex items-center justify-end gap-1">
                               {capabilities.canEdit && (
                                 <button
                                   type="button"
                                   onClick={() => openEdit(item)}
                                   disabled={saving}
-                                  className="text-xs text-emerald-700 hover:text-emerald-900 font-medium px-2 py-1 rounded hover:bg-emerald-50 transition-colors cursor-pointer"
+                                  className="text-xs text-emerald-700 hover:text-emerald-900 font-semibold px-2.5 py-1 rounded-lg hover:bg-emerald-50 transition-colors cursor-pointer"
                                 >
                                   Edit
                                 </button>
                               )}
-                              {capabilities.canToggleStatus && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleActive(item)}
-                                  disabled={saving}
-                                  className={`text-xs font-medium px-2 py-1 rounded transition-colors cursor-pointer ${
-                                    item.is_active !== false
-                                      ? 'text-rose-600 hover:text-rose-800 hover:bg-rose-50'
-                                      : 'text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50'
-                                  }`}
-                                >
-                                  {item.is_active !== false ? 'Nonaktifkan' : 'Aktifkan'}
-                                </button>
-                              )}
-                            </>
+                              {/* MPUI-F01: Portal-based three-dot menu — state-driven, not clipped by table overflow */}
+                              <button
+                                type="button"
+                                ref={(el: HTMLElement | null) => {
+                                  // Hanya simpan trigger baris yang sedang membuka menu, agar
+                                  // ref aktif tidak tertimpa oleh baris lain saat di-render ulang.
+                                  if (openMenuRowId === item.id) {
+                                    menuButtonRef.current = el;
+                                  }
+                                }}
+                                aria-label={`Opsi lain ${item.name}`}
+                                aria-haspopup="menu"
+                                aria-expanded={openMenuRowId === item.id}
+                                disabled={saving}
+                                onClick={(e) => toggleRowMenu(e, item)}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleRowMenu(e, item); }}
+                                className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors cursor-pointer"
+                              >
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M10 3a1 1 0 110 2 1 1 0 010-2zm0 5a1 1 0 110 2 1 1 0 010-2zm0 5a1 1 0 110 2 1 1 0 010-2z"/></svg>
+                              </button>
+                            </div>
                           ) : (
                             <span className="text-[11px] text-gray-400">Hanya lihat</span>
                           )}
@@ -2693,21 +2993,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             </table>
           </div>
         </div>
-      )}
-
-      {/* Floating Add Product Button */}
-      {capabilities.canCreate && (
-        <button
-          type="button"
-          aria-label="Tambah produk"
-          title="Tambah produk"
-          onClick={openAddModal}
-          className="fixed bottom-6 right-6 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full bg-emerald-700 hover:bg-emerald-800 active:scale-95 text-white shadow-lg shadow-emerald-900/25 border border-emerald-600/40 transition-all cursor-pointer focus:outline-hidden focus:ring-4 focus:ring-emerald-500/30"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 5v14m7-7H5" />
-          </svg>
-        </button>
       )}
 
       {/* Add Product Modal */}
@@ -2778,6 +3063,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     value={newProduct.name}
                     onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
                     className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                  />
+                </div>
+
+                {/* MPUI-F02: SKU manual bagian identitas, tidak tersembunyi di Detail Opsional */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: FNB-001"
+                    value={newProduct.code}
+                    onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
                   />
                 </div>
 
@@ -2912,6 +3209,39 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </label>
                 </div>
 
+                {/* 5b. Pelacakan Stok & Penerimaan Gudang (GRN) */}
+                <div className="p-3.5 rounded-xl bg-teal-50/50 border border-teal-200/80 space-y-2">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      data-testid="add-product-track-stock-checkbox"
+                      aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
+                      checked={Boolean(newProduct.trackStock)}
+                      onChange={(e) => setNewProduct({ ...newProduct, trackStock: e.target.checked })}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
+                    />
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs font-bold text-gray-900">
+                          Lacak Stok &amp; Penerimaan Gudang (GRN)
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            newProduct.trackStock
+                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                              : 'bg-gray-100 text-gray-600 border-gray-200'
+                          }`}
+                        >
+                          {newProduct.trackStock ? 'Stok Fisik Dilacak (Siap PO & GRN)' : 'Non-Stok / Menu Resep'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-gray-600 mt-0.5">
+                        Aktifkan untuk barang fisik yang dibeli/diterima ke gudang dan dilacak saldonya per satuan dasar (contoh: Air Mineral Botol, Bahan Baku, Barang Setengah Jadi). Biarkan nonaktif untuk menu racikan berbasis resep/BOM (contoh: Nasi Goreng, Kopi) atau jasa yang tidak diterima langsung melalui GRN.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+
                 {/* 6. Harga Jual (IDR) */}
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
@@ -2951,6 +3281,40 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 </div>
 
+                {/* MPUI-F02: SKU sudah dipindah ke bagian identitas (setelah Nama); bagian ini hanya berisi Deskripsi */}
+                {/* Bagian Opsional (Deskripsi) */}
+                <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
+                  <button
+                    type="button"
+                    aria-expanded={showAddOptional}
+                    onClick={() => setShowAddOptional((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>Detail Opsional (Deskripsi)</span>
+                      {(newProduct.description.trim() !== '') && (
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                          Terisi
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-gray-400 text-[11px]">{showAddOptional ? 'Sembunyikan ▲' : 'Tampilkan ▼'}</span>
+                  </button>
+                  {showAddOptional && (
+                    <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
+                        <textarea
+                          rows={2}
+                          placeholder="Keterangan singkat komposisi, spesifikasi, atau sajian..."
+                          value={newProduct.description}
+                          onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
                 {/* 8. Foto Produk (Opsional) */}
                 <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5">
                   <div className="flex items-center justify-between">
@@ -3027,50 +3391,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 </div>
 
-                {/* Bagian Opsional (SKU & Deskripsi) */}
-                <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
-                  <button
-                    type="button"
-                    aria-expanded={showAddOptional}
-                    onClick={() => setShowAddOptional((prev) => !prev)}
-                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
-                  >
-                    <span className="flex items-center gap-2">
-                      <span>Detail Opsional (Kode SKU &amp; Deskripsi)</span>
-                      {(newProduct.code.trim() !== '' || newProduct.description.trim() !== '') && (
-                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                          Terisi
-                        </span>
-                      )}
-                    </span>
-                    <span className="text-gray-400 text-[11px]">{showAddOptional ? 'Sembunyikan ▲' : 'Tampilkan ▼'}</span>
-                  </button>
-                  {showAddOptional && (
-                    <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
-                        <input
-                          type="text"
-                          placeholder="Contoh: FNB-001"
-                          value={newProduct.code}
-                          onChange={(e) => setNewProduct({ ...newProduct, code: e.target.value.toUpperCase() })}
-                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
-                        <textarea
-                          rows={2}
-                          placeholder="Keterangan singkat komposisi, spesifikasi, atau sajian..."
-                          value={newProduct.description}
-                          onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
-                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
+                {/* Bagian Opsional (Deskripsi) — satu-satunya; SKU sudah di bagian identitas */}
                 <div className="text-[11px] text-gray-400 bg-gray-50/80 border border-gray-200/70 rounded-lg px-3 py-2">
                   Konversi kemasan, stok awal, HPP, dan mutasi stok akan diaktifkan pada tahap inventori berikutnya.
                 </div>
@@ -3138,6 +3459,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     value={editProduct.name}
                     onChange={(e) => setEditProduct({ ...editProduct, name: e.target.value })}
                     className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                  />
+                </div>
+
+                {/* MPUI-F02: SKU bagian identitas, tidak tersembunyi di Detail Opsional */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
+                  <input
+                    type="text"
+                    value={editProduct.code}
+                    onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
+                    className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
                   />
                 </div>
 
@@ -3218,15 +3550,26 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label="Buka kelola kemasan produk"
-                      onClick={() => openPackagingModal(editingItem)}
-                      className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
-                    >
-                      Kelola Kemasan
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Buka formula resep BOM produk"
+                        onClick={() => openRecipeModal(editingItem)}
+                        className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        Resep (BOM)
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        aria-label="Buka kelola kemasan produk"
+                        onClick={() => openPackagingModal(editingItem)}
+                        className="text-xs font-semibold text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        Kelola Kemasan
+                      </button>
+                    </div>
                   </div>
                   <select
                     aria-label="Pilih satuan dasar kanonik"
@@ -3286,6 +3629,54 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       <div className="text-xs font-bold text-gray-900">Dijual di POS (Tampilkan di Kasir)</div>
                       <div className="text-[11px] text-gray-500">
                         Matikan bila produk ini merupakan bahan baku atau produk non-POS yang tidak dijual langsung di kasir POS.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+
+                {/* 5b. Pelacakan Stok & Penerimaan Gudang (GRN) */}
+                <div className="p-3.5 rounded-xl bg-teal-50/50 border border-teal-200/80 space-y-2.5">
+                  {Array.isArray(editingItem.packaging_conversions) &&
+                    editingItem.packaging_conversions.some((p) => p.is_active) &&
+                    !editProduct.trackStock && (
+                      <div
+                        data-testid="edit-product-untracked-packaging-warning"
+                        className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-[11px] space-y-1.5"
+                      >
+                        <div className="font-bold">
+                          ⚠ Produk ini sudah memiliki konversi kemasan pembelian, tetapi Pelacakan Stok &amp; GRN masih nonaktif.
+                        </div>
+                        <div>
+                          Centang opsi di bawah lalu klik <strong>Simpan Perubahan</strong> agar produk ini dapat disimpan dan diposting pada Penerimaan Barang (GRN) tanpa mengubah ID produk maupun kemasan.
+                        </div>
+                      </div>
+                    )}
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      data-testid="edit-product-track-stock-checkbox"
+                      aria-label="Lacak Stok & Penerimaan Gudang (GRN)"
+                      checked={Boolean(editProduct.trackStock)}
+                      onChange={(e) => setEditProduct({ ...editProduct, trackStock: e.target.checked })}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-700 focus:ring-emerald-600"
+                    />
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs font-bold text-gray-900">
+                          Lacak Stok &amp; Penerimaan Gudang (GRN)
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            editProduct.trackStock
+                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                              : 'bg-gray-100 text-gray-600 border-gray-200'
+                          }`}
+                        >
+                          {editProduct.trackStock ? 'Stok Fisik Dilacak (Siap PO & GRN)' : 'Non-Stok / Menu Resep'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-gray-600 mt-0.5">
+                        Aktifkan untuk barang fisik yang dibeli/diterima ke gudang dan dilacak saldonya per satuan dasar (contoh: Air Mineral Botol, Bahan Baku, Barang Setengah Jadi). Biarkan nonaktif untuk menu racikan berbasis resep/BOM atau jasa yang tidak diterima langsung melalui GRN.
                       </div>
                     </div>
                   </label>
@@ -3447,7 +3838,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </div>
                 </div>
 
-                {/* Bagian Opsional (SKU & Deskripsi) */}
+                {/* MPUI-F02: SKU sudah dipindah ke bagian identitas; bagian ini hanya berisi Deskripsi */}
+                {/* Bagian Opsional (Deskripsi) */}
                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50/40">
                   <button
                     type="button"
@@ -3456,8 +3848,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     className="w-full flex items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-gray-700 hover:bg-gray-100/80 transition-colors cursor-pointer"
                   >
                     <span className="flex items-center gap-2">
-                      <span>Detail Opsional (Kode SKU &amp; Deskripsi)</span>
-                      {(editProduct.code.trim() !== '' || editProduct.description.trim() !== '') && (
+                      <span>Detail Opsional (Deskripsi)</span>
+                      {(editProduct.description.trim() !== '') && (
                         <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                           Terisi
                         </span>
@@ -3467,15 +3859,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   </button>
                   {showEditOptional && (
                     <div className="p-3.5 pt-2 border-t border-gray-200/70 space-y-3 bg-white">
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Kode / SKU (Opsional)</label>
-                        <input
-                          type="text"
-                          value={editProduct.code}
-                          onChange={(e) => setEditProduct({ ...editProduct, code: e.target.value.toUpperCase() })}
-                          className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                        />
-                      </div>
                       <div>
                         <label className="block text-xs font-semibold text-gray-700 mb-1">Deskripsi Produk (Opsional)</label>
                         <textarea
@@ -4243,6 +4626,75 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           </div>
         </div>
       )}
+      {/* MP-04C Formula Resep / BOM Modal */}
+      <ProductRecipeModal
+        product={recipeModalItem}
+        propertyId={propertyId}
+        isOpen={Boolean(recipeModalItem)}
+        onClose={closeRecipeModal}
+        canEdit={capabilities.canEdit}
+      />
+
+      {/* MPUI-F01: Portal-based three-dot menu — rendered outside table overflow context */}
+      {openMenuRowId !== null && (() => {
+          const activeItem = filteredItems.find((i) => i.id === openMenuRowId);
+          if (!activeItem) return null;
+          const { top, bottom, right } = menuPosition;
+          const menuStyle: React.CSSProperties = {
+            position: 'fixed',
+            top: top ?? undefined,
+            bottom: bottom ?? undefined,
+            right,
+            zIndex: 9999,
+            minWidth: 150,
+          };
+          return createPortal(
+            <div
+              ref={(el) => { menuPortalRef.current = el; }}
+              role="menu"
+              aria-label={`Menu opsi ${activeItem.name}`}
+              style={menuStyle}
+              className="bg-white border border-gray-200 rounded-lg shadow-xl py-1"
+            >
+              {(capabilities.canEdit || capabilities.canCreate) && (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Formula resep BOM ${activeItem.name}`}
+                    onClick={() => { closeRowMenu(false); openRecipeModal(activeItem); }}
+                    disabled={saving}
+                    className="w-full text-left px-3 py-1.5 text-xs text-amber-800 hover:bg-amber-50 cursor-pointer disabled:opacity-50"
+                  >
+                    Resep / BOM
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Kelola kemasan ${activeItem.name}`}
+                    onClick={() => { closeRowMenu(false); openPackagingModal(activeItem); }}
+                    disabled={saving}
+                    className="w-full text-left px-3 py-1.5 text-xs text-sky-700 hover:bg-sky-50 cursor-pointer disabled:opacity-50"
+                  >
+                    Kemasan
+                  </button>
+                </>
+              )}
+              {capabilities.canToggleStatus && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { closeRowMenu(false); handleToggleActive(activeItem); }}
+                  disabled={saving}
+                  className={`w-full text-left px-3 py-1.5 text-xs cursor-pointer disabled:opacity-50 ${activeItem.is_active !== false ? 'text-rose-600 hover:bg-rose-50' : 'text-emerald-700 hover:bg-emerald-50'}`}
+                >
+                  {activeItem.is_active !== false ? 'Nonaktifkan' : 'Aktifkan'}
+                </button>
+              )}
+            </div>,
+            document.body
+          );
+        })()}
     </div>
   );
 }

@@ -117,7 +117,21 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       service_charge_enabled: svcRaw,
       tax_enabled: taxRaw,
       expected_total: expectedTotalRaw,
+      location_id: locationIdRaw,
     } = req.body;
+
+    let orderLocationId: number | null = null;
+    if (locationIdRaw !== undefined && locationIdRaw !== null) {
+      const parsedLocId = Number(locationIdRaw);
+      if (!Number.isInteger(parsedLocId) || parsedLocId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'location_id must be a positive integer',
+        });
+      }
+      orderLocationId = parsedLocId;
+    }
 
     // ── Strict boolean validasi per-order service charge / PPN flags ───────
     // Keputusan bisnis:
@@ -371,7 +385,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       items.some((it: any) => it.discount_type != null || it.discount_value != null) ||
       // New per-order pricing fields: any presence (true, false, or expected_total)
       // triggers the expanded path. Absent = follow-property, no fingerprint impact.
-      svcRaw !== undefined || taxRaw !== undefined || expectedTotal !== null;
+      svcRaw !== undefined || taxRaw !== undefined || expectedTotal !== null || orderLocationId !== null;
     const expandedPayload = {
       property_id: propertyId,
       reservation_id: reservation_id ?? null,
@@ -389,6 +403,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       service_charge_enabled: svcRaw === undefined ? null : svcRaw,
       tax_enabled: taxRaw === undefined ? null : taxRaw,
       expected_total: expectedTotal,
+      location_id: orderLocationId,
       items: items.map((it: any) => ({
         menu_item_id: Number(it.menu_item_id),
         quantity: Number(it.quantity ?? 1),
@@ -446,7 +461,8 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
                   po.created_at, po.updated_at,
                   po.guest_phone, po.notes,
                   po.discount_type, po.discount_value, po.discount_reason, po.discount_amount,
-                  po.request_fingerprint AS stored_fingerprint
+                    po.location_id,
+                    po.request_fingerprint AS stored_fingerprint
            FROM pos_orders po
            WHERE po.property_id = $1 AND po.idempotency_key = $2
            FOR UPDATE`,
@@ -701,16 +717,17 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
               idempotency_key, request_fingerprint,
               guest_phone, notes,
-              discount_type, discount_value, discount_reason, discount_amount)
+              discount_type, discount_value, discount_reason, discount_amount, location_id)
            VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8,
-                  $9, $10, $11, $12, $13, 0)
+                  $9, $10, $11, $12, $13, 0, $14)
             ON CONFLICT (property_id, idempotency_key) WHERE idempotency_key IS NOT NULL
             DO NOTHING
             RETURNING *`,
           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
             guest_name || 'Guest', orderStatus, idempotencyKey, fingerprint,
             normalizedGuestPhone, normalizedNotes,
-            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
+            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm,
+            orderLocationId]
         );
         if ((orderInsert.rowCount ?? 0) === 0) {
           // ─── Step 7: Winner lookup (plain SELECT, TANPA FOR UPDATE) ───
@@ -765,14 +782,15 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
              (property_id, reservation_id, order_number, table_number, guest_name, total_amount, status,
               idempotency_key, request_fingerprint,
               guest_phone, notes,
-              discount_type, discount_value, discount_reason, discount_amount)
+              discount_type, discount_value, discount_reason, discount_amount, location_id)
            VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, $7,
-                  $8, $9, $10, $11, $12, 0)
+                  $8, $9, $10, $11, $12, 0, $13)
            RETURNING *`,
           [propertyId, reservation_id || null, orderNumber, table_number || 'Walk In',
             guest_name || 'Guest', orderStatus, fingerprint,
             normalizedGuestPhone, normalizedNotes,
-            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm]
+            orderDiscountType, orderDiscountValue, orderDiscountReasonNorm,
+            orderLocationId]
         );
       }
 

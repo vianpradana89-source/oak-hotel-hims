@@ -1,6 +1,14 @@
 import { Pool } from 'pg';
 import { initializeDatabase as initializeV2 } from './schema_v2';
 import { seedBaselineStayChargeRules } from '../domains/stayCharges/stayChargeRuleDefaults';
+import { runProductMasterMp03cMigration } from './migrations/product_master_mp03c_v1';
+import { runProductInventoryMp04bB1Migration } from './migrations/product_inventory_mp04b_b1_v1';
+import { runProductInventoryMp04bB3Migration } from './migrations/product_inventory_mp04b_b3_v1';
+import { runPosProductRecipeMigration } from './migrations/pos_product_recipe_v1';
+import { runPosPurchaseOrdersMigration } from './migrations/pos_purchase_orders_v1';
+import { runPosPurchaseReceiptDraftPostMigration } from './migrations/pos_purchase_receipt_draft_post_v1';
+import { runPosPurchaseReceiptDraftPostV2Migration } from './migrations/pos_purchase_receipt_draft_post_v2';
+import { runPosProcurementTahap1aV1Migration } from './migrations/pos_procurement_tahap1a_v1';
 
 export async function initializeDatabase(pool: Pool) {
   // Run v2 initialization first (creates availability tables)
@@ -183,6 +191,8 @@ export async function initializeDatabase(pool: Pool) {
       canonical_base_unit_code VARCHAR(20),
       barcode VARCHAR(100),
       photo_storage_key TEXT,
+      track_stock BOOLEAN NOT NULL DEFAULT FALSE,
+      track_inventory BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT chk_pos_menu_items_product_type
@@ -841,6 +851,40 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_pmi_property_product_type ON pos_menu_items(property_id, product_type);
 
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
+      ON pos_menu_items(property_id, track_inventory)
+      WHERE track_inventory = TRUE;
+
+    CREATE OR REPLACE FUNCTION sync_pos_menu_items_track_stock_inventory()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.track_inventory IS TRUE AND NEW.track_stock IS NOT TRUE THEN
+          NEW.track_stock := TRUE;
+        ELSIF NEW.track_stock IS TRUE AND NEW.track_inventory IS NOT TRUE THEN
+          NEW.track_inventory := TRUE;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.track_inventory IS DISTINCT FROM OLD.track_inventory THEN
+          NEW.track_stock := NEW.track_inventory;
+        ELSIF NEW.track_stock IS DISTINCT FROM OLD.track_stock THEN
+          NEW.track_inventory := NEW.track_stock;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_sync_pos_menu_items_track_stock_inventory ON pos_menu_items;
+    CREATE TRIGGER trg_sync_pos_menu_items_track_stock_inventory
+    BEFORE INSERT OR UPDATE OF track_stock, track_inventory ON pos_menu_items
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_pos_menu_items_track_stock_inventory();
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
+      ON pos_menu_items(property_id, track_stock)
+      WHERE track_stock = TRUE;
     DO $$
     BEGIN
       ALTER TABLE pos_menu_items DROP CONSTRAINT IF EXISTS chk_pos_menu_items_canonical_base_unit;
@@ -928,6 +972,7 @@ export async function initializeDatabase(pool: Pool) {
       v_is_equivalent_promotion BOOLEAN := FALSE;
       v_is_unit_changing BOOLEAN := FALSE;
       v_has_minibar_usage BOOLEAN := FALSE;
+      v_has_stock_movements BOOLEAN := FALSE;
     BEGIN
       v_is_initial_assignment := (
         OLD.canonical_base_unit_code IS NULL
@@ -1007,6 +1052,14 @@ export async function initializeDatabase(pool: Pool) {
             INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
           IF v_has_minibar_usage THEN
             RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada laporan inspeksi minibar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.stock_movements') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM stock_movements WHERE product_id = $1)'
+            INTO v_has_stock_movements USING NEW.id;
+          IF v_has_stock_movements THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_STOCK: Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok';
           END IF;
         END IF;
       END IF;
@@ -1136,6 +1189,410 @@ export async function initializeDatabase(pool: Pool) {
       BEFORE UPDATE ON stock_locations
       FOR EACH ROW
       EXECUTE FUNCTION trg_fn_guard_stock_location_identity();
+    /* MP-04B Batch 1: Inventory ledger tables, projection and append-only invariants */
+    CREATE TABLE IF NOT EXISTS stock_operations (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      operation_type VARCHAR(50) NOT NULL,
+      operation_key VARCHAR(100) NOT NULL,
+      payload_fingerprint VARCHAR(128) NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_operations_prop_key'
+          AND conrelid = 'stock_operations'::regclass
+      ) THEN
+        ALTER TABLE stock_operations
+          ADD CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_type
+      ON stock_operations(property_id, operation_type);
+
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id BIGSERIAL PRIMARY KEY,
+      operation_id BIGINT NOT NULL REFERENCES stock_operations(id),
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      packaging_code VARCHAR(30),
+      packaging_label VARCHAR(60),
+      quantity_delta NUMERIC(12, 3) NOT NULL,
+      base_unit_code VARCHAR(20) NOT NULL,
+      unit_cost NUMERIC(14, 2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_property_product_location
+      ON stock_movements(property_id, product_id, location_id);
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_operation_id
+      ON stock_movements(operation_id);
+
+    CREATE TABLE IF NOT EXISTS stock_balances (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0),
+      CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_stock_balance_non_negative'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_balances_product_location'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_balances_property_product
+      ON stock_balances(property_id, product_id);
+
+    CREATE TABLE IF NOT EXISTS stock_cutover_windows (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      cutover_at TIMESTAMPTZ NOT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'OPEN',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_cutover_prop_active'
+          AND conrelid = 'stock_cutover_windows'::regclass
+      ) THEN
+        ALTER TABLE stock_cutover_windows
+          ADD CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status);
+      END IF;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION trg_fn_stock_movements_append_only()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Perubahan (UPDATE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Penghapusan (DELETE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Pembersihan (TRUNCATE) pada stock_movements dilarang';
+      END IF;
+      RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_append_only ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_append_only
+      BEFORE UPDATE OR DELETE ON stock_movements
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_no_truncate ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_no_truncate
+      BEFORE TRUNCATE ON stock_movements
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b1_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+    /* MP-04B Batch 3: Purchase line bindings & receipt tracking */
+    CREATE TABLE IF NOT EXISTS stock_purchase_line_bindings (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      transaction_id INTEGER NOT NULL,
+      transaction_line_id INTEGER NOT NULL,
+      line_type VARCHAR(30) NOT NULL DEFAULT 'STOCK',
+      product_id INTEGER REFERENCES pos_menu_items(id),
+      destination_location_id INTEGER REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      ordered_quantity NUMERIC(12, 3) NOT NULL,
+      received_quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      base_unit_code VARCHAR(20) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE')),
+      CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0),
+      CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_purchase_line_binding'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_type'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_quantities'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_tx
+      ON stock_purchase_line_bindings(property_id, transaction_id);
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_prod
+      ON stock_purchase_line_bindings(property_id, product_id);
+
+    ALTER TABLE stock_operations
+      ADD COLUMN IF NOT EXISTS transaction_id BIGINT,
+      ADD COLUMN IF NOT EXISTS notes TEXT,
+      ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_tx
+      ON stock_operations(property_id, transaction_id)
+      WHERE transaction_id IS NOT NULL;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b3_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+
+    -- MP-04C: Master Resep & Bill of Materials (BOM) Bahan Baku POS
+    CREATE TABLE IF NOT EXISTS pos_product_uoms (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(20) NOT NULL,
+      name VARCHAR(50) NOT NULL,
+      category VARCHAR(30) DEFAULT 'GENERAL',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_product_uoms_prop_code
+      ON pos_product_uoms (COALESCE(property_id, 0), UPPER(code));
+
+    INSERT INTO pos_product_uoms (property_id, code, name, category)
+    VALUES
+      (NULL, 'GRAM', 'Gram', 'WEIGHT'),
+      (NULL, 'KG', 'Kilogram', 'WEIGHT'),
+      (NULL, 'ML', 'Mililiter', 'VOLUME'),
+      (NULL, 'LITER', 'Liter', 'VOLUME'),
+      (NULL, 'PCS', 'Pieces', 'COUNT'),
+      (NULL, 'PORSI', 'Porsi', 'COUNT'),
+      (NULL, 'CUP', 'Cup', 'COUNT'),
+      (NULL, 'GELAS', 'Gelas', 'COUNT'),
+      (NULL, 'BOTOL', 'Botol', 'COUNT'),
+      (NULL, 'KALENG', 'Kaleng', 'COUNT'),
+      (NULL, 'PACK', 'Pack', 'COUNT'),
+      (NULL, 'BOX', 'Box', 'COUNT'),
+      (NULL, 'ROLL', 'Roll', 'COUNT'),
+      (NULL, 'SET', 'Set', 'COUNT'),
+      (NULL, 'LEMBAR', 'Lembar', 'COUNT')
+    ON CONFLICT DO NOTHING;
+
+    ALTER TABLE pos_menu_items
+      ADD COLUMN IF NOT EXISTS is_raw_material BOOLEAN NOT NULL DEFAULT FALSE;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_raw_material
+      ON pos_menu_items (property_id, is_raw_material)
+      WHERE is_raw_material = TRUE;
+
+    CREATE TABLE IF NOT EXISTS pos_product_recipes (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE CASCADE,
+      ingredient_product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE RESTRICT,
+      quantity NUMERIC(12, 4) NOT NULL,
+      uom_id INTEGER REFERENCES pos_product_uoms(id) ON DELETE SET NULL,
+      notes VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_quantity_positive'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_quantity_positive CHECK (quantity > 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_no_self_ref'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_no_self_ref CHECK (product_id <> ingredient_product_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_pos_product_recipes_prop_prod_ing'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT uq_pos_product_recipes_prop_prod_ing UNIQUE (property_id, product_id, ingredient_product_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_product
+      ON pos_product_recipes (property_id, product_id);
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_ingredient
+      ON pos_product_recipes (property_id, ingredient_product_id);
+
+    CREATE OR REPLACE VIEW pos_products AS
+      SELECT * FROM pos_menu_items;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_product_recipe_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+    -- MP-04D: Purchase Orders & Goods Receipts
+    CREATE TABLE IF NOT EXISTS pos_suppliers (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(50) NOT NULL,
+      name VARCHAR(150) NOT NULL,
+      contact_person VARCHAR(100),
+      phone VARCHAR(50),
+      email VARCHAR(100),
+      address TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_suppliers_property_code UNIQUE (property_id, code)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_suppliers_property ON pos_suppliers(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_suppliers_property_active ON pos_suppliers(property_id, is_active);
+
+    ALTER TABLE pos_menu_items
+      ADD COLUMN IF NOT EXISTS average_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS last_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS pos_purchase_orders (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      po_number VARCHAR(50) NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES pos_suppliers(id),
+      order_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      expected_date DATE,
+      status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+      notes TEXT,
+      total_estimated_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      created_by VARCHAR(100),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_purchase_orders_property_po UNIQUE (property_id, po_number),
+      CONSTRAINT chk_pos_purchase_orders_status
+        CHECK (status IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED', 'COMPLETED', 'CANCELLED'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_purchase_orders_prop_status ON pos_purchase_orders(property_id, status);
+    CREATE INDEX IF NOT EXISTS idx_pos_purchase_orders_prop_supplier ON pos_purchase_orders(property_id, supplier_id);
+
+    CREATE TABLE IF NOT EXISTS pos_purchase_order_items (
+      id SERIAL PRIMARY KEY,
+      po_id INTEGER NOT NULL REFERENCES pos_purchase_orders(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      ordered_qty NUMERIC(12,4) NOT NULL CHECK (ordered_qty > 0),
+      received_qty NUMERIC(12,4) NOT NULL DEFAULT 0 CHECK (received_qty >= 0),
+      unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (unit_cost >= 0),
+      uom_id INTEGER REFERENCES pos_product_uoms(id),
+      notes VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_purchase_order_items_po_prod UNIQUE (po_id, product_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_po_items_po_id ON pos_purchase_order_items(po_id);
+
+    CREATE TABLE IF NOT EXISTS pos_goods_receipts (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      grn_number VARCHAR(50) NOT NULL,
+      po_id INTEGER REFERENCES pos_purchase_orders(id),
+      supplier_id INTEGER REFERENCES pos_suppliers(id),
+      location_id INTEGER REFERENCES stock_locations(id),
+      receipt_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      invoice_no VARCHAR(100),
+      received_by VARCHAR(100),
+      status VARCHAR(30) NOT NULL DEFAULT 'COMPLETED',
+      notes TEXT,
+      idempotency_key VARCHAR(120),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_goods_receipts_property_grn UNIQUE (property_id, grn_number),
+      CONSTRAINT chk_pos_goods_receipts_status
+        CHECK (status IN ('COMPLETED', 'CANCELLED'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_goods_receipts_idemp
+      ON pos_goods_receipts(property_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pos_goods_receipts_prop ON pos_goods_receipts(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_goods_receipts_po ON pos_goods_receipts(po_id);
+
+    CREATE TABLE IF NOT EXISTS pos_goods_receipt_items (
+      id SERIAL PRIMARY KEY,
+      receipt_id INTEGER NOT NULL REFERENCES pos_goods_receipts(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      po_item_id INTEGER REFERENCES pos_purchase_order_items(id),
+      received_qty NUMERIC(12,4) NOT NULL CHECK (received_qty > 0),
+      unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (unit_cost >= 0),
+      subtotal NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
+      uom_id INTEGER REFERENCES pos_product_uoms(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_grn_items_receipt ON pos_goods_receipt_items(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_grn_items_prod ON pos_goods_receipt_items(product_id);
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_purchase_orders_v1')
+    ON CONFLICT (version) DO NOTHING;
+
 
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$
@@ -1208,6 +1665,8 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property ON pos_orders(property_id);
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property_status ON pos_orders(property_id, status);
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
   `);
 
   // GL accounts and journal property isolation (idempotent for existing DBs)
@@ -6164,7 +6623,7 @@ export async function initializeDatabase(pool: Pool) {
     }
   }
 
-  // Migration: doc_1b_2b_documents_permission_rows_v1
+    // Migration: doc_1b_2b_documents_permission_rows_v1
   await pool.query(`
     INSERT INTO permissions (resource, action, key, description, is_system)
     VALUES
@@ -6264,6 +6723,7 @@ export async function initializeDatabase(pool: Pool) {
   }
 
   await ensureBookingCreateRequestsSchema(pool);
+  await ensureInventoryTahapAR1Schema(pool);
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
 }
 
@@ -6334,5 +6794,70 @@ export async function ensureBookingCreateRequestsSchema(pool: Pool): Promise<voi
 
     CREATE INDEX IF NOT EXISTS idx_bcr_fp_lookup
       ON booking_create_requests (fingerprint, fingerprint_version);
+  `);
+}
+
+
+export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version VARCHAR(255) PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_raw_material BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS average_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS last_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
+      ON pos_menu_items(property_id, track_inventory)
+      WHERE track_inventory = TRUE;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
+      ON pos_menu_items(property_id, track_stock)
+      WHERE track_stock = TRUE;
+
+    CREATE OR REPLACE FUNCTION sync_pos_menu_items_track_stock_inventory()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.track_inventory IS TRUE AND NEW.track_stock IS NOT TRUE THEN
+          NEW.track_stock := TRUE;
+        ELSIF NEW.track_stock IS TRUE AND NEW.track_inventory IS NOT TRUE THEN
+          NEW.track_inventory := TRUE;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.track_inventory IS DISTINCT FROM OLD.track_inventory THEN
+          NEW.track_stock := NEW.track_inventory;
+        ELSIF NEW.track_stock IS DISTINCT FROM OLD.track_stock THEN
+          NEW.track_inventory := NEW.track_stock;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_sync_pos_menu_items_track_stock_inventory ON pos_menu_items;
+    CREATE TRIGGER trg_sync_pos_menu_items_track_stock_inventory
+      BEFORE INSERT OR UPDATE OF track_stock, track_inventory ON pos_menu_items
+      FOR EACH ROW
+      EXECUTE FUNCTION sync_pos_menu_items_track_stock_inventory();
+  `);
+
+  await runProductMasterMp03cMigration(pool);
+  await runProductInventoryMp04bB1Migration(pool);
+  await runProductInventoryMp04bB3Migration(pool);
+  await runPosProductRecipeMigration(pool);
+  await runPosPurchaseOrdersMigration(pool);
+  await runPosPurchaseReceiptDraftPostMigration(pool);
+  await runPosPurchaseReceiptDraftPostV2Migration(pool);
+  await runPosProcurementTahap1aV1Migration(pool);
+
+  await pool.query(`
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
   `);
 }

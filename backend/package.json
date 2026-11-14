@@ -105,6 +105,7 @@
     "test:dashboard-daily-kpi": "npm run build && node test/dashboard_daily_kpi_test.js",
     "test:booking-payment-allocation": "npm run build && node test/booking_payment_allocation_contract_test.js",
     "test:deposit-payment-history": "node test/deposit_payment_history_regression_test.js",
+    "test:pos-food-cost": "npm run build && node test/pos_food_cost_analysis_e2e_test.cjs",
     "db:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup_db.ps1"
   },
   "keywords": [],

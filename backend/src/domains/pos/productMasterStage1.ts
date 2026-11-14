@@ -439,6 +439,58 @@ export function parseProductTypeQueryFilter(
   return { ok: true, filter: parsed.value };
 }
 
+export function parseStockTrackingInput(
+  body: Record<string, any> | null | undefined,
+  options?: { productType?: ProductType | null }
+):
+  | { ok: true; provided: boolean; track_stock: boolean; track_inventory: boolean }
+  | { ok: false; code: string; message: string } {
+  const rawTrackStock = body?.track_stock;
+  const rawTrackInventory = body?.track_inventory;
+  const hasTrackStock = rawTrackStock !== undefined;
+  const hasTrackInventory = rawTrackInventory !== undefined;
+
+  if (hasTrackStock && typeof rawTrackStock !== 'boolean') {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'track_stock must be a boolean (true or false)',
+    };
+  }
+  if (hasTrackInventory && typeof rawTrackInventory !== 'boolean') {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'track_inventory must be a boolean (true or false)',
+    };
+  }
+  if (hasTrackStock && hasTrackInventory && rawTrackStock !== rawTrackInventory) {
+    return {
+      ok: false,
+      code: 'CONFLICTING_STOCK_TRACKING_FLAGS',
+      message:
+        'track_stock dan track_inventory harus selaras (keduanya true untuk produk stok fisik/GRN, atau keduanya false untuk produk non-stok/resep/jasa)',
+    };
+  }
+  if (hasTrackStock || hasTrackInventory) {
+    const resolved = Boolean(hasTrackStock ? rawTrackStock : rawTrackInventory);
+    return {
+      ok: true,
+      provided: true,
+      track_stock: resolved,
+      track_inventory: resolved,
+    };
+  }
+  const defaultTracked =
+    options?.productType === 'RAW_MATERIAL' || options?.productType === 'SEMI_FINISHED';
+  return {
+    ok: true,
+    provided: false,
+    track_stock: defaultTracked,
+    track_inventory: defaultTracked,
+  };
+}
+
 /**
  * Format baris pos_menu_items dari database ke response JSON API.
  * Penting:
@@ -478,6 +530,12 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
   const packagingConversions = Array.isArray(safeRow.packaging_conversions)
     ? safeRow.packaging_conversions
     : [];
+  const trackStock: boolean =
+    typeof safeRow.track_stock === 'boolean' ? safeRow.track_stock : Boolean(safeRow.track_stock);
+  const trackInventory: boolean =
+    typeof safeRow.track_inventory === 'boolean'
+      ? safeRow.track_inventory
+      : Boolean(safeRow.track_inventory);
 
   return {
     ...safeRow,
@@ -492,6 +550,8 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
     base_unit_dimension: canonicalUnitDef ? canonicalUnitDef.dimension : null,
     is_base_unit_locked: isBaseUnitLocked,
     packaging_conversions: packagingConversions,
+    track_stock: trackStock,
+    track_inventory: trackInventory,
     barcode,
     has_photo: hasPhoto,
     photo_url: photoUrl,
@@ -760,6 +820,21 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         setClauses.push(`is_active = $${params.length}`);
       }
 
+      const parsedPatchTracking = parseStockTrackingInput(body);
+      if (!parsedPatchTracking.ok) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: parsedPatchTracking.code,
+          message: parsedPatchTracking.message,
+        });
+      }
+      if (parsedPatchTracking.provided) {
+        params.push(parsedPatchTracking.track_stock);
+        setClauses.push(`track_stock = $${params.length}`);
+        params.push(parsedPatchTracking.track_inventory);
+        setClauses.push(`track_inventory = $${params.length}`);
+      }
+
       if (setClauses.length === 0 && !hasAnyUnitField) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
       }
@@ -822,11 +897,14 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
           });
           if (unitMutation.isUnitChanging && lockCheck.isLocked) {
             await client.query('ROLLBACK');
+            const errCode = lockCheck.lockCode || (lockCheck.hasStockMovements ? 'BASE_UNIT_LOCKED_BY_STOCK' : 'BASE_UNIT_LOCKED_BY_USAGE');
+            const message = lockCheck.hasStockMovements
+              ? 'Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok'
+              : 'Satuan dasar tidak dapat diubah karena produk sudah memiliki kemasan aktif atau penggunaan stok';
             return res.status(409).json({
               status: 'ERROR',
-              code: 'BASE_UNIT_LOCKED_BY_USAGE',
-              message:
-                'Satuan dasar tidak dapat diubah karena produk sudah memiliki kemasan aktif atau penggunaan stok',
+              code: errCode,
+              message,
             });
           }
 
@@ -1050,6 +1128,17 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
         isActiveVal = is_active;
       }
 
+      const parsedTracking = parseStockTrackingInput(body, { productType: productTypeVal });
+      if (!parsedTracking.ok) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: parsedTracking.code,
+          message: parsedTracking.message,
+        });
+      }
+      const trackStockVal = parsedTracking.track_stock;
+      const trackInventoryVal = parsedTracking.track_inventory;
+
       let resolvedCategoryId: number | null = null;
       if (category_id !== undefined) {
         if (category_id === null) {
@@ -1149,9 +1238,10 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
             ? await client.query(
                 `INSERT INTO pos_menu_items (
                    property_id, category_id, item_code, name, description,
-                   price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode, canonical_base_unit_code
+                   price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode,
+                   canonical_base_unit_code, track_stock, track_inventory
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                  RETURNING *`,
                 [
                   propId,
@@ -1167,6 +1257,34 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
                   baseUnitVal,
                   barcodeVal,
                   canonicalBaseUnitVal,
+                  trackStockVal,
+                  trackInventoryVal,
+                ]
+              )
+            : parsedTracking.provided || trackStockVal
+            ? await client.query(
+                `INSERT INTO pos_menu_items (
+                   property_id, category_id, item_code, name, description,
+                   price, is_active, is_sellable_pos, product_type, product_kind, base_unit, barcode,
+                   track_stock, track_inventory
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 RETURNING *`,
+                [
+                  propId,
+                  finalCategoryId,
+                  code,
+                  propName,
+                  desc,
+                  priceVal,
+                  isActiveVal,
+                  effectiveSellablePos,
+                  productTypeVal,
+                  productKindVal,
+                  baseUnitVal,
+                  barcodeVal,
+                  trackStockVal,
+                  trackInventoryVal,
                 ]
               )
             : await client.query(
@@ -1197,6 +1315,8 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
           status: 'OK',
           data: formatPosMenuItemRow({
             canonical_base_unit_code: canonicalBaseUnitVal,
+            track_stock: trackStockVal,
+            track_inventory: trackInventoryVal,
             ...row,
             category_name: finalCategoryName,
           }),

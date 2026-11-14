@@ -9,7 +9,7 @@ import multer from 'multer';
 import { Pool } from 'pg';
 import { createPostgresRealtimeBus } from './infrastructure/realtime/postgresRealtimeBus';
 import { generateBid } from './utils/bid';
-import { initializeDatabase, ensureBookingCreateRequestsSchema } from './db/schema_v3';
+import { initializeDatabase, ensureBookingCreateRequestsSchema, ensureInventoryTahapAR1Schema } from './db/schema_v3';
 import { createRoomCategoriesRouter } from './domains/roomMaster/roomCategoriesRouter';
 import { createRoomTypesRouter } from './domains/roomMaster/roomTypesRouter';
 import { createRoomsRouter } from './domains/roomMaster/roomsRouter';
@@ -209,6 +209,52 @@ import {
   createStockLocationCreateHandler,
   createStockLocationPatchHandler,
 } from './domains/pos/productMasterStage1';
+
+import {
+  createStockOpeningBalanceHandler,
+  createStockBalancesHandler,
+  createPurchaseReceiptHandler,
+  createPurchaseReceiptsQueryHandler,
+  createStockAdjustmentHandler,
+  createStockAdjustmentsQueryHandler,
+  createStockOpnameHandler,
+  createStockOpnamesQueryHandler,
+  createStockTransferHandler,
+  createStockTransfersQueryHandler,
+  createStockLedgerHandler,
+  createInventoryValuationHandler,
+  createOpnameVarianceHandler,
+  createGlobalStockMovementsHandler,
+} from './domains/pos/stockInventoryService';
+import {
+  createPosProductUomsHandler,
+  createProductRecipeGetHandler,
+  createProductRecipeSaveHandler,
+  createProductRecipeDeleteHandler,
+  createRawMaterialsListHandler,
+} from './domains/pos/posProductRecipeService';
+import {
+  createPosSuppliersListHandler,
+  createPosSupplierGetHandler,
+  createPosSupplierCreateHandler,
+  createPosSupplierUpdateHandler,
+  createPosSupplierDeleteHandler,
+  createPosPurchaseOrdersListHandler,
+  createPosPurchaseOrderGetHandler,
+  createPosPurchaseOrderCreateHandler,
+  createPosPurchaseOrderUpdateHandler,
+  createPosPurchaseOrderStatusHandler,
+  createPosGoodsReceiptsListHandler,
+  createPosGoodsReceiptGetHandler,
+  createPosGoodsReceiptCreateHandler,
+  createPosGoodsReceiptPostHandler,
+  createPosGoodsReceiptDraftUpdateHandler,
+  createPosGoodsReceiptCancelHandler,
+  createPosPurchaseOrderReceivablePreviewHandler,
+  createPosPurchaseTransactionReceivablePreviewHandler,
+} from './domains/pos/posPurchaseOrderHandlers';
+import { createFoodCostHandlers } from './domains/pos/posFoodCostHandlers';
+
 
 const app: any = express();
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -688,6 +734,7 @@ async function startServer() {
   } else {
     console.log('Database schema initialization skipped');
     await ensureBookingCreateRequestsSchema(pool);
+    await ensureInventoryTahapAR1Schema(pool);
   }
   await seedSuperAdmin(pool);
   const sweepSummary = await sweepExpiredLocks();
@@ -6297,6 +6344,68 @@ app.get('/api/pos/stock-locations/room-candidates', createStockLocationRoomCandi
 app.get('/api/pos/stock-locations', createStockLocationListHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock-locations', createStockLocationCreateHandler({ pool, assertPropertyScope }));
 app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool, assertPropertyScope }));
+
+// ── Master Produk: Manajemen Stok & Saldo Awal (MP-04B) ──────────────────────
+app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/purchase-receipt', createPurchaseReceiptHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/purchase-receipts', createPurchaseReceiptsQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/adjustments', createStockAdjustmentHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/adjustments', createStockAdjustmentsQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/opname', createStockOpnameHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/opnames', createStockOpnameHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opname', createStockOpnamesQueryHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opnames', createStockOpnamesQueryHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/stock/transfers', createStockTransferHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/transfers', createStockTransfersQueryHandler({ pool, assertPropertyScope }));
+
+// ── Master Produk: Laporan Mutasi Stok, Kartu Stok & Valuasi Persediaan (MP-04B B-5) ──
+app.get('/api/pos/inventory/stock-ledger', createStockLedgerHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/stock-ledger', createStockLedgerHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/inventory/stock-movements-global', createGlobalStockMovementsHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/movements-global', createGlobalStockMovementsHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/inventory/valuation-report', createInventoryValuationHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/valuation-report', createInventoryValuationHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/inventory/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/stock/opname-variance-report', createOpnameVarianceHandler({ pool, assertPropertyScope }));
+
+// ── Master Resep & Bill of Materials (BOM) Bahan Baku POS (MP-04C) ──────────
+app.get('/api/pos/uoms', createPosProductUomsHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/raw-materials', createRawMaterialsListHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/products/:id/recipe', createProductRecipeGetHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/products/:id/recipe', createProductRecipeSaveHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/menu/items/:id/recipe', createProductRecipeGetHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/menu/items/:id/recipe', createProductRecipeSaveHandler({ pool, assertPropertyScope }));
+app.delete('/api/pos/recipes/:recipeId', createProductRecipeDeleteHandler({ pool, assertPropertyScope }));
+
+// ── Purchase Order & Goods Receipt (GRN) Bahan Baku POS (MP-04D) ────────────
+app.get('/api/pos/suppliers', createPosSuppliersListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/suppliers', createPosSupplierCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/suppliers/:id', createPosSupplierGetHandler({ pool, assertPropertyScope }));
+app.put('/api/pos/suppliers/:id', createPosSupplierUpdateHandler({ pool, assertPropertyScope }));
+app.delete('/api/pos/suppliers/:id', createPosSupplierDeleteHandler({ pool, assertPropertyScope }));
+
+app.get('/api/pos/purchase-orders', createPosPurchaseOrdersListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/purchase-orders', createPosPurchaseOrderCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/purchase-orders/:id', createPosPurchaseOrderGetHandler({ pool, assertPropertyScope }));
+app.put('/api/pos/purchase-orders/:id', createPosPurchaseOrderUpdateHandler({ pool, assertPropertyScope }));
+app.patch('/api/pos/purchase-orders/:id/status', createPosPurchaseOrderStatusHandler({ pool, assertPropertyScope }));
+
+app.get('/api/pos/goods-receipts', createPosGoodsReceiptsListHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/goods-receipts', createPosGoodsReceiptCreateHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/goods-receipts/from-po/:poId', createPosPurchaseOrderReceivablePreviewHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/goods-receipts/from-purchase/:transactionId', createPosPurchaseTransactionReceivablePreviewHandler({ pool, assertPropertyScope }));
+app.get('/api/pos/goods-receipts/:id', createPosGoodsReceiptGetHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/goods-receipts/:id/post', createPosGoodsReceiptPostHandler({ pool, assertPropertyScope }));
+app.put('/api/pos/goods-receipts/:id/draft', createPosGoodsReceiptDraftUpdateHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/goods-receipts/:id/cancel', createPosGoodsReceiptCancelHandler({ pool, assertPropertyScope }));
+
+// ── MP-04E: Food Cost & Menu Engineering ─────────────────────────────────────
+const foodCostHandlers = createFoodCostHandlers({ pool, assertPropertyScope });
+app.get('/api/pos/products/:id/food-cost', foodCostHandlers.getProductFoodCostHandler);
+app.get('/api/pos/reports/food-cost-overview', foodCostHandlers.getFoodCostOverviewHandler);
+app.get('/api/pos/reports/menu-engineering', foodCostHandlers.getMenuEngineeringHandler);
+
 
 // ── Master Produk: Category Management ───────────────────────────────────────
 

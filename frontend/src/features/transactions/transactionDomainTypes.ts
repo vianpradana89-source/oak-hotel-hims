@@ -5,8 +5,10 @@ export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 export type DepartmentCode = 'FRONT_OFFICE' | 'HOUSEKEEPING' | 'FNB' | 'MAINTENANCE' | 'ADMIN' | 'HRD' | 'GENERAL';
 
+export type PurchaseApprovalStatus = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+
 /** PURCHASE-2A3: canonical lifecycle action for inline purchase controls. */
-export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL' | 'ARCHIVE' | 'UNARCHIVE';
 
 /** EXPENSE-1C: canonical lifecycle action for inline expense controls. */
 export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
@@ -48,7 +50,14 @@ export interface TransactionLine {
   id: string;
   property_id: number;
   transaction_id: string;
-  product_id?: string | null;
+  product_id?: string | number | null;
+  packaging_id?: string | number | null;
+  po_item_id?: string | number | null;
+  po_ordered_quantity?: number | string | null;
+  po_unit_cost?: number | string | null;
+  ordered_quantity?: number | string | null;
+  line_type?: 'STOCK_PRODUCT' | 'NON_STOCK_EXPENSE';
+  received_quantity?: number | string;
   description_snapshot: string;
   quantity: number | string;
   unit: string;
@@ -60,7 +69,10 @@ export interface TransactionLine {
 }
 
 export interface TransactionLineInput {
+  id?: number | string | null;
   product_id?: number | string | null;
+  packaging_id?: number | string | null;
+  line_type?: 'STOCK_PRODUCT' | 'NON_STOCK_EXPENSE';
   description?: string;
   description_snapshot?: string;
   quantity: number;
@@ -166,6 +178,11 @@ export interface TransactionRecord {
   recipient_bank_holder?: string | null;
   /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
   expense_workflow_status?: string | null;
+  approval_status?: PurchaseApprovalStatus | null;
+  approved_by_user_id?: string | null;
+  approved_by_name_snapshot?: string | null;
+  approved_at?: string | null;
+  rejection_reason?: string | null;
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
   verification_status: VerificationStatus;
@@ -173,6 +190,30 @@ export interface TransactionRecord {
   verified_by_name_snapshot?: string | null;
   verified_at?: string | null;
   verification_note?: string | null;
+  po_id?: number | string | null;
+  po_number?: string | null;
+  po_number_snapshot?: string | null;
+  po_status?: string | null;
+  is_legacy_without_po?: boolean;
+  has_po_variance?: boolean;
+  po_variance_summary?: any | null;
+  balance_amount?: number | string | null;
+  workflow_status?: string | null;
+  archived_at?: string | null;
+  archived_by_user_id?: string | null;
+  archived_by_name_snapshot?: string | null;
+  archive_reason?: string | null;
+  linked_goods_receipts?: Array<{
+    id: number;
+    grn_number: string;
+    receipt_date: string;
+    status: string;
+    location_id?: number | null;
+    location_name?: string | null;
+    received_by?: string | null;
+    posted_by?: string | null;
+    total_amount?: number | string | null;
+  }>;
   reversal_of_transaction_id: number | string | null;
   correction_group_id: string | null;
   notes: string | null;
@@ -672,6 +713,18 @@ export interface PurchasePillClass {
   text: string;
 }
 
+export function getPurchaseApprovalClass(status: string | null | undefined): PurchasePillClass {
+  switch (status) {
+    case 'APPROVED':
+      return { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700' };
+    case 'REJECTED':
+      return { bg: 'bg-rose-50', border: 'border-rose-300', text: 'text-rose-700' };
+    case 'PENDING_APPROVAL':
+    default:
+      return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
+  }
+}
+
 export function getPurchaseReceivingClass(status: string): PurchasePillClass {
   switch (status) {
     case 'DITERIMA':
@@ -709,6 +762,48 @@ export function getPurchaseWorkflowClass(status: string): PurchasePillClass {
     default:
       return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
   }
+}
+
+/**
+ * Normalizes a transaction business date into a canonical YYYY-MM-DD calendar string.
+ * Preserves plain YYYY-MM-DD strings as-is and converts timestamps/Date values in Asia/Jakarta.
+ */
+export function toTransactionBusinessDateYmd(value?: string | Date | null): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return '';
+    return value.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+  }
+  const str = String(value).trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+  }
+  return str.slice(0, 10);
+}
+
+export function toJakartaDateInput(val?: string | Date | null): string {
+  const ymd = toTransactionBusinessDateYmd(val);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+}
+
+export function formatTransactionBusinessDate(value: string | Date | null | undefined): string {
+  const raw = toTransactionBusinessDateYmd(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return raw || '-';
+
+  const [, year, month, day] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  if (Number.isNaN(date.getTime())) return raw;
+
+  return date.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
 }
 
 export type BookingSaleSourceCategory =

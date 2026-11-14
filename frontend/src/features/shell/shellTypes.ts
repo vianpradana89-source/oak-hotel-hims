@@ -10,7 +10,9 @@ export type MainNavKey =
   | 'Laporan'
   | 'Master Kamar'
   | 'Master Produk'
+  | 'Penerimaan Barang'
   | 'Produk & Inventori'
+  | 'Analisis Food Cost'
   | 'Pelanggan'
   | 'Pengaturan';
 
@@ -22,6 +24,7 @@ export interface NavItemDef {
   badgeVariant?: 'neutral' | 'primary' | 'gold' | 'success' | 'warning' | 'danger' | 'info';
   isFunctional: boolean;
   disabledTooltip?: string;
+  children?: NavItemDef[];
 }
 
 export interface NavGroupDef {

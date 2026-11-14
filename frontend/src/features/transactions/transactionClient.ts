@@ -286,6 +286,7 @@ export async function createPurchaseTransactionApi(data: {
   lines: TransactionLineInput[];
   discount_amount?: number;
   transaction_discount?: number;
+  po_id?: number | string | null;
   rounding_amount?: number;
   is_immediately_paid?: boolean;
   payment_method?: string | null;
@@ -296,6 +297,51 @@ export async function createPurchaseTransactionApi(data: {
 }): Promise<TransactionRecord> {
   return await fetchJson<TransactionRecord>(`${API_BASE}/purchases`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+}
+
+/** Update existing Purchase transaction */
+export async function updatePurchaseTransactionApi(id: number | string, data: {
+  property_id: number;
+  transaction_date?: string;
+  category_code?: string;
+  category_name?: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
+  department_code?: string;
+  supplier_id?: number | string | null;
+  supplier_name?: string | null;
+  supplier_phone?: string | null;
+  supplier_bank_name?: string | null;
+  supplier_bank_account?: string | null;
+  supplier_address?: string | null;
+  source_reference?: string | null;
+  description?: string;
+  lines?: Array<{
+    id?: number | string | null;
+    product_id?: number | string | null;
+    packaging_id?: number | string | null;
+    line_type?: 'STOCK_PRODUCT' | 'NON_STOCK_EXPENSE';
+    description?: string;
+    description_snapshot?: string;
+    quantity: number | string;
+    unit?: string;
+    unit_price: number | string;
+    discount_amount?: number | string;
+  }>;
+  discount_amount?: number;
+  transaction_discount?: number;
+  po_id?: number | string | null;
+  rounding_amount?: number;
+  payment_method?: string | null;
+  notes?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}): Promise<TransactionRecord> {
+  return await fetchJson<TransactionRecord>(`${API_BASE}/purchases/${id}`, {
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   });
@@ -540,11 +586,12 @@ export async function updatePurchaseLifecycleApi(
   id: number | string,
   data: {
     property_id: number;
-    action: 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+    action: 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL' | 'ARCHIVE' | 'UNARCHIVE';
     receiving_status?: string | null;
     received_at?: string | null;
     verification_status?: string | null;
     workflow_status?: string | null;
+    approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | null;
     reason?: string | null;
     actor_name?: string | null;
     actor_user_id?: string | null;

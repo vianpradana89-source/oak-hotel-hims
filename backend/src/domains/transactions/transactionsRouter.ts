@@ -8,6 +8,7 @@ import {
   getTransactionById,
   createManualTransaction,
   createPurchaseTransaction,
+  updatePurchaseTransaction,
   createExpenseTransaction,
   updateExpenseTransaction,
   createIncomeTransaction,
@@ -305,6 +306,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         transaction_date: req.body.transaction_date,
         category_code: req.body.category_code,
         category_name: req.body.category_name,
+        po_id: req.body.po_id,
         purchase_category_id: req.body.purchase_category_id,
         supplier_id: req.body.supplier_id,
         supplier_name: req.body.supplier_name,
@@ -338,6 +340,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -376,6 +379,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -414,6 +418,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -465,6 +470,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -512,6 +518,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -530,6 +537,7 @@ export function createTransactionsRouter(pool: Pool): Router {
       }
       const id = req.params.id;
       const action = req.body?.action;
+      const approvalStatus = req.body?.approval_status;
       const receivingStatus = req.body?.receiving_status;
       const verificationStatus = req.body?.verification_status;
       const workflowStatus = req.body?.workflow_status;
@@ -563,6 +571,7 @@ export function createTransactionsRouter(pool: Pool): Router {
       const updated = await executePurchaseLifecycle(pool, id, {
         property_id: scopedPropertyId,
         action,
+        approval_status: approvalStatus,
         receiving_status: receivingStatus,
         received_at: req.body?.received_at || null,
         verification_status: verificationStatus,
@@ -580,6 +589,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -625,6 +635,7 @@ export function createTransactionsRouter(pool: Pool): Router {
      } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -953,6 +964,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }
@@ -979,6 +991,66 @@ export function createTransactionsRouter(pool: Pool): Router {
       });
     }
   });
+
+  /**
+   * PATCH / PUT /api/transactions/purchases/:id
+   * Update existing Purchase transaction (PROSES only).
+   * Maintains line identities, verifies non-terminal and ceiling checks.
+   */
+  const handleUpdatePurchase = async (req: Request, res: Response) => {
+    try {
+      const scoped = await resolveAuthenticatedTransactionWrite({ req, res, pool });
+      if (!scoped) return;
+
+      const id = req.params.id;
+      const body = req.body;
+
+      const actorName = body.actor_name || scoped.user?.full_name || scoped.user?.username || null;
+      const actorUserId = body.actor_user_id || String(scoped.user?.id) || null;
+
+      const updated = await updatePurchaseTransaction(pool, id, {
+        property_id: scoped.propertyId,
+        transaction_date: body.transaction_date,
+        category_code: body.category_code,
+        category_name: body.category_name,
+        purchase_category_id: body.purchase_category_id,
+        department_code: body.department_code,
+        department_id: body.department_id,
+        supplier_id: body.supplier_id,
+        supplier_name: body.supplier_name,
+        supplier_phone: body.supplier_phone,
+        supplier_bank_name: body.supplier_bank_name,
+        supplier_bank_account: body.supplier_bank_account,
+        supplier_address: body.supplier_address,
+        source_reference: body.source_reference,
+        description: body.description,
+        lines: body.lines,
+        discount_amount: body.discount_amount,
+        transaction_discount: body.transaction_discount,
+        rounding_amount: body.rounding_amount,
+        payment_method: body.payment_method,
+        receiving_status: body.receiving_status,
+        received_at: body.received_at,
+        notes: body.notes,
+        actor_name: actorName,
+        actor_user_id: actorUserId,
+      });
+
+      return res.json({
+        success: true,
+        message: 'Transaksi pembelian berhasil diperbarui',
+        data: updated
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({
+        success: false,
+        code: err.code || undefined,
+        error: err.message
+      });
+    }
+  };
+  router.patch('/purchases/:id', handleUpdatePurchase);
+  router.put('/purchases/:id', handleUpdatePurchase);
 
   /**
    * PATCH /api/transactions/expenses/:id
@@ -1025,6 +1097,7 @@ export function createTransactionsRouter(pool: Pool): Router {
     } catch (err: any) {
       return res.status(err.statusCode || 400).json({
         success: false,
+        code: err.code || undefined,
         error: err.message
       });
     }

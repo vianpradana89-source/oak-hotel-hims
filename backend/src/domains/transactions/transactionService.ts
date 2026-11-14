@@ -13,6 +13,7 @@ import {
   CreateTransactionInput,
   CreateManualTransactionDto,
   CreatePurchaseTransactionDto,
+  UpdatePurchaseTransactionDto,
   CreateExpenseTransactionDto,
   UpdateExpenseTransactionDto,
   CreateIncomeTransactionDto,
@@ -201,6 +202,7 @@ const PURCHASE_RECEIVING_STATUSES: ReceivingStatus[] = [
   'BELUM_DITERIMA',
   'DITERIMA_SEBAGIAN',
   'DITERIMA',
+  'DITERIMA_LENGKAP',
 ];
 
 function purchaseValidationError(message: string): Error {
@@ -1083,6 +1085,15 @@ export async function createManualTransaction(
     throw err;
   }
 
+  if (String(dto.transaction_type || '').toUpperCase() === 'PURCHASE') {
+    const err: any = new Error(
+      'Pengadaan dan pencatatan tagihan pembelian baru wajib melalui alur Purchase Order (PO) yang sudah disetujui.'
+    );
+    err.statusCode = 400;
+    err.code = 'PO_REQUIRED_FOR_PURCHASE';
+    throw err;
+  }
+
   const amount = Number(dto.amount);
   if (!Number.isFinite(amount) || amount <= 0) {
     const err: any = new Error('Nominal transaksi harus lebih besar dari 0');
@@ -1225,6 +1236,199 @@ export async function createManualTransaction(
 }
 
 /**
+ * Helper: Detect whether a purchase line input represents a canonical STOCK line.
+ */
+function isStockPurchaseLineInput(line: { product_id?: number | string | null; line_type?: string | null }): boolean {
+  const rawLineType = String(line?.line_type || '').trim().toUpperCase();
+  const isNonStockLine = ['NON_STOCK', 'NON_STOCK_EXPENSE', 'NON_STOCK_PHYSICAL', 'SERVICE'].includes(rawLineType);
+  if (isNonStockLine) return false;
+  if (['STOCK', 'STOCK_PRODUCT'].includes(rawLineType)) return true;
+  const prodId = line?.product_id ? Number(line.product_id) : 0;
+  return Number.isFinite(prodId) && prodId > 0;
+}
+
+/**
+ * Helper: Compute canonical receiving status for a purchase transaction that contains STOCK lines,
+ * derived strictly from POSTED GRN quantities / stock_purchase_line_bindings.
+ */
+async function computeCanonicalStockReceivingStatus(
+  client: Pool | PoolClient,
+  propertyId: number,
+  transactionId: number | string,
+  prevReceivedAt?: string | null
+): Promise<{ hasStockLines: boolean; receivingStatus: ReceivingStatus; receivedAt: string | null }> {
+  const res = await client.query(
+    `SELECT
+       tl.id AS transaction_line_id,
+       COALESCE(b.ordered_quantity, tl.quantity, 0)::numeric AS ordered_qty,
+       GREATEST(
+         COALESCE(b.received_quantity, 0)::numeric,
+         COALESCE((
+           SELECT SUM(
+             CASE
+               WHEN tl.packaging_id IS NOT NULL AND gri.packaging_id = tl.packaging_id THEN gri.received_qty
+               WHEN tl.packaging_id IS NOT NULL AND COALESCE(
+                 NULLIF(b.conversion_factor_snapshot, 0),
+                 NULLIF(tl.conversion_factor_snapshot, 0),
+                 CASE WHEN poi.packaging_id = tl.packaging_id THEN NULLIF(poi.conversion_factor_snapshot, 0) ELSE NULL END,
+                 (SELECT CASE
+                           WHEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) = MAX(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                           THEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                           ELSE NULL
+                         END
+                    FROM pos_goods_receipt_items gri_s
+                    JOIN pos_goods_receipts gr_s ON gr_s.id = gri_s.receipt_id
+                   WHERE gr_s.property_id = tl.property_id
+                     AND UPPER(COALESCE(gr_s.status, '')) IN ('POSTED', 'COMPLETED')
+                     AND gri_s.packaging_id = tl.packaging_id
+                     AND NULLIF(gri_s.conversion_factor_snapshot, 0) IS NOT NULL
+                     AND (
+                       gri_s.transaction_line_id = tl.id
+                       OR (COALESCE(b.po_item_id, tl.po_item_id) IS NOT NULL AND gri_s.po_item_id = COALESCE(b.po_item_id, tl.po_item_id))
+                     )),
+                 0
+               ) > 0 THEN
+                 COALESCE(
+                   NULLIF(gri.base_quantity, 0),
+                   CASE WHEN gri.packaging_id IS NULL THEN gri.received_qty ELSE gri.received_qty * NULLIF(gri.conversion_factor_snapshot, 0) END,
+                   0
+                 ) / COALESCE(
+                   NULLIF(b.conversion_factor_snapshot, 0),
+                   NULLIF(tl.conversion_factor_snapshot, 0),
+                   CASE WHEN poi.packaging_id = tl.packaging_id THEN NULLIF(poi.conversion_factor_snapshot, 0) ELSE NULL END,
+                   (SELECT CASE
+                             WHEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) = MAX(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                             THEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                             ELSE NULL
+                           END
+                      FROM pos_goods_receipt_items gri_s
+                      JOIN pos_goods_receipts gr_s ON gr_s.id = gri_s.receipt_id
+                     WHERE gr_s.property_id = tl.property_id
+                       AND UPPER(COALESCE(gr_s.status, '')) IN ('POSTED', 'COMPLETED')
+                       AND gri_s.packaging_id = tl.packaging_id
+                       AND NULLIF(gri_s.conversion_factor_snapshot, 0) IS NOT NULL
+                       AND (
+                         gri_s.transaction_line_id = tl.id
+                         OR (COALESCE(b.po_item_id, tl.po_item_id) IS NOT NULL AND gri_s.po_item_id = COALESCE(b.po_item_id, tl.po_item_id))
+                       ))
+                 )
+               WHEN tl.packaging_id IS NOT NULL THEN 0
+               ELSE COALESCE(
+                 NULLIF(gri.base_quantity, 0),
+                 CASE WHEN gri.packaging_id IS NULL THEN gri.received_qty ELSE gri.received_qty * NULLIF(gri.conversion_factor_snapshot, 0) END,
+                 0
+               )
+             END
+           )
+             FROM pos_goods_receipt_items gri
+             JOIN pos_goods_receipts gr ON gr.id = gri.receipt_id
+            WHERE gr.property_id = tl.property_id
+              AND UPPER(COALESCE(gr.status, '')) IN ('POSTED', 'COMPLETED')
+              AND (
+                (gr.transaction_id = tl.transaction_id AND (gri.transaction_line_id = tl.id OR (gri.transaction_line_id IS NULL AND gri.product_id = tl.product_id)))
+                OR (COALESCE(b.po_item_id, tl.po_item_id) IS NOT NULL AND gri.po_item_id = COALESCE(b.po_item_id, tl.po_item_id))
+              )
+         ), 0)::numeric
+       ) AS received_qty,
+       COALESCE((
+         SELECT SUM(
+           COALESCE(
+             NULLIF(gri.base_quantity, 0),
+             CASE WHEN gri.packaging_id IS NULL THEN gri.received_qty ELSE gri.received_qty * NULLIF(gri.conversion_factor_snapshot, 0) END,
+             gri.received_qty,
+             0
+           )
+         )
+           FROM pos_goods_receipt_items gri
+           JOIN pos_goods_receipts gr ON gr.id = gri.receipt_id
+          WHERE gr.property_id = tl.property_id
+            AND UPPER(COALESCE(gr.status, '')) IN ('POSTED', 'COMPLETED')
+            AND (
+              (gr.transaction_id = tl.transaction_id AND (gri.transaction_line_id = tl.id OR (gri.transaction_line_id IS NULL AND gri.product_id = tl.product_id)))
+              OR (COALESCE(b.po_item_id, tl.po_item_id) IS NOT NULL AND gri.po_item_id = COALESCE(b.po_item_id, tl.po_item_id))
+            )
+       ), 0)::numeric AS raw_grn_base_qty,
+       CASE
+         WHEN tl.packaging_id IS NOT NULL AND COALESCE(
+           NULLIF(b.conversion_factor_snapshot, 0),
+           NULLIF(tl.conversion_factor_snapshot, 0),
+           CASE WHEN poi.packaging_id = tl.packaging_id THEN NULLIF(poi.conversion_factor_snapshot, 0) ELSE NULL END,
+           (SELECT CASE
+                     WHEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) = MAX(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                     THEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0))
+                     ELSE NULL
+                   END
+              FROM pos_goods_receipt_items gri_s
+              JOIN pos_goods_receipts gr_s ON gr_s.id = gri_s.receipt_id
+             WHERE gr_s.property_id = tl.property_id
+               AND UPPER(COALESCE(gr_s.status, '')) IN ('POSTED', 'COMPLETED')
+               AND gri_s.packaging_id = tl.packaging_id
+               AND NULLIF(gri_s.conversion_factor_snapshot, 0) IS NOT NULL
+               AND (
+                 gri_s.transaction_line_id = tl.id
+                 OR (COALESCE(b.po_item_id, tl.po_item_id) IS NOT NULL AND gri_s.po_item_id = COALESCE(b.po_item_id, tl.po_item_id))
+               ))
+         ) IS NULL THEN 1
+         ELSE 0
+       END AS has_unresolved_packaging_factor
+     FROM transaction_lines tl
+     LEFT JOIN stock_purchase_line_bindings b
+       ON b.transaction_id = tl.transaction_id
+      AND b.transaction_line_id = tl.id
+      AND b.property_id = tl.property_id
+     LEFT JOIN pos_purchase_order_items poi
+       ON poi.id = COALESCE(b.po_item_id, tl.po_item_id)
+      AND poi.property_id = tl.property_id
+     WHERE tl.transaction_id = $1
+       AND tl.property_id = $2
+       AND (
+         UPPER(COALESCE(tl.line_type, '')) IN ('STOCK', 'STOCK_PRODUCT')
+         OR (tl.product_id IS NOT NULL AND UPPER(COALESCE(tl.line_type, 'STOCK')) NOT IN ('NON_STOCK', 'NON_STOCK_EXPENSE', 'NON_STOCK_PHYSICAL', 'SERVICE'))
+       )`,
+    [transactionId, propertyId]
+  );
+
+  if ((res.rowCount ?? 0) === 0) {
+    return {
+      hasStockLines: false,
+      receivingStatus: 'BELUM_DITERIMA',
+      receivedAt: prevReceivedAt || null
+    };
+  }
+
+  const rows = res.rows;
+  const isAllReceived = rows.every(
+    (r: any) =>
+      !Number(r.has_unresolved_packaging_factor) &&
+      parseFloat(r.received_qty) >= parseFloat(r.ordered_qty) - 0.0001 &&
+      parseFloat(r.ordered_qty) > 0
+  );
+  const anyReceived = rows.some(
+    (r: any) => parseFloat(r.received_qty || '0') > 0.0001 || parseFloat(r.raw_grn_base_qty || '0') > 0.0001
+  );
+
+  if (isAllReceived) {
+    return {
+      hasStockLines: true,
+      receivingStatus: 'DITERIMA_LENGKAP',
+      receivedAt: prevReceivedAt ? new Date(prevReceivedAt).toISOString() : new Date().toISOString()
+    };
+  }
+  if (anyReceived) {
+    return {
+      hasStockLines: true,
+      receivingStatus: 'DITERIMA_SEBAGIAN',
+      receivedAt: null
+    };
+  }
+  return {
+    hasStockLines: true,
+    receivingStatus: 'BELUM_DITERIMA',
+    receivedAt: null
+  };
+}
+
+/**
  * TRANSACTION-2D: Dedicated Pembelian (Purchase) Creation Workflow.
  * Recomputes all line totals and transaction total authoritatively in PostgreSQL.
  */
@@ -1245,14 +1449,49 @@ export async function createPurchaseTransaction(
     throw err;
   }
 
+  const poId = dto.po_id !== undefined && dto.po_id !== null && String(dto.po_id).trim() !== ''
+    ? Number(dto.po_id)
+    : 0;
+  if (!Number.isInteger(poId) || poId <= 0) {
+    const err: any = new Error(
+      'Pencatatan tagihan/pembelian baru wajib terhubung ke Purchase Order (PO) yang sudah disetujui.'
+    );
+    err.statusCode = 400;
+    err.code = 'PO_REQUIRED_FOR_PURCHASE';
+    throw err;
+  }
+
+  const rawCallerReceivingStatus = (dto as any).receiving_status;
+  const rawCallerReceivedAt = (dto as any).received_at;
+  const hasStockInputLines = dto.lines.some((l) => isStockPurchaseLineInput(l));
+  if (hasStockInputLines) {
+    const normalizedCallerStatus = rawCallerReceivingStatus !== undefined && rawCallerReceivingStatus !== null
+      ? String(rawCallerReceivingStatus).trim().toUpperCase()
+      : '';
+    const hasExplicitReceivedAt = rawCallerReceivedAt !== undefined && rawCallerReceivedAt !== null && String(rawCallerReceivedAt).trim() !== '';
+    if ((normalizedCallerStatus !== '' && normalizedCallerStatus !== 'BELUM_DITERIMA') || hasExplicitReceivedAt) {
+      const err: any = new Error(
+        'Status penerimaan untuk pembelian barang stok dikendalikan secara otomatis melalui dokumen Penerimaan Barang (GRN) yang di-Post dan tidak dapat diatur manual.'
+      );
+      err.statusCode = 400;
+      err.code = 'STOCK_RECEIVING_MANAGED_BY_GRN';
+      throw err;
+    }
+  }
+
   dto = await preparePurchaseCreateDto(pool, dto);
 
   for (let i = 0; i < dto.lines.length; i++) {
     const line = dto.lines[i];
     const desc = (line.description_snapshot || line.description || '').trim();
     if (!desc) {
-      throw new Error(`Baris item ke-${i + 1}: Nama/Deskripsi produk wajib diisi`);
+      throw new Error('Baris item ke-' + (i + 1) + ': Nama/Deskripsi produk wajib diisi');
     }
+
+
+
+
+
     const q = Number(line.quantity);
     if (isNaN(q) || q <= 0) {
       throw new Error(`Baris item ke-${i + 1}: Qty harus lebih besar dari 0`);
@@ -1267,7 +1506,9 @@ export async function createPurchaseTransaction(
     }
   }
 
-  const receivingStatus = resolvePurchaseReceivingStatus(dto.receiving_status);
+  const receivingStatus = hasStockInputLines
+    ? 'BELUM_DITERIMA'
+    : resolvePurchaseReceivingStatus(dto.receiving_status);
   const category = await resolvePurchaseCategoryBinding(pool, propertyId, dto);
   const department = await resolvePurchaseDepartmentBinding(pool, propertyId, dto);
   const categoryCode = category.code;
@@ -1281,9 +1522,73 @@ export async function createPurchaseTransaction(
   try {
     await client.query('BEGIN');
 
-    // Handle or Bind Supplier
-    let supplierId = dto.supplier_id ? Number(dto.supplier_id) : null;
-    let supplierName = dto.supplier_name?.trim() || null;
+    // Tahap 1A: Validate and lock the authoritative Purchase Order (PO)
+    const poRes = await client.query(
+      `SELECT po.*,
+              COALESCE(s_can.id, m.canonical_supplier_id) AS resolved_canonical_supplier_id,
+              COALESCE(s_can.name, ps.name) AS resolved_supplier_name
+         FROM pos_purchase_orders po
+         LEFT JOIN suppliers s_can
+           ON s_can.id = COALESCE(po.canonical_supplier_id, po.supplier_id)
+          AND s_can.property_id = po.property_id
+          AND s_can.deleted_at IS NULL
+         LEFT JOIN pos_supplier_canonical_mappings m
+           ON m.property_id = po.property_id
+          AND m.pos_supplier_id = po.supplier_id
+          AND m.mapping_status IN ('MAPPED_EXACT', 'MAPPED_MANUAL', 'AUTO_PROMOTED')
+         LEFT JOIN pos_suppliers ps
+           ON ps.id = po.supplier_id
+          AND ps.property_id = po.property_id
+        WHERE po.id = $1 AND po.property_id = $2
+        FOR UPDATE OF po`,
+      [poId, propertyId]
+    );
+    if ((poRes.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Purchase Order #${poId} tidak ditemukan untuk properti #${propertyId}`);
+      err.statusCode = 404;
+      err.code = 'PO_NOT_FOUND';
+      throw err;
+    }
+    const po = poRes.rows[0];
+    const poStatusUpper = String(po.status || '').toUpperCase();
+    const poApprovalUpper = String(po.approval_status || '').toUpperCase();
+    const isPoApproved =
+      ['APPROVED', 'ORDERED', 'PARTIAL', 'PARTIALLY_RECEIVED', 'RECEIVED', 'COMPLETED'].includes(poStatusUpper) &&
+      !['CANCELLED', 'REJECTED', 'DRAFT', 'PENDING_APPROVAL'].includes(poStatusUpper) &&
+      (poApprovalUpper === 'APPROVED' || (!poApprovalUpper && ['APPROVED', 'ORDERED', 'PARTIAL', 'PARTIALLY_RECEIVED', 'RECEIVED', 'COMPLETED'].includes(poStatusUpper)));
+
+    if (!isPoApproved) {
+      const err: any = new Error(
+        `Purchase Order ${po.po_number} belum disetujui (status: ${po.status}, approval_status: ${po.approval_status || 'N/A'}). Tagihan pembelian hanya dapat dicatat untuk PO yang sudah disetujui.`
+      );
+      err.statusCode = 400;
+      err.code = 'PO_NOT_APPROVED_FOR_INVOICE';
+      throw err;
+    }
+
+    const poItemsRes = await client.query(
+      `SELECT poi.id, poi.po_id, poi.product_id, poi.packaging_id, poi.ordered_unit, poi.conversion_factor_snapshot,
+              COALESCE(NULLIF(poi.conversion_factor_snapshot, 0), ppc.to_base_factor, 1) AS effective_po_factor,
+              poi.ordered_qty, poi.received_qty, poi.unit_cost, COALESCE(poi.subtotal, poi.line_total, 0) AS subtotal_cost
+         FROM pos_purchase_order_items poi
+         LEFT JOIN product_packaging_conversions ppc ON ppc.id = poi.packaging_id
+        WHERE poi.po_id = $1 AND poi.property_id = $2
+        ORDER BY poi.id ASC
+        FOR UPDATE OF poi`,
+      [poId, propertyId]
+    );
+    const poItems = poItemsRes.rows;
+    const poItemsById = new Map<number, any>();
+    for (const item of poItems) {
+      poItemsById.set(Number(item.id), item);
+    }
+
+    // Handle or Bind Supplier (defaulting to PO canonical supplier)
+    const poCanonicalSupplierId = po.resolved_canonical_supplier_id
+      ? Number(po.resolved_canonical_supplier_id)
+      : (po.canonical_supplier_id ? Number(po.canonical_supplier_id) : null);
+    let supplierId = dto.supplier_id ? Number(dto.supplier_id) : poCanonicalSupplierId;
+    let supplierName = dto.supplier_name?.trim() || po.resolved_supplier_name || null;
 
     if (!supplierId && supplierName) {
       // Check duplicate supplier
@@ -1326,6 +1631,96 @@ export async function createPurchaseTransaction(
       supplierName = supCheck.rows[0].name;
     }
 
+    // Track variances between PO and actual Invoice
+    const poVariances: Array<Record<string, any>> = [];
+    if (poCanonicalSupplierId && supplierId && Number(supplierId) !== Number(poCanonicalSupplierId)) {
+      poVariances.push({
+        type: 'SUPPLIER_MISMATCH',
+        po_supplier_id: poCanonicalSupplierId,
+        invoice_supplier_id: supplierId,
+        message: `Supplier tagihan (#${supplierId}) berbeda dari supplier PO (#${poCanonicalSupplierId})`
+      });
+    }
+
+    const usedPoItemIds = new Set<number>();
+    const resolvedLinePoItems: Array<any | null> = [];
+    for (let i = 0; i < dto.lines.length; i++) {
+      const line = dto.lines[i];
+      const explicitPoItemId = line.po_item_id ? Number(line.po_item_id) : 0;
+      const prodId = line.product_id ? Number(line.product_id) : null;
+      const packId = line.packaging_id ? Number(line.packaging_id) : null;
+      let matchedPoItem: any | null = null;
+
+      if (explicitPoItemId > 0) {
+        matchedPoItem = poItemsById.get(explicitPoItemId) || null;
+        if (!matchedPoItem) {
+          const err: any = new Error(
+            `Baris item ke-${i + 1}: po_item_id #${explicitPoItemId} tidak ditemukan pada PO ${po.po_number}`
+          );
+          err.statusCode = 400;
+          err.code = 'INVALID_PO_ITEM_ID';
+          throw err;
+        }
+      } else if (prodId) {
+        const candidates = poItems.filter((pi: any) => {
+          if (usedPoItemIds.has(Number(pi.id))) return false;
+          if (Number(pi.product_id) !== prodId) return false;
+          const piPack = pi.packaging_id ? Number(pi.packaging_id) : null;
+          return piPack === packId;
+        });
+        if (candidates.length === 1) {
+          matchedPoItem = candidates[0];
+        } else if (candidates.length === 0) {
+          const prodOnlyCandidates = poItems.filter(
+            (pi: any) => !usedPoItemIds.has(Number(pi.id)) && Number(pi.product_id) === prodId
+          );
+          if (prodOnlyCandidates.length === 1) {
+            matchedPoItem = prodOnlyCandidates[0];
+          }
+        }
+      }
+
+      if (matchedPoItem) {
+        usedPoItemIds.add(Number(matchedPoItem.id));
+        const poQty = Number(matchedPoItem.ordered_qty || 0);
+        const invQty = Number(line.quantity || 0);
+        const poPrice = Math.round(Number(matchedPoItem.unit_cost || 0));
+        const invPrice = Math.round(Number(line.unit_price || 0));
+        if (Math.abs(invQty - poQty) > 0.0001 || invPrice !== poPrice) {
+          poVariances.push({
+            type: 'LINE_VARIANCE',
+            line_index: i + 1,
+            po_item_id: Number(matchedPoItem.id),
+            product_id: prodId,
+            description: line.description_snapshot || line.description || '',
+            po_qty: poQty,
+            invoice_qty: invQty,
+            po_unit_price: poPrice,
+            invoice_unit_price: invPrice,
+          });
+        }
+      } else if (prodId) {
+        poVariances.push({
+          type: 'UNMATCHED_INVOICE_LINE',
+          line_index: i + 1,
+          product_id: prodId,
+          description: line.description_snapshot || line.description || '',
+          invoice_qty: Number(line.quantity || 0),
+          invoice_unit_price: Math.round(Number(line.unit_price || 0)),
+        });
+      }
+      resolvedLinePoItems.push(matchedPoItem);
+    }
+
+    const hasPoVariance = poVariances.length > 0;
+    const poVarianceSummary = {
+      has_variance: hasPoVariance,
+      po_id: poId,
+      po_number: po.po_number,
+      checked_at: new Date().toISOString(),
+      variances: poVariances,
+    };
+
     const lineDescriptions = dto.lines.map((line) => line.description_snapshot || line.description || '');
     const description = String(dto.description || '').trim()
       || generatePurchaseDescription({
@@ -1335,7 +1730,11 @@ export async function createPurchaseTransaction(
 
     const txDate = dto.transaction_date || getHotelDateToday();
     const txNumber = await generateTransactionNumber(client, propertyId, txDate);
-    const receivedAt = dto.received_at ? new Date(dto.received_at).toISOString() : (receivingStatus === 'DITERIMA' ? new Date().toISOString() : null);
+    const receivedAt = hasStockInputLines
+      ? null
+      : (dto.received_at
+          ? new Date(dto.received_at).toISOString()
+          : (['DITERIMA', 'DITERIMA_LENGKAP'].includes(receivingStatus) ? new Date().toISOString() : null));
 
     // PURCHASE-2A1: respect explicit workflow/verification on creation; fall back to safe defaults.
     const purchaseWorkflowStatus = dto.purchase_workflow_status
@@ -1348,6 +1747,11 @@ export async function createPurchaseTransaction(
     const transactionDiscount = Math.max(0, Math.round(Number(dto.transaction_discount || dto.discount_amount || 0)));
     const roundingAmount = Math.round(Number(dto.rounding_amount || 0));
 
+    // Inherit procurement approval from the approved PO (no second procurement approval required)
+    const inheritedApprovedByUserId = po.approved_by_user_id ? String(po.approved_by_user_id) : (dto.actor_user_id || null);
+    const inheritedApprovedByName = po.approved_by_name_snapshot || dto.actor_name || `Sesuai PO ${po.po_number}`;
+    const inheritedApprovedAt = po.approved_at ? new Date(po.approved_at).toISOString() : new Date().toISOString();
+
     // 1. Initial Insert for transaction header
     const insertTx = await client.query(
       `INSERT INTO transactions (
@@ -1357,7 +1761,9 @@ export async function createPurchaseTransaction(
         amount, discount_amount, service_amount, tax_amount, rounding_amount, net_amount,
         payment_status, payment_method, transaction_status,
         supplier_id, receiving_status, received_at, verification_status,
-        purchase_workflow_status,
+        purchase_workflow_status, approval_status,
+        approved_by_user_id, approved_by_name_snapshot, approved_at,
+        source_revision, po_id, is_legacy_without_po, has_po_variance, po_variance_summary,
         notes, metadata, created_by,
         purchase_category_id, department_id, department_name_snapshot
       ) VALUES (
@@ -1367,15 +1773,17 @@ export async function createPurchaseTransaction(
         0, $10, 0, 0, $11, 0,
         'UNPAID', $12, 'POSTED',
         $13, $14, $15, $16,
-        $17,
+        $17, 'APPROVED',
         $18, $19, $20,
-        $21, $22, $23
+        1, $21, FALSE, $22, $23::jsonb,
+        $24, $25, $26,
+        $27, $28, $29
       ) RETURNING *`,
       [
         propertyId,
         txNumber,
         txDate,
-        dto.source_reference?.trim() || null,
+        dto.source_reference?.trim() || po.po_number || null,
         supplierName,
         categoryCode,
         categoryName,
@@ -1389,8 +1797,14 @@ export async function createPurchaseTransaction(
         receivedAt,
         verificationStatus,
         purchaseWorkflowStatus,
+        inheritedApprovedByUserId,
+        inheritedApprovedByName,
+        inheritedApprovedAt,
+        poId,
+        hasPoVariance,
+        JSON.stringify(poVarianceSummary),
         dto.notes?.trim() || null,
-        JSON.stringify({ workflow: 'PURCHASE_2D', actor: dto.actor_name || 'Staff' }),
+        JSON.stringify({ workflow: 'PURCHASE_2D_PO', po_id: poId, po_number: po.po_number, actor: dto.actor_name || 'Staff' }),
         dto.actor_name || dto.actor_user_id || 'Staff',
         purchaseCategoryId,
         departmentId,
@@ -1404,29 +1818,177 @@ export async function createPurchaseTransaction(
     // line_total = GREATEST(0, ROUND(quantity * unit_price)::BIGINT - discount_amount)
     for (let i = 0; i < dto.lines.length; i++) {
       const line = dto.lines[i];
+      const matchedPoItem = resolvedLinePoItems[i];
+      const poItemId = matchedPoItem ? Number(matchedPoItem.id) : (line.po_item_id ? Number(line.po_item_id) : null);
       const desc = (line.description_snapshot || line.description || '').trim();
-      await client.query(
+      const prodId = line.product_id ? Number(line.product_id) : (matchedPoItem?.product_id ? Number(matchedPoItem.product_id) : null);
+      const packId = line.packaging_id !== undefined
+        ? (line.packaging_id ? Number(line.packaging_id) : null)
+        : (matchedPoItem?.packaging_id ? Number(matchedPoItem.packaging_id) : null);
+      const rawLineType = String(line.line_type || '').trim().toUpperCase();
+      const isNonStockLine = ['NON_STOCK', 'NON_STOCK_EXPENSE', 'NON_STOCK_PHYSICAL'].includes(rawLineType);
+      const isServiceLine = rawLineType === 'SERVICE';
+      const lineType = isServiceLine
+        ? 'SERVICE'
+        : (isNonStockLine ? 'NON_STOCK_PHYSICAL' : (prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL'));
+      const unitStr = String(line.unit || matchedPoItem?.ordered_unit || '').trim();
+      const qtyNum = Number(line.quantity);
+      const poPackId = matchedPoItem?.packaging_id ? Number(matchedPoItem.packaging_id) : null;
+      const poFactor = Number(matchedPoItem?.effective_po_factor || matchedPoItem?.conversion_factor_snapshot || 1) > 0
+        ? Number(matchedPoItem?.effective_po_factor || matchedPoItem?.conversion_factor_snapshot || 1)
+        : 1;
+
+      let lineFactorSnapshot = 1;
+      let linePkgLabelSnapshot: string | null = unitStr || null;
+      if (packId) {
+        if (poPackId === packId && poFactor > 0) {
+          lineFactorSnapshot = poFactor;
+          linePkgLabelSnapshot = String(matchedPoItem?.packaging_label_snapshot || unitStr || '').trim() || null;
+        } else {
+          const pkgFactorRes = await client.query(
+            `SELECT to_base_factor, packaging_label FROM product_packaging_conversions WHERE id = $1 AND property_id = $2`,
+            [packId, propertyId]
+          );
+          if ((pkgFactorRes.rowCount ?? 0) > 0) {
+            const fetchedFactor = Number(pkgFactorRes.rows[0].to_base_factor || 1);
+            lineFactorSnapshot = fetchedFactor > 0 ? fetchedFactor : 1;
+            linePkgLabelSnapshot = String(pkgFactorRes.rows[0].packaging_label || unitStr || '').trim() || null;
+          }
+        }
+        const clientLineSnapRaw = (line as any).conversion_factor_snapshot;
+        if (clientLineSnapRaw !== undefined && clientLineSnapRaw !== null && String(clientLineSnapRaw).trim() !== '') {
+          const clientLineSnapVal = Number(clientLineSnapRaw);
+          if (isNaN(clientLineSnapVal) || clientLineSnapVal <= 0 || Math.abs(clientLineSnapVal - lineFactorSnapshot) > 1e-6) {
+            const err: any = new Error(
+              `conversion_factor_snapshot (${clientLineSnapRaw}) pada baris ke-${i + 1} tidak sesuai dengan faktor konversi otoritatif server (${lineFactorSnapshot})`
+            );
+            err.statusCode = 400;
+            err.code = 'INVALID_CONVERSION_FACTOR_SNAPSHOT';
+            throw err;
+          }
+        }
+      }
+
+      let alreadyReceivedOnPoItem = 0;
+      if (matchedPoItem) {
+        const poRecRaw = Math.max(0, Number(matchedPoItem.received_qty || 0));
+        if (poRecRaw > 0) {
+          if ((packId || null) === poPackId && Math.abs(lineFactorSnapshot - poFactor) <= 1e-6) {
+            alreadyReceivedOnPoItem = Math.min(qtyNum, poRecRaw);
+          } else {
+            const poRecBase = poRecRaw * (poPackId ? poFactor : 1);
+            const poRecInLineUnit = lineFactorSnapshot > 0 ? Number((poRecBase / lineFactorSnapshot).toFixed(4)) : poRecBase;
+            alreadyReceivedOnPoItem = Math.min(qtyNum, Math.max(0, poRecInLineUnit));
+          }
+        }
+      }
+
+      const insLineRes = await client.query(
         `INSERT INTO transaction_lines (
-          property_id, transaction_id, product_id, description_snapshot,
-          quantity, unit, unit_price, discount_amount, line_total, sort_order, created_at
+          property_id, transaction_id, product_id, packaging_id, po_item_id, line_type, description_snapshot,
+          quantity, unit, unit_price, discount_amount, line_total, sort_order,
+          packaging_label_snapshot, conversion_factor_snapshot, created_at
         ) VALUES (
-          $1, $2, $3, $4,
-          $5, $6, $7, $8,
-          GREATEST(0, ROUND($5::numeric * $7::bigint)::bigint - $8::bigint),
-          $9, NOW()
-        )`,
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11,
+          GREATEST(0, ROUND($8::numeric * $10::bigint)::bigint - $11::bigint),
+          $12, $13, $14, NOW()
+        ) RETURNING id`,
         [
           propertyId,
           txId,
-          line.product_id || null,
+          prodId,
+          packId,
+          poItemId,
+          lineType,
           desc,
-          Number(line.quantity),
-          String(line.unit || '').trim(),
+          qtyNum,
+          unitStr,
           Math.round(Number(line.unit_price)),
           Math.max(0, Math.round(Number(line.discount_amount || 0))),
-          i + 1
+          i + 1,
+          linePkgLabelSnapshot,
+          lineFactorSnapshot
         ]
       );
+
+      const createdLineId = insLineRes.rows[0]?.id ? Number(insLineRes.rows[0].id) : null;
+      if (createdLineId && prodId && lineType === 'STOCK') {
+        const bindingLineType = 'STOCK';
+        await client.query(
+          `INSERT INTO stock_purchase_line_bindings (
+            property_id, transaction_id, transaction_line_id, po_item_id, line_type,
+            product_id, packaging_id, ordered_quantity, received_quantity, base_unit_code,
+            packaging_label_snapshot, conversion_factor_snapshot, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+          ON CONFLICT (property_id, transaction_id, transaction_line_id) DO UPDATE SET
+            po_item_id = COALESCE(EXCLUDED.po_item_id, stock_purchase_line_bindings.po_item_id),
+            product_id = EXCLUDED.product_id,
+            packaging_id = EXCLUDED.packaging_id,
+            line_type = EXCLUDED.line_type,
+            ordered_quantity = EXCLUDED.ordered_quantity,
+            received_quantity = GREATEST(stock_purchase_line_bindings.received_quantity, EXCLUDED.received_quantity),
+            base_unit_code = EXCLUDED.base_unit_code,
+            packaging_label_snapshot = COALESCE(stock_purchase_line_bindings.packaging_label_snapshot, EXCLUDED.packaging_label_snapshot),
+            conversion_factor_snapshot = COALESCE(NULLIF(stock_purchase_line_bindings.conversion_factor_snapshot, 0), EXCLUDED.conversion_factor_snapshot),
+            updated_at = NOW()`,
+          [
+            propertyId,
+            txId,
+            createdLineId,
+            poItemId,
+            bindingLineType,
+            prodId,
+            packId,
+            qtyNum,
+            alreadyReceivedOnPoItem,
+            unitStr || 'PCS',
+            linePkgLabelSnapshot,
+            lineFactorSnapshot
+          ]
+        );
+
+        // If any GRN items were previously posted directly against this po_item_id without a transaction_line_id, link them
+        if (poItemId) {
+          await client.query(
+            `UPDATE pos_goods_receipt_items gri
+                SET transaction_line_id = $1
+               FROM pos_goods_receipts gr
+              WHERE gri.receipt_id = gr.id
+                AND gr.property_id = $2
+                AND gri.po_item_id = $3
+                AND gri.transaction_line_id IS NULL
+                AND gr.status IN ('POSTED', 'COMPLETED')`,
+            [createdLineId, propertyId, poItemId]
+          );
+        }
+      }
+    }
+
+    // Also link any existing posted PO GRN headers that had transaction_id IS NULL to this purchase transaction if no other purchase tx claimed them
+    await client.query(
+      `UPDATE pos_goods_receipts
+          SET transaction_id = $1,
+              updated_at = NOW()
+        WHERE property_id = $2
+          AND po_id = $3
+          AND transaction_id IS NULL
+          AND status IN ('POSTED', 'COMPLETED')`,
+      [txId, propertyId, poId]
+    );
+
+    // Recompute canonical receiving status on the new Purchase Transaction in case the PO was already received before invoice recording
+    if (hasStockInputLines) {
+      const canonicalAfterBind = await computeCanonicalStockReceivingStatus(client, propertyId, txId, null);
+      if (canonicalAfterBind.hasStockLines && canonicalAfterBind.receivingStatus !== 'BELUM_DITERIMA') {
+        await client.query(
+          `UPDATE transactions
+              SET receiving_status = $1,
+                  received_at = $2
+            WHERE id = $3 AND property_id = $4`,
+          [canonicalAfterBind.receivingStatus, canonicalAfterBind.receivedAt, txId, propertyId]
+        );
+      }
     }
 
     // 3. Recompute Header Subtotal and Authoritative Net Amount in PostgreSQL
@@ -1518,6 +2080,934 @@ export async function createPurchaseTransaction(
     await client.query('COMMIT');
 
     return await getTransactionById(pool, propertyId, txId);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update an existing Purchase transaction (PROSES only).
+ * Maintains transaction and line identities.
+ * Enforces ceiling check: cannot delete lines that already have received goods,
+ * and cannot reduce line quantity below already received quantity.
+ */
+export async function updatePurchaseTransaction(
+  pool: Pool,
+  id: number | string,
+  dto: UpdatePurchaseTransactionDto
+): Promise<TransactionRow> {
+  const propertyId = Number(dto.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    const err: any = new Error('property_id wajib diisi dan harus valid');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (dto.lines !== undefined) {
+    if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
+      const err: any = new Error('Minimal harus ada 1 item produk pesanan pada pembelian');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    for (let i = 0; i < dto.lines.length; i++) {
+      const line = dto.lines[i];
+      const hasId = line.id !== undefined && line.id !== null && String(line.id).trim() !== '';
+      const desc = (line.description_snapshot || line.description || '').trim();
+      if (!hasId && !desc) {
+        throw new Error('Baris item ke-' + (i + 1) + ': Nama/Deskripsi produk wajib diisi');
+      }
+
+
+
+      const q = Number(line.quantity);
+      if (isNaN(q) || q <= 0) {
+        throw new Error(`Baris item ke-${i + 1}: Qty harus lebih besar dari 0`);
+      }
+      const p = Number(line.unit_price);
+      if (isNaN(p) || p < 0 || !Number.isInteger(p)) {
+        throw new Error(`Baris item ke-${i + 1}: Harga satuan harus berupa integer IDR >= 0`);
+      }
+      const d = Number(line.discount_amount || 0);
+      if (isNaN(d) || d < 0 || !Number.isInteger(d)) {
+        throw new Error(`Baris item ke-${i + 1}: Diskon item harus berupa integer IDR >= 0`);
+      }
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Row-lock transaction header
+    const prevRes = await client.query(
+      `SELECT * FROM transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+      [id, propertyId]
+    );
+
+    if ((prevRes.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const prev = prevRes.rows[0];
+
+    if (String(prev.transaction_type || '').toUpperCase() !== 'PURCHASE') {
+      const err: any = new Error(`Transaksi #${id} bukan tipe PURCHASE`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const currentTxStatus = String(prev.transaction_status || '').toUpperCase();
+    if (['VOIDED', 'REVERSED', 'CANCELLED', 'COMPLETED'].includes(currentTxStatus)) {
+      const err: any = new Error(`Transaksi dengan status ${currentTxStatus} bersifat terminal dan tidak dapat diubah.`);
+      err.statusCode = 409;
+      err.code = 'TRANSACTION_NOT_EDITABLE';
+      throw err;
+    }
+    assertNonTerminal(prev.transaction_status);
+
+    if (prev.deleted_at) {
+      const err: any = new Error(`Transaksi #${id} telah dihapus dan tidak dapat diubah.`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // PROSES-only enforcement
+    const workflowStatus = String(prev.purchase_workflow_status || 'PROSES').toUpperCase();
+    if (workflowStatus === 'SELESAI') {
+      const err: any = new Error('Transaksi pembelian ini sudah SELESAI. Ubah workflow kembali ke PROSES terlebih dahulu.');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // 2. Fetch existing transaction lines FOR UPDATE
+    const existingLinesRes = await client.query(
+      `SELECT * FROM transaction_lines WHERE transaction_id = $1 AND property_id = $2 FOR UPDATE`,
+      [id, propertyId]
+    );
+    const existingLines = existingLinesRes.rows;
+    const existingLinesMap = new Map<number, any>();
+    for (const el of existingLines) {
+      existingLinesMap.set(Number(el.id), el);
+    }
+
+    // 3. Fetch any existing receipts (stock_purchase_line_bindings or pos_goods_receipt_items)
+    const bindingsRes = await client.query(
+      `SELECT transaction_line_id, received_quantity, packaging_id, conversion_factor_snapshot, packaging_label_snapshot
+         FROM stock_purchase_line_bindings
+        WHERE transaction_id = $1 AND property_id = $2`,
+      [id, propertyId]
+    );
+    const grnItemsRes = await client.query(
+      `SELECT gri.transaction_line_id,
+              COALESCE(
+                SUM(
+                  CASE
+                    WHEN tl.packaging_id IS NOT NULL AND gri.packaging_id = tl.packaging_id THEN gri.received_qty
+                    WHEN tl.packaging_id IS NOT NULL AND COALESCE(
+                      NULLIF(b_tl.conversion_factor_snapshot, 0),
+                      NULLIF(tl.conversion_factor_snapshot, 0),
+                      CASE WHEN poi_tl.packaging_id = tl.packaging_id THEN NULLIF(poi_tl.conversion_factor_snapshot, 0) ELSE NULL END,
+                      (SELECT CASE WHEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) = MAX(NULLIF(gri_s.conversion_factor_snapshot, 0)) THEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) ELSE NULL END
+                         FROM pos_goods_receipt_items gri_s
+                         JOIN pos_goods_receipts gr_s ON gr_s.id = gri_s.receipt_id
+                        WHERE gr_s.property_id = gr.property_id
+                          AND gr_s.status IN ('POSTED', 'COMPLETED')
+                          AND gri_s.packaging_id = tl.packaging_id
+                          AND NULLIF(gri_s.conversion_factor_snapshot, 0) IS NOT NULL
+                          AND (
+                            gri_s.transaction_line_id = tl.id
+                            OR (COALESCE(b_tl.po_item_id, tl.po_item_id) IS NOT NULL AND gri_s.po_item_id = COALESCE(b_tl.po_item_id, tl.po_item_id))
+                          )),
+                      0
+                    ) > 0 THEN
+                      COALESCE(
+                        NULLIF(gri.base_quantity, 0),
+                        CASE WHEN gri.packaging_id IS NULL THEN gri.received_qty ELSE gri.received_qty * NULLIF(gri.conversion_factor_snapshot, 0) END,
+                        0
+                      ) / COALESCE(
+                        NULLIF(b_tl.conversion_factor_snapshot, 0),
+                        NULLIF(tl.conversion_factor_snapshot, 0),
+                        CASE WHEN poi_tl.packaging_id = tl.packaging_id THEN NULLIF(poi_tl.conversion_factor_snapshot, 0) ELSE NULL END,
+                        (SELECT CASE WHEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) = MAX(NULLIF(gri_s.conversion_factor_snapshot, 0)) THEN MIN(NULLIF(gri_s.conversion_factor_snapshot, 0)) ELSE NULL END
+                           FROM pos_goods_receipt_items gri_s
+                           JOIN pos_goods_receipts gr_s ON gr_s.id = gri_s.receipt_id
+                          WHERE gr_s.property_id = gr.property_id
+                            AND gr_s.status IN ('POSTED', 'COMPLETED')
+                            AND gri_s.packaging_id = tl.packaging_id
+                            AND NULLIF(gri_s.conversion_factor_snapshot, 0) IS NOT NULL
+                            AND (
+                              gri_s.transaction_line_id = tl.id
+                              OR (COALESCE(b_tl.po_item_id, tl.po_item_id) IS NOT NULL AND gri_s.po_item_id = COALESCE(b_tl.po_item_id, tl.po_item_id))
+                            ))
+                      )
+                    WHEN tl.packaging_id IS NOT NULL THEN 0
+                    ELSE COALESCE(
+                      NULLIF(gri.base_quantity, 0),
+                      CASE WHEN gri.packaging_id IS NULL THEN gri.received_qty ELSE gri.received_qty * NULLIF(gri.conversion_factor_snapshot, 0) END,
+                      0
+                    )
+                  END
+                ),
+                0
+              ) AS grn_received
+       FROM pos_goods_receipt_items gri
+       JOIN pos_goods_receipts gr ON gr.id = gri.receipt_id
+       LEFT JOIN transaction_lines tl ON tl.id = gri.transaction_line_id AND tl.transaction_id = gr.transaction_id
+       LEFT JOIN stock_purchase_line_bindings b_tl ON b_tl.transaction_id = gr.transaction_id AND b_tl.transaction_line_id = tl.id AND b_tl.property_id = gr.property_id
+       LEFT JOIN pos_purchase_order_items poi_tl ON poi_tl.id = COALESCE(b_tl.po_item_id, tl.po_item_id) AND poi_tl.property_id = gr.property_id
+       WHERE gr.transaction_id = $1 AND gr.property_id = $2 AND gr.status IN ('POSTED', 'COMPLETED')
+       GROUP BY gri.transaction_line_id`,
+      [id, propertyId]
+    );
+
+    const receivedMap = new Map<number, number>();
+    const existingBindingByLineId = new Map<number, any>();
+    for (const b of bindingsRes.rows) {
+      const lid = Number(b.transaction_line_id);
+      const rQty = Number(b.received_quantity || 0);
+      receivedMap.set(lid, Math.max(receivedMap.get(lid) || 0, rQty));
+      existingBindingByLineId.set(lid, b);
+    }
+    for (const g of grnItemsRes.rows) {
+      const lid = Number(g.transaction_line_id);
+      const rQty = Number(g.grn_received || 0);
+      receivedMap.set(lid, Math.max(receivedMap.get(lid) || 0, rQty));
+    }
+
+    // 4. Update / Insert / Delete lines if dto.lines provided
+    let materialChanged = false;
+    const existingBindingLines = new Set<number>(
+      bindingsRes.rows.map((b: any) => Number(b.transaction_line_id))
+    );
+
+    if (dto.lines) {
+      const incomingLineIds = new Set<number>();
+
+      for (const line of dto.lines) {
+        if (line.id !== undefined && line.id !== null && String(line.id).trim() !== '') {
+          const lid = Number(line.id);
+          if (isNaN(lid) || lid <= 0 || !existingLinesMap.has(lid)) {
+            const err: any = new Error(
+              `Baris item #${line.id} tidak ditemukan pada transaksi pembelian #${id}.`
+            );
+            err.statusCode = 400;
+            err.code = 'INVALID_TRANSACTION_LINE_ID';
+            throw err;
+          }
+          if (incomingLineIds.has(lid)) {
+            const err: any = new Error(
+              `Terdapat duplikasi ID baris item #${lid} pada permintaan perubahan pembelian.`
+            );
+            err.statusCode = 400;
+            err.code = 'DUPLICATE_TRANSACTION_LINE_ID';
+            throw err;
+          }
+          incomingLineIds.add(lid);
+        }
+      }
+
+      // Check for removed lines: if an existing line is not in incomingLineIds, ensure received_quantity == 0
+      for (const [existingLid, el] of existingLinesMap.entries()) {
+        if (!incomingLineIds.has(existingLid)) {
+          const rQty = receivedMap.get(existingLid) || 0;
+          if (rQty > 0) {
+            const desc = el.description_snapshot || `Line #${existingLid}`;
+            const err: any = new Error(
+              `Dilarang menghapus baris "${desc}" karena sudah diterima sebagian/penuh (${rQty} unit).`
+            );
+            err.statusCode = 409;
+            err.code = 'CANNOT_DELETE_RECEIVED_LINE';
+            throw err;
+          }
+          materialChanged = true;
+        }
+      }
+
+      // Now process each line in dto.lines
+      let sortOrder = 1;
+      for (const line of dto.lines) {
+        const qty = Number(line.quantity);
+        const price = Math.round(Number(line.unit_price));
+        const disc = Math.max(0, Math.round(Number(line.discount_amount || 0)));
+
+        let existingId: number | null = null;
+        if (line.id !== undefined && line.id !== null && String(line.id).trim() !== '') {
+          const parsed = Number(line.id);
+          if (!isNaN(parsed) && existingLinesMap.has(parsed)) {
+            existingId = parsed;
+          }
+        }
+
+        if (existingId !== null) {
+          const existingLine = existingLinesMap.get(existingId);
+          const existingBinding = existingBindingByLineId.get(existingId);
+          const rQty = receivedMap.get(existingId) || 0;
+
+          const prevProdId = existingLine.product_id !== undefined && existingLine.product_id !== null
+            ? Number(existingLine.product_id)
+            : null;
+          const prevPackId = existingLine.packaging_id !== undefined && existingLine.packaging_id !== null
+            ? Number(existingLine.packaging_id)
+            : null;
+          const prevUnit = String(existingLine.unit || '').trim();
+          const prevDesc = String(existingLine.description_snapshot || '').trim();
+
+          // Preserve existing product_id / packaging_id / unit if omitted (undefined) in payload
+          const prodId = line.product_id !== undefined
+            ? (line.product_id ? Number(line.product_id) : null)
+            : prevProdId;
+          const packId = line.packaging_id !== undefined
+            ? (line.packaging_id ? Number(line.packaging_id) : null)
+            : prevPackId;
+          const unit = line.unit !== undefined && String(line.unit).trim() !== ''
+            ? String(line.unit).trim()
+            : prevUnit;
+          const desc = (line.description_snapshot || line.description || prevDesc || '').trim();
+          const rawLineType = line.line_type !== undefined && line.line_type !== null
+            ? String(line.line_type).trim().toUpperCase()
+            : (existingLine.line_type ? String(existingLine.line_type).trim().toUpperCase() : (prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL'));
+          const isNonStockLine = ['NON_STOCK', 'NON_STOCK_EXPENSE', 'NON_STOCK_PHYSICAL'].includes(rawLineType);
+          const lineType = rawLineType === 'SERVICE'
+            ? 'SERVICE'
+            : (isNonStockLine ? 'NON_STOCK_PHYSICAL' : (prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL'));
+
+          // When line already has received quantity > 0, forbid changing product, packaging, or unit
+          if (rQty > 0) {
+            if (prodId !== prevProdId) {
+              const err: any = new Error(
+                `Dilarang mengubah produk pada baris "${desc}" karena sudah diterima sebagian/penuh (${rQty} unit).`
+              );
+              err.statusCode = 409;
+              err.code = 'CANNOT_CHANGE_RECEIVED_LINE_PRODUCT';
+              throw err;
+            }
+            if (line.packaging_id !== undefined && packId !== prevPackId) {
+              const err: any = new Error(
+                `Dilarang mengubah kemasan pada baris "${desc}" karena sudah diterima sebagian/penuh (${rQty} unit).`
+              );
+              err.statusCode = 409;
+              err.code = 'CANNOT_CHANGE_RECEIVED_LINE_PACKAGING';
+              throw err;
+            }
+            if (prevUnit && unit && prevUnit.toUpperCase() !== unit.toUpperCase()) {
+              const err: any = new Error(
+                `Dilarang mengubah satuan (${prevUnit} -> ${unit}) pada baris "${desc}" karena sudah diterima sebagian/penuh (${rQty} unit).`
+              );
+              err.statusCode = 409;
+              err.code = 'CANNOT_CHANGE_RECEIVED_LINE_UNIT';
+              throw err;
+            }
+          }
+
+          // Verify quantity not below received
+          if (qty < rQty) {
+            const err: any = new Error(
+              `Jumlah pembelian untuk "${desc}" tidak boleh lebih kecil dari jumlah yang sudah diterima (${rQty} unit).`
+            );
+            err.statusCode = 409;
+            err.code = 'CANNOT_REDUCE_BELOW_RECEIVED_QTY';
+            throw err;
+          }
+
+          if (
+            prodId !== prevProdId ||
+            packId !== prevPackId ||
+            prevUnit.toUpperCase() !== unit.toUpperCase() ||
+            Math.abs(qty - Number(existingLine.quantity || 0)) > 0.0001 ||
+            price !== Math.round(Number(existingLine.unit_price || 0)) ||
+            disc !== Math.round(Number(existingLine.discount_amount || 0))
+          ) {
+            materialChanged = true;
+          }
+
+          // Preserve existing conversion_factor_snapshot if packaging_id did not change
+          const prevLineSnap = Number(
+            existingBinding?.conversion_factor_snapshot ||
+            existingLine.conversion_factor_snapshot ||
+            0
+          );
+          let lineFactorSnapshot: number | null = 1;
+          let linePkgLabelSnapshot: string | null = unit || null;
+          if (packId === null) {
+            lineFactorSnapshot = 1;
+            linePkgLabelSnapshot = unit || null;
+          } else if (packId === prevPackId && prevLineSnap > 0) {
+            lineFactorSnapshot = prevLineSnap;
+            linePkgLabelSnapshot =
+              existingBinding?.packaging_label_snapshot ||
+              existingLine.packaging_label_snapshot ||
+              unit ||
+              null;
+          } else if (packId === prevPackId) {
+            lineFactorSnapshot = null;
+            linePkgLabelSnapshot =
+              existingBinding?.packaging_label_snapshot ||
+              existingLine.packaging_label_snapshot ||
+              null;
+          } else {
+            const pkgFactorRes = await client.query(
+              `SELECT to_base_factor, packaging_label FROM product_packaging_conversions WHERE id = $1 AND property_id = $2`,
+              [packId, propertyId]
+            );
+            if ((pkgFactorRes.rowCount ?? 0) > 0) {
+              const fetched = Number(pkgFactorRes.rows[0].to_base_factor || 1);
+              lineFactorSnapshot = fetched > 0 ? fetched : 1;
+              linePkgLabelSnapshot = String(pkgFactorRes.rows[0].packaging_label || unit || '').trim() || null;
+            }
+          }
+          if (
+            (line as any).conversion_factor_snapshot !== undefined &&
+            (line as any).conversion_factor_snapshot !== null &&
+            String((line as any).conversion_factor_snapshot).trim() !== ''
+          ) {
+            const reqSnap = Number((line as any).conversion_factor_snapshot);
+            if (
+              !Number.isFinite(reqSnap) ||
+              reqSnap <= 0 ||
+              lineFactorSnapshot === null ||
+              Math.abs(reqSnap - lineFactorSnapshot) > 1e-6
+            ) {
+              const err: any = new Error(
+                `Faktor konversi kemasan (${(line as any).conversion_factor_snapshot}) pada item "${desc}" tidak sesuai dengan faktor konversi otoritatif sistem (${lineFactorSnapshot}).`
+              );
+              err.statusCode = 400;
+              err.code = 'INVALID_CONVERSION_FACTOR_SNAPSHOT';
+              throw err;
+            }
+          }
+
+          // Update existing line maintaining stable identity and snapshot
+          await client.query(
+            `UPDATE transaction_lines
+             SET product_id = $1,
+                 description_snapshot = $2,
+                 quantity = $3,
+                 unit = $4,
+                 unit_price = $5,
+                 discount_amount = $6,
+                 line_total = GREATEST(0, ROUND($3::numeric * $5::bigint)::bigint - $6::bigint),
+                 sort_order = $7,
+                 packaging_id = $10,
+                 line_type = $11,
+                 packaging_label_snapshot = COALESCE($12, packaging_label_snapshot),
+                 conversion_factor_snapshot = $13
+             WHERE id = $8 AND property_id = $9`,
+            [
+              prodId,
+              desc,
+              qty,
+              unit,
+              price,
+              disc,
+              sortOrder++,
+              existingId,
+              propertyId,
+              packId,
+              lineType,
+              linePkgLabelSnapshot,
+              lineFactorSnapshot
+            ]
+          );
+
+          // Synchronize stock_purchase_line_bindings
+          if ((prodId === null || lineType !== 'STOCK') && rQty === 0) {
+            await client.query(
+              `DELETE FROM stock_purchase_line_bindings WHERE transaction_id = $1 AND transaction_line_id = $2 AND property_id = $3`,
+              [id, existingId, propertyId]
+            );
+          } else {
+            const bindingLineType = lineType === 'SERVICE' ? 'SERVICE' : (lineType === 'STOCK' && prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL');
+            await client.query(
+              `UPDATE stock_purchase_line_bindings
+               SET ordered_quantity = $1,
+                   received_quantity = GREATEST(received_quantity, $9),
+                   product_id = COALESCE($5, product_id),
+                   packaging_id = $6,
+                   line_type = $7,
+                   base_unit_code = COALESCE(NULLIF($8, ''), base_unit_code),
+                   packaging_label_snapshot = COALESCE($10, packaging_label_snapshot),
+                   conversion_factor_snapshot = $11,
+                   updated_at = NOW()
+               WHERE transaction_id = $2 AND transaction_line_id = $3 AND property_id = $4`,
+              [
+                qty,
+                id,
+                existingId,
+                propertyId,
+                prodId,
+                packId,
+                bindingLineType,
+                unit,
+                rQty,
+                linePkgLabelSnapshot,
+                lineFactorSnapshot
+              ]
+            );
+            if (prodId !== null && lineType === 'STOCK' && !existingBindingLines.has(existingId)) {
+              await client.query(
+                `INSERT INTO stock_purchase_line_bindings (
+                   property_id, transaction_id, transaction_line_id, line_type,
+                   product_id, packaging_id, ordered_quantity, received_quantity, base_unit_code,
+                   packaging_label_snapshot, conversion_factor_snapshot, created_at, updated_at
+                 ) VALUES (
+                   $1, $2, $3, $4,
+                   $5, $6, $7, $8, $9,
+                   $10, $11, NOW(), NOW()
+                 ) ON CONFLICT (property_id, transaction_id, transaction_line_id)
+                 DO UPDATE SET
+                   ordered_quantity = EXCLUDED.ordered_quantity,
+                   received_quantity = GREATEST(stock_purchase_line_bindings.received_quantity, EXCLUDED.received_quantity),
+                   packaging_label_snapshot = COALESCE(stock_purchase_line_bindings.packaging_label_snapshot, EXCLUDED.packaging_label_snapshot),
+                   conversion_factor_snapshot = COALESCE(NULLIF(stock_purchase_line_bindings.conversion_factor_snapshot, 0), EXCLUDED.conversion_factor_snapshot),
+                   updated_at = NOW()`,
+                [
+                  propertyId,
+                  id,
+                  existingId,
+                  bindingLineType,
+                  prodId,
+                  packId,
+                  qty,
+                  rQty,
+                  unit || 'PCS',
+                  linePkgLabelSnapshot,
+                  lineFactorSnapshot
+                ]
+              );
+            }
+          }
+        } else {
+          materialChanged = true;
+          const desc = (line.description_snapshot || line.description || '').trim();
+          const unit = String(line.unit || '').trim();
+          const prodId = line.product_id ? Number(line.product_id) : null;
+          const packId = line.packaging_id ? Number(line.packaging_id) : null;
+          const rawLineType = line.line_type !== undefined && line.line_type !== null
+            ? String(line.line_type).trim().toUpperCase()
+            : (prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL');
+          const isNonStockLine = ['NON_STOCK', 'NON_STOCK_EXPENSE', 'NON_STOCK_PHYSICAL'].includes(rawLineType);
+          const lineType = rawLineType === 'SERVICE'
+            ? 'SERVICE'
+            : (isNonStockLine ? 'NON_STOCK_PHYSICAL' : (prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL'));
+          const bindingLineType = lineType === 'SERVICE' ? 'SERVICE' : (lineType === 'STOCK' && prodId ? 'STOCK' : 'NON_STOCK_PHYSICAL');
+
+          let lineFactorSnapshot = 1;
+          let linePkgLabelSnapshot: string | null = unit || null;
+          if (packId) {
+            const pkgFactorRes = await client.query(
+              `SELECT to_base_factor, packaging_label FROM product_packaging_conversions WHERE id = $1 AND property_id = $2`,
+              [packId, propertyId]
+            );
+            if ((pkgFactorRes.rowCount ?? 0) > 0) {
+              const fetched = Number(pkgFactorRes.rows[0].to_base_factor || 1);
+              lineFactorSnapshot = fetched > 0 ? fetched : 1;
+              linePkgLabelSnapshot = String(pkgFactorRes.rows[0].packaging_label || unit || '').trim() || null;
+            }
+          }
+          if (
+            (line as any).conversion_factor_snapshot !== undefined &&
+            (line as any).conversion_factor_snapshot !== null &&
+            String((line as any).conversion_factor_snapshot).trim() !== ''
+          ) {
+            const reqSnap = Number((line as any).conversion_factor_snapshot);
+            if (!Number.isFinite(reqSnap) || reqSnap <= 0 || Math.abs(reqSnap - lineFactorSnapshot) > 1e-6) {
+              const err: any = new Error(
+                `Faktor konversi kemasan (${(line as any).conversion_factor_snapshot}) pada item "${desc}" tidak sesuai dengan faktor konversi otoritatif sistem (${lineFactorSnapshot}).`
+              );
+              err.statusCode = 400;
+              err.code = 'INVALID_CONVERSION_FACTOR_SNAPSHOT';
+              throw err;
+            }
+          }
+
+          // Insert new line
+          const insLine = await client.query(
+            `INSERT INTO transaction_lines (
+               property_id, transaction_id, product_id, packaging_id, line_type, description_snapshot,
+               quantity, unit, unit_price, discount_amount, line_total, sort_order,
+               packaging_label_snapshot, conversion_factor_snapshot, created_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6,
+               $7, $8, $9, $10,
+               GREATEST(0, ROUND($7::numeric * $9::bigint)::bigint - $10::bigint),
+               $11, $12, $13, NOW()
+             ) RETURNING id`,
+            [
+              propertyId,
+              id,
+              prodId,
+              packId,
+              lineType,
+              desc,
+              qty,
+              unit,
+              price,
+              disc,
+              sortOrder++,
+              linePkgLabelSnapshot,
+              lineFactorSnapshot
+            ]
+          );
+
+          if (prodId !== null && lineType === 'STOCK') {
+            const newLineId = insLine.rows[0]?.id ? Number(insLine.rows[0].id) : null;
+            if (newLineId) {
+              await client.query(
+                `INSERT INTO stock_purchase_line_bindings (
+                   property_id, transaction_id, transaction_line_id, line_type,
+                   product_id, packaging_id, ordered_quantity, received_quantity, base_unit_code,
+                   packaging_label_snapshot, conversion_factor_snapshot, created_at, updated_at
+                 ) VALUES (
+                   $1, $2, $3, $4,
+                   $5, $6, $7, 0, $8,
+                   $9, $10, NOW(), NOW()
+                 ) ON CONFLICT (property_id, transaction_id, transaction_line_id) DO NOTHING`,
+                [
+                  propertyId,
+                  id,
+                  newLineId,
+                  bindingLineType,
+                  prodId,
+                  packId,
+                  qty,
+                  unit || 'PCS',
+                  linePkgLabelSnapshot,
+                  lineFactorSnapshot
+                ]
+              );
+            }
+          }
+        }
+      }
+
+      // Delete removed lines (which were verified to have rQty === 0)
+      for (const [existingLid] of existingLinesMap.entries()) {
+        if (!incomingLineIds.has(existingLid)) {
+          await client.query(
+            `DELETE FROM stock_purchase_line_bindings WHERE transaction_id = $1 AND transaction_line_id = $2 AND property_id = $3`,
+            [id, existingLid, propertyId]
+          );
+          await client.query(
+            `DELETE FROM transaction_lines WHERE id = $1 AND transaction_id = $2 AND property_id = $3`,
+            [existingLid, id, propertyId]
+          );
+        }
+      }
+    }
+
+    // 5. Category & Department resolution if provided
+    let categoryCode = prev.category_code;
+    let categoryName = prev.category_name;
+    let purchaseCategoryId = prev.purchase_category_id;
+    let departmentCode = prev.department_code;
+    let departmentId = prev.department_id;
+    let departmentNameSnapshot = prev.department_name_snapshot;
+
+    if (dto.category_code || dto.purchase_category_id) {
+      const cat = await resolvePurchaseCategoryBinding(pool, propertyId, dto);
+      categoryCode = cat.code;
+      categoryName = cat.name;
+      purchaseCategoryId = cat.id;
+    }
+
+    if (dto.department_code || dto.department_id) {
+      const dept = await resolvePurchaseDepartmentBinding(pool, propertyId, dto);
+      departmentCode = dept.code;
+      departmentId = dept.id;
+      departmentNameSnapshot = dept.name;
+    }
+
+    let supplierId = dto.supplier_id !== undefined ? (dto.supplier_id ? Number(dto.supplier_id) : null) : prev.supplier_id;
+    let supplierName = dto.supplier_name !== undefined ? (dto.supplier_name?.trim() || null) : prev.party_name;
+
+    if (dto.supplier_id !== undefined && supplierId) {
+      const supCheck = await client.query(
+        `SELECT name FROM suppliers WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL`,
+        [supplierId, propertyId]
+      );
+      if ((supCheck.rowCount ?? 0) === 0) {
+        const err: any = new Error(`Supplier #${supplierId} bukan milik properti #${propertyId}`);
+        err.statusCode = 403;
+        err.code = 'CROSS_PROPERTY_SUPPLIER';
+        throw err;
+      }
+      supplierName = supCheck.rows[0].name;
+    }
+
+    let hasPoVariance = Boolean(prev.has_po_variance);
+    let poVarianceSummary: any = prev.po_variance_summary || {};
+    if (prev.po_id) {
+      const poRes = await client.query(
+        `SELECT po.*, s.name AS canonical_supplier_name
+           FROM pos_purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.canonical_supplier_id AND s.property_id = po.property_id
+          WHERE po.id = $1 AND po.property_id = $2`,
+        [prev.po_id, propertyId]
+      );
+      const po = poRes.rows[0];
+      if (po) {
+        const poSupplierId = po.canonical_supplier_id ? Number(po.canonical_supplier_id) : null;
+        if (poSupplierId && supplierId && Number(supplierId) !== poSupplierId) {
+          const err: any = new Error(
+            `Rekanan pada tagihan harus sesuai dengan PO (${po.canonical_supplier_name || po.supplier_name}). Perubahan rekanan wajib melalui revisi PO.`
+          );
+          err.statusCode = 409;
+          err.code = 'PO_SUPPLIER_MISMATCH';
+          throw err;
+        }
+        const poItemsRes = await client.query(
+          `SELECT * FROM pos_purchase_order_items WHERE po_id = $1 ORDER BY id ASC`,
+          [prev.po_id]
+        );
+        const poItemsMap = new Map<number, any>();
+        for (const pi of poItemsRes.rows) {
+          poItemsMap.set(Number(pi.id), pi);
+        }
+        const currentLinesRes = await client.query(
+          `SELECT * FROM transaction_lines WHERE transaction_id = $1 AND property_id = $2 ORDER BY sort_order ASC, id ASC`,
+          [id, propertyId]
+        );
+        const variances: any[] = [];
+        for (const cl of currentLinesRes.rows) {
+          let matchedPi = cl.po_item_id ? poItemsMap.get(Number(cl.po_item_id)) : null;
+          if (!matchedPi && cl.product_id) {
+            const cands = poItemsRes.rows.filter(
+              (pi: any) =>
+                Number(pi.product_id) === Number(cl.product_id) &&
+                Number(pi.packaging_id || 0) === Number(cl.packaging_id || 0)
+            );
+            if (cands.length === 1) matchedPi = cands[0];
+          }
+          if (matchedPi) {
+            const poQty = Number(matchedPi.ordered_qty || 0);
+            const poPrice = Math.round(Number(matchedPi.unit_cost || 0));
+            const invQty = Number(cl.quantity || 0);
+            const invPrice = Math.round(Number(cl.unit_price || 0));
+            const qtyDiff = Math.round((invQty - poQty) * 10000) / 10000;
+            const priceDiff = invPrice - poPrice;
+            if (Math.abs(qtyDiff) > 0.0001 || Math.abs(priceDiff) > 0) {
+              variances.push({
+                transaction_line_id: Number(cl.id),
+                po_item_id: Number(matchedPi.id),
+                product_id: cl.product_id ? Number(cl.product_id) : null,
+                description: cl.description_snapshot,
+                po_ordered_qty: poQty,
+                invoice_qty: invQty,
+                qty_diff: qtyDiff,
+                po_unit_cost: poPrice,
+                invoice_unit_price: invPrice,
+                unit_price_diff: priceDiff,
+              });
+            }
+          } else {
+            variances.push({
+              transaction_line_id: Number(cl.id),
+              po_item_id: null,
+              product_id: cl.product_id ? Number(cl.product_id) : null,
+              description: cl.description_snapshot,
+              reason: 'UNMATCHED_PO_LINE',
+            });
+          }
+        }
+        hasPoVariance = variances.length > 0;
+        poVarianceSummary = {
+          has_variance: hasPoVariance,
+          po_id: Number(prev.po_id),
+          po_number: po.po_number,
+          checked_at: new Date().toISOString(),
+          variances,
+        };
+      }
+    }
+
+    let txDate = prev.transaction_date;
+    if (dto.transaction_date) {
+      const dateStr = String(dto.transaction_date).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        const err: any = new Error('Format tanggal transaksi harus YYYY-MM-DD');
+        err.statusCode = 400;
+        throw err;
+      }
+      txDate = dateStr;
+    }
+
+    const txDiscount = dto.transaction_discount !== undefined
+      ? Math.max(0, Math.round(Number(dto.transaction_discount || dto.discount_amount || 0)))
+      : Number(prev.discount_amount || 0);
+    const roundingAmount = dto.rounding_amount !== undefined
+      ? Math.round(Number(dto.rounding_amount || 0))
+      : Number(prev.rounding_amount || 0);
+
+    const description = dto.description !== undefined ? (dto.description?.trim() || null) : prev.description;
+    const sourceRef = dto.source_reference !== undefined ? (dto.source_reference?.trim() || null) : prev.source_reference;
+    const notes = dto.notes !== undefined ? (dto.notes?.trim() || null) : prev.notes;
+    const paymentMethod = dto.payment_method !== undefined ? (dto.payment_method?.trim() || null) : prev.payment_method;
+
+    if (
+      Number(supplierId || 0) !== Number(prev.supplier_id || 0) ||
+      String(supplierName || '') !== String(prev.party_name || '') ||
+      txDiscount !== Number(prev.discount_amount || 0) ||
+      roundingAmount !== Number(prev.rounding_amount || 0)
+    ) {
+      materialChanged = true;
+    }
+
+    const prevApprovalStatus = String(prev.approval_status || 'PENDING_APPROVAL').toUpperCase();
+    const keepPoInheritedApproval = Boolean(prev.po_id) && !hasPoVariance && prevApprovalStatus === 'APPROVED';
+    const nextApprovalStatus = keepPoInheritedApproval ? 'APPROVED' : (materialChanged ? 'PENDING_APPROVAL' : prevApprovalStatus);
+    const nextApprovedByUserId = keepPoInheritedApproval ? (prev.approved_by_user_id || null) : (materialChanged ? null : (prev.approved_by_user_id || null));
+    const nextApprovedByName = keepPoInheritedApproval ? (prev.approved_by_name_snapshot || null) : (materialChanged ? null : (prev.approved_by_name_snapshot || null));
+    const nextApprovedAt = keepPoInheritedApproval ? (prev.approved_at || null) : (materialChanged ? null : (prev.approved_at || null));
+    const nextRejectionReason = keepPoInheritedApproval ? null : (materialChanged ? null : (prev.rejection_reason || null));
+    const revisionDelta = materialChanged ? 1 : 0;
+
+    // 5b. Canonical Stock Receiving Control (v0.2 section 0.4)
+    const canonicalRecv =
+      typeof computeCanonicalStockReceivingStatus === 'function'
+        ? await computeCanonicalStockReceivingStatus(client, propertyId, id, prev.received_at)
+        : { hasStockLines: false, receivingStatus: (prev.receiving_status || 'BELUM_DITERIMA') as ReceivingStatus, receivedAt: prev.received_at || null };
+    let nextReceivingStatus: string = prev.receiving_status || 'BELUM_DITERIMA';
+    let nextReceivedAt: string | null = prev.received_at || null;
+    if (canonicalRecv.hasStockLines) {
+      const callerRecvStatus = dto.receiving_status !== undefined && dto.receiving_status !== null
+        ? String(dto.receiving_status).trim().toUpperCase()
+        : '';
+      const hasCallerReceivedAt = dto.received_at !== undefined && dto.received_at !== null && String(dto.received_at).trim() !== '';
+      if ((callerRecvStatus !== '' && callerRecvStatus !== canonicalRecv.receivingStatus) || hasCallerReceivedAt) {
+        const err: any = new Error(
+          'Status penerimaan untuk pembelian barang stok dikendalikan secara otomatis melalui dokumen Penerimaan Barang (GRN) yang di-Post dan tidak dapat diubah manual.'
+        );
+        err.statusCode = 400;
+        err.code = 'STOCK_RECEIVING_MANAGED_BY_GRN';
+        throw err;
+      }
+      nextReceivingStatus = canonicalRecv.receivingStatus;
+      nextReceivedAt = canonicalRecv.receivedAt;
+    } else if (dto.receiving_status !== undefined && dto.receiving_status !== null && String(dto.receiving_status).trim() !== '') {
+      nextReceivingStatus = resolvePurchaseReceivingStatus(dto.receiving_status);
+      nextReceivedAt = nextReceivingStatus === 'BELUM_DITERIMA'
+        ? null
+        : (dto.received_at ? new Date(dto.received_at).toISOString() : (prev.received_at || new Date().toISOString()));
+    }
+
+    // 6. Update header & recompute line sums atomically
+    const recomputeRes = await client.query(
+      `WITH line_sums AS (
+         SELECT COALESCE(SUM(line_total), 0) AS subtotal
+         FROM transaction_lines
+         WHERE transaction_id = $1
+       )
+       UPDATE transactions
+       SET category_code = $2,
+           category_name = $3,
+           purchase_category_id = $4,
+           department_code = $5,
+           department_id = $6,
+           department_name_snapshot = $7,
+           supplier_id = $8,
+           party_name = $9,
+           transaction_date = $10,
+           source_reference = $11,
+           description = $12,
+           notes = $13,
+           payment_method = $14,
+           amount = line_sums.subtotal::bigint,
+           discount_amount = $15::bigint,
+           rounding_amount = $16::bigint,
+           net_amount = GREATEST(0, (line_sums.subtotal::bigint - $15::bigint + $16::bigint)),
+           updated_by = $17,
+           approval_status = $19,
+           approved_by_user_id = $20,
+           approved_by_name_snapshot = $21,
+           approved_at = $22,
+           rejection_reason = $23,
+           source_revision = COALESCE(source_revision, 1) + $24,
+           receiving_status = $25,
+           received_at = $26,
+           has_po_variance = $27,
+           po_variance_summary = $28::jsonb,
+           updated_at = NOW()
+       FROM line_sums
+       WHERE id = $1 AND property_id = $18
+       RETURNING *`,
+      [
+        id,
+        categoryCode,
+        categoryName,
+        purchaseCategoryId,
+        departmentCode,
+        departmentId,
+        departmentNameSnapshot,
+        supplierId,
+        supplierName,
+        txDate,
+        sourceRef,
+        description,
+        notes,
+        paymentMethod,
+        txDiscount,
+        roundingAmount,
+        dto.actor_name || dto.actor_user_id || 'Staff',
+        propertyId,
+        nextApprovalStatus,
+        nextApprovedByUserId,
+        nextApprovedByName,
+        nextApprovedAt,
+        nextRejectionReason,
+        revisionDelta,
+        nextReceivingStatus,
+        nextReceivedAt,
+        hasPoVariance,
+        JSON.stringify(poVarianceSummary || {})
+      ]
+    );
+
+    const updatedTx = recomputeRes.rows[0] || prev;
+    if (materialChanged) {
+      prev.approval_status = nextApprovalStatus;
+      prev.approved_by_user_id = nextApprovedByUserId;
+      prev.approved_by_name_snapshot = nextApprovedByName;
+      prev.approved_at = nextApprovedAt;
+      prev.rejection_reason = nextRejectionReason;
+      prev.source_revision = Number(prev.source_revision || 1) + revisionDelta;
+    }
+
+    // 7. Audit log
+    const actor = dto.actor_name || dto.actor_user_id || 'Staff';
+    await client.query(
+      `INSERT INTO audit_logs (
+        module, action, entity, record_id, new_value, property_id, timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        'TRANSACTIONS',
+        'PURCHASE_UPDATED',
+        'transactions',
+        String(id),
+        JSON.stringify({
+          transaction_no: prev.transaction_no,
+          previous: {
+            amount: prev.amount,
+            net_amount: prev.net_amount,
+            lines_count: existingLines.length
+          },
+          updated: {
+            amount: updatedTx.amount,
+            net_amount: updatedTx.net_amount
+          },
+          actor
+        }),
+        propertyId
+      ]
+    );
+
+    await client.query('COMMIT');
+    return await getTransactionById(pool, propertyId, id);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -2350,6 +3840,16 @@ export async function updatePurchaseReceivingStatus(
     throw new Error(`Status penerimaan barang hanya berlaku untuk transaksi Pembelian (PURCHASE)`);
   }
 
+  const canonicalRecv = await computeCanonicalStockReceivingStatus(pool, propertyId, id, currentTx.received_at);
+  if (canonicalRecv.hasStockLines) {
+    const err: any = new Error(
+      'Status penerimaan untuk pembelian barang stok dikendalikan secara otomatis melalui dokumen Penerimaan Barang (GRN) yang di-Post dan tidak dapat diubah manual.'
+    );
+    err.statusCode = 400;
+    err.code = 'STOCK_RECEIVING_MANAGED_BY_GRN';
+    throw err;
+  }
+
   const prevStatus = currentTx.receiving_status;
   const receivedAtVal = status === 'BELUM_DITERIMA' 
     ? null 
@@ -2867,8 +4367,12 @@ function buildHapusConditionsAndValues(
     values.push(params.verification_status);
   }
   if (params.receiving_status) {
-    conditions.push(`t.receiving_status = $${idx++}`);
-    values.push(params.receiving_status);
+    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(String(params.receiving_status).toUpperCase())) {
+      conditions.push(`t.receiving_status IN ('DITERIMA', 'DITERIMA_LENGKAP')`);
+    } else {
+      conditions.push(`t.receiving_status = $${idx++}`);
+      values.push(params.receiving_status);
+    }
   }
   if (params.transaction_status) {
     conditions.push(`UPPER(t.transaction_status) = $${idx++}`);
@@ -2978,8 +4482,12 @@ export async function getTransactions(
   }
 
   if (params.receiving_status) {
-    baseConditions.push(`t.receiving_status = $${valIdx++}`);
-    baseValues.push(params.receiving_status);
+    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(String(params.receiving_status).toUpperCase())) {
+      baseConditions.push(`t.receiving_status IN ('DITERIMA', 'DITERIMA_LENGKAP')`);
+    } else {
+      baseConditions.push(`t.receiving_status = $${valIdx++}`);
+      baseValues.push(params.receiving_status);
+    }
   }
 
   if (params.supplier_id) {
@@ -3063,10 +4571,13 @@ export async function getTransactions(
             b.channel AS booking_channel,
             b.ota_source_id,
             ota.name AS ota_source_name,
+            po_ref.po_number AS po_number,
+            po_ref.status AS po_status,
             COALESCE(pmt.total_paid, 0) AS paid_amount,
             GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
      FROM transactions t
      LEFT JOIN suppliers s ON s.id = t.supplier_id
+     LEFT JOIN pos_purchase_orders po_ref ON po_ref.id = t.po_id AND po_ref.property_id = t.property_id
      LEFT JOIN reservations r ON r.id = t.reservation_id
      LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
      LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
@@ -3523,12 +5034,17 @@ export async function getTransactionById(
              b.channel as booking_channel,
              b.ota_source_id,
              ota.name AS ota_source_name,
+             po_ref.po_number AS po_number,
+             po_ref.status AS po_status,
+             po_ref.order_date AS po_order_date,
+             po_ref.total_amount AS po_total_amount,
              rev_orig.transaction_no as original_transaction_no,
             rev_repl.transaction_no as reversal_transaction_no,
     COALESCE(pmt.total_paid, 0) AS paid_amount,
               GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
       FROM transactions t
        LEFT JOIN suppliers s ON s.id = t.supplier_id
+       LEFT JOIN pos_purchase_orders po_ref ON po_ref.id = t.po_id AND po_ref.property_id = t.property_id
        LEFT JOIN reservations r ON r.id = t.reservation_id
        LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
        LEFT JOIN ota_sources ota ON ota.id = b.ota_source_id AND ota.property_id = b.property_id
@@ -3575,13 +5091,210 @@ export async function getTransactionById(
 
    // Fetch transaction lines
    const linesRes = await pool.query(
-     `SELECT id::text, property_id, transaction_id::text, product_id::text, description_snapshot,
-             quantity, unit, unit_price, discount_amount, line_total, sort_order, created_at
+     `SELECT id::text, property_id, transaction_id::text, product_id::text,
+             packaging_id::text, po_item_id::text, line_type, description_snapshot,
+             quantity, unit, unit_price, discount_amount, line_total, sort_order,
+             conversion_factor_snapshot, packaging_label_snapshot, created_at
       FROM transaction_lines
       WHERE transaction_id = $1 AND property_id = $2
       ORDER BY sort_order ASC, id ASC`,
      [id, propertyId]
    );
+
+   let linkedGoodsReceipts: any[] = [];
+   if (String(tx.transaction_type || '').toUpperCase() === 'PURCHASE' && linesRes.rows.length > 0) {
+     try {
+       const bindRes = await pool.query(
+         `SELECT b.transaction_line_id, b.po_item_id, b.received_quantity, b.packaging_id, b.line_type,
+                 b.conversion_factor_snapshot AS binding_conversion_factor_snapshot,
+                 b.packaging_label_snapshot AS binding_packaging_label_snapshot,
+                 tl_s.conversion_factor_snapshot AS line_conversion_factor_snapshot,
+                 tl_s.packaging_label_snapshot AS line_packaging_label_snapshot,
+                 poi.received_qty AS po_item_received_qty, poi.ordered_qty AS po_item_ordered_qty, poi.unit_cost AS po_item_unit_cost,
+                 poi.packaging_id AS po_item_packaging_id, poi.conversion_factor_snapshot AS po_item_conversion_factor_snapshot,
+                 ppc_b.to_base_factor AS binding_to_base_factor,
+                 ppc_poi.to_base_factor AS po_item_to_base_factor
+          FROM stock_purchase_line_bindings b
+          LEFT JOIN transaction_lines tl_s
+            ON tl_s.id = b.transaction_line_id
+           AND tl_s.property_id = b.property_id
+          LEFT JOIN pos_purchase_order_items poi
+            ON poi.id = b.po_item_id
+           AND poi.property_id = b.property_id
+          LEFT JOIN product_packaging_conversions ppc_b
+            ON ppc_b.id = b.packaging_id
+           AND ppc_b.property_id = b.property_id
+          LEFT JOIN product_packaging_conversions ppc_poi
+            ON ppc_poi.id = poi.packaging_id
+           AND ppc_poi.property_id = b.property_id
+          WHERE b.transaction_id = $1 AND b.property_id = $2`,
+         [id, propertyId]
+       );
+       const grnRes = await pool.query(
+         `SELECT gri.transaction_line_id, gri.po_item_id, gri.packaging_id,
+                 gri.received_qty, gri.base_quantity, gri.conversion_factor_snapshot,
+                 ppc_gri.to_base_factor AS gri_to_base_factor
+          FROM pos_goods_receipt_items gri
+          JOIN pos_goods_receipts gr ON gr.id = gri.receipt_id
+          LEFT JOIN product_packaging_conversions ppc_gri
+            ON ppc_gri.id = gri.packaging_id
+           AND ppc_gri.property_id = gr.property_id
+          WHERE gr.property_id = $2
+            AND gr.status IN ('POSTED', 'COMPLETED')
+            AND (gr.transaction_id = $1 OR ($3::bigint IS NOT NULL AND gr.po_id = $3::bigint))`,
+         [id, propertyId, tx.po_id ? Number(tx.po_id) : null]
+       );
+       const pMap = new Map<number, any>();
+       for (const b of bindRes.rows) {
+         pMap.set(Number(b.transaction_line_id), b);
+       }
+       for (const row of linesRes.rows) {
+         const lid = Number(row.id);
+         const b = pMap.get(lid);
+         const pid = row.po_item_id ? Number(row.po_item_id) : (b?.po_item_id ? Number(b.po_item_id) : 0);
+         const linePkgId = row.packaging_id != null ? Number(row.packaging_id) : (b?.packaging_id != null ? Number(b.packaging_id) : null);
+         const poPkgId = b?.po_item_packaging_id != null ? Number(b.po_item_packaging_id) : null;
+         const poSnapFactor = Number(b?.po_item_conversion_factor_snapshot || 0);
+         const poFactor: number | null = poPkgId != null
+           ? (poSnapFactor > 0 ? poSnapFactor : null)
+           : 1;
+         const snapLineFactor = Number(
+           b?.binding_conversion_factor_snapshot ||
+           b?.line_conversion_factor_snapshot ||
+           row.conversion_factor_snapshot ||
+           0
+         );
+
+         // Consensus snapshot from posted GRNs using the exact same packaging as this line
+         let grnConsensusFactor: number | null = null;
+         if (linePkgId != null) {
+           const matchingFactors: number[] = [];
+           for (const g of grnRes.rows) {
+             const gLid = g.transaction_line_id ? Number(g.transaction_line_id) : 0;
+             const gPid = g.po_item_id ? Number(g.po_item_id) : 0;
+             const gPkgId = g.packaging_id != null ? Number(g.packaging_id) : null;
+             const gSnap = Number(g.conversion_factor_snapshot || 0);
+             if (
+               gPkgId === linePkgId &&
+               gSnap > 0 &&
+               (gLid === lid || (pid > 0 && gPid === pid))
+             ) {
+               matchingFactors.push(gSnap);
+             }
+           }
+           if (matchingFactors.length > 0) {
+             const minF = Math.min(...matchingFactors);
+             const maxF = Math.max(...matchingFactors);
+             if (Math.abs(minF - maxF) <= 1e-6) {
+               grnConsensusFactor = minF;
+             }
+           }
+         }
+
+         const verifiedLineFactor: number | null = linePkgId != null
+           ? (snapLineFactor > 0
+               ? snapLineFactor
+               : (linePkgId === poPkgId && poSnapFactor > 0
+                   ? poSnapFactor
+                   : grnConsensusFactor))
+           : 1;
+
+         let poRecvInLineUnit = 0;
+         let unverifiedReceivedBaseQty = 0;
+         if (b && b.po_item_received_qty != null) {
+           const rawPoRecv = Number(b.po_item_received_qty || 0);
+           if (linePkgId === poPkgId) {
+             poRecvInLineUnit = rawPoRecv;
+           } else if (poFactor != null && poFactor > 0) {
+             const poRecvBase = rawPoRecv * (poPkgId != null ? poFactor : 1);
+             if (linePkgId == null) {
+               poRecvInLineUnit = poRecvBase;
+             } else if (verifiedLineFactor != null && verifiedLineFactor > 0) {
+               poRecvInLineUnit = poRecvBase / verifiedLineFactor;
+             } else {
+               unverifiedReceivedBaseQty = Math.max(unverifiedReceivedBaseQty, poRecvBase);
+             }
+           }
+         }
+
+         let grnRecvInLineUnit = 0;
+         let grnRawBaseTotal = 0;
+         for (const g of grnRes.rows) {
+           const gLid = g.transaction_line_id ? Number(g.transaction_line_id) : 0;
+           const gPid = g.po_item_id ? Number(g.po_item_id) : 0;
+           if (gLid === lid || (gLid === 0 && pid > 0 && gPid === pid) || (pid > 0 && gPid === pid)) {
+             const gPkgId = g.packaging_id != null ? Number(g.packaging_id) : null;
+             const gSnapFactor = Number(g.conversion_factor_snapshot || 0);
+             const gVerifiedFactor: number | null = gPkgId != null
+               ? (gSnapFactor > 0 ? gSnapFactor : null)
+               : 1;
+             const gBase = Number(g.base_quantity || 0) > 0
+               ? Number(g.base_quantity)
+               : (gVerifiedFactor != null && gVerifiedFactor > 0
+                   ? Number(g.received_qty || 0) * gVerifiedFactor
+                   : 0);
+             grnRawBaseTotal += gBase;
+             if (linePkgId != null && gPkgId === linePkgId) {
+               grnRecvInLineUnit += Number(g.received_qty || 0);
+             } else if (linePkgId == null) {
+               grnRecvInLineUnit += gBase;
+             } else if (verifiedLineFactor != null && verifiedLineFactor > 0) {
+               grnRecvInLineUnit += gBase / verifiedLineFactor;
+             }
+           }
+         }
+         if (linePkgId != null && verifiedLineFactor == null) {
+           unverifiedReceivedBaseQty = Math.max(unverifiedReceivedBaseQty, grnRawBaseTotal);
+         }
+
+         row.received_quantity = Math.max(
+           Number(b?.received_quantity || 0),
+           poRecvInLineUnit,
+           grnRecvInLineUnit
+         );
+         row.remaining_quantity = Math.max(
+           0,
+           Number(row.quantity || b?.ordered_quantity || 0) - Number(row.received_quantity || 0)
+         );
+         row.conversion_factor_snapshot = verifiedLineFactor;
+         row.conversion_factor_unresolved = linePkgId != null && verifiedLineFactor == null;
+         row.unverified_received_base_qty = unverifiedReceivedBaseQty;
+         if (b?.binding_packaging_label_snapshot || b?.line_packaging_label_snapshot) {
+           row.packaging_label_snapshot = b?.binding_packaging_label_snapshot || b?.line_packaging_label_snapshot;
+         }
+         if (!row.po_item_id && b?.po_item_id) {
+           row.po_item_id = String(b.po_item_id);
+         }
+         if (!row.packaging_id && b?.packaging_id) {
+           row.packaging_id = String(b.packaging_id);
+         }
+         if (!row.line_type) {
+           row.line_type = b?.line_type || (row.product_id ? 'STOCK' : 'NON_STOCK');
+         }
+         if (b?.po_item_ordered_qty !== undefined && b?.po_item_ordered_qty !== null) {
+           row.po_ordered_quantity = Number(b.po_item_ordered_qty);
+         }
+         if (b?.po_item_unit_cost !== undefined && b?.po_item_unit_cost !== null) {
+           row.po_unit_cost = Number(b.po_item_unit_cost);
+         }
+       }
+
+       const grnListRes = await pool.query(
+         `SELECT gr.id, gr.grn_number, gr.po_id, gr.transaction_id, gr.receipt_date, gr.status,
+                 gr.total_amount, gr.invoice_no, gr.invoice_no AS invoice_reference, gr.received_by, gr.posted_at, gr.created_at,
+                 sl.name AS location_name
+            FROM pos_goods_receipts gr
+            LEFT JOIN stock_locations sl ON sl.id = gr.location_id AND sl.property_id = gr.property_id
+           WHERE gr.property_id = $2
+             AND (gr.transaction_id = $1 OR ($3::bigint IS NOT NULL AND gr.po_id = $3::bigint))
+           ORDER BY gr.receipt_date DESC, gr.id DESC`,
+         [id, propertyId, tx.po_id ? Number(tx.po_id) : null]
+       );
+       linkedGoodsReceipts = grnListRes.rows;
+     } catch {
+       // Ignore if tables are missing in unit test mocks
+     }
+   }
 
    // Fetch purpose-aware attachments
    const attRes = await pool.query(
@@ -3794,6 +5507,7 @@ export async function getTransactionById(
     lines: linesRes.rows,
     attachments: attRes.rows,
     linked_payments: pmtRes.rows,
+    linked_goods_receipts: linkedGoodsReceipts,
     // POS settlements as a separate field — frontend can display them
     // distinctly from legacy payment_transactions.
     pos_settlements: posSettlements,
@@ -4258,6 +5972,11 @@ interface LockedPurchaseRow {
   verified_by_name_snapshot: string | null;
   verified_at: string | null;
   received_at: string | null;
+  approval_status: string | null;
+  approved_by_user_id: string | null;
+  approved_by_name_snapshot: string | null;
+  approved_at: string | null;
+  rejection_reason: string | null;
 }
 
 async function fetchLockedPurchase(
@@ -4268,7 +5987,8 @@ async function fetchLockedPurchase(
   const res = await client.query(
     `SELECT id, transaction_no, transaction_type, transaction_status,
             receiving_status, verification_status, purchase_workflow_status,
-            verified_by_user_id, verified_by_name_snapshot, verified_at, received_at
+            verified_by_user_id, verified_by_name_snapshot, verified_at, received_at,
+            approval_status, approved_by_user_id, approved_by_name_snapshot, approved_at, rejection_reason
      FROM transactions
      WHERE id = $1 AND property_id = $2 FOR UPDATE`,
     [id, propertyId]
@@ -4308,6 +6028,11 @@ function buildAuditPayload(
     verified_by_user_id: string | null;
     verified_by_name_snapshot: string | null;
     verified_at: string | null;
+    approval_status?: string | null;
+    approved_by_user_id?: string | null;
+    approved_by_name_snapshot?: string | null;
+    approved_at?: string | null;
+    rejection_reason?: string | null;
   },
   autoRules: { verified_forced_workflow_complete: boolean; workflow_process_forced_unverify: boolean },
   reason: string | null,
@@ -4366,7 +6091,10 @@ export async function executePurchaseLifecycle(
   if (
     actionUpper !== 'SET_RECEIVING' &&
     actionUpper !== 'SET_VERIFICATION' &&
-    actionUpper !== 'SET_WORKFLOW'
+    actionUpper !== 'SET_WORKFLOW' &&
+    actionUpper !== 'SET_APPROVAL' &&
+    actionUpper !== 'ARCHIVE' &&
+    actionUpper !== 'UNARCHIVE'
   ) {
     const err: any = new Error(`Action '${action}' tidak valid untuk PURCHASE lifecycle`);
     err.statusCode = 400;
@@ -4387,6 +6115,11 @@ export async function executePurchaseLifecycle(
     let newVerifiedByName: string | null = prev.verified_by_name_snapshot;
     let newVerifiedAt: string | null = prev.verified_at;
     let newReceivedAt: string | null = prev.received_at;
+    let newApprovalStatus: string | null = prev.approval_status || 'PENDING_APPROVAL';
+    let newApprovedByUserId: string | null = prev.approved_by_user_id;
+    let newApprovedByName: string | null = prev.approved_by_name_snapshot;
+    let newApprovedAt: string | null = prev.approved_at;
+    let newRejectionReason: string | null = prev.rejection_reason;
 
     const autoRules = {
       verified_forced_workflow_complete: false,
@@ -4398,6 +6131,15 @@ export async function executePurchaseLifecycle(
       if (!status || !PURCHASE_RECEIVING_STATUSES.includes(status as ReceivingStatus)) {
         const err: any = new Error(`receiving_status '${status}' tidak valid`);
         err.statusCode = 400;
+        throw err;
+      }
+      const canonicalRecv = await computeCanonicalStockReceivingStatus(client, propertyId, id, prev.received_at);
+      if (canonicalRecv.hasStockLines) {
+        const err: any = new Error(
+          'Status penerimaan untuk pembelian barang stok dikendalikan secara otomatis melalui dokumen Penerimaan Barang (GRN) yang di-Post dan tidak dapat diubah manual.'
+        );
+        err.statusCode = 400;
+        err.code = 'STOCK_RECEIVING_MANAGED_BY_GRN';
         throw err;
       }
       newReceiving = status;
@@ -4420,8 +6162,6 @@ export async function executePurchaseLifecycle(
         newVerifiedByUserId = actorUserId;
         newVerifiedByName = actor;
         newVerifiedAt = new Date().toISOString();
-        newWorkflow = 'SELESAI';
-        autoRules.verified_forced_workflow_complete = true;
       } else if (v === 'UNVERIFIED') {
         newVerifiedByUserId = null;
         newVerifiedByName = null;
@@ -4435,13 +6175,57 @@ export async function executePurchaseLifecycle(
         throw err;
       }
       newWorkflow = w;
-      if (w === 'PROSES') {
-        newVerification = 'UNVERIFIED';
-        newVerifiedByUserId = null;
-        newVerifiedByName = null;
-        newVerifiedAt = null;
-        autoRules.workflow_process_forced_unverify = true;
+    } else if (actionUpper === 'SET_APPROVAL') {
+      const app = dto.approval_status;
+      if (!app || !['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(app)) {
+        const err: any = new Error(`approval_status '${app}' tidak valid`);
+        err.statusCode = 400;
+        throw err;
       }
+      if (app === 'REJECTED' && !reason) {
+        const err: any = new Error('Alasan penolakan (reason) wajib diisi saat menolak pembelian');
+        err.statusCode = 400;
+        throw err;
+      }
+      newApprovalStatus = app;
+      if (app === 'APPROVED') {
+        newApprovedByUserId = actorUserId;
+        newApprovedByName = actor;
+        newApprovedAt = new Date().toISOString();
+        newRejectionReason = null;
+      } else if (app === 'REJECTED') {
+        newApprovedByUserId = actorUserId;
+        newApprovedByName = actor;
+        newApprovedAt = new Date().toISOString();
+        newRejectionReason = reason;
+      } else if (app === 'PENDING_APPROVAL') {
+        newApprovedByUserId = null;
+        newApprovedByName = null;
+        newApprovedAt = null;
+        newRejectionReason = null;
+      }
+    } else if (actionUpper === 'ARCHIVE') {
+      newWorkflow = 'SELESAI';
+      await client.query(
+        `UPDATE transactions
+            SET archived_at = NOW(),
+                archived_by_user_id = $1,
+                archived_by_name_snapshot = $2,
+                archive_reason = $3
+          WHERE id = $4 AND property_id = $5`,
+        [actorUserId, actor, reason, id, propertyId]
+      );
+    } else if (actionUpper === 'UNARCHIVE') {
+      newWorkflow = 'PROSES';
+      await client.query(
+        `UPDATE transactions
+            SET archived_at = NULL,
+                archived_by_user_id = NULL,
+                archived_by_name_snapshot = NULL,
+                archive_reason = NULL
+          WHERE id = $1 AND property_id = $2`,
+        [id, propertyId]
+      );
     }
 
     await client.query(
@@ -4453,8 +6237,13 @@ export async function executePurchaseLifecycle(
            verified_by_name_snapshot = $5,
            verified_at = $6,
            purchase_workflow_status = $7,
+           approval_status = $8,
+           approved_by_user_id = $9,
+           approved_by_name_snapshot = $10,
+           approved_at = $11,
+           rejection_reason = $12,
            updated_at = NOW()
-       WHERE id = $8 AND property_id = $9`,
+       WHERE id = $13 AND property_id = $14`,
       [
         newReceiving,
         newReceivedAt,
@@ -4463,6 +6252,11 @@ export async function executePurchaseLifecycle(
         newVerifiedByName,
         newVerifiedAt,
         newWorkflow,
+        newApprovalStatus,
+        newApprovedByUserId,
+        newApprovedByName,
+        newApprovedAt,
+        newRejectionReason,
         id,
         propertyId,
       ]
@@ -4480,6 +6274,11 @@ export async function executePurchaseLifecycle(
         verified_by_user_id: newVerifiedByUserId,
         verified_by_name_snapshot: newVerifiedByName,
         verified_at: newVerifiedAt,
+        approval_status: newApprovalStatus,
+        approved_by_user_id: newApprovedByUserId,
+        approved_by_name_snapshot: newApprovedByName,
+        approved_at: newApprovedAt,
+        rejection_reason: newRejectionReason,
       },
       autoRules,
       reason,

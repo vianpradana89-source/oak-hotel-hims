@@ -1,7 +1,9 @@
 import { Pool, PoolClient } from 'pg';
 import dotenv from 'dotenv';
 
-dotenv.config();
+if (require.main === module) {
+  dotenv.config();
+}
 
 type MigrationStep = {
   id: string;

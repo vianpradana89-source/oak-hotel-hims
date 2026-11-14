@@ -48,6 +48,8 @@ import { OccupancySection } from './features/reports/OccupancySection.tsx';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
+import GoodsReceiptSection from './features/posInventory/GoodsReceiptSection';
+import FoodCostOverviewSection from './features/posInventory/FoodCostOverviewSection';
 import PosModal from './features/pos/PosModal';
 import PosPayCashModal, { type PosPayCashOrderContext } from './features/pos/PosPayCashModal';
 import type { PosOrderPaidSignal } from './features/pos/PosWorkspace';
@@ -4025,6 +4027,32 @@ function AppContent() {
 
   return (
     <div className="hotel-app">
+      {import.meta.env.VITE_UAT_PREVIEW === 'true' && (
+        <div
+          data-testid="uat-isolated-copy-banner"
+          style={{
+            backgroundColor: '#064e3b',
+            color: '#fef08a',
+            fontSize: '13px',
+            fontWeight: '600',
+            padding: '6px 16px',
+            textAlign: 'center',
+            letterSpacing: '0.02em',
+            borderBottom: '1px solid #047857',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            zIndex: 9999,
+          }}
+        >
+          <span>🛡️</span>
+          <span>UAT Inventory Tahap A R1 - Salinan Terisolasi</span>
+          <span style={{ color: '#d1fae5', fontWeight: 'normal', fontSize: '12px' }}>
+            {`(Port ${import.meta.env.VITE_UAT_PREVIEW_PORT || '44197'} • DB ${import.meta.env.VITE_UAT_PREVIEW_DB || '55457'} terisolasi • Mode Baca Terjaga)`}
+          </span>
+        </div>
+      )}
       <GlobalOperationsBar
         activeProperty={properties.find((p: any) => p.id === propertyId) || null}
         properties={properties}
@@ -4570,6 +4598,21 @@ function AppContent() {
               })();
             }}
             realtimeRefreshVersion={transactionRefreshVersion}
+            onNavigateToInventory={() => {
+              if (!isNavAllowed(effectiveAccess?.effective, 'Penerimaan Barang')) {
+                try {
+                  sessionStorage.removeItem('oak_hims_pending_grn_po_id');
+                  sessionStorage.removeItem('oak_hims_pending_grn_purchase_tx_id');
+                  sessionStorage.removeItem('oak_hims_pending_grn_search');
+                } catch {
+                  /* ignore */
+                }
+                window.alert('Akses ke menu Penerimaan Barang memerlukan izin tampilan Produk & Inventori.');
+                return;
+              }
+              setSelectedMenu('Penerimaan Barang');
+              window.dispatchEvent(new Event('oak_hims_pending_grn_bridge'));
+            }}
           />
         )}
 
@@ -4769,12 +4812,25 @@ function AppContent() {
           />
         )}
 
+        {selectedMenu === 'Penerimaan Barang' && propertyId !== null && (
+          <GoodsReceiptSection
+            propertyId={propertyId}
+          />
+        )}
+
         {selectedMenu === 'Produk & Inventori' && (
           <ProductInventorySection
             propertyId={propertyId}
             posMenuCount={posMenu.length}
             posOrderCount={posOrders.length}
+            onNavigateToProcurement={() => setSelectedMenu('Transaksi')}
             onViewReservation={viewRoomMasterReservation}
+          />
+        )}
+
+        {selectedMenu === 'Analisis Food Cost' && propertyId !== null && (
+          <FoodCostOverviewSection
+            propertyId={propertyId}
           />
         )}
 

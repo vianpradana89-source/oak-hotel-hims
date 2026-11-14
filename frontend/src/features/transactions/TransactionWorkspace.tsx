@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   TransactionRecord,
   TransactionSummary,
@@ -8,7 +9,7 @@ import type {
   OperationalStatus,
   VerificationStatus
 } from './transactionDomainTypes';
-import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass, getPurchaseReceivingClass, getPurchaseVerificationClass, getPurchaseWorkflowClass, isTransactionEditable } from './transactionDomainTypes';
+import { displayTransactionNet, formatReservationStayType, mapToOperationalStatus, stayTypeBadgeClass, getPurchaseApprovalClass, getPurchaseReceivingClass, getPurchaseVerificationClass, getPurchaseWorkflowClass, isTransactionEditable, toTransactionBusinessDateYmd } from './transactionDomainTypes';
 import {
   flattenAllTabRows,
   formatStayShortDate,
@@ -39,6 +40,7 @@ import { PurchaseTransactionEditor } from './PurchaseTransactionEditor';
 import { ExpenseTransactionEditor } from './ExpenseTransactionEditor';
 import { IncomeTransactionEditor } from './IncomeTransactionEditor';
 import { VendorSupplierMasterPage } from '../vendors/VendorSupplierMasterPage';
+import { ProcurementPoSection } from './ProcurementPoSection';
 import { useAuth } from '../auth/AuthContext';
 import { getPosAccess } from '../pos/posPermissions';
 import POSOrderPanel from '../pos/POSOrderPanel';
@@ -64,6 +66,7 @@ interface TransactionWorkspaceProps {
   getPaymentStatusLabel?: (status: string) => string;
   getPaymentBadgeClass?: (status: string) => string;
   onNavigateToReservation?: (reservationId: number) => void;
+  onNavigateToInventory?: () => void;
   onOpenQuickBooking?: () => void;
   // REALTIME-3B: parent-owned invalidation counter. Bumped on each
   // TransactionUpdated SSE event; the workspace refetches its canonical
@@ -72,7 +75,7 @@ interface TransactionWorkspaceProps {
 }
 
 function formatTransactionBusinessDate(value: string | null | undefined): string {
-  const raw = String(value || '').slice(0, 10);
+  const raw = toTransactionBusinessDateYmd(value);
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
   if (!match) return raw || '-';
 
@@ -93,6 +96,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   currentUserId = null,
   onViewReservationFolio,
   onNavigateToReservation,
+  onNavigateToInventory,
   onOpenQuickBooking,
   realtimeRefreshVersion
 }) => {
@@ -102,9 +106,28 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [editingExpenseId, setEditingExpenseId] = useState<number | string | null>(null);
   /** EDIT-1B: Store transaction data for edit mode pre-population */
   const [editingExpenseData, setEditingExpenseData] = useState<TransactionRecord | null>(null);
+  /** EDIT-PURCHASE: Store transaction id for edit mode */
+  const [editingPurchaseId, setEditingPurchaseId] = useState<number | string | null>(null);
+  /** EDIT-PURCHASE: Store transaction data for edit mode pre-population */
+  const [editingPurchaseData, setEditingPurchaseData] = useState<TransactionRecord | null>(null);
+  /** TAHAP 1A: Pre-selected PO ID when opening PurchaseTransactionEditor from a PO */
+  const [initialPoIdForInvoice, setInitialPoIdForInvoice] = useState<number | null>(null);
+  const [showCreatePoModal, setShowCreatePoModal] = useState<boolean>(false);
+  const [poRefreshTrigger, setPoRefreshTrigger] = useState<number>(0);
 
-  // LEVEL 1 — TRANSACTION TYPE (Default: SALE)
-  const [activeTab, setActiveTab] = useState<'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL'>('SALE');
+  // LEVEL 1 — TRANSACTION TYPE (Default: SALE, or PURCHASE when redirected from Inventory PO)
+  const [activeTab, setActiveTab] = useState<'SALE' | 'PURCHASE' | 'EXPENSE' | 'INCOME' | 'ALL'>(() => {
+    try {
+      const pendingTab = sessionStorage.getItem('oak_hims_open_procurement_tab');
+      if (pendingTab === 'PURCHASE') {
+        sessionStorage.removeItem('oak_hims_open_procurement_tab');
+        return 'PURCHASE';
+      }
+    } catch {
+      // ignore
+    }
+    return 'SALE';
+  });
   const [showVendorSupplierMaster, setShowVendorSupplierMaster] = useState<boolean>(false);
 
   // LEVEL 2 — DATE PERIOD (default: this_month for all 4 categories)
@@ -411,7 +434,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     if (refreshVersion <= 0) return;
     void loadTransactions();
     // TX-F1-R1-02: invalidate daily cards on any transaction change signal
-    void loadDailyCards();
+      void loadDailyCards();
+      setPoRefreshTrigger((prev) => prev + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshVersion]);
 
@@ -558,6 +582,21 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setSoftDeleteModalOpen(true);
   };
 
+  /** EDIT-PURCHASE: Open purchase in edit mode */
+  const openPurchaseEditor = async (tx: TransactionRecord) => {
+    try {
+      const detail = await fetchTransactionDetailApi(tx.id, propertyId);
+      setEditingPurchaseData(detail);
+      setEditingPurchaseId(tx.id);
+      setActiveEditor('PURCHASE');
+    } catch (err) {
+      console.error('Failed to load purchase detail for editing:', err);
+      setEditingPurchaseData(tx);
+      setEditingPurchaseId(tx.id);
+      setActiveEditor('PURCHASE');
+    }
+  };
+
   /** EDIT-1B: Open expense in edit mode */
   const openExpenseEditor = async (tx: TransactionRecord) => {
     // Load full detail for pre-population
@@ -581,7 +620,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const handlePurchaseLifecycleMutation = async (
     tx: TransactionRecord,
     action: PurchaseLifecycleAction,
-    value: string
+    value: string,
+    reason?: string
   ) => {
     const key = `${String(tx.id)}:${action}`;
     setLifecycleSaving(prev => ({ ...prev, [key]: true }));
@@ -593,6 +633,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         receiving_status?: string | null;
         verification_status?: string | null;
         workflow_status?: string | null;
+        approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | null;
+        reason?: string | null;
       } = { property_id: propertyId, action };
       if (action === 'SET_RECEIVING') {
         payload.receiving_status = value;
@@ -600,10 +642,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         payload.verification_status = value;
       } else if (action === 'SET_WORKFLOW') {
         payload.workflow_status = value;
+      } else if (action === 'SET_APPROVAL') {
+        payload.approval_status = value as any;
+        payload.reason = reason;
       }
       await updatePurchaseLifecycleApi(tx.id, payload);
       await loadTransactions();
       void loadDailyCards();
+      setPoRefreshTrigger((prev) => prev + 1);
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
@@ -808,6 +854,138 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setBankPopoverPos({ top, left });
   }, [bankPopoverOpen, activeBankTrigger]);
 
+  // UX-01: Purchase row overflow action menu (`⋮`)
+  const [purchaseActionMenuTx, setPurchaseActionMenuTx] = useState<TransactionRecord | null>(null);
+  const [purchaseActionMenuTrigger, setPurchaseActionMenuTrigger] = useState<HTMLButtonElement | null>(null);
+  const [purchaseActionMenuPos, setPurchaseActionMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const purchaseActionMenuRef = useRef<HTMLDivElement>(null);
+
+  const closePurchaseActionMenu = useCallback(() => {
+    setPurchaseActionMenuTx(null);
+    setPurchaseActionMenuTrigger(null);
+  }, []);
+
+  const computePurchaseActionMenuPosition = useCallback((triggerEl: HTMLElement, menuEl?: HTMLElement | null) => {
+    const rect = triggerEl.getBoundingClientRect();
+    const menuWidth = menuEl && menuEl.offsetWidth > 0 ? menuEl.offsetWidth : 208;
+    const menuHeight = menuEl && menuEl.offsetHeight > 0 ? menuEl.offsetHeight : 184;
+    const padding = 12;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+    const spaceBelow = viewportHeight - rect.bottom - padding;
+    const spaceAbove = rect.top - padding;
+    let top = rect.bottom + 6;
+    if (spaceBelow < menuHeight && spaceAbove >= menuHeight) {
+      top = rect.top - menuHeight - 6;
+    } else if (spaceBelow < menuHeight) {
+      top = Math.max(padding, viewportHeight - menuHeight - padding);
+    }
+    const left = Math.max(padding, Math.min(rect.right - menuWidth, viewportWidth - menuWidth - padding));
+    return { top, left };
+  }, []);
+
+  const updatePurchaseActionMenuPosition = useCallback(() => {
+    if (!purchaseActionMenuTrigger) return;
+    setPurchaseActionMenuPos(computePurchaseActionMenuPosition(purchaseActionMenuTrigger, purchaseActionMenuRef.current));
+  }, [purchaseActionMenuTrigger, computePurchaseActionMenuPosition]);
+
+  useEffect(() => {
+    if (!purchaseActionMenuTx) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        const triggerToFocus = purchaseActionMenuTrigger;
+        closePurchaseActionMenu();
+        triggerToFocus?.focus();
+      }
+    };
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (
+        purchaseActionMenuRef.current &&
+        !purchaseActionMenuRef.current.contains(target) &&
+        purchaseActionMenuTrigger &&
+        !purchaseActionMenuTrigger.contains(target)
+      ) {
+        closePurchaseActionMenu();
+      }
+    };
+    const handleScrollOrResize = () => {
+      updatePurchaseActionMenuPosition();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('scroll', handleScrollOrResize, true);
+    window.addEventListener('resize', handleScrollOrResize);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('scroll', handleScrollOrResize, true);
+      window.removeEventListener('resize', handleScrollOrResize);
+    };
+  }, [purchaseActionMenuTx, purchaseActionMenuTrigger, closePurchaseActionMenu, updatePurchaseActionMenuPosition]);
+
+  useLayoutEffect(() => {
+    if (!purchaseActionMenuTx || !purchaseActionMenuTrigger) return;
+    updatePurchaseActionMenuPosition();
+  }, [purchaseActionMenuTx, purchaseActionMenuTrigger, updatePurchaseActionMenuPosition]);
+
+  const getPurchaseRowActionState = (t: TransactionRecord) => {
+    const isVoidOrDeleted = t.transaction_status === 'VOIDED' || Boolean(t.deleted_at);
+    const ps = String(t.payment_status || 'UNPAID').toUpperCase();
+    const remainingAmount = Number(
+      t.outstanding_amount ?? t.balance_amount ?? (ps === 'PAID' ? 0 : displayTransactionNet(t))
+    );
+    const recvStatus = t.receiving_status || 'BELUM_DITERIMA';
+    const isFullyReceived = recvStatus === 'DITERIMA' || recvStatus === 'DITERIMA_LENGKAP';
+    const isApprovedForReceiving = t.approval_status === 'APPROVED';
+
+    const canRecordPayment = !isVoidOrDeleted && ps !== 'PAID' && remainingAmount > 0;
+    const canReceiveGoods = !isVoidOrDeleted && isApprovedForReceiving && !isFullyReceived;
+    const canViewReceipts = !isVoidOrDeleted && isApprovedForReceiving && isFullyReceived;
+    const canEdit = isTransactionEditable(t);
+    const canSoftDelete = isEligibleForSoftDelete(t);
+    const canVoid = !isVoidOrDeleted && t.transaction_status === 'POSTED';
+
+    const primaryAction: 'PAYMENT' | 'RECEIVE' | null = canRecordPayment
+      ? 'PAYMENT'
+      : canReceiveGoods
+      ? 'RECEIVE'
+      : null;
+
+    return {
+      primaryAction,
+      canRecordPayment,
+      canReceiveGoods,
+      canViewReceipts,
+      canEdit,
+      canSoftDelete,
+      canVoid,
+    };
+  };
+
+  const handleTriggerPurchaseReceiveGoods = (t: TransactionRecord) => {
+    try {
+      sessionStorage.setItem('oak_hims_pending_grn_purchase_tx_id', String(t.id));
+    } catch { /* ignore */ }
+    if (onNavigateToInventory) {
+      onNavigateToInventory();
+    } else {
+      openDetailDrawer(t.id);
+    }
+  };
+
+  const handleTriggerPurchaseViewReceipts = (t: TransactionRecord) => {
+    try {
+      sessionStorage.setItem('oak_hims_pending_grn_search', String(t.po_number_snapshot || t.transaction_no));
+    } catch { /* ignore */ }
+    if (onNavigateToInventory) {
+      onNavigateToInventory();
+    } else {
+      openDetailDrawer(t.id);
+    }
+  };
+
   const handleConfirmSoftDelete = async () => {
     if (!selectedTxForSoftDelete) return;
     if (!deleteReason.trim()) {
@@ -829,6 +1007,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       setDeleteReason('');
       loadTransactions();
       void loadDailyCards();
+      setPoRefreshTrigger((prev) => prev + 1);
       if (detailDrawerOpen && selectedTxIdForDetail === selectedTxForSoftDelete.id) {
         setDetailDrawerOpen(false);
       }
@@ -1439,12 +1618,31 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       <PurchaseTransactionEditor
         propertyId={propertyId}
         actorName={currentStaffName}
-        onBack={() => setActiveEditor(null)}
-        onSuccess={(createdId) => {
+        editMode={!!editingPurchaseId}
+        initialData={editingPurchaseData}
+        initialPoId={initialPoIdForInvoice}
+        onBack={() => {
           setActiveEditor(null);
+          setEditingPurchaseId(null);
+          setEditingPurchaseData(null);
+          setInitialPoIdForInvoice(null);
+        }}
+        onOpenDetail={(txId) => {
+          setActiveEditor(null);
+          setEditingPurchaseId(null);
+          setEditingPurchaseData(null);
+          setInitialPoIdForInvoice(null);
+          openDetailDrawer(txId);
+        }}
+        onSuccess={(resultId) => {
+          setActiveEditor(null);
+          setEditingPurchaseId(null);
+          setEditingPurchaseData(null);
+          setInitialPoIdForInvoice(null);
           loadTransactions();
           void loadDailyCards();
-          openDetailDrawer(createdId);
+          setPoRefreshTrigger((prev) => prev + 1);
+          openDetailDrawer(resultId);
         }}
       />
     );
@@ -1752,7 +1950,37 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           onBack={() => setShowVendorSupplierMaster(false)}
         />
       ) : (
-        /* Main Table Workspace */
+        <div className="space-y-4">
+        {activeTab === 'PURCHASE' && (
+          <ProcurementPoSection
+            propertyId={propertyId}
+            currentStaffName={currentStaffName}
+            searchQuery={search}
+            refreshTrigger={poRefreshTrigger}
+            showCreateModalExternal={showCreatePoModal}
+            onClearShowCreateModalExternal={() => setShowCreatePoModal(false)}
+            onOpenReceiveGoodsForPo={(po) => {
+              try {
+                sessionStorage.setItem('oak_hims_pending_grn_po_id', String(po.id));
+              } catch { /* ignore */ }
+              if (onNavigateToInventory) onNavigateToInventory();
+            }}
+            onOpenViewReceiptsForPo={(po) => {
+              try {
+                sessionStorage.setItem('oak_hims_pending_grn_search', String(po.po_number));
+              } catch { /* ignore */ }
+              if (onNavigateToInventory) onNavigateToInventory();
+            }}
+            onOpenCreateInvoiceForPo={(po) => {
+              setInitialPoIdForInvoice(po.id);
+              setActiveEditor('PURCHASE');
+            }}
+            onOpenInvoiceDetailDrawer={(txId) => openDetailDrawer(txId)}
+            onOpenVendorSupplierMaster={() => setShowVendorSupplierMaster(true)}
+            onRefreshParentTransactions={() => loadTransactions()}
+          />
+        )}
+        {/* Main Table Workspace */}
         <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm overflow-hidden">
         {/* Toolbar & Filters */}
         <div className="px-5 py-4 border-b border-slate-200 space-y-3 bg-slate-50/40">
@@ -1823,15 +2051,29 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             {/* Contextual create action — right side */}
             <div className="flex items-center gap-2 shrink-0">
               {activeTab === 'PURCHASE' && (
-                <button
-                  onClick={() => setActiveEditor('PURCHASE')}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-all shadow-sm cursor-pointer"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                  </svg>
-                  <span>+ Catat Pembelian</span>
-                </button>
+                <>
+                  <button
+                    onClick={() => setShowCreatePoModal(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span>+ Buat PO</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setInitialPoIdForInvoice(null);
+                      setActiveEditor('PURCHASE');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span>+ Catat Tagihan / Nota PO</span>
+                  </button>
+                </>
               )}
               {activeTab === 'EXPENSE' && (
                 <button
@@ -2098,7 +2340,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </p>
             </div>
           ) : (
-            <table className="w-full text-left text-xs text-slate-600">
+            <table className="w-full text-left text-xs text-slate-600" style={{ tableLayout: 'auto' }}>
               <thead className="bg-slate-50/90 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
                 {operationalStatus === 'HAPUS' ? (
                   <tr>
@@ -2135,15 +2377,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
                     {activeTab === 'PURCHASE' && (
                       <tr>
-                        <th className="py-3 px-3">Tanggal</th>
-                        <th className="py-3 px-3">No. Transaksi</th>
-                        <th className="py-3 px-3">Supplier Vendor</th>
-                        <th className="py-3 px-4">Keterangan</th>
-                        <th className="py-3 px-3 text-right">Total Tagihan</th>
-                        <th className="py-3 px-3 text-center">Penerimaan</th>
-                        <th className="py-3 px-2 text-center">Verifikasi</th>
-                        <th className="py-3 px-2 text-center">Status</th>
-                        <th className="py-3 px-3 text-center">Aksi</th>
+                        <th className="py-3 px-2.5">Tanggal</th>
+                        <th className="py-3 px-2.5">No. Transaksi / PO</th>
+                        <th className="py-3 px-2.5">Supplier / Rekanan</th>
+                        <th className="py-3 px-2.5">Keterangan & Faktur</th>
+                        <th className="py-3 px-2.5 text-right">Total Tagihan</th>
+                        <th className="py-3 px-2 text-center">Otorisasi PO</th>
+                        <th className="py-3 px-2 text-center">Penerimaan Barang</th>
+                        <th className="py-3 px-2 text-center">Pelunasan</th>
+                        <th className="py-3 px-2 text-center">Pemeriksaan Tagihan</th>
+                        <th className="py-3 px-3 text-right min-w-[156px]">Aksi</th>
                       </tr>
                     )}
 
@@ -2289,8 +2532,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           onClick={() => openDetailDrawer(t.id)}
                           className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                         >
-                          <td className="py-3 px-3 whitespace-nowrap">
-                            <div className="flex items-center gap-2">
+                          <td className="py-3 px-2.5 whitespace-nowrap">
+                            <div className="flex items-center gap-1.5">
                               <button
                                 type="button"
                                 aria-label={isExpanded ? 'Tutup detail pembelian' : 'Lihat detail pembelian'}
@@ -2313,16 +2556,45 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               </div>
                             </div>
                           </td>
-                        <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
-                          {t.transaction_no}
+                        <td className="py-3 px-2.5 font-mono font-semibold text-slate-800 whitespace-nowrap">
+                          <div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDetailDrawer(t.id);
+                              }}
+                              className="font-mono font-bold text-emerald-800 hover:text-emerald-950 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-1 rounded-xs cursor-pointer text-left"
+                              title={`Buka detail ${t.transaction_no}`}
+                            >
+                              {t.transaction_no}
+                            </button>
+                          </div>
+                          {(t.po_number_snapshot || t.po_id) && (
+                            <div className="text-[10px] font-bold text-emerald-700">
+                              PO: {t.po_number_snapshot || `#${t.po_id}`}
+                            </div>
+                          )}
+                          {t.has_po_variance && (
+                            <span
+                              className="mt-0.5 inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300"
+                              title={
+                                typeof t.po_variance_summary === 'string'
+                                  ? t.po_variance_summary
+                                  : 'Ada selisih harga atau kuantitas tagihan terhadap PO'
+                              }
+                            >
+                              Selisih terhadap PO
+                            </span>
+                          )}
                         </td>
-                        <td className="py-3 px-3 font-semibold text-slate-800 truncate max-w-[150px]">
-                          <div>{t.supplier_name || t.party_name || '-'}</div>
-                          <div className="text-[10px] text-slate-400 font-normal">
+                        <td className="py-3 px-2.5 font-semibold text-slate-800 max-w-[140px]">
+                          <div className="truncate" title={t.supplier_name || t.party_name || '-'}>{t.supplier_name || t.party_name || '-'}</div>
+                          <div className="text-[10px] text-slate-400 font-normal truncate">
                             {t.department_name_snapshot || t.department_code || ''}
                           </div>
                           {t.supplier_phone && (
-                            <div className="text-[10px] text-slate-400 font-normal">{t.supplier_phone}</div>
+                            <div className="text-[10px] text-slate-400 font-normal truncate">{t.supplier_phone}</div>
                           )}
                           {t.supplier_bank_name && t.supplier_bank_account && (
                             <button
@@ -2342,120 +2614,165 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             </button>
                           )}
                         </td>
-                        <td className="py-3 px-4 max-w-xs truncate text-slate-800">
-                          <div>{t.description}</div>
+                        <td className="py-3 px-2.5 max-w-[155px] text-slate-800">
+                          <div className="truncate" title={t.description || ''}>{t.description}</div>
                           {t.source_reference && (
-                            <div className="text-[10px] font-mono text-slate-400">Faktur: {t.source_reference}</div>
+                            <div className="text-[10px] font-mono text-slate-400 truncate" title={t.source_reference}>Faktur: {t.source_reference}</div>
+                          )}
+                          {t.operational_sheet === 'SELESAI' && (
+                            <span className="mt-0.5 inline-flex items-center text-[9px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                              Diarsipkan
+                            </span>
                           )}
                         </td>
-                        <td className="py-3 px-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
+                        <td className="py-3 px-2.5 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
                           {formatIdr(displayTransactionNet(t))}
                         </td>
-                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {(() => {
-                            const rc = getPurchaseReceivingClass(t.receiving_status || 'BELUM_DITERIMA');
+                            if (t.po_id) {
+                              return (
+                                <span
+                                  className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                  title="Tagihan terhubung ke PO yang sudah disetujui — mewarisi otorisasi PO"
+                                >
+                                  Disetujui via PO
+                                </span>
+                              );
+                            }
+                            const appStatus = t.approval_status || 'PENDING_APPROVAL';
+                            const ac = getPurchaseApprovalClass(appStatus);
                             return (
                               <select
-                                value={t.receiving_status || 'BELUM_DITERIMA'}
+                                value={appStatus}
                                 onChange={async (e) => {
                                   e.stopPropagation();
-                                  await handlePurchaseLifecycleMutation(t, 'SET_RECEIVING', e.target.value);
+                                  const nextVal = e.target.value;
+                                  let reason: string | undefined;
+                                  if (nextVal === 'REJECTED') {
+                                    const promptRes = window.prompt('Masukkan alasan penolakan pembelian:');
+                                    if (promptRes === null) return;
+                                    reason = promptRes;
+                                  }
+                                  await handlePurchaseLifecycleMutation(t, 'SET_APPROVAL', nextVal, reason);
                                 }}
-                                disabled={lifecycleSaving[`${String(t.id)}:SET_RECEIVING`] || !isTransactionEditable(t)}
-                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${rc.bg} ${rc.border} ${rc.text} hover:bg-opacity-80`}
+                                disabled={lifecycleSaving[`${String(t.id)}:SET_APPROVAL`] || !isTransactionEditable(t)}
+                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${ac.bg} ${ac.border} ${ac.text} hover:bg-opacity-80`}
                               >
-                                <option value="BELUM_DITERIMA">Belum Diterima</option>
-                                <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                                <option value="DITERIMA">Diterima</option>
-                                <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
+                                <option value="PENDING_APPROVAL">Menunggu</option>
+                                <option value="APPROVED">Disetujui</option>
+                                <option value="REJECTED">Ditolak</option>
                               </select>
                             );
                           })()}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {(() => {
-                            const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
+                            const recvStatus = t.receiving_status || 'BELUM_DITERIMA';
+                            const rc = getPurchaseReceivingClass(recvStatus);
+                            const isFull = recvStatus === 'DITERIMA' || recvStatus === 'DITERIMA_LENGKAP';
+                            const label = isFull
+                              ? 'Diterima Lengkap'
+                              : recvStatus === 'DITERIMA_SEBAGIAN'
+                              ? 'Diterima Sebagian'
+                              : 'Belum Diterima';
                             return (
-                              <select
-                                value={t.verification_status || 'UNVERIFIED'}
-                                onChange={async (e) => {
-                                  e.stopPropagation();
-                                  await handlePurchaseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
-                                }}
-                                disabled={lifecycleSaving[`${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
-                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
+                              <span
+                                className={`inline-flex items-center text-[11px] font-semibold px-2.5 py-0.5 rounded-lg border ${rc.bg} ${rc.border} ${rc.text}`}
+                                title="Status penerimaan barang stok mengikuti dokumen Penerimaan Barang (GRN) yang di-Post"
                               >
-                                <option value="UNVERIFIED">Belum Diperiksa</option>
-                                <option value="VERIFIED">Terverifikasi</option>
-                                <option value="REJECTED">Perlu Koreksi</option>
-                              </select>
+                                {label}
+                              </span>
                             );
                           })()}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {(() => {
-                            const ws = t.operational_sheet || 'PROSES';
-                            const wc = getPurchaseWorkflowClass(ws);
-                            if (ws === 'BATAL') {
-                              return (
-                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                  Batal
-                                </span>
-                              );
-                            }
-                            if (ws === 'HAPUS') {
-                              return (
-                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                  Dihapus
-                                </span>
-                              );
-                            }
+                            const ps = String(t.payment_status || 'UNPAID').toUpperCase();
+                            const isPartial = ps === 'PARTIAL' || ps === 'PARTIALLY_PAID';
+                            const label = ps === 'PAID' ? 'Lunas' : isPartial ? 'Dibayar Sebagian' : 'Belum Dibayar';
+                            const cls =
+                              ps === 'PAID'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : isPartial
+                                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200';
                             return (
-                              <select
-                                value={ws}
-                                onChange={async (e) => {
-                                  e.stopPropagation();
-                                  await handlePurchaseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
-                                }}
-                                disabled={lifecycleSaving[`${String(t.id)}:SET_WORKFLOW`]}
-                                className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
-                              >
-                                <option value="PROSES">Proses</option>
-                                <option value="SELESAI">Selesai</option>
-                              </select>
+                              <div className="inline-flex flex-col items-center gap-0.5">
+                                <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${cls}`}>
+                                  {label}
+                                </span>
+                                {Number(t.outstanding_amount ?? t.balance_amount ?? 0) > 0 && (
+                                  <span className="text-[9px] font-mono text-slate-500">
+                                    Sisa {formatIdr(Number(t.outstanding_amount ?? t.balance_amount ?? 0))}
+                                  </span>
+                                )}
+                              </div>
                             );
                           })()}
                         </td>
-                        <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => openDetailDrawer(t.id)}
-                              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-                            >
-                              Detail
-                            </button>
-                            {isEligibleForSoftDelete(t) && (
-                              <button
-                                onClick={() => openSoftDeleteModal(t)}
-                                className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              >
-                                Hapus
-                              </button>
-                            )}
-                             {t.transaction_status === 'POSTED' && (
-                               <button
-                                 onClick={() => openVoidModal(t)}
-                                 className="px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                               >
-                                 Void
-                               </button>
-                             )}
-                           </div>
+                        <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          {renderVerificationBadge(t.verification_status || 'UNVERIFIED')}
+                        </td>
+                        <td className="py-3 px-3 text-right whitespace-nowrap min-w-[156px]" onClick={(e) => e.stopPropagation()}>
+                          {(() => {
+                            const actionState = getPurchaseRowActionState(t);
+                            const isMenuOpen = purchaseActionMenuTx?.id === t.id;
+                            return (
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                {actionState.primaryAction === 'PAYMENT' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openDetailDrawer(t.id)}
+                                    className="px-2.5 py-1 text-[10px] font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                                    title="Catat Pembayaran atas Tagihan"
+                                  >
+                                    Catat Pembayaran
+                                  </button>
+                                )}
+                                {actionState.primaryAction === 'RECEIVE' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTriggerPurchaseReceiveGoods(t)}
+                                    className="px-2.5 py-1 text-[10px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+                                    title="Terima barang fisik di modul Stok & Mutasi (GRN)"
+                                  >
+                                    Terima Barang
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  aria-label={`Aksi ${t.transaction_no}`}
+                                  aria-haspopup="menu"
+                                  aria-expanded={isMenuOpen}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isMenuOpen) {
+                                      closePurchaseActionMenu();
+                                    } else {
+                                      const trigger = e.currentTarget;
+                                      setPurchaseActionMenuPos(computePurchaseActionMenuPosition(trigger, null));
+                                      setPurchaseActionMenuTrigger(trigger);
+                                      setPurchaseActionMenuTx(t);
+                                    }
+                                  }}
+                                  className={`w-7 h-7 inline-flex items-center justify-center rounded-lg border text-slate-600 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 ${
+                                    isMenuOpen
+                                      ? 'bg-slate-200 border-slate-300 text-slate-900'
+                                      : 'bg-white hover:bg-slate-100 border-slate-200 hover:text-slate-900'
+                                  }`}
+                                  title={`Menu aksi ${t.transaction_no}`}
+                                >
+                                  <span className="text-sm font-bold leading-none select-none" aria-hidden="true">⋮</span>
+                                </button>
+                              </div>
+                            );
+                          })()}
                          </td>
                         </tr>
                         {isExpanded && (
                           <tr className="bg-slate-50/60">
-                            <td colSpan={9} className="px-4 py-3">
+                            <td colSpan={10} className="px-4 py-3">
                               <div className="rounded-lg border border-slate-200 bg-white/90 overflow-hidden">
                                 <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
                                   Rincian Item Pembelian
@@ -3211,6 +3528,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           );
         })()}
       </div>
+      </div>
       )}
 
       {/* Void Modal */}
@@ -3225,7 +3543,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         }}
         onSuccess={() => {
           loadTransactions();
-          void loadDailyCards();
+      void loadDailyCards();
+      setPoRefreshTrigger((prev) => prev + 1);
         }}
       />
 
@@ -3357,6 +3676,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           setDetailDrawerOpen(false);
           setSelectedTxIdForDetail(null);
         }}
+        onEditPurchase={(tx) => {
+          setDetailDrawerOpen(false);
+          openPurchaseEditor(tx);
+        }}
         onEditExpense={(tx) => {
           setDetailDrawerOpen(false);
           openExpenseEditor(tx);
@@ -3387,9 +3710,138 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         }}
         onTransactionUpdated={() => {
           loadTransactions();
-          void loadDailyCards();
+      void loadDailyCards();
+      setPoRefreshTrigger((prev) => prev + 1);
         }}
+        onNavigateToInventory={onNavigateToInventory}
       />
+      {/* UX-01: Purchase Row Overflow Action Menu (`⋮`) */}
+      {purchaseActionMenuTx && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={purchaseActionMenuRef}
+          style={{
+            position: 'fixed',
+            top: `${purchaseActionMenuPos.top}px`,
+            left: `${purchaseActionMenuPos.left}px`,
+            zIndex: 60,
+          }}
+          role="menu"
+          aria-label={`Menu aksi ${purchaseActionMenuTx.transaction_no}`}
+          className="bg-white rounded-xl shadow-xl border border-slate-200 w-52 py-1.5 text-xs text-slate-700 animate-in fade-in zoom-in-95 duration-100"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const tx = purchaseActionMenuTx;
+            const state = getPurchaseRowActionState(tx);
+            return (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closePurchaseActionMenu();
+                    openDetailDrawer(tx.id);
+                  }}
+                  className="w-full px-3.5 py-2 text-left font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-between cursor-pointer"
+                >
+                  <span>Buka Detail</span>
+                </button>
+
+                {state.canEdit && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closePurchaseActionMenu();
+                      openPurchaseEditor(tx);
+                    }}
+                    className="w-full px-3.5 py-2 text-left font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Edit/Revisi</span>
+                  </button>
+                )}
+
+                {state.canRecordPayment && state.primaryAction !== 'PAYMENT' && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closePurchaseActionMenu();
+                      openDetailDrawer(tx.id);
+                    }}
+                    className="w-full px-3.5 py-2 text-left font-semibold text-amber-800 hover:bg-amber-50 flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Catat Pembayaran</span>
+                  </button>
+                )}
+
+                {state.canReceiveGoods && state.primaryAction !== 'RECEIVE' && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closePurchaseActionMenu();
+                      handleTriggerPurchaseReceiveGoods(tx);
+                    }}
+                    className="w-full px-3.5 py-2 text-left font-semibold text-emerald-800 hover:bg-emerald-50 flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Terima Barang</span>
+                  </button>
+                )}
+
+                {state.canViewReceipts && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closePurchaseActionMenu();
+                      handleTriggerPurchaseViewReceipts(tx);
+                    }}
+                    className="w-full px-3.5 py-2 text-left font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Lihat Penerimaan</span>
+                  </button>
+                )}
+
+                {state.canSoftDelete && (
+                  <>
+                    <div className="my-1 border-t border-slate-200" role="separator" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closePurchaseActionMenu();
+                        openSoftDeleteModal(tx);
+                      }}
+                      className="w-full px-3.5 py-2 text-left font-semibold text-rose-700 hover:bg-rose-50 flex items-center justify-between cursor-pointer"
+                    >
+                      <span>Hapus Draft</span>
+                    </button>
+                  </>
+                )}
+
+                {state.canVoid && (
+                  <>
+                    <div className="my-1 border-t border-slate-200" role="separator" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closePurchaseActionMenu();
+                        openVoidModal(tx);
+                      }}
+                      className="w-full px-3.5 py-2 text-left font-semibold text-rose-700 hover:bg-rose-50 flex items-center justify-between cursor-pointer"
+                    >
+                      <span>Batalkan Transaksi (Void)</span>
+                    </button>
+                  </>
+                )}
+              </>
+            );
+          })()}
+        </div>,
+        document.body
+      )}
       {/* PURCHASE-2C: Supplier Bank Quick Info Popover */}
       {bankPopoverOpen && bankPopoverTx && (
         <>
