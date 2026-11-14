@@ -418,7 +418,6 @@ export function validateProductPhotoFile(
 }
 
 export const PRODUCT_TYPE_TABS: Array<{ key: ProductTypeFilter; label: string }> = [
-  { key: 'ALL', label: 'Semua Tipe' },
   { key: 'FINISHED_GOOD', label: 'Produk Jadi' },
   { key: 'SEMI_FINISHED', label: 'Setengah Jadi' },
   { key: 'RAW_MATERIAL', label: 'Bahan Baku' },
@@ -705,7 +704,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
-  const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>('ALL');
+  const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>('FINISHED_GOOD');
   const [sellableFilter, setSellableFilter] = useState<SellableFilter>('all');
   const [stockFilter, setStockFilter] = useState<StockFilter>('all');
   // MPUI-F03: kontrol urutan (stabil, tanpa mutasi items/props)
@@ -1181,30 +1180,24 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const getCategoriesForProductType = useCallback(
     (targetProductType: string, currentCategoryId?: string): CategoryOption[] => {
-      const upperTarget = (targetProductType || '').trim().toUpperCase();
+      const upperTarget = (targetProductType || 'FINISHED_GOOD').trim().toUpperCase();
       if (!upperTarget || upperTarget === 'ALL') return categories;
       return categories.filter((c) => {
         if (currentCategoryId && String(c.id) === String(currentCategoryId)) return true;
-        if (!c.product_type) return true;
-        return String(c.product_type).trim().toUpperCase() === upperTarget;
+        const catType = c.product_type ? String(c.product_type).trim().toUpperCase() : 'FINISHED_GOOD';
+        return catType === upperTarget;
       });
     },
     [categories]
   );
 
-  const categoryNames = useMemo(() => {
-    if (productTypeFilter === 'ALL') {
-      return categories.map((c) => c.name);
-    }
-    const usedByType = new Set(
-      items
-        .filter((i) => i.product_type === productTypeFilter && i.category_name)
-        .map((i) => String(i.category_name))
-    );
-    return categories
-      .filter((c) => !c.product_type || c.product_type === productTypeFilter || usedByType.has(c.name))
-      .map((c) => c.name);
-  }, [categories, productTypeFilter, items]);
+  const activeTabCategories = useMemo(() => {
+    const activeType = productTypeFilter === 'ALL' ? 'FINISHED_GOOD' : productTypeFilter;
+    return categories.filter((c) => {
+      const catType = c.product_type ? String(c.product_type).trim().toUpperCase() : 'FINISHED_GOOD';
+      return catType === activeType;
+    });
+  }, [categories, productTypeFilter]);
 
   // Click-outside handler for the category dropdown
   useEffect(() => {
@@ -1241,7 +1234,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     const activeCount = items.filter((i) => i.is_active !== false).length;
     const sellableCount = items.filter((i) => i.is_sellable_pos !== false).length;
     const internalCount = items.filter((i) => i.is_sellable_pos === false).length;
-    const finishedCount = items.filter((i) => i.product_type === 'FINISHED_GOOD').length;
+    const finishedCount = items.filter((i) => (i.product_type || 'FINISHED_GOOD') === 'FINISHED_GOOD').length;
     const semiCount = items.filter((i) => i.product_type === 'SEMI_FINISHED').length;
     const rawCount = items.filter((i) => i.product_type === 'RAW_MATERIAL').length;
     const operationalCount = items.filter((i) => i.product_type === 'OPERATIONAL_ITEM').length;
@@ -1278,8 +1271,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         (selectedCategory !== 'NONE'
           ? (item.category_name || 'Tanpa Kategori') === selectedCategory
           : item.category_name === null || item.category_name === undefined || item.category_name === '');
+      const itemProductType = item.product_type || 'FINISHED_GOOD';
       const matchProductType =
-        productTypeFilter === 'ALL' || item.product_type === productTypeFilter;
+        productTypeFilter === 'ALL' || itemProductType === productTypeFilter;
       const itemSellable = item.is_sellable_pos !== false;
       const matchSellable =
         sellableFilter === 'all' ||
@@ -1817,6 +1811,44 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     }
   };
 
+  const handleDeleteProduct = async (item: ProductItem) => {
+    if (!capabilities.canEdit && !capabilities.canToggleStatus) return;
+    if (!propertyId) return;
+    if (
+      !window.confirm(
+        `Hapus produk "${item.name}"?\n\nProduk akan dihapus dari daftar Master Barang & Produk, namun riwayat penjualan POS tetap tersimpan utuh.`
+      )
+    ) {
+      return;
+    }
+    const targetPropertyId = propertyId;
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setErrorMsg(null);
+      const res = await authenticatedFetch(`/api/pos/menu/items/${item.id}?property_id=${targetPropertyId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: targetPropertyId }),
+      });
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) {
+        throw new Error((json as any)?.message || 'Gagal menghapus produk');
+      }
+      setSuccessMsg(`Produk "${item.name}" berhasil dihapus.`);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid);
+      if (stale()) return;
+      onRefresh?.();
+    } catch (err: any) {
+      if (!stale()) setErrorMsg(err?.message || 'Gagal menghapus produk');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
   const openAddModal = () => {
     if (!capabilities.canCreate) return;
     setErrorMsg(null);
@@ -1965,10 +1997,53 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     }
   };
 
+  const handleQuickAddCategoryFromDropdown = async () => {
+    if (!capabilities.canManageCategory) return;
+    if (!propertyId) return;
+    const name = categorySearchQuery.trim();
+    if (!name) {
+      const inputEl = categoryPanelRef.current?.querySelector('input');
+      if (inputEl instanceof HTMLInputElement) {
+        inputEl.focus();
+      }
+      return;
+    }
+    const targetPropertyId = propertyId;
+    const activeType = productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD';
+    const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
+    const stale = () => isMutationStale(ctx);
+    try {
+      setSaving(true);
+      setErrorMsg(null);
+      const res = await authenticatedFetch('/api/pos/menu/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: targetPropertyId,
+          name,
+          product_type: activeType,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (stale()) return;
+      if (!res.ok) throw new Error((json as any)?.message || 'Gagal menambah kategori');
+      setCategorySearchQuery('');
+      setSuccessMsg(`Kategori "${name}" (${formatProductTypeLabel(activeType)}) berhasil ditambahkan.`);
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid);
+      if (stale()) return;
+      onRefresh?.();
+    } catch (err: any) {
+      if (!stale()) setErrorMsg(err?.message || 'Gagal menambah kategori');
+    } finally {
+      if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
+    }
+  };
+
   const handleDeleteCategory = async (cat: CategoryOption) => {
     if (!capabilities.canDeleteCategory) return;
     if (!propertyId) return;
-    if (!window.confirm(`Hapus kategori "${cat.name}"? Hanya dapat dihapus bila tidak dipakai produk apa pun.`)) return;
+    if (!window.confirm(`Hapus kategori "${cat.name}"?`)) return;
     const targetPropertyId = propertyId;
     const ctx = { pid: targetPropertyId, propGen: propGenRef.current, mutGen: ++savingMutGen.current };
     const stale = () => isMutationStale(ctx);
@@ -1982,6 +2057,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const json = await res.json().catch(() => null);
       if (stale()) return; // properti sudah berganti — abaikan respons submit lama
       if (!res.ok) throw new Error((json as any)?.message || 'Gagal menghapus kategori');
+      if (selectedCategory === cat.name) {
+        setSelectedCategory('ALL');
+      }
       setSuccessMsg(`Kategori "${cat.name}" berhasil dihapus.`);
       // Refresh memakai konteks TERKINI dari ref, bukan closure submit lama.
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
@@ -1993,16 +2071,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     } finally {
       if (!stale() && ctx.mutGen === savingMutGen.current) setSaving(false);
     }
-  };
-
-  const openAddCategory = () => {
-    if (!capabilities.canManageCategory) return;
-    setCategoryForm({
-      mode: 'add',
-      name: '',
-      productType: productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD',
-    });
-    setShowCategoryModal(true);
   };
 
   const openRenameCategory = (cat: CategoryOption) => {
@@ -2774,18 +2842,6 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               {capabilities.canCreate || capabilities.canEdit ? 'Kelola Penyimpanan' : 'Lihat Penyimpanan'}
             </button>
           )}
-          {capabilities.canManageCategory && (
-            <button
-              type="button"
-              onClick={openAddCategory}
-              className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-              Kelola Kategori
-            </button>
-          )}
         </div>
       </div>
 
@@ -2847,7 +2903,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
       {/* Product Type Classification Tabs & Search/Filter Toolbar */}
       <div className="bg-white border border-gray-200/90 rounded-2xl p-4 shadow-xs flex flex-col gap-3.5">
-        {/* Baris 1: Tab Tipe Produk: Semua Tipe, Produk Jadi, Setengah Jadi, Bahan Baku */}
+        {/* Baris 1: Tab Tipe Produk: Produk Jadi, Setengah Jadi, Bahan Baku, Item Operasional */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 border-b border-gray-100">
           {PRODUCT_TYPE_TABS.map((tab) => {
             const active = productTypeFilter === tab.key;
@@ -2856,7 +2912,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <button
                 key={tab.key}
                 type="button"
-                onClick={() => setProductTypeFilter(tab.key)}
+                onClick={() => {
+                  setProductTypeFilter(tab.key);
+                  setSelectedCategory('ALL');
+                }}
                 className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors cursor-pointer ${
                   active
                     ? 'bg-emerald-800 text-white shadow-2xs'
@@ -2902,8 +2961,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   return;
                 }
                 const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                // Panel lebar 224px; rata kiri dengan tombol, clamp agar tidak melewati tepi kanan viewport.
-                const PANEL_W = 224;
+                const PANEL_W = 248;
                 const left = Math.max(4, Math.min(rect.left, window.innerWidth - PANEL_W - 4));
                 setCategoryMenuPosition({
                   top: rect.bottom + 4,
@@ -2916,10 +2974,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer border flex items-center gap-1.5 ${
                 selectedCategory !== 'ALL'
                   ? 'bg-emerald-800 text-white border-emerald-700'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-gray-200'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border-gray-200'
               }`}
             >
-              <span>{selectedCategory === 'ALL' ? 'Semua Kategori' : selectedCategory}</span>
+              <span>{selectedCategory === 'ALL' ? 'Tambah Kategori' : `Kategori: ${selectedCategory}`}</span>
               <svg className={`w-3 h-3 transition-transform ${categoryDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7"/></svg>
             </button>
             {categoryDropdownOpen && categoryMenuPosition && (() => {
@@ -2927,56 +2985,107 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 position: 'fixed',
                 top: Math.max(4, categoryMenuPosition.top),
                 right: categoryMenuPosition.right,
-                width: 224,
+                width: 248,
                 zIndex: 9999,
               };
+              const filteredTabCategories = activeTabCategories.filter((c) =>
+                c.name.toLowerCase().includes(categorySearchQuery.toLowerCase())
+              );
               return createPortal(
-                <div ref={categoryPanelRef} style={panelStyle} className="bg-white border border-gray-200 rounded-xl shadow-lg max-h-64 flex flex-col overflow-hidden">
+                <div ref={categoryPanelRef} style={panelStyle} className="bg-white border border-gray-200 rounded-xl shadow-lg max-h-72 flex flex-col overflow-hidden">
                   <div className="p-2 border-b border-gray-100">
                     <input
                       type="text"
-                      placeholder="Cari kategori…"
+                      placeholder="Cari / ketik kategori baru…"
                       value={categorySearchQuery}
                       onChange={(e) => setCategorySearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleQuickAddCategoryFromDropdown();
+                        }
+                      }}
                       autoFocus
-                      className="w-full px-2 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                      className="w-full px-2.5 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                     />
                   </div>
-                  <div className="flex-1 overflow-y-auto p-1">
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedCategory('ALL'); setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setCategorySearchQuery(''); }}
-                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                        selectedCategory === 'ALL' ? 'bg-emerald-50 text-emerald-800' : 'text-gray-700 hover:bg-gray-50'
-                      }`}
-                    >
-                      Semua Kategori
-                    </button>
-                    {categoryNames
-                      .filter((c) => c.toLowerCase().includes(categorySearchQuery.toLowerCase()))
-                      .map((cat) => (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => { setSelectedCategory(cat); setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setCategorySearchQuery(''); }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center justify-between ${
-                            selectedCategory === cat ? 'bg-emerald-50 text-emerald-800' : 'text-gray-700 hover:bg-gray-50'
+                  <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
+                    {selectedCategory !== 'ALL' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategory('ALL');
+                          setCategoryDropdownOpen(false);
+                          setCategoryMenuPosition(null);
+                          setCategorySearchQuery('');
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold text-emerald-700 hover:bg-emerald-50 transition-colors cursor-pointer"
+                      >
+                        Tampilkan Semua ({formatProductTypeLabel(productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD')})
+                      </button>
+                    )}
+                    {filteredTabCategories.length === 0 ? (
+                      <div className="px-2.5 py-2 text-[11px] text-gray-400">
+                        {categorySearchQuery.trim()
+                          ? `Klik "+ Tambah Kategori" untuk membuat "${categorySearchQuery.trim()}"`
+                          : `Belum ada kategori untuk ${formatProductTypeLabel(productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD')}`}
+                      </div>
+                    ) : (
+                      filteredTabCategories.map((cat) => (
+                        <div
+                          key={cat.id}
+                          className={`group flex items-center justify-between rounded-lg px-2 py-1 text-xs font-medium transition-colors ${
+                            selectedCategory === cat.name ? 'bg-emerald-50 text-emerald-800' : 'text-gray-700 hover:bg-gray-50'
                           }`}
                         >
-                          <span>{cat}</span>
-                          {selectedCategory === cat && (
-                            <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"/></svg>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedCategory(selectedCategory === cat.name ? 'ALL' : cat.name);
+                              setCategoryDropdownOpen(false);
+                              setCategoryMenuPosition(null);
+                              setCategorySearchQuery('');
+                            }}
+                            className="flex-1 text-left py-0.5 pr-2 truncate cursor-pointer flex items-center gap-1.5"
+                          >
+                            <span className="truncate">{cat.name}</span>
+                            {selectedCategory === cat.name && (
+                              <svg className="w-3.5 h-3.5 text-emerald-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"/></svg>
+                            )}
+                          </button>
+                          {capabilities.canDeleteCategory && (
+                            <button
+                              type="button"
+                              title={`Hapus kategori ${cat.name}`}
+                              aria-label={`Hapus kategori ${cat.name}`}
+                              disabled={saving}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleDeleteCategory(cat);
+                              }}
+                              className="w-5 h-5 rounded-md flex items-center justify-center text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer shrink-0 disabled:opacity-40"
+                            >
+                              ✕
+                            </button>
                           )}
-                        </button>
-                      ))}
+                        </div>
+                      ))
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => { setCategoryDropdownOpen(false); setCategoryMenuPosition(null); setShowCategoryModal(true); }}
-                    className="px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-50 border-t border-gray-100 cursor-pointer"
-                  >
-                    + Tambah Kategori
-                  </button>
+                  {capabilities.canManageCategory && (
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void handleQuickAddCategoryFromDropdown()}
+                      className="px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 border-t border-gray-100 cursor-pointer text-left flex items-center justify-between disabled:opacity-50"
+                    >
+                      <span className="truncate">
+                        {categorySearchQuery.trim()
+                          ? `+ Tambah Kategori "${categorySearchQuery.trim()}"`
+                          : '+ Tambah Kategori'}
+                      </span>
+                    </button>
+                  )}
                 </div>,
                 document.body
               );
@@ -3002,7 +3111,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400 font-medium shrink-0">Status:</span>
-            {(['active', 'inactive', 'all'] as const).map((s) => (
+            {(['active', 'inactive'] as const).map((s) => (
               <button
                 key={s}
                 type="button"
@@ -3013,7 +3122,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {s === 'active' ? 'Aktif' : s === 'inactive' ? 'Nonaktif' : 'Semua'}
+                {s === 'active' ? 'Aktif' : 'Nonaktif'}
               </button>
             ))}
           </div>
@@ -3227,7 +3336,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             {isActive ? 'Aktif' : 'Nonaktif'}
                           </span>
                         </td>
-                        {/* Kolom Aksi: Edit + menu ⋮ */}
+                        {/* Kolom Aksi: Edit + Hapus + menu ⋮ */}
                         <td className="py-3 px-4 text-right whitespace-nowrap">
                           {(capabilities.canEdit || capabilities.canToggleStatus) ? (
                             <div className="flex items-center justify-end gap-1">
@@ -3239,6 +3348,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                                   className="text-xs text-emerald-700 hover:text-emerald-900 font-semibold px-2.5 py-1 rounded-lg hover:bg-emerald-50 transition-colors cursor-pointer"
                                 >
                                   Edit
+                                </button>
+                              )}
+                              {(capabilities.canEdit || capabilities.canToggleStatus) && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteProduct(item)}
+                                  disabled={saving}
+                                  className="text-xs text-rose-600 hover:text-rose-800 font-semibold px-2.5 py-1 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                                >
+                                  Hapus
                                 </button>
                               )}
                               {/* MPUI-F01: Portal-based three-dot menu — state-driven, not clipped by table overflow */}
@@ -5553,9 +5672,20 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                   role="menuitem"
                   onClick={() => { closeRowMenu(false); handleToggleActive(activeItem); }}
                   disabled={saving}
-                  className={`w-full text-left px-3 py-1.5 text-xs cursor-pointer disabled:opacity-50 ${activeItem.is_active !== false ? 'text-rose-600 hover:bg-rose-50' : 'text-emerald-700 hover:bg-emerald-50'}`}
+                  className={`w-full text-left px-3 py-1.5 text-xs cursor-pointer disabled:opacity-50 ${activeItem.is_active !== false ? 'text-amber-700 hover:bg-amber-50' : 'text-emerald-700 hover:bg-emerald-50'}`}
                 >
                   {activeItem.is_active !== false ? 'Nonaktifkan' : 'Aktifkan'}
+                </button>
+              )}
+              {(capabilities.canEdit || capabilities.canToggleStatus) && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { closeRowMenu(false); void handleDeleteProduct(activeItem); }}
+                  disabled={saving}
+                  className="w-full text-left px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50 font-semibold cursor-pointer disabled:opacity-50 border-t border-gray-100 mt-0.5 pt-1.5"
+                >
+                  Hapus Produk
                 </button>
               )}
             </div>,

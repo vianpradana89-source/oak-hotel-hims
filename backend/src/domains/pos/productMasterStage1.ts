@@ -1590,13 +1590,21 @@ export function createPosMenuItemDeactivateHandler(deps: PosMenuItemPatchDeps) {
       }
       await deps.assertPropertyScope(req, propertyId);
       const updateResult = await deps.pool.query(
-        'UPDATE pos_menu_items SET is_active = FALSE WHERE id = $1 AND property_id = $2 RETURNING id',
+        `UPDATE pos_menu_items
+            SET is_active = FALSE,
+                is_deleted = TRUE,
+                deleted_at = NOW(),
+                item_code = NULL,
+                barcode = NULL,
+                category_id = NULL
+          WHERE id = $1 AND property_id = $2
+          RETURNING id`,
         [itemId, propertyId]
       );
       if ((updateResult.rowCount ?? 0) === 0) {
         return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: `menu item ${itemId} not found for property ${propertyId}` });
       }
-      res.json({ status: 'OK', message: 'Item nonaktif' });
+      res.json({ status: 'OK', message: 'Produk berhasil dihapus tanpa menghilangkan riwayat penjualan' });
     } catch (err: any) {
       const statusCode = err.statusCode || 500;
       res.status(statusCode).json({
@@ -1630,7 +1638,7 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
       }
       await deps.assertPropertyScope(req, propertyId);
 
-      const rawItems = body.items;
+      const rawItems = Array.isArray(body.items) ? body.items : Array.isArray(body.rows) ? body.rows : null;
       if (!Array.isArray(rawItems) || rawItems.length === 0) {
         return res.status(400).json({
           status: 'ERROR',
@@ -1718,9 +1726,10 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             }
           }
 
+          const rawCodeCandidate = item.item_code !== undefined && item.item_code !== null ? item.item_code : item.sku;
           const rawCode =
-            typeof item.item_code === 'string' && item.item_code.trim() !== ''
-              ? item.item_code.trim().slice(0, 50).toUpperCase()
+            typeof rawCodeCandidate === 'string' && rawCodeCandidate.trim() !== ''
+              ? rawCodeCandidate.trim().slice(0, 50).toUpperCase()
               : null;
           const rawBarcode =
             typeof item.barcode === 'string' && item.barcode.trim() !== ''
@@ -1737,21 +1746,20 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
 
           await client.query(`SAVEPOINT sp_import_${idx}`);
           try {
-            // 1. Resolve or create Category
+            // 1. Resolve or create Category strictly per product_type
             let categoryId: number | null = null;
             if (rawCategoryName) {
               const findCat = await client.query(
-                `SELECT id, product_type FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
-                [propertyId, rawCategoryName]
+                `SELECT id, product_type
+                   FROM pos_menu_categories
+                  WHERE property_id = $1
+                    AND LOWER(name) = LOWER($2)
+                    AND COALESCE(product_type, 'FINISHED_GOOD') = $3
+                  LIMIT 1`,
+                [propertyId, rawCategoryName, productTypeVal]
               );
               if ((findCat.rowCount ?? 0) > 0) {
                 categoryId = Number(findCat.rows[0].id);
-                if (!findCat.rows[0].product_type) {
-                  await client.query(
-                    `UPDATE pos_menu_categories SET product_type = $1 WHERE id = $2 AND property_id = $3`,
-                    [productTypeVal, categoryId, propertyId]
-                  );
-                }
               } else {
                 const newCat = await client.query(
                   `INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING id`,
@@ -1761,11 +1769,11 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               }
             }
 
-            // 2. Check if item exists by item_code or (LOWER(name) + product_type)
+            // 2. Check if item exists by item_code or (LOWER(name) + product_type) among non-deleted items
             let existingItem: any = null;
             if (rawCode) {
               const codeRes = await client.query(
-                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND UPPER(item_code) = $2 LIMIT 1`,
+                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND COALESCE(is_deleted, FALSE) = FALSE AND UPPER(item_code) = $2 LIMIT 1`,
                 [propertyId, rawCode]
               );
               if ((codeRes.rowCount ?? 0) > 0) {
@@ -1774,8 +1782,8 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             }
             if (!existingItem) {
               const nameRes = await client.query(
-                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND LOWER(name) = LOWER($2) ORDER BY id ASC LIMIT 1`,
-                [propertyId, rawName]
+                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND COALESCE(is_deleted, FALSE) = FALSE AND LOWER(name) = LOWER($2) AND COALESCE(product_type, 'FINISHED_GOOD') = $3 ORDER BY id ASC LIMIT 1`,
+                [propertyId, rawName, productTypeVal]
               );
               if ((nameRes.rowCount ?? 0) > 0) {
                 existingItem = nameRes.rows[0];

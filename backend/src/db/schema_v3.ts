@@ -6884,6 +6884,12 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     ALTER TABLE stock_balances ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
     ALTER TABLE pos_menu_categories ADD COLUMN IF NOT EXISTS product_type VARCHAR(30) NULL;
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS variants JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;
+
+    UPDATE pos_menu_items
+       SET product_type = 'FINISHED_GOOD'
+     WHERE product_type IS NULL;
 
     UPDATE pos_menu_categories pmc
        SET product_type = sub.product_type
@@ -6896,5 +6902,18 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
       ) sub
      WHERE pmc.id = sub.category_id
        AND pmc.product_type IS NULL;
+
+    UPDATE pos_menu_categories
+       SET product_type = 'FINISHED_GOOD'
+     WHERE product_type IS NULL;
+
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pos_menu_categories_property_name') THEN
+        ALTER TABLE pos_menu_categories DROP CONSTRAINT uq_pos_menu_categories_property_name;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pos_menu_categories_property_id_name_key') THEN
+        ALTER TABLE pos_menu_categories DROP CONSTRAINT pos_menu_categories_property_id_name_key;
+      END IF;
+    END $$;
   `);
 }

@@ -6209,7 +6209,7 @@ app.get('/api/pos/menu', async (req, res) => {
 
     const categories = await pool.query('SELECT * FROM pos_menu_categories WHERE property_id = $1 ORDER BY id', [propertyId]);
 
-    const whereConditions: string[] = ['mi.property_id = $1'];
+    const whereConditions: string[] = ['mi.property_id = $1', 'COALESCE(mi.is_deleted, FALSE) = FALSE'];
     const itemParams: any[] = [propertyId];
 
     if (statusFilter === 'active') {
@@ -6435,13 +6435,13 @@ app.post('/api/pos/menu/categories', async (req, res) => {
     if (catName.length > 100) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be at most 100 characters' });
     }
-    let resolvedProductType: string | null = null;
+    let resolvedProductType: string = 'FINISHED_GOOD';
     if (product_type !== undefined && product_type !== null && String(product_type).trim() !== '') {
       const parsedPt = parseProductTypeInput(product_type);
       if (!parsedPt.ok) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: parsedPt.message || 'invalid product_type' });
       }
-      resolvedProductType = parsedPt.value ?? null;
+      resolvedProductType = parsedPt.value || 'FINISHED_GOOD';
     }
     await assertPropertyScope(req, propId);
 
@@ -6450,23 +6450,18 @@ app.post('/api/pos/menu/categories', async (req, res) => {
     try {
       await client.query('BEGIN');
       await client.query('SELECT id FROM properties WHERE id = $1 FOR UPDATE', [propId]);
-      // Case-insensitive duplicate check dalam transaksi (setelah lock).
+      // Case-insensitive duplicate check per (property_id, product_type, LOWER(name)).
       const dupCheck = await client.query(
-        'SELECT id, product_type FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2)',
-        [propId, catName]
+        `SELECT id, product_type
+           FROM pos_menu_categories
+          WHERE property_id = $1
+            AND LOWER(name) = LOWER($2)
+            AND COALESCE(product_type, 'FINISHED_GOOD') = $3`,
+        [propId, catName, resolvedProductType]
       );
       if ((dupCheck.rowCount ?? 0) > 0) {
-        const existingCat = dupCheck.rows[0];
-        if (!existingCat.product_type && resolvedProductType) {
-          const updatedExisting = await client.query(
-            'UPDATE pos_menu_categories SET product_type = $1 WHERE id = $2 RETURNING *',
-            [resolvedProductType, existingCat.id]
-          );
-          await client.query('COMMIT');
-          return res.status(200).json({ status: 'OK', data: updatedExisting.rows[0] });
-        }
         await client.query('ROLLBACK');
-        return res.status(409).json({ status: 'ERROR', code: 'CATEGORY_DUPLICATE', message: 'category name already exists for this property' });
+        return res.status(409).json({ status: 'ERROR', code: 'CATEGORY_DUPLICATE', message: 'Nama kategori sudah ada pada jenis produk ini' });
       }
       const result = await client.query(
         'INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING *',
@@ -6610,20 +6605,11 @@ app.delete('/api/pos/menu/categories/:id', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(404).json({ status: 'ERROR', code: 'NOT_FOUND', message: 'category not found for this property' });
       }
-      // Cek in-use: item aktif ATAU nonaktif yang masih merujuk category ini.
-      const inUse = await client.query(
-        'SELECT COUNT(*)::int AS c FROM pos_menu_items WHERE property_id = $1 AND category_id = $2',
+      // Lepaskan relasi produk dari kategori ini agar penghapusan kategori langsung berhasil tanpa terkunci.
+      await client.query(
+        'UPDATE pos_menu_items SET category_id = NULL WHERE property_id = $1 AND category_id = $2',
         [propertyId, categoryId]
       );
-      const inUseCount = Number(inUse.rows[0].c);
-      if (inUseCount > 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          status: 'ERROR',
-          code: 'CATEGORY_IN_USE',
-          message: `category is used by ${inUseCount} menu item(s) and cannot be deleted`
-        });
-      }
       await client.query(
         'DELETE FROM pos_menu_categories WHERE id = $1 AND property_id = $2',
         [categoryId, propertyId]
