@@ -4,6 +4,13 @@ import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
 import ProductRecipeModal from './ProductRecipeModal';
+import {
+  downloadProductTemplateXlsx,
+  exportProductsToXlsx,
+  parseProductsFromXlsxFile,
+  type ProductVariantDto,
+  type ParsedExcelProductRow,
+} from './productExcelUtils';
 
 export type ProductTypeCode = 'RAW_MATERIAL' | 'SEMI_FINISHED' | 'FINISHED_GOOD' | 'OPERATIONAL_ITEM';
 export type ProductKindCode = 'STANDARD';
@@ -282,16 +289,19 @@ export interface UnconfirmedPackagingCreateState {
 export interface ProductItem {
   id: number;
   item_code?: string | null;
+  sku?: string | null;
   barcode?: string | null;
   name: string;
   category_id?: number | null;
   category_name?: string | null;
   price: number | string | null;
+  cost_price?: number | string | null;
   is_active?: boolean;
   is_sellable_pos?: boolean;
   track_stock?: boolean;
   track_inventory?: boolean;
   storage_sublocation?: string | null;
+  variants?: ProductVariantDto[] | null;
   product_type?: ProductTypeCode | string | null;
   product_type_label?: string;
   product_kind?: ProductKindCode | string | null;
@@ -312,6 +322,14 @@ export interface ProductItem {
 export interface CategoryOption {
   id: number;
   name: string;
+  product_type?: ProductTypeCode | string | null;
+}
+
+export interface ProductVariantFormDraft {
+  name: string;
+  price: string;
+  costPrice: string;
+  barcode: string;
 }
 
 interface Props {
@@ -339,6 +357,7 @@ export interface ProductFormState {
   isSellablePos: boolean;
   trackStock?: boolean;
   storageSublocation?: string;
+  variants?: ProductVariantFormDraft[];
 }
 
 export const EMPTY_PRODUCT_FORM: ProductFormState = {
@@ -355,6 +374,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   isSellablePos: true,
   trackStock: false,
   storageSublocation: '',
+  variants: [],
 };
 
 export const PRODUCT_PHOTO_MAX_BYTES = 2 * 1024 * 1024;
@@ -585,6 +605,14 @@ export function buildEditProductForm(item: ProductItem): ProductFormState {
     isSellablePos: item.is_sellable_pos !== false,
     trackStock: effectiveTrackStock,
     storageSublocation: typeof item.storage_sublocation === 'string' ? item.storage_sublocation : '',
+    variants: Array.isArray(item.variants)
+      ? item.variants.map((v) => ({
+          name: v.name || '',
+          price: v.price != null ? String(v.price) : '0',
+          costPrice: v.cost_price != null ? String(v.cost_price) : '',
+          barcode: v.barcode || '',
+        }))
+      : [],
   };
 }
 
@@ -704,7 +732,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   // Harga disimpan sebagai string agar "kosong" bisa dibedakan dari "0".
   const [newProduct, setNewProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
   const [editProduct, setEditProduct] = useState<ProductFormState>({ ...EMPTY_PRODUCT_FORM });
-  const [categoryForm, setCategoryForm] = useState<{ mode: 'add' | 'rename'; id?: number; name: string }>({ mode: 'add', name: '' });
+  const [categoryForm, setCategoryForm] = useState<{ mode: 'add' | 'rename'; id?: number; name: string; productType: string }>({
+    mode: 'add',
+    name: '',
+    productType: 'FINISHED_GOOD',
+  });
+  const [showExcelImportModal, setShowExcelImportModal] = useState(false);
+  const [excelImportRows, setExcelImportRows] = useState<ParsedExcelProductRow[]>([]);
+  const [excelImportFileName, setExcelImportFileName] = useState<string>('');
+  const [excelImportError, setExcelImportError] = useState<string | null>(null);
+  const [excelImportLoading, setExcelImportLoading] = useState(false);
+  const excelFileInputRef = useRef<HTMLInputElement | null>(null);
   const addNameInputRef = useRef<HTMLInputElement | null>(null);
   const [addPhotoFile, setAddPhotoFile] = useState<File | null>(null);
   const [addPhotoPreviewUrl, setAddPhotoPreviewUrl] = useState<string | null>(null);
@@ -1141,10 +1179,32 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     };
   }, [revokeObjectUrlSafe]);
 
-  const categoryNames = useMemo(
-    () => categories.map((c) => c.name),
+  const getCategoriesForProductType = useCallback(
+    (targetProductType: string, currentCategoryId?: string): CategoryOption[] => {
+      const upperTarget = (targetProductType || '').trim().toUpperCase();
+      if (!upperTarget || upperTarget === 'ALL') return categories;
+      return categories.filter((c) => {
+        if (currentCategoryId && String(c.id) === String(currentCategoryId)) return true;
+        if (!c.product_type) return true;
+        return String(c.product_type).trim().toUpperCase() === upperTarget;
+      });
+    },
     [categories]
   );
+
+  const categoryNames = useMemo(() => {
+    if (productTypeFilter === 'ALL') {
+      return categories.map((c) => c.name);
+    }
+    const usedByType = new Set(
+      items
+        .filter((i) => i.product_type === productTypeFilter && i.category_name)
+        .map((i) => String(i.category_name))
+    );
+    return categories
+      .filter((c) => !c.product_type || c.product_type === productTypeFilter || usedByType.has(c.name))
+      .map((c) => c.name);
+  }, [categories, productTypeFilter, items]);
 
   // Click-outside handler for the category dropdown
   useEffect(() => {
@@ -1415,6 +1475,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       if (addSublocationClean !== '') {
         productPayload.storage_sublocation = addSublocationClean;
       }
+      if (newProduct.productType === 'FINISHED_GOOD' && Array.isArray(newProduct.variants)) {
+        productPayload.variants = newProduct.variants
+          .filter((v) => v.name.trim() !== '')
+          .map((v) => ({
+            name: v.name.trim(),
+            price: Math.max(0, Math.round(Number(v.price) || 0)),
+            cost_price: v.costPrice.trim() !== '' ? Math.max(0, Math.round(Number(v.costPrice) || 0)) : null,
+            barcode: v.barcode.trim() !== '' ? v.barcode.trim() : null,
+          }));
+      } else {
+        productPayload.variants = [];
+      }
 
       let targetItemId: number | null = pendingCreatedItem ? pendingCreatedItem.id : null;
 
@@ -1582,6 +1654,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const nextSublocation = (editProduct.storageSublocation || '').trim();
       if (nextSublocation !== origSublocation || nextSublocation !== '') {
         patch.storage_sublocation = nextSublocation === '' ? null : nextSublocation;
+      }
+      if (editProduct.productType === 'FINISHED_GOOD' && Array.isArray(editProduct.variants)) {
+        patch.variants = editProduct.variants
+          .filter((v) => v.name.trim() !== '')
+          .map((v) => ({
+            name: v.name.trim(),
+            price: Math.max(0, Math.round(Number(v.price) || 0)),
+            cost_price: v.costPrice.trim() !== '' ? Math.max(0, Math.round(Number(v.costPrice) || 0)) : null,
+            barcode: v.barcode.trim() !== '' ? v.barcode.trim() : null,
+          }));
+      } else {
+        patch.variants = [];
       }
       if (unitUnchanged) {
         if (origCanonicalCode !== '' && origBaseUnit === '') {
@@ -1835,7 +1919,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         const res = await authenticatedFetch('/api/pos/menu/categories', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ property_id: targetPropertyId, name })
+          body: JSON.stringify({
+            property_id: targetPropertyId,
+            name,
+            product_type: categoryForm.productType || null,
+          })
         });
         const json = await res.json().catch(() => null);
         if (stale()) return; // properti sudah berganti — abaikan respons submit lama
@@ -1847,7 +1935,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ property_id: targetPropertyId, name })
+            body: JSON.stringify({
+              property_id: targetPropertyId,
+              name,
+              product_type: categoryForm.productType || null,
+            })
           }
         );
         const json = await res.json().catch(() => null);
@@ -1856,7 +1948,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         setSuccessMsg(`Kategori berhasil diubah menjadi "${name}".`);
       }
       setShowCategoryModal(false);
-      setCategoryForm({ mode: 'add', name: '' });
+      setCategoryForm({
+        mode: 'add',
+        name: '',
+        productType: productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD',
+      });
       // Refresh memakai konteks TERKINI dari ref, bukan closure submit lama.
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
       await loadProducts(curSf, curPid);
@@ -1901,14 +1997,100 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
   const openAddCategory = () => {
     if (!capabilities.canManageCategory) return;
-    setCategoryForm({ mode: 'add', name: '' });
+    setCategoryForm({
+      mode: 'add',
+      name: '',
+      productType: productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD',
+    });
     setShowCategoryModal(true);
   };
 
   const openRenameCategory = (cat: CategoryOption) => {
     if (!capabilities.canManageCategory) return;
-    setCategoryForm({ mode: 'rename', id: cat.id, name: cat.name });
+    setCategoryForm({
+      mode: 'rename',
+      id: cat.id,
+      name: cat.name,
+      productType: cat.product_type ? String(cat.product_type) : '',
+    });
     setShowCategoryModal(true);
+  };
+
+  const openExcelImportModal = () => {
+    setExcelImportError(null);
+    setExcelImportRows([]);
+    setExcelImportFileName('');
+    setShowExcelImportModal(true);
+  };
+
+  const handleExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setExcelImportError(null);
+    setExcelImportFileName(file.name);
+    try {
+      const defaultType: ProductTypeCode =
+        productTypeFilter !== 'ALL' ? productTypeFilter : 'FINISHED_GOOD';
+      const parsed = await parseProductsFromXlsxFile(file, defaultType);
+      setExcelImportRows(parsed);
+    } catch (err: any) {
+      setExcelImportRows([]);
+      setExcelImportError(err?.message || 'Gagal membaca file Excel (.xlsx)');
+    } finally {
+      if (excelFileInputRef.current) excelFileInputRef.current.value = '';
+    }
+  };
+
+  const handleBulkExcelImportSubmit = async () => {
+    if (!propertyId || excelImportRows.length === 0 || excelImportLoading) return;
+    const targetPropertyId = propertyId;
+    setExcelImportLoading(true);
+    setExcelImportError(null);
+    try {
+      const res = await authenticatedFetch('/api/pos/menu/items/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: targetPropertyId,
+          rows: excelImportRows.map((r) => ({
+            sku: r.sku || null,
+            barcode: r.barcode || null,
+            name: r.name,
+            product_type: r.product_type,
+            category_name: r.category_name || null,
+            base_unit: r.base_unit || 'PCS',
+            storage_sublocation: r.storage_sublocation || null,
+            cost_price: r.cost_price,
+            price: r.price,
+            is_sellable_pos: r.is_sellable_pos,
+            variants: r.variants,
+          })),
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error((json as any)?.message || 'Gagal mengimpor data produk dari Excel');
+      }
+      const data = (json as any)?.data || {};
+      const created = Number(data.created_count || 0);
+      const updated = Number(data.updated_count || 0);
+      const failed = Number(data.failed_count || 0);
+      setShowExcelImportModal(false);
+      setExcelImportRows([]);
+      setExcelImportFileName('');
+      setSuccessMsg(
+        `Import Excel selesai: ${created} produk baru ditambahkan, ${updated} produk diperbarui${
+          failed > 0 ? ` (${failed} baris dilewati)` : ''
+        }.`
+      );
+      const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
+      await loadProducts(curSf, curPid ?? targetPropertyId);
+      onRefresh?.();
+    } catch (err: any) {
+      setExcelImportError(err?.message || 'Gagal memproses import Excel');
+    } finally {
+      setExcelImportLoading(false);
+    }
   };
 
   // ── MP-03C: Kelola Kemasan Produk (Dialog Terpisah) ────────────────────────
@@ -2539,7 +2721,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={handleRefresh}
@@ -2550,6 +2732,35 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
+          <button
+            type="button"
+            onClick={() =>
+              exportProductsToXlsx(
+                filteredItems,
+                productTypeFilter !== 'ALL' ? productTypeFilter : undefined
+              )
+            }
+            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-800 text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
+            title="Export daftar produk saat ini ke file Excel (.xlsx)"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Export Excel (.xlsx)
+          </button>
+          {(capabilities.canCreate || capabilities.canEdit) && (
+            <button
+              type="button"
+              onClick={openExcelImportModal}
+              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs sm:text-sm font-bold shadow-xs transition-colors cursor-pointer"
+              title="Import banyak produk sekaligus dari 4 template Excel (.xlsx)"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              Import Excel (.xlsx)
+            </button>
+          )}
           {(capabilities.canView || capabilities.canCreate || capabilities.canEdit || capabilities.canManageCategory) && (
             <button
               type="button"
@@ -2949,6 +3160,22 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                                   </span>
                                 )}
                               </div>
+                              {Array.isArray(item.variants) && item.variants.length > 0 && (
+                                <div className="flex flex-wrap items-center gap-1 mt-1">
+                                  <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                                    Varian ({item.variants.length}):
+                                  </span>
+                                  {item.variants.map((vr, vIdx) => (
+                                    <span
+                                      key={`${vr.name}-${vIdx}`}
+                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200 text-[10px] font-medium"
+                                    >
+                                      <span>{vr.name}</span>
+                                      <span className="text-emerald-700 font-bold">({formatIDR(Number(vr.price) || 0)})</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </td>
@@ -3162,14 +3389,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Kategori {newProduct.productType ? `(${formatProductTypeLabel(newProduct.productType)})` : ''}
+                      </label>
                       <select
                         value={newProduct.category}
                         onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
                         className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
                       >
                         <option value="">— Tanpa Kategori —</option>
-                        {categories.map((c) => (
+                        {getCategoriesForProductType(newProduct.productType, newProduct.category).map((c) => (
                           <option key={c.id} value={String(c.id)}>{c.name}</option>
                         ))}
                       </select>
@@ -3373,6 +3602,97 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
                     </div>
                   </div>
+
+                  {/* Varian Produk (Khusus Produk Jadi) */}
+                  {newProduct.productType === 'FINISHED_GOOD' && (
+                    <div className="p-3 rounded-xl bg-emerald-50/40 border border-emerald-200/80 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-bold text-emerald-950">Varian Produk Jadi (Opsional)</div>
+                          <div className="text-[11px] text-emerald-800/80">
+                            Contoh: Reguler, Jumbo, Panas (Hot), Dingin (Ice), Pedas, Original.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setNewProduct((prev) => ({
+                              ...prev,
+                              variants: [
+                                ...(prev.variants || []),
+                                { name: '', price: prev.price || '0', costPrice: '', barcode: '' },
+                              ],
+                            }))
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                        >
+                          + Tambah Varian
+                        </button>
+                      </div>
+                      {Array.isArray(newProduct.variants) && newProduct.variants.length > 0 && (
+                        <div className="space-y-2">
+                          {newProduct.variants.map((vr, idx) => (
+                            <div key={idx} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded-lg border border-emerald-200/70">
+                              <div className="col-span-5">
+                                <input
+                                  type="text"
+                                  placeholder={`Nama Varian #${idx + 1} (cth: Jumbo)`}
+                                  value={vr.name}
+                                  onChange={(e) => {
+                                    const next = [...(newProduct.variants || [])];
+                                    next[idx] = { ...next[idx], name: e.target.value };
+                                    setNewProduct({ ...newProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5"
+                                />
+                              </div>
+                              <div className="col-span-3">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="Harga Jual"
+                                  value={vr.price}
+                                  onChange={(e) => {
+                                    const next = [...(newProduct.variants || [])];
+                                    next[idx] = { ...next[idx], price: e.target.value };
+                                    setNewProduct({ ...newProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5 font-mono"
+                                />
+                              </div>
+                              <div className="col-span-3">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="HPP (Opsional)"
+                                  value={vr.costPrice}
+                                  onChange={(e) => {
+                                    const next = [...(newProduct.variants || [])];
+                                    next[idx] = { ...next[idx], costPrice: e.target.value };
+                                    setNewProduct({ ...newProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5 font-mono"
+                                />
+                              </div>
+                              <div className="col-span-1 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = (newProduct.variants || []).filter((_, i) => i !== idx);
+                                    setNewProduct({ ...newProduct, variants: next });
+                                  }}
+                                  className="text-rose-600 hover:text-rose-800 text-xs font-bold px-1 cursor-pointer"
+                                  title="Hapus varian"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 4. Detail Opsional (Barcode & Deskripsi — Lipat/Collapsible) */}
@@ -3584,14 +3904,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Kategori</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Kategori {editProduct.productType ? `(${formatProductTypeLabel(editProduct.productType)})` : ''}
+                      </label>
                       <select
                         value={editProduct.category}
                         onChange={(e) => setEditProduct({ ...editProduct, category: e.target.value })}
                         className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
                       >
                         <option value="">— Tanpa Kategori —</option>
-                        {categories.map((c) => (
+                        {getCategoriesForProductType(editProduct.productType, editProduct.category).map((c) => (
                           <option key={c.id} value={String(c.id)}>{c.name}</option>
                         ))}
                       </select>
@@ -3730,15 +4052,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     <div className="flex items-center justify-between">
                       <label className="block text-xs font-semibold text-gray-700">Satuan Dasar</label>
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={saving}
-                          aria-label="Buka formula resep BOM produk"
-                          onClick={() => openRecipeModal(editingItem)}
-                          className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
-                        >
-                          Resep (BOM)
-                        </button>
+                        {(editProduct.productType === 'FINISHED_GOOD' || editProduct.productType === 'SEMI_FINISHED') && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            aria-label="Buka formula resep BOM produk"
+                            onClick={() => openRecipeModal(editingItem)}
+                            className="text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                          >
+                            Resep (BOM)
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={saving}
@@ -3855,6 +4179,97 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
                     </div>
                   </div>
+
+                  {/* Varian Produk (Khusus Produk Jadi) */}
+                  {editProduct.productType === 'FINISHED_GOOD' && (
+                    <div className="p-3 rounded-xl bg-emerald-50/40 border border-emerald-200/80 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-bold text-emerald-950">Varian Produk Jadi (Opsional)</div>
+                          <div className="text-[11px] text-emerald-800/80">
+                            Contoh: Reguler, Jumbo, Panas (Hot), Dingin (Ice), Pedas, Original.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditProduct((prev) => ({
+                              ...prev,
+                              variants: [
+                                ...(prev.variants || []),
+                                { name: '', price: prev.price || '0', costPrice: '', barcode: '' },
+                              ],
+                            }))
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                        >
+                          + Tambah Varian
+                        </button>
+                      </div>
+                      {Array.isArray(editProduct.variants) && editProduct.variants.length > 0 && (
+                        <div className="space-y-2">
+                          {editProduct.variants.map((vr, idx) => (
+                            <div key={idx} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded-lg border border-emerald-200/70">
+                              <div className="col-span-5">
+                                <input
+                                  type="text"
+                                  placeholder={`Nama Varian #${idx + 1} (cth: Jumbo)`}
+                                  value={vr.name}
+                                  onChange={(e) => {
+                                    const next = [...(editProduct.variants || [])];
+                                    next[idx] = { ...next[idx], name: e.target.value };
+                                    setEditProduct({ ...editProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5"
+                                />
+                              </div>
+                              <div className="col-span-3">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="Harga Jual"
+                                  value={vr.price}
+                                  onChange={(e) => {
+                                    const next = [...(editProduct.variants || [])];
+                                    next[idx] = { ...next[idx], price: e.target.value };
+                                    setEditProduct({ ...editProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5 font-mono"
+                                />
+                              </div>
+                              <div className="col-span-3">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="HPP (Opsional)"
+                                  value={vr.costPrice}
+                                  onChange={(e) => {
+                                    const next = [...(editProduct.variants || [])];
+                                    next[idx] = { ...next[idx], costPrice: e.target.value };
+                                    setEditProduct({ ...editProduct, variants: next });
+                                  }}
+                                  className="w-full text-xs bg-gray-50 border border-gray-300 rounded-md px-2 py-1.5 font-mono"
+                                />
+                              </div>
+                              <div className="col-span-1 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = (editProduct.variants || []).filter((_, i) => i !== idx);
+                                    setEditProduct({ ...editProduct, variants: next });
+                                  }}
+                                  className="text-rose-600 hover:text-rose-800 text-xs font-bold px-1 cursor-pointer"
+                                  title="Hapus varian"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 4. Detail Opsional (Barcode & Deskripsi — Lipat/Collapsible) */}
@@ -4023,11 +4438,26 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 </div>
               )}
               <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Kelompok Tipe Produk</label>
+                <select
+                  value={categoryForm.productType}
+                  onChange={(e) => setCategoryForm({ ...categoryForm, productType: e.target.value })}
+                  className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
+                >
+                  <option value="FINISHED_GOOD">Produk Jadi (cth: Makanan, Minuman)</option>
+                  <option value="SEMI_FINISHED">Produk Setengah Jadi (cth: Bumbu Olahan, Saus)</option>
+                  <option value="RAW_MATERIAL">Bahan Baku (cth: Vegetarian, Fish Meal, Daging)</option>
+                  <option value="OPERATIONAL_ITEM">Item Operasional (cth: Linen, Handuk, Amenities)</option>
+                  <option value="">Umum / Semua Tipe Produk</option>
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Nama Kategori *</label>
                 <input
                   type="text"
                   required
                   maxLength={100}
+                  placeholder="Contoh: Vegetarian, Fish Meal, Makanan, Minuman"
                   value={categoryForm.name}
                   onChange={(e) => setCategoryForm({ ...categoryForm, name: e.target.value })}
                   className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2"
@@ -4061,9 +4491,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               ) : (
                 <div className="space-y-1">
                   {categories.map((cat) => (
-                    <div key={cat.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
-                      <span className="text-xs font-medium text-gray-800">{cat.name}</span>
-                      <div className="flex gap-1">
+                    <div key={cat.id} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs font-medium text-gray-800 truncate">{cat.name}</span>
+                        <span
+                          className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border shrink-0 ${getProductTypeBadgeClass(
+                            cat.product_type
+                          )}`}
+                        >
+                          {cat.product_type ? formatProductTypeLabel(cat.product_type) : 'Semua Tipe'}
+                        </span>
+                      </div>
+                      <div className="flex gap-1 shrink-0">
                         {capabilities.canManageCategory && (
                           <button
                             type="button"
@@ -4738,6 +5177,313 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         canEdit={capabilities.canEdit}
       />
 
+      {/* Import Produk dari Excel (.xlsx) Modal — 4 Template */}
+      {showExcelImportModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4"
+          onClick={() => {
+            if (!excelImportLoading) setShowExcelImportModal(false);
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-xl w-full border border-gray-200 max-h-[92vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="shrink-0 px-6 pt-5 pb-4 border-b border-gray-100 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-extrabold text-gray-900">Import Master Barang &amp; Produk dari Excel</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Tambahkan atau perbarui banyak barang sekaligus dari file spreadsheet (.xlsx).
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={excelImportLoading}
+                onClick={() => setShowExcelImportModal(false)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 cursor-pointer"
+                aria-label="Tutup modal import excel"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+              {excelImportError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2">
+                  <span>⚠ {excelImportError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setExcelImportError(null)}
+                    className="font-bold text-rose-700 hover:text-rose-900"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Section 1: Download 4 Template Excel */}
+              <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-200/80 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <span className="w-6 h-6 rounded-full bg-emerald-700 text-white text-xs font-extrabold flex items-center justify-center shrink-0 mt-0.5">
+                    1
+                  </span>
+                  <div>
+                    <div className="text-sm font-bold text-gray-900">Download Template Excel (4 Jenis Produk)</div>
+                    <div className="text-xs text-gray-600 mt-0.5">
+                      Pilih template sesuai jenis barang/produk yang ingin diimport. Isi data di Excel, lalu upload kembali.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => downloadProductTemplateXlsx('FINISHED_GOOD')}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs sm:text-sm shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <span>📦</span>
+                    <span>Template Produk Jadi (Fisik + Varian)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadProductTemplateXlsx('SEMI_FINISHED')}
+                    className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <span>🍲</span>
+                    <span>Template Produk Setengah Jadi</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadProductTemplateXlsx('RAW_MATERIAL')}
+                    className="w-full py-2.5 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs sm:text-sm shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <span>🥬</span>
+                    <span>Template Bahan Baku (Vegetarian, Fish Meal, dll)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadProductTemplateXlsx('OPERATIONAL_ITEM')}
+                    className="w-full py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-bold text-xs sm:text-sm shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <span>🛎️</span>
+                    <span>Template Item Operasional (Linen, Handuk, Amenities)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Pratinjau File Excel bila sudah dipilih */}
+              {excelImportRows.length > 0 && (
+                <div className="p-4 rounded-2xl bg-amber-50/70 border border-amber-300 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-extrabold text-amber-950">
+                        File Siap Diimport: {excelImportFileName} ({excelImportRows.length} baris produk)
+                      </div>
+                      <div className="text-[11px] text-amber-800">
+                        Periksa ringkasan di bawah lalu klik <strong>Simpan Import ({excelImportRows.length} Produk)</strong>.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExcelImportRows([]);
+                        setExcelImportFileName('');
+                      }}
+                      className="text-xs font-semibold text-amber-900 hover:underline cursor-pointer"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                  <div className="max-h-44 overflow-y-auto bg-white rounded-xl border border-amber-200">
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="bg-amber-50 text-amber-950 font-bold border-b border-amber-200 sticky top-0">
+                        <tr>
+                          <th className="py-1.5 px-2.5">SKU</th>
+                          <th className="py-1.5 px-2.5">Nama Item</th>
+                          <th className="py-1.5 px-2.5">Jenis</th>
+                          <th className="py-1.5 px-2.5">Kategori</th>
+                          <th className="py-1.5 px-2.5">Satuan</th>
+                          <th className="py-1.5 px-2.5">Penyimpanan</th>
+                          <th className="py-1.5 px-2.5 text-right">Harga</th>
+                          <th className="py-1.5 px-2.5">Varian</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {excelImportRows.map((r, i) => (
+                          <tr key={i}>
+                            <td className="py-1.5 px-2.5 font-mono text-gray-600">{r.sku || 'Otomatis'}</td>
+                            <td className="py-1.5 px-2.5 font-semibold text-gray-900">{r.name}</td>
+                            <td className="py-1.5 px-2.5">{formatProductTypeLabel(r.product_type)}</td>
+                            <td className="py-1.5 px-2.5">{r.category_name || '—'}</td>
+                            <td className="py-1.5 px-2.5 font-mono">{r.base_unit}</td>
+                            <td className="py-1.5 px-2.5">{r.storage_sublocation || '—'}</td>
+                            <td className="py-1.5 px-2.5 text-right font-mono">
+                              {r.price != null ? formatIDR(r.price) : '—'}
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              {r.variants.length > 0
+                                ? r.variants.map((v) => `${v.name} (${formatIDR(v.price)})`).join(', ')
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Section 2: Format Kolom yang Didukung */}
+              <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <span className="w-6 h-6 rounded-full bg-slate-700 text-white text-xs font-extrabold flex items-center justify-center shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <div>
+                    <div className="text-sm font-bold text-gray-900">Format Kolom yang Didukung</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Sistem mengenali kolom secara otomatis (case-insensitive). Berikut kolom yang didukung:
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 text-xs text-gray-600 pt-1">
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Kode Item / SKU
+                    </span>
+                    Kode unik produk (opsional, otomatis jika kosong; jika SKU sudah ada maka akan memperbarui data produk)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Barcode
+                    </span>
+                    Kode barcode produk untuk scan di kasir (opsional)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-mono font-bold text-[11px] mr-1.5">
+                      Nama Item
+                    </span>
+                    Nama produk / barang (wajib)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Jenis
+                    </span>
+                    Tipe: <strong>Produk Jadi</strong>, <strong>Produk Setengah Jadi</strong>, <strong>Bahan Baku</strong>, atau <strong>Item Operasional</strong>
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Kategori
+                    </span>
+                    Kategori per jenis produk (otomatis dibuat &amp; dikelompokkan per jenis produk, cth Bahan Baku: Vegetarian, Fish Meal; Produk Jadi: Makanan, Minuman)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Satuan
+                    </span>
+                    Unit dasar: PCS, PORSI, CUP, BOTOL, GRAM, KG, ML, LITER, SET, dll (default: PCS)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Tempat Penyimpanan
+                    </span>
+                    Sub-lokasi di dalam gudang/outlet (contoh: Showcase, Chiller, Freezer, Rak Linen)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Harga Pokok
+                    </span>
+                    HPP / harga modal per satuan dasar (angka)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Harga Jual
+                    </span>
+                    Harga jual ke konsumen (angka, wajib untuk Produk Jadi POS)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Varian1_Nama, Varian2_Nama, ...
+                    </span>
+                    Nama varian khusus Produk Jadi. Jumlah varian bebas — tambah sendiri kolom Varian3_Nama, Varian4_Nama, dst. Contoh isi: Reguler, Jumbo, Kecil, Besar
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Varian1_Harga, Varian2_Harga, ...
+                    </span>
+                    Harga jual per varian (angka)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Varian1_HPP, Varian2_HPP, ...
+                    </span>
+                    Modal/HPP per varian (angka, opsional)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Varian1_Barcode, Varian2_Barcode, ...
+                    </span>
+                    Barcode per varian (opsional)
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="shrink-0 px-6 py-4 border-t border-gray-100 bg-white flex items-center justify-end gap-2.5">
+              <input
+                ref={excelFileInputRef}
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                onChange={handleExcelFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={excelImportLoading}
+                onClick={() => setShowExcelImportModal(false)}
+                className="px-4 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs sm:text-sm font-bold cursor-pointer disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={excelImportLoading}
+                onClick={() => excelFileInputRef.current?.click()}
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs sm:text-sm font-bold shadow-xs flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                {excelImportRows.length > 0 ? 'Ganti File Excel' : 'Pilih File Excel'}
+              </button>
+              {excelImportRows.length > 0 && (
+                <button
+                  type="button"
+                  disabled={excelImportLoading}
+                  onClick={handleBulkExcelImportSubmit}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  {excelImportLoading
+                    ? 'Mengimpor…'
+                    : `Simpan Import (${excelImportRows.length} Produk)`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Floating Action Button (+) Tambah Produk di kanan bawah */}
       {capabilities.canCreate && (
         <button
@@ -4777,16 +5523,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             >
               {(capabilities.canEdit || capabilities.canCreate) && (
                 <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    aria-label={`Formula resep BOM ${activeItem.name}`}
-                    onClick={() => { closeRowMenu(false); openRecipeModal(activeItem); }}
-                    disabled={saving}
-                    className="w-full text-left px-3 py-1.5 text-xs text-amber-800 hover:bg-amber-50 cursor-pointer disabled:opacity-50"
-                  >
-                    Resep / BOM
-                  </button>
+                  {(activeItem.product_type === 'FINISHED_GOOD' || activeItem.product_type === 'SEMI_FINISHED') && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-label={`Formula resep BOM ${activeItem.name}`}
+                      onClick={() => { closeRowMenu(false); openRecipeModal(activeItem); }}
+                      disabled={saving}
+                      className="w-full text-left px-3 py-1.5 text-xs text-amber-800 hover:bg-amber-50 cursor-pointer disabled:opacity-50"
+                    >
+                      Resep / BOM
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"

@@ -6882,5 +6882,19 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
     ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
     ALTER TABLE stock_balances ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
+    ALTER TABLE pos_menu_categories ADD COLUMN IF NOT EXISTS product_type VARCHAR(30) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS variants JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+    UPDATE pos_menu_categories pmc
+       SET product_type = sub.product_type
+      FROM (
+        SELECT category_id, MIN(product_type) AS product_type
+          FROM pos_menu_items
+         WHERE category_id IS NOT NULL AND product_type IS NOT NULL
+         GROUP BY category_id
+        HAVING COUNT(DISTINCT product_type) = 1
+      ) sub
+     WHERE pmc.id = sub.category_id
+       AND pmc.product_type IS NULL;
   `);
 }

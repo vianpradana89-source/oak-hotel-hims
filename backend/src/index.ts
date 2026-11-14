@@ -190,10 +190,12 @@ import { createAccessControlRouter } from './domains/settings/accessControlRoute
 import { createOperationalAccessGuard } from './domains/settings/operationalAccessGuard';
 import { hasAnyEffectivePermission } from './domains/settings/accessControlService';
 import {
+  parseProductTypeInput,
   parseProductTypeQueryFilter,
   formatPosMenuItemRow,
   createPosMenuItemPatchHandler,
   createPosMenuItemCreateHandler,
+  createPosMenuItemsBulkImportHandler,
   createPosMenuItemDeactivateHandler,
   MAX_PRODUCT_PHOTO_BYTES,
   createProductPhotoUploadHandler,
@@ -6276,6 +6278,7 @@ app.get('/api/pos/menu', async (req, res) => {
 });
 
 app.post('/api/pos/menu/items', createPosMenuItemCreateHandler({ pool, assertPropertyScope }));
+app.post('/api/pos/menu/items/bulk-import', createPosMenuItemsBulkImportHandler({ pool, assertPropertyScope }));
 
 app.delete('/api/pos/menu/items/:id', createPosMenuItemDeactivateHandler({ pool, assertPropertyScope }));
 
@@ -6416,7 +6419,7 @@ app.get('/api/pos/reports/menu-engineering', foodCostHandlers.getMenuEngineering
 // POST /api/pos/menu/categories — create category
 app.post('/api/pos/menu/categories', async (req, res) => {
   try {
-    const { property_id, name } = req.body || {};
+    const { property_id, name, product_type } = req.body || {};
     if (!property_id) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
     }
@@ -6432,6 +6435,14 @@ app.post('/api/pos/menu/categories', async (req, res) => {
     if (catName.length > 100) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be at most 100 characters' });
     }
+    let resolvedProductType: string | null = null;
+    if (product_type !== undefined && product_type !== null && String(product_type).trim() !== '') {
+      const parsedPt = parseProductTypeInput(product_type);
+      if (!parsedPt.ok) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: parsedPt.message || 'invalid product_type' });
+      }
+      resolvedProductType = parsedPt.value ?? null;
+    }
     await assertPropertyScope(req, propId);
 
     // Transaksi + lock: serialisasi concurrent create/rename via property row lock.
@@ -6441,16 +6452,25 @@ app.post('/api/pos/menu/categories', async (req, res) => {
       await client.query('SELECT id FROM properties WHERE id = $1 FOR UPDATE', [propId]);
       // Case-insensitive duplicate check dalam transaksi (setelah lock).
       const dupCheck = await client.query(
-        'SELECT id FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2)',
+        'SELECT id, product_type FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2)',
         [propId, catName]
       );
       if ((dupCheck.rowCount ?? 0) > 0) {
+        const existingCat = dupCheck.rows[0];
+        if (!existingCat.product_type && resolvedProductType) {
+          const updatedExisting = await client.query(
+            'UPDATE pos_menu_categories SET product_type = $1 WHERE id = $2 RETURNING *',
+            [resolvedProductType, existingCat.id]
+          );
+          await client.query('COMMIT');
+          return res.status(200).json({ status: 'OK', data: updatedExisting.rows[0] });
+        }
         await client.query('ROLLBACK');
         return res.status(409).json({ status: 'ERROR', code: 'CATEGORY_DUPLICATE', message: 'category name already exists for this property' });
       }
       const result = await client.query(
-        'INSERT INTO pos_menu_categories (property_id, name) VALUES ($1, $2) RETURNING *',
-        [propId, catName]
+        'INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING *',
+        [propId, catName, resolvedProductType]
       );
       await client.query('COMMIT');
       res.status(201).json({ status: 'OK', data: result.rows[0] });
@@ -6494,6 +6514,18 @@ app.put('/api/pos/menu/categories/:id', async (req, res) => {
     if (name.length > 100) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'name must be at most 100 characters' });
     }
+    const hasProductTypeKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'product_type');
+    let nextProductType: string | null = null;
+    if (hasProductTypeKey) {
+      const rawPt = (req.body || {}).product_type;
+      if (rawPt !== null && rawPt !== undefined && String(rawPt).trim() !== '') {
+        const parsedPt = parseProductTypeInput(rawPt);
+        if (!parsedPt.ok) {
+          return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: parsedPt.message || 'invalid product_type' });
+        }
+        nextProductType = parsedPt.value ?? null;
+      }
+    }
     await assertPropertyScope(req, propertyId);
 
     // Transaksi + lock: cek kategori + duplikat case-insensitive dalam satu transaksi.
@@ -6503,7 +6535,7 @@ app.put('/api/pos/menu/categories/:id', async (req, res) => {
       // Lock property row untuk serialisasi concurrent rename.
       await client.query('SELECT id FROM properties WHERE id = $1 FOR UPDATE', [propertyId]);
       const cat = await client.query(
-        'SELECT id FROM pos_menu_categories WHERE id = $1 AND property_id = $2',
+        'SELECT id, product_type FROM pos_menu_categories WHERE id = $1 AND property_id = $2',
         [categoryId, propertyId]
       );
       if ((cat.rowCount ?? 0) === 0) {
@@ -6519,9 +6551,10 @@ app.put('/api/pos/menu/categories/:id', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(409).json({ status: 'ERROR', code: 'CATEGORY_DUPLICATE', message: 'category name already exists for this property' });
       }
+      const effectiveProductType = hasProductTypeKey ? nextProductType : cat.rows[0].product_type;
       const result = await client.query(
-        'UPDATE pos_menu_categories SET name = $1 WHERE id = $2 AND property_id = $3 RETURNING *',
-        [name, categoryId, propertyId]
+        'UPDATE pos_menu_categories SET name = $1, product_type = $2 WHERE id = $3 AND property_id = $4 RETURNING *',
+        [name, effectiveProductType, categoryId, propertyId]
       );
       await client.query('COMMIT');
       res.json({ status: 'OK', data: result.rows[0] });

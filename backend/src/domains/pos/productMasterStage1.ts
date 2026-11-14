@@ -312,6 +312,85 @@ export function parseStorageSublocationInput(raw: unknown): ParsedFieldResult<st
   return { ok: true, provided: true, value: trimmed };
 }
 
+export interface ProductVariantItem {
+  name: string;
+  price: number;
+  cost_price?: number | null;
+  sku?: string | null;
+  barcode?: string | null;
+}
+
+/**
+ * Validasi dan normalisasi daftar varian untuk Produk Jadi (FINISHED_GOOD).
+ */
+export function parseVariantsInput(raw: unknown): ParsedFieldResult<ProductVariantItem[]> {
+  if (raw === undefined) {
+    return { ok: true, provided: false, value: undefined };
+  }
+  if (raw === null) {
+    return { ok: true, provided: true, value: [] };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      message: 'variants harus berupa array daftar varian produk',
+    };
+  }
+  const result: ProductVariantItem[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (!v || typeof v !== 'object') {
+      return {
+        ok: false,
+        code: 'VALIDATION_ERROR',
+        message: `Varian #${i + 1} tidak valid`,
+      };
+    }
+    const rawName = typeof v.name === 'string' ? v.name.trim() : '';
+    if (!rawName) {
+      continue;
+    }
+    if (rawName.length > 100) {
+      return {
+        ok: false,
+        code: 'VALIDATION_ERROR',
+        message: `Nama varian #${i + 1} maksimal 100 karakter`,
+      };
+    }
+    const rawPrice = v.price;
+    const priceNum =
+      rawPrice === null || rawPrice === undefined || rawPrice === '' ? 0 : Math.round(Number(rawPrice));
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
+      return {
+        ok: false,
+        code: 'VALIDATION_ERROR',
+        message: `Harga jual varian "${rawName}" harus berupa angka Rupiah >= 0`,
+      };
+    }
+    let costPriceVal: number | null = null;
+    if (v.cost_price !== undefined && v.cost_price !== null && String(v.cost_price).trim() !== '') {
+      const cp = Math.round(Number(v.cost_price));
+      if (Number.isFinite(cp) && cp >= 0) {
+        costPriceVal = cp;
+      }
+    }
+    const skuVal =
+      typeof v.sku === 'string' && v.sku.trim() !== '' ? v.sku.trim().slice(0, 50).toUpperCase() : null;
+    const barcodeVal =
+      typeof v.barcode === 'string' && v.barcode.trim() !== '' ? v.barcode.trim().slice(0, 100) : null;
+
+    result.push({
+      name: rawName,
+      price: priceNum,
+      ...(costPriceVal !== null ? { cost_price: costPriceVal } : {}),
+      ...(skuVal !== null ? { sku: skuVal } : {}),
+      ...(barcodeVal !== null ? { barcode: barcodeVal } : {}),
+    });
+  }
+  return { ok: true, provided: true, value: result };
+}
+
 /**
  * Normalisasi input barcode pada POST/PATCH (MP-02B).
  * - undefined -> provided: false, value: undefined
@@ -597,6 +676,18 @@ export function formatPosMenuItemRow(row: Record<string, any>) {
       safeRow.storage_sublocation === null || safeRow.storage_sublocation === undefined || String(safeRow.storage_sublocation).trim() === ''
         ? null
         : String(safeRow.storage_sublocation).trim(),
+    variants: Array.isArray(safeRow.variants)
+      ? safeRow.variants
+      : typeof safeRow.variants === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(safeRow.variants);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [],
     barcode,
     has_photo: hasPhoto,
     photo_url: photoUrl,
@@ -891,6 +982,15 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         setClauses.push(`storage_sublocation = $${params.length}`);
       }
 
+      if (body.variants !== undefined) {
+        const pv = parseVariantsInput(body.variants);
+        if (!pv.ok) {
+          return res.status(400).json({ status: 'ERROR', code: pv.code, message: pv.message });
+        }
+        params.push(JSON.stringify(pv.value ?? []));
+        setClauses.push(`variants = $${params.length}::jsonb`);
+      }
+
       if (setClauses.length === 0 && !hasAnyUnitField) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
       }
@@ -1118,7 +1218,22 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
       }
       const effectiveSellablePos = parsedSellable.provided ? parsedSellable.value : true;
 
-      if (effectiveSellablePos && price === undefined) {
+      const parsedVariants = parseVariantsInput(body.variants);
+      if (!parsedVariants.ok) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: parsedVariants.code,
+          message: parsedVariants.message,
+        });
+      }
+      const variantsVal: ProductVariantItem[] = parsedVariants.provided ? parsedVariants.value : [];
+
+      const effectiveRawPrice =
+        (price === undefined || price === null) && effectiveSellablePos && variantsVal.length > 0
+          ? variantsVal[0].price
+          : price;
+
+      if (effectiveSellablePos && effectiveRawPrice === undefined) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id and price are required' });
       }
 
@@ -1155,7 +1270,7 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'description must be a string or null' });
       }
 
-      const parsedPrice = parsePriceInput(price);
+      const parsedPrice = parsePriceInput(effectiveRawPrice);
       if (!parsedPrice.ok) {
         return res.status(400).json({ status: 'ERROR', code: parsedPrice.code, message: parsedPrice.message });
       }
@@ -1392,16 +1507,30 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
                 ]
               );
         let row = insertRes.rows[0];
-        if (storageSublocationVal !== null && row?.id) {
-          const subRes = await client.query(
-            `UPDATE pos_menu_items SET storage_sublocation = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
-            [storageSublocationVal, row.id, propId]
-          );
+        if ( (storageSublocationVal !== null || variantsVal.length > 0) && row?.id) {
+          const subRes = await client
+            .query(
+              `UPDATE pos_menu_items
+                  SET storage_sublocation = COALESCE($1, storage_sublocation),
+                      variants = $2::jsonb
+                WHERE id = $3 AND property_id = $4
+                RETURNING *`,
+              [storageSublocationVal, JSON.stringify(variantsVal), row.id, propId]
+            )
+            .catch(() => ({ rowCount: 0, rows: [] as any[] }));
           if ((subRes.rowCount ?? 0) > 0) {
             row = subRes.rows[0];
           } else {
-            row = { ...row, storage_sublocation: storageSublocationVal };
+            row = { ...row, storage_sublocation: storageSublocationVal, variants: variantsVal };
           }
+        }
+        if (finalCategoryId !== null && productTypeVal !== null) {
+          await client
+            .query(
+              `UPDATE pos_menu_categories SET product_type = $1 WHERE id = $2 AND property_id = $3 AND product_type IS NULL`,
+              [productTypeVal, finalCategoryId, propId]
+            )
+            .catch(() => {});
         }
         await client.query('COMMIT');
         res.status(201).json({
@@ -1411,6 +1540,7 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
             track_stock: trackStockVal,
             track_inventory: trackInventoryVal,
             storage_sublocation: storageSublocationVal,
+            variants: variantsVal,
             ...row,
             category_name: finalCategoryName,
           }),
@@ -1473,6 +1603,309 @@ export function createPosMenuItemDeactivateHandler(deps: PosMenuItemPatchDeps) {
         status: 'ERROR',
         code: err.code || 'INTERNAL_ERROR',
         message: statusCode === 500 ? 'Internal server error' : err.message
+      });
+    }
+  };
+}
+
+/**
+ * Handler produksi untuk POST /api/pos/menu/items/bulk-import.
+ * Mendukung import massal (.xlsx) untuk 4 tipe produk:
+ * - FINISHED_GOOD (Produk Jadi + Varian)
+ * - SEMI_FINISHED (Produk Setengah Jadi)
+ * - RAW_MATERIAL (Bahan Baku)
+ * - OPERATIONAL_ITEM (Item Operasional HK/Hotel)
+ */
+export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps) {
+  return async (req: any, res: any) => {
+    try {
+      const body = req.body || {};
+      const propertyId = Number(body.property_id ?? req.query?.property_id);
+      if (!Number.isInteger(propertyId) || propertyId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'property_id wajib berupa bilangan bulat positif',
+        });
+      }
+      await deps.assertPropertyScope(req, propertyId);
+
+      const rawItems = body.items;
+      if (!Array.isArray(rawItems) || rawItems.length === 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'items wajib berupa array non-kosong',
+        });
+      }
+      if (rawItems.length > 500) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'VALIDATION_ERROR',
+          message: 'Maksimal 500 baris produk per sekali proses import',
+        });
+      }
+
+      const client = await deps.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT id FROM properties WHERE id = $1 FOR UPDATE', [propertyId]);
+
+        let createdCount = 0;
+        let updatedCount = 0;
+        const errors: Array<{ row_index: number; name: string; message: string }> = [];
+
+        for (let idx = 0; idx < rawItems.length; idx++) {
+          const item = rawItems[idx] || {};
+          const rowIndex = Number(item.row_index ?? idx + 1);
+          const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+          if (!rawName) {
+            errors.push({ row_index: rowIndex, name: '-', message: 'Nama produk wajib diisi' });
+            continue;
+          }
+          if (rawName.length > 100) {
+            errors.push({ row_index: rowIndex, name: rawName, message: 'Nama produk maksimal 100 karakter' });
+            continue;
+          }
+
+          const ptParsed = parseProductTypeInput(item.product_type || 'FINISHED_GOOD');
+          const productTypeVal: ProductType =
+            ptParsed.ok && ptParsed.provided && ptParsed.value ? ptParsed.value : 'FINISHED_GOOD';
+
+          const isFinishedGood = productTypeVal === 'FINISHED_GOOD';
+          const effectiveSellablePos =
+            typeof item.is_sellable_pos === 'boolean' ? item.is_sellable_pos : isFinishedGood;
+          const trackStockVal =
+            typeof item.track_stock === 'boolean'
+              ? item.track_stock
+              : productTypeVal === 'RAW_MATERIAL' ||
+                productTypeVal === 'SEMI_FINISHED' ||
+                productTypeVal === 'OPERATIONAL_ITEM' ||
+                Boolean(item.track_stock);
+
+          const rawUnitStr =
+            typeof item.base_unit === 'string' && item.base_unit.trim() ? item.base_unit.trim() : 'PCS';
+          const matchedUnit =
+            matchCanonicalUnitByText(rawUnitStr) ||
+            getCanonicalUnitByCode(rawUnitStr) ||
+            getCanonicalUnitByCode('PCS')!;
+          const canonicalCode = matchedUnit.code;
+          const baseUnitLabel = matchedUnit.label_id;
+
+          const parsedVariants = isFinishedGood ? parseVariantsInput(item.variants) : { ok: true as const, provided: true as const, value: [] as ProductVariantItem[] };
+          const variantsVal: ProductVariantItem[] =
+            parsedVariants.ok && parsedVariants.provided ? parsedVariants.value : [];
+
+          let priceVal: number | null = null;
+          if (item.price !== undefined && item.price !== null && String(item.price).trim() !== '') {
+            const pNum = Math.round(Number(item.price));
+            if (Number.isFinite(pNum) && pNum >= 0) {
+              priceVal = pNum;
+            }
+          }
+          if (priceVal === null && isFinishedGood && variantsVal.length > 0) {
+            priceVal = variantsVal[0].price;
+          }
+          if (priceVal === null && effectiveSellablePos) {
+            priceVal = 0;
+          }
+
+          let costPriceVal: number | null = null;
+          if (item.cost_price !== undefined && item.cost_price !== null && String(item.cost_price).trim() !== '') {
+            const cNum = Number(item.cost_price);
+            if (Number.isFinite(cNum) && cNum >= 0) {
+              costPriceVal = cNum;
+            }
+          }
+
+          const rawCode =
+            typeof item.item_code === 'string' && item.item_code.trim() !== ''
+              ? item.item_code.trim().slice(0, 50).toUpperCase()
+              : null;
+          const rawBarcode =
+            typeof item.barcode === 'string' && item.barcode.trim() !== ''
+              ? item.barcode.trim().slice(0, 100)
+              : null;
+          const rawSublocation =
+            typeof item.storage_sublocation === 'string' && item.storage_sublocation.trim() !== ''
+              ? item.storage_sublocation.trim().slice(0, 100)
+              : null;
+          const rawCategoryName =
+            typeof item.category_name === 'string' && item.category_name.trim() !== ''
+              ? item.category_name.trim().slice(0, 100)
+              : null;
+
+          await client.query(`SAVEPOINT sp_import_${idx}`);
+          try {
+            // 1. Resolve or create Category
+            let categoryId: number | null = null;
+            if (rawCategoryName) {
+              const findCat = await client.query(
+                `SELECT id, product_type FROM pos_menu_categories WHERE property_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
+                [propertyId, rawCategoryName]
+              );
+              if ((findCat.rowCount ?? 0) > 0) {
+                categoryId = Number(findCat.rows[0].id);
+                if (!findCat.rows[0].product_type) {
+                  await client.query(
+                    `UPDATE pos_menu_categories SET product_type = $1 WHERE id = $2 AND property_id = $3`,
+                    [productTypeVal, categoryId, propertyId]
+                  );
+                }
+              } else {
+                const newCat = await client.query(
+                  `INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING id`,
+                  [propertyId, rawCategoryName, productTypeVal]
+                );
+                categoryId = Number(newCat.rows[0].id);
+              }
+            }
+
+            // 2. Check if item exists by item_code or (LOWER(name) + product_type)
+            let existingItem: any = null;
+            if (rawCode) {
+              const codeRes = await client.query(
+                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND UPPER(item_code) = $2 LIMIT 1`,
+                [propertyId, rawCode]
+              );
+              if ((codeRes.rowCount ?? 0) > 0) {
+                existingItem = codeRes.rows[0];
+              }
+            }
+            if (!existingItem) {
+              const nameRes = await client.query(
+                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND LOWER(name) = LOWER($2) ORDER BY id ASC LIMIT 1`,
+                [propertyId, rawName]
+              );
+              if ((nameRes.rowCount ?? 0) > 0) {
+                existingItem = nameRes.rows[0];
+              }
+            }
+
+            if (existingItem) {
+              // Update existing product safely
+              const lockStatus = await checkProductBaseUnitLockStatus(client, propertyId, Number(existingItem.id), {
+                forMutation: false,
+              });
+              const nextBaseUnit = lockStatus.isLocked ? existingItem.base_unit || baseUnitLabel : baseUnitLabel;
+              const nextCanonicalUnit = lockStatus.isLocked
+                ? existingItem.canonical_base_unit_code || canonicalCode
+                : canonicalCode;
+
+              await client.query(
+                `UPDATE pos_menu_items
+                    SET name = $1,
+                        category_id = COALESCE($2, category_id),
+                        item_code = COALESCE($3, item_code),
+                        barcode = COALESCE($4, barcode),
+                        price = $5,
+                        is_sellable_pos = $6,
+                        product_type = $7,
+                        base_unit = $8,
+                        canonical_base_unit_code = $9,
+                        track_stock = $10,
+                        track_inventory = $10,
+                        storage_sublocation = COALESCE($11, storage_sublocation),
+                        variants = $12::jsonb,
+                        average_cost = CASE WHEN $13::numeric IS NOT NULL AND COALESCE(average_cost, 0) = 0 THEN $13::numeric ELSE average_cost END,
+                        last_cost = COALESCE($13::numeric, last_cost)
+                  WHERE id = $14 AND property_id = $15`,
+                [
+                  rawName,
+                  categoryId,
+                  rawCode,
+                  rawBarcode,
+                  priceVal,
+                  effectiveSellablePos,
+                  productTypeVal,
+                  nextBaseUnit,
+                  nextCanonicalUnit,
+                  trackStockVal,
+                  rawSublocation,
+                  JSON.stringify(variantsVal),
+                  costPriceVal,
+                  existingItem.id,
+                  propertyId,
+                ]
+              );
+              if (rawSublocation) {
+                await client.query(
+                  `UPDATE stock_balances SET storage_sublocation = $1 WHERE property_id = $2 AND product_id = $3`,
+                  [rawSublocation, propertyId, existingItem.id]
+                );
+              }
+              updatedCount++;
+            } else {
+              const generatedCode =
+                rawCode || `PRD-${Date.now().toString().slice(-4)}-${idx + 1}`;
+              await client.query(
+                `INSERT INTO pos_menu_items (
+                   property_id, category_id, item_code, barcode, name,
+                   price, is_active, is_sellable_pos, product_type, product_kind,
+                   base_unit, canonical_base_unit_code, track_stock, track_inventory,
+                   storage_sublocation, variants, average_cost, last_cost
+                 ) VALUES (
+                   $1, $2, $3, $4, $5,
+                   $6, TRUE, $7, $8, 'STANDARD',
+                   $9, $10, $11, $11,
+                   $12, $13::jsonb, COALESCE($14::numeric, 0), COALESCE($14::numeric, 0)
+                 )`,
+                [
+                  propertyId,
+                  categoryId,
+                  generatedCode,
+                  rawBarcode,
+                  rawName,
+                  priceVal,
+                  effectiveSellablePos,
+                  productTypeVal,
+                  baseUnitLabel,
+                  canonicalCode,
+                  trackStockVal,
+                  rawSublocation,
+                  JSON.stringify(variantsVal),
+                  costPriceVal,
+                ]
+              );
+              createdCount++;
+            }
+            await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
+          } catch (rowErr: any) {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_import_${idx}`);
+            errors.push({
+              row_index: rowIndex,
+              name: rawName,
+              message: rowErr?.message || 'Gagal menyimpan baris produk',
+            });
+          }
+        }
+
+        await client.query('COMMIT');
+        return res.status(200).json({
+          status: 'OK',
+          data: {
+            created_count: createdCount,
+            updated_count: updatedCount,
+            failed_count: errors.length,
+            errors,
+          },
+        });
+      } catch (txErr) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // ignore
+        }
+        throw txErr;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err.code || 'INTERNAL_ERROR',
+        message: statusCode === 500 ? 'Internal server error' : err.message,
       });
     }
   };
