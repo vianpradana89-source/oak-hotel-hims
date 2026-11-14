@@ -135,7 +135,10 @@ export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, 
     menuKey === 'Penerimaan Barang' ||
     menuKey === 'Analisis Food Cost'
   ) {
-    return effective['Produk & Inventori']?.view?.allowed === true;
+    return (
+      effective['Master Produk']?.view?.allowed === true ||
+      effective['Produk & Inventori']?.view?.allowed === true
+    );
   }
   return effective[menuKey]?.view?.allowed === true;
 }
