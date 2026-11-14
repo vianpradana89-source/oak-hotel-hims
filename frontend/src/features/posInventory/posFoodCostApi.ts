@@ -2,6 +2,8 @@
  * OAK HIMS — MP-04E Food Cost & Menu Engineering Frontend API Client & Types
  */
 
+import { authenticatedFetch } from '../../lib/authenticatedFetch';
+
 export type FoodCostClassification =
   | 'LOW_COST'
   | 'HEALTHY'
@@ -132,12 +134,12 @@ export async function fetchProductFoodCostAnalysis(
   productId: number,
   propertyId: number = 1
 ): Promise<ProductFoodCostAnalysis> {
-  const res = await fetch(`/api/pos/products/${productId}/food-cost?property_id=${propertyId}`, {
+  const res = await authenticatedFetch(`/api/pos/products/${productId}/food-cost?property_id=${propertyId}`, {
     headers: { 'Content-Type': 'application/json' },
   });
   const body = await res.json();
   if (!res.ok || body.status !== 'OK') {
-    throw new Error(body.error || 'Gagal memuat analisis food cost produk');
+    throw new Error(body.error || body.message || 'Gagal memuat analisis food cost produk');
   }
   return body.data;
 }
@@ -155,12 +157,12 @@ export async function fetchFoodCostOverview(
   if (filters?.status && filters.status !== 'ALL') params.set('status', filters.status);
   if (filters?.search) params.set('search', filters.search);
 
-  const res = await fetch(`/api/pos/reports/food-cost-overview?${params.toString()}`, {
+  const res = await authenticatedFetch(`/api/pos/reports/food-cost-overview?${params.toString()}`, {
     headers: { 'Content-Type': 'application/json' },
   });
   const body = await res.json();
   if (!res.ok || body.status !== 'OK') {
-    throw new Error(body.error || 'Gagal memuat ikhtisar food cost');
+    throw new Error(body.error || body.message || 'Gagal memuat ikhtisar food cost');
   }
   return body.data;
 }
@@ -178,12 +180,12 @@ export async function fetchMenuEngineeringReport(
   if (filters?.endDate) params.set('end_date', filters.endDate);
   if (filters?.categoryId) params.set('category_id', String(filters.categoryId));
 
-  const res = await fetch(`/api/pos/reports/menu-engineering?${params.toString()}`, {
+  const res = await authenticatedFetch(`/api/pos/reports/menu-engineering?${params.toString()}`, {
     headers: { 'Content-Type': 'application/json' },
   });
   const body = await res.json();
   if (!res.ok || body.status !== 'OK') {
-    throw new Error(body.error || 'Gagal memuat laporan menu engineering');
+    throw new Error(body.error || body.message || 'Gagal memuat laporan menu engineering');
   }
   return body.data;
 }
