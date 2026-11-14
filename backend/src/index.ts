@@ -225,6 +225,7 @@ import {
   createInventoryValuationHandler,
   createOpnameVarianceHandler,
   createGlobalStockMovementsHandler,
+  createRemoveZeroStockBalanceHandler,
 } from './domains/pos/stockInventoryService';
 import {
   createPosProductUomsHandler,
@@ -6348,6 +6349,7 @@ app.patch('/api/pos/stock-locations/:id', createStockLocationPatchHandler({ pool
 // ── Master Produk: Manajemen Stok & Saldo Awal (MP-04B) ──────────────────────
 app.post('/api/pos/stock/opening-balance', createStockOpeningBalanceHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/balances', createStockBalancesHandler({ pool, assertPropertyScope }));
+app.delete('/api/pos/stock/balances', createRemoveZeroStockBalanceHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/purchase-receipt', createPurchaseReceiptHandler({ pool, assertPropertyScope }));
 app.get('/api/pos/stock/purchase-receipts', createPurchaseReceiptsQueryHandler({ pool, assertPropertyScope }));
 app.post('/api/pos/stock/adjustments', createStockAdjustmentHandler({ pool, assertPropertyScope }));

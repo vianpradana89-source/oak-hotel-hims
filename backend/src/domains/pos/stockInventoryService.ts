@@ -7561,4 +7561,132 @@ export async function deductStockForPosSale(
   };
 }
 
+/**
+ * Handler: DELETE /api/pos/stock/balances
+ * Menghapus baris saldo stok bernilai 0 (quantity = 0) dari suatu lokasi penyimpanan
+ * tanpa menghapus histori mutasi (stock_movements / Kartu Stok tetap utuh untuk jejak audit).
+ */
+export function createRemoveZeroStockBalanceHandler(deps: StockInventoryDeps) {
+  return async function handleRemoveZeroStockBalance(req: Request, res: Response) {
+    const propertyId = Number(req.query?.property_id ?? req.body?.property_id);
+    const productId = Number(req.query?.product_id ?? req.body?.product_id);
+    const locationId = Number(req.query?.location_id ?? req.body?.location_id);
+
+    if (!Number.isInteger(propertyId) || propertyId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'property_id wajib berupa bilangan bulat positif',
+      });
+    }
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'product_id wajib berupa bilangan bulat positif',
+      });
+    }
+    if (!Number.isInteger(locationId) || locationId <= 0) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'location_id wajib berupa bilangan bulat positif',
+      });
+    }
+
+    try {
+      await invokeAssertPropertyScope(deps.assertPropertyScope, req, res, propertyId);
+      if (res.headersSent) return;
+
+      const authUser = (req as any).user;
+      if (authUser) {
+        const canEdit = await checkInventoryPermission(
+          authUser,
+          ['inventory.edit', 'inventory.create'],
+          deps.pool
+        );
+        if (!canEdit) {
+          return res.status(403).json({
+            status: 'ERROR',
+            code: 'FORBIDDEN',
+            message: 'Akses ditolak: Memerlukan izin operasional inventory.edit',
+          });
+        }
+      }
+
+      const client = await deps.pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const balRes = await client.query(
+          `SELECT id, quantity
+             FROM stock_balances
+            WHERE property_id = $1
+              AND product_id = $2
+              AND location_id = $3
+            FOR UPDATE`,
+          [propertyId, productId, locationId]
+        );
+
+        if ((balRes.rowCount ?? 0) === 0) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({
+            status: 'ERROR',
+            code: 'STOCK_BALANCE_NOT_FOUND',
+            message: 'Data saldo produk pada lokasi ini tidak ditemukan.',
+          });
+        }
+
+        const row = balRes.rows[0];
+        const qty = parseFloat(String(row.quantity ?? '0'));
+        if (!Number.isFinite(qty) || Math.abs(qty) > 0.0001) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            status: 'ERROR',
+            code: 'NON_ZERO_STOCK_BALANCE',
+            message:
+              'Produk tidak dapat dihapus dari lokasi ini karena masih memiliki sisa stok tercatat. Lakukan Transfer Stok atau Penyesuaian Stok terlebih dahulu hingga saldo menjadi 0.',
+          });
+        }
+
+        await client.query(
+          `DELETE FROM stock_balances
+            WHERE id = $1
+              AND property_id = $2
+              AND quantity = 0`,
+          [row.id, propertyId]
+        );
+
+        await client.query('COMMIT');
+        return res.status(200).json({
+          status: 'OK',
+          data: {
+            removed: true,
+            property_id: propertyId,
+            product_id: productId,
+            location_id: locationId,
+          },
+        });
+      } catch (txErr) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // ignore rollback error
+        }
+        throw txErr;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      const statusCode = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code: err?.code || 'INTERNAL_ERROR',
+        message: err?.message || 'Gagal menghapus produk dari lokasi penyimpanan',
+      });
+    }
+  };
+}
+
+
 

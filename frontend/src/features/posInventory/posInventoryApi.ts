@@ -267,3 +267,27 @@ export async function fetchGlobalStockMovements(
   );
 }
 
+/**
+ * Menghapus produk bersaldo 0 (quantity = 0) dari suatu lokasi penyimpanan
+ * tanpa menghapus histori mutasi (Kartu Stok tetap tersimpan untuk audit).
+ */
+export async function removeZeroStockBalanceFromLocation(params: {
+  property_id: number;
+  product_id: number;
+  location_id: number;
+}): Promise<{ removed: boolean; property_id: number; product_id: number; location_id: number }> {
+  const qs = new URLSearchParams({
+    property_id: String(params.property_id),
+    product_id: String(params.product_id),
+    location_id: String(params.location_id),
+  });
+  const res = await authenticatedFetch(`/api/pos/stock/balances?${qs.toString()}`, {
+    method: 'DELETE',
+  });
+  return await handleResponse<{ removed: boolean; property_id: number; product_id: number; location_id: number }>(
+    res,
+    'Gagal menghapus produk dari lokasi penyimpanan'
+  );
+}
+
+

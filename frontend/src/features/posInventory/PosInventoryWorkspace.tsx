@@ -8,6 +8,7 @@ import { createPortal } from 'react-dom';
 import {
   fetchInventoryValuation,
   fetchStockLocations,
+  removeZeroStockBalanceFromLocation,
 } from './posInventoryApi';
 import type {
   StockLocation,
@@ -66,6 +67,9 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
   const [opnameItem, setOpnameItem] = useState<InventoryValuationItem | null>(null);
   const [transferItem, setTransferItem] = useState<InventoryValuationItem | null>(null);
   const [showOpeningBalanceModal, setShowOpeningBalanceModal] = useState<boolean>(false);
+  const [removeLocationItem, setRemoveLocationItem] = useState<InventoryValuationItem | null>(null);
+  const [removingLocationItem, setRemovingLocationItem] = useState<boolean>(false);
+  const [removeLocationError, setRemoveLocationError] = useState<string | null>(null);
 
   // Row Overflow Menu (⋮) state keyed by `${product_id}-${location_id}`
   const [openRowMenuKey, setOpenRowMenuKey] = useState<string | null>(null);
@@ -144,6 +148,8 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
     setOpnameItem(null);
     setTransferItem(null);
     setShowOpeningBalanceModal(false);
+    setRemoveLocationItem(null);
+    setRemoveLocationError(null);
   }, [activePropertyId]);
 
   // Auto-dismiss toast
@@ -743,6 +749,33 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
             >
               <span>Transfer Stok</span>
             </button>
+            <div className="my-1 border-t border-stone-100" />
+            {Math.abs(parseFloat(activeRowItem.quantity || '0')) <= 0.0001 ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpenRowMenuKey(null);
+                  setRowMenuCoords(null);
+                  setRemoveLocationError(null);
+                  setRemoveLocationItem(activeRowItem);
+                }}
+                className="w-full text-left px-3 py-2 font-semibold text-red-700 hover:bg-red-50 hover:text-red-900 flex items-center gap-2 transition-colors cursor-pointer"
+              >
+                <span>Hapus dari Lokasi Ini</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                disabled
+                title="Kosongkan stok terlebih dahulu lewat Transfer Stok atau Penyesuaian Stok sebelum menghapus produk dari lokasi ini."
+                className="w-full text-left px-3 py-2 font-medium text-stone-400 flex items-center justify-between gap-2 cursor-not-allowed"
+              >
+                <span>Hapus dari Lokasi Ini</span>
+                <span className="text-[10px] bg-stone-100 text-stone-500 px-1.5 py-0.5 rounded">Stok &gt; 0</span>
+              </button>
+            )}
           </div>,
           document.body
         );
@@ -835,6 +868,94 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
         }
         onSuccess={() => handleActionSuccess('Transfer stok antar lokasi berhasil dikirim!')}
       />
+
+      {/* Remove Zero-Stock Product from Location Confirmation Modal */}
+      {removeLocationItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remove-stock-location-title"
+            className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-md overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 id="remove-stock-location-title" className="text-sm font-bold text-gray-900">
+                Hapus Produk dari Lokasi Ini?
+              </h3>
+              <button
+                type="button"
+                disabled={removingLocationItem}
+                onClick={() => {
+                  setRemoveLocationItem(null);
+                  setRemoveLocationError(null);
+                }}
+                className="text-gray-400 hover:text-gray-600 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-6 space-y-3 text-xs text-gray-600">
+              {removeLocationError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 font-medium">
+                  {removeLocationError}
+                </div>
+              )}
+              <p>
+                Anda akan menghapus baris saldo{' '}
+                <strong className="text-gray-900">{removeLocationItem.product_name}</strong> dari lokasi{' '}
+                <strong className="text-gray-900">{removeLocationItem.location_name}</strong> (Stok tercatat:{' '}
+                <strong className="text-gray-900">
+                  {formatQty(removeLocationItem.quantity)} {removeLocationItem.base_unit_code}
+                </strong>
+                ).
+              </p>
+              <p className="text-[11px] text-gray-500 bg-gray-50 p-3 rounded-xl border border-gray-200/80">
+                Catatan: Produk di Master Barang &amp; Produk maupun histori di Riwayat Mutasi tetap tersimpan aman untuk audit, namun produk ini tidak lagi muncul di daftar lokasi{' '}
+                <strong>{removeLocationItem.location_name}</strong>.
+              </p>
+            </div>
+            <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={removingLocationItem}
+                onClick={() => {
+                  setRemoveLocationItem(null);
+                  setRemoveLocationError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 text-xs font-semibold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={removingLocationItem}
+                onClick={async () => {
+                  setRemovingLocationItem(true);
+                  setRemoveLocationError(null);
+                  try {
+                    await removeZeroStockBalanceFromLocation({
+                      property_id: activePropertyId,
+                      product_id: removeLocationItem.product_id,
+                      location_id: removeLocationItem.location_id,
+                    });
+                    const prodName = removeLocationItem.product_name;
+                    const locName = removeLocationItem.location_name;
+                    setRemoveLocationItem(null);
+                    handleActionSuccess(`Produk "${prodName}" berhasil dihapus dari lokasi ${locName}.`);
+                  } catch (err: any) {
+                    setRemoveLocationError(err?.message || 'Gagal menghapus produk dari lokasi ini');
+                  } finally {
+                    setRemovingLocationItem(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {removingLocationItem ? 'Menghapus...' : 'Ya, Hapus dari Lokasi Ini'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

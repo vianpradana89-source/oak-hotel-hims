@@ -72,7 +72,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/pos\/stock-locations(\/|$)/, resources: ['Master Produk', 'Transaksi', 'POS'], action: 'view', methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/pos\/stock-locations(\/|$)/, resources: ['Master Produk'] },
   { pattern: /^\/api\/pos\/(purchase-orders|goods-receipts|suppliers)(\/|$)/, resources: ['Transaksi', 'Master Produk', 'POS'] },
-  { pattern: /^\/api\/pos\/(inventory|reports|uoms|raw-materials|recipes|stock-movements|stock-balances|stock-adjustments|stock-opname|stock-transfers|stock-opening-balance|products|food-cost|units)(\/|$)/, resources: ['Master Produk', 'POS', 'Transaksi', 'Laporan'] },
+  { pattern: /^\/api\/pos\/(inventory|stock|reports|uoms|raw-materials|recipes|stock-movements|stock-balances|stock-adjustments|stock-opname|stock-transfers|stock-opening-balance|products|food-cost|units)(\/|$)/, resources: ['Master Produk', 'POS', 'Transaksi', 'Laporan'] },
   { pattern: /^\/api\/pos\/menu(\/|$)/, resources: ['POS', 'Master Produk', 'Transaksi'] },
   { pattern: /^\/api\/pos\/communication-settings$/, resources: ['POS', 'Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/pos\/communication-settings$/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
