@@ -29,6 +29,10 @@ export interface InventoryValuationItem {
   base_unit_code: string;
   quantity: string;
   unit_cost: string | null;
+  last_unit_cost?: string | null;
+  prev_unit_cost?: string | null;
+  cost_delta?: string | null;
+  cost_delta_pct?: number | null;
   total_value: string | null;
   cost_known?: boolean;
   cost_status?: 'KNOWN' | 'UNKNOWN';
@@ -74,6 +78,9 @@ export interface StockMovement {
   quantity_delta: string;
   running_balance: string;
   unit_cost: string | null;
+  prev_unit_cost?: string | null;
+  cost_delta?: string | null;
+  cost_delta_pct?: number | null;
   total_cost: string | null;
   reference_type: string | null;
   reference_id: string | null;
@@ -116,6 +123,12 @@ export interface StockLedgerCardData {
   total_in: string;
   total_out: string;
   closing_balance: string;
+  cost_summary?: {
+    min_unit_cost: string | null;
+    max_unit_cost: string | null;
+    last_unit_cost: string | null;
+    average_cost: string | null;
+  };
   movements: StockMovement[];
 }
 

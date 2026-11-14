@@ -62,6 +62,13 @@ function formatQty(value: number | string): string {
   return num.toLocaleString('id-ID', { maximumFractionDigits: 3 });
 }
 
+function formatIDR(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (!Number.isFinite(num)) return '—';
+  return 'Rp ' + Math.round(num).toLocaleString('id-ID');
+}
+
 export default function StockLedgerDrawer({
   isOpen,
   onClose,
@@ -124,7 +131,7 @@ export default function StockLedgerDrawer({
       <div
         role="dialog"
         aria-modal="true"
-        className="fixed inset-y-0 right-0 max-w-full w-full sm:w-[680px] bg-white shadow-2xl flex flex-col z-10 duration-200 border-l border-gray-200"
+        className="fixed inset-y-0 right-0 max-w-full w-full sm:w-[820px] bg-white shadow-2xl flex flex-col z-10 duration-200 border-l border-gray-200"
       >
         {/* Drawer Header */}
         <div className="px-6 py-4 bg-[#1b4332] text-white flex items-center justify-between shrink-0">
@@ -223,6 +230,36 @@ export default function StockLedgerDrawer({
           </div>
         )}
 
+        {/* Price Fluctuation Summary Strip */}
+        {ledgerData?.cost_summary && (
+          <div className="px-6 py-2.5 grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#faf9f5] border-b border-gray-200 shrink-0">
+            <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200/80">
+              <div className="text-[10px] font-semibold text-gray-500">Harga Terendah</div>
+              <div className="text-xs font-extrabold text-emerald-700 mt-0.5">
+                {formatIDR(ledgerData.cost_summary.min_unit_cost)}
+              </div>
+            </div>
+            <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200/80">
+              <div className="text-[10px] font-semibold text-gray-500">Harga Tertinggi</div>
+              <div className="text-xs font-extrabold text-rose-700 mt-0.5">
+                {formatIDR(ledgerData.cost_summary.max_unit_cost)}
+              </div>
+            </div>
+            <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200/80">
+              <div className="text-[10px] font-semibold text-gray-500">Harga Beli Terakhir</div>
+              <div className="text-xs font-extrabold text-gray-900 mt-0.5">
+                {formatIDR(ledgerData.cost_summary.last_unit_cost)}
+              </div>
+            </div>
+            <div className="px-3 py-1.5 bg-white rounded-lg border border-gray-200/80">
+              <div className="text-[10px] font-semibold text-gray-500">Rata-Rata (HPP)</div>
+              <div className="text-xs font-extrabold text-[#1b4332] mt-0.5">
+                {formatIDR(ledgerData.cost_summary.average_cost)}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Drawer Body: Chronological Movements Table */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {errorMsg && (
@@ -259,6 +296,8 @@ export default function StockLedgerDrawer({
                     <th className="px-3 py-2.5">Tipe Mutasi</th>
                     <th className="px-3 py-2.5">Referensi</th>
                     <th className="px-3 py-2.5 text-right">Mutasi</th>
+                    <th className="px-3 py-2.5 text-right">Harga Satuan</th>
+                    <th className="px-3 py-2.5 text-right">Selisih Harga</th>
                     <th className="px-3 py-2.5 text-right">Saldo</th>
                   </tr>
                 </thead>
@@ -276,6 +315,14 @@ export default function StockLedgerDrawer({
                       timeStyle: 'short',
                     });
 
+                    const unitCostNum =
+                      mov.unit_cost !== null && mov.unit_cost !== undefined ? parseFloat(mov.unit_cost) : null;
+                    const hasCost = unitCostNum !== null && Number.isFinite(unitCostNum) && unitCostNum > 0;
+                    const costDeltaNum =
+                      mov.cost_delta !== null && mov.cost_delta !== undefined ? parseFloat(mov.cost_delta) : null;
+                    const costDeltaPct =
+                      mov.cost_delta_pct !== null && mov.cost_delta_pct !== undefined ? mov.cost_delta_pct : null;
+
                     return (
                       <tr key={rowKey} className="hover:bg-gray-50/80 transition-colors">
                         <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap">
@@ -289,7 +336,7 @@ export default function StockLedgerDrawer({
                         <td className="px-3 py-2.5 text-gray-600">
                           <div className="font-medium font-mono text-[11px]">{refLabel}</div>
                           {mov.notes && (
-                            <div className="text-[10px] text-gray-400 truncate max-w-[160px]" title={mov.notes}>
+                            <div className="text-[10px] text-gray-400 truncate max-w-[140px]" title={mov.notes}>
                               {mov.notes}
                             </div>
                           )}
@@ -303,6 +350,40 @@ export default function StockLedgerDrawer({
                           isPositive ? 'text-emerald-700' : delta < 0 ? 'text-rose-700' : 'text-gray-500'
                         }`}>
                           {isPositive ? `+${formatQty(delta)}` : formatQty(delta)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-semibold text-gray-800 whitespace-nowrap">
+                          {hasCost ? formatIDR(unitCostNum) : <span className="text-gray-400">—</span>}
+                        </td>
+                        <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                          {isPositive && hasCost && rawType !== 'STOCK_TRANSFER_IN' && rawType !== 'STOCK_TRANSFER' ? (
+                            costDeltaNum === null ? (
+                              <span className="inline-block px-2 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
+                                Harga Awal
+                              </span>
+                            ) : Math.abs(costDeltaNum) < 0.01 ? (
+                              <span className="inline-block px-2 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
+                                Tetap (Rp 0)
+                              </span>
+                            ) : costDeltaNum > 0 ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200"
+                                title={`Naik dari pembelian sebelumnya (${formatIDR(mov.prev_unit_cost)})`}
+                              >
+                                ▲ +{formatIDR(costDeltaNum)}
+                                {costDeltaPct !== null ? ` (+${costDeltaPct}%)` : ''}
+                              </span>
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                title={`Turun dari pembelian sebelumnya (${formatIDR(mov.prev_unit_cost)})`}
+                              >
+                                ▼ -{formatIDR(Math.abs(costDeltaNum))}
+                                {costDeltaPct !== null ? ` (${costDeltaPct}%)` : ''}
+                              </span>
+                            )
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 text-right font-extrabold text-gray-900 whitespace-nowrap">
                           {formatQty(mov.running_balance)}

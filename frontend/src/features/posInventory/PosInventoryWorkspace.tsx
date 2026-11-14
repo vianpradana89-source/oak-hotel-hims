@@ -605,7 +605,31 @@ export default function PosInventoryWorkspace({ propertyId, onRefreshParent }: P
                       {/* Unit Cost */}
                       <td className="px-4 py-3 text-right text-gray-700 whitespace-nowrap">
                         {item.unit_cost !== null && item.unit_cost !== undefined && item.cost_status !== 'UNKNOWN' ? (
-                          formatIDR(item.unit_cost)
+                          <div>
+                            <div className="font-semibold text-gray-900">{formatIDR(item.unit_cost)}</div>
+                            {item.last_unit_cost && (
+                              <div className="text-[10px] text-gray-500 mt-0.5 flex items-center justify-end gap-1">
+                                <span>Terakhir: {formatIDR(item.last_unit_cost)}</span>
+                                {item.cost_delta !== null && item.cost_delta !== undefined && Math.abs(parseFloat(item.cost_delta)) >= 1 && (
+                                  parseFloat(item.cost_delta) > 0 ? (
+                                    <span
+                                      className="inline-flex items-center px-1 py-0.2 rounded text-[9px] font-bold bg-rose-50 text-rose-700 border border-rose-200"
+                                      title={`Naik ${formatIDR(item.cost_delta)} dibanding pembelian sebelumnya (${formatIDR(item.prev_unit_cost)})`}
+                                    >
+                                      ▲ +{formatIDR(item.cost_delta)}
+                                    </span>
+                                  ) : (
+                                    <span
+                                      className="inline-flex items-center px-1 py-0.2 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                      title={`Turun ${formatIDR(Math.abs(parseFloat(item.cost_delta)))} dibanding pembelian sebelumnya (${formatIDR(item.prev_unit_cost)})`}
+                                    >
+                                      ▼ -{formatIDR(Math.abs(parseFloat(item.cost_delta)))}
+                                    </span>
+                                  )
+                                )}
+                              </div>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-[11px] italic text-amber-700" title="Belum ada biaya perolehan terverifikasi">
                             Belum diketahui

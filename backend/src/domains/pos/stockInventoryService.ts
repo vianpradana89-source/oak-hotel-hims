@@ -5030,6 +5030,9 @@ export interface StockLedgerMovementItem {
   packaging_code: string | null;
   packaging_label: string | null;
   unit_cost: string | null;
+  prev_unit_cost?: string | null;
+  cost_delta?: string | null;
+  cost_delta_pct?: number | null;
   notes: string | null;
   created_by?: number | null;
   created_by_name?: string | null;
@@ -5059,6 +5062,12 @@ export interface StockLedgerCardResult {
   current_system_balance: string;
   total_in: string;
   total_out: string;
+  cost_summary?: {
+    min_unit_cost: string | null;
+    max_unit_cost: string | null;
+    last_unit_cost: string | null;
+    average_cost: string | null;
+  };
   movements: StockLedgerMovementItem[];
 }
 
@@ -5085,6 +5094,10 @@ export interface InventoryValuationItem {
   base_unit_code: string;
   quantity: string;
   unit_cost: string | null;
+  last_unit_cost?: string | null;
+  prev_unit_cost?: string | null;
+  cost_delta?: string | null;
+  cost_delta_pct?: number | null;
   total_value: string | null;
   cost_known?: boolean;
   cost_status?: 'KNOWN' | 'UNKNOWN';
@@ -5225,7 +5238,8 @@ export async function getStockLedgerCard(
 
   // 1. Validasi produk & lokasi
   const prodRes = await pool.query(
-    `SELECT id, property_id, name, item_code, canonical_base_unit_code, base_unit, track_stock
+    `SELECT id, property_id, name, item_code, canonical_base_unit_code, base_unit, track_stock,
+            average_cost, last_cost
        FROM pos_menu_items
       WHERE id = $1 AND property_id = $2`,
     [productId, propertyId]
@@ -5264,6 +5278,7 @@ export async function getStockLedgerCard(
 
   // 4. Opening Balance: Akumulasi seluruh pergerakan sebelum rentang tanggal
   let openingBalance = '0.000';
+  let priorPurchaseUnitCost: number | null = null;
   if (startBound) {
     const openRes = await pool.query(
       `SELECT COALESCE(SUM(quantity_delta), 0) AS opening_balance
@@ -5273,6 +5288,27 @@ export async function getStockLedgerCard(
       [propertyId, productId, locationId, startBound]
     );
     openingBalance = parseFloat(openRes.rows[0].opening_balance).toFixed(3);
+
+    const priorCostRes = await pool.query(
+      `SELECT sm.unit_cost
+         FROM stock_movements sm
+         JOIN stock_operations so ON so.id = sm.operation_id
+        WHERE sm.property_id = $1 AND sm.product_id = $2 AND sm.location_id = $3
+          AND sm.created_at < $4::timestamptz
+          AND sm.quantity_delta > 0
+          AND sm.unit_cost IS NOT NULL
+          AND sm.unit_cost > 0
+          AND so.operation_type IN ('OPENING_BALANCE', 'PURCHASE_RECEIPT', 'STOCK_ADJUSTMENT')
+        ORDER BY sm.created_at DESC, sm.id DESC
+        LIMIT 1`,
+      [propertyId, productId, locationId, startBound]
+    );
+    if ((priorCostRes.rowCount ?? 0) > 0 && priorCostRes.rows[0].unit_cost !== null) {
+      const pCost = parseFloat(String(priorCostRes.rows[0].unit_cost));
+      if (Number.isFinite(pCost) && pCost > 0) {
+        priorPurchaseUnitCost = pCost;
+      }
+    }
   }
 
   // 5. Riwayat mutasi dalam rentang
@@ -5325,6 +5361,10 @@ export async function getStockLedgerCard(
   let runningNum = parseFloat(openingBalance);
   let totalIn = 0;
   let totalOut = 0;
+  let runningPrevPurchaseCost = priorPurchaseUnitCost as number | null;
+  let minPurchaseCost = null as number | null;
+  let maxPurchaseCost = null as number | null;
+  let latestPurchaseCost = null as number | null;
 
   const movements: StockLedgerMovementItem[] = movRes.rows.map((row: any) => {
     const delta = parseFloat(row.quantity_delta);
@@ -5334,6 +5374,41 @@ export async function getStockLedgerCard(
       totalOut += Math.abs(delta);
     }
     runningNum += delta;
+
+    const hasUnitCost =
+      row.unit_cost !== null &&
+      row.unit_cost !== undefined &&
+      Number.isFinite(parseFloat(String(row.unit_cost)));
+    const unitCostNum = hasUnitCost ? parseFloat(String(row.unit_cost)) : null;
+
+    let prevUnitCostStr: string | null = null;
+    let costDeltaStr: string | null = null;
+    let costDeltaPct: number | null = null;
+
+    // Hitung selisih naik/turun harga pada transaksi stok masuk yang memiliki harga beli
+    const isIncomingWithCost =
+      delta > 0 &&
+      unitCostNum !== null &&
+      unitCostNum > 0 &&
+      row.operation_type !== 'STOCK_TRANSFER';
+
+    if (isIncomingWithCost && unitCostNum !== null) {
+      if (minPurchaseCost === null || unitCostNum < minPurchaseCost) {
+        minPurchaseCost = unitCostNum;
+      }
+      if (maxPurchaseCost === null || unitCostNum > maxPurchaseCost) {
+        maxPurchaseCost = unitCostNum;
+      }
+      latestPurchaseCost = unitCostNum;
+
+      if (runningPrevPurchaseCost !== null && runningPrevPurchaseCost > 0) {
+        const diff = unitCostNum - runningPrevPurchaseCost;
+        prevUnitCostStr = runningPrevPurchaseCost.toFixed(2);
+        costDeltaStr = diff.toFixed(2);
+        costDeltaPct = Math.round((diff / runningPrevPurchaseCost) * 1000) / 10;
+      }
+      runningPrevPurchaseCost = unitCostNum;
+    }
 
     return {
       id: Number(row.movement_id),
@@ -5352,7 +5427,10 @@ export async function getStockLedgerCard(
       packaging_id: row.packaging_id ? Number(row.packaging_id) : null,
       packaging_code: row.packaging_code ?? null,
       packaging_label: row.packaging_label ?? null,
-      unit_cost: row.unit_cost !== null && row.unit_cost !== undefined ? parseFloat(row.unit_cost).toFixed(2) : null,
+      unit_cost: unitCostNum !== null ? unitCostNum.toFixed(2) : null,
+      prev_unit_cost: prevUnitCostStr,
+      cost_delta: costDeltaStr,
+      cost_delta_pct: costDeltaPct,
       notes: row.notes ?? null,
       created_by: row.created_by ? Number(row.created_by) : null,
       created_by_name: row.created_by_name ?? null,
@@ -5361,6 +5439,16 @@ export async function getStockLedgerCard(
   });
 
   const closingBalance = runningNum.toFixed(3);
+  const masterAvgCost =
+    product.average_cost !== null && product.average_cost !== undefined && parseFloat(String(product.average_cost)) > 0
+      ? parseFloat(String(product.average_cost)).toFixed(2)
+      : null;
+  const masterLastCost =
+    latestPurchaseCost !== null
+      ? (latestPurchaseCost as number).toFixed(2)
+      : product.last_cost !== null && product.last_cost !== undefined && parseFloat(String(product.last_cost)) > 0
+        ? parseFloat(String(product.last_cost)).toFixed(2)
+        : masterAvgCost;
 
   return {
     property_id: propertyId,
@@ -5385,6 +5473,12 @@ export async function getStockLedgerCard(
     current_system_balance: currentSystemBalance,
     total_in: totalIn.toFixed(3),
     total_out: totalOut.toFixed(3),
+    cost_summary: {
+      min_unit_cost: minPurchaseCost !== null ? (minPurchaseCost as number).toFixed(2) : masterLastCost,
+      max_unit_cost: maxPurchaseCost !== null ? (maxPurchaseCost as number).toFixed(2) : masterLastCost,
+      last_unit_cost: masterLastCost,
+      average_cost: masterAvgCost,
+    },
     movements,
   };
 }
@@ -5527,7 +5621,37 @@ export async function getInventoryValuationReport(
           )
         ) THEN pmi.average_cost
         ELSE NULL
-      END AS unit_cost
+      END AS unit_cost,
+      COALESCE(
+        (
+          SELECT sm_last.unit_cost
+            FROM stock_movements sm_last
+            JOIN stock_operations so_last ON so_last.id = sm_last.operation_id
+           WHERE sm_last.property_id = sb.property_id
+             AND sm_last.product_id = sb.product_id
+             AND sm_last.quantity_delta > 0
+             AND sm_last.unit_cost IS NOT NULL
+             AND sm_last.unit_cost > 0
+             AND so_last.operation_type IN ('OPENING_BALANCE', 'PURCHASE_RECEIPT', 'STOCK_ADJUSTMENT')
+           ORDER BY sm_last.created_at DESC, sm_last.id DESC
+           LIMIT 1
+        ),
+        NULLIF(pmi.last_cost, 0)
+      ) AS last_unit_cost,
+      (
+        SELECT sm_prev_in.unit_cost
+          FROM stock_movements sm_prev_in
+          JOIN stock_operations so_prev_in ON so_prev_in.id = sm_prev_in.operation_id
+         WHERE sm_prev_in.property_id = sb.property_id
+           AND sm_prev_in.product_id = sb.product_id
+           AND sm_prev_in.quantity_delta > 0
+           AND sm_prev_in.unit_cost IS NOT NULL
+           AND sm_prev_in.unit_cost > 0
+           AND so_prev_in.operation_type IN ('OPENING_BALANCE', 'PURCHASE_RECEIPT', 'STOCK_ADJUSTMENT')
+         ORDER BY sm_prev_in.created_at DESC, sm_prev_in.id DESC
+         OFFSET 1
+         LIMIT 1
+      ) AS prev_unit_cost
     FROM stock_balances sb
     JOIN pos_menu_items pmi ON pmi.id = sb.product_id AND pmi.property_id = sb.property_id
     JOIN stock_locations sl ON sl.id = sb.location_id AND sl.property_id = sb.property_id
@@ -5565,6 +5689,29 @@ export async function getInventoryValuationReport(
       unknownCostItems++;
     }
 
+    const lastCostNum =
+      row.last_unit_cost !== null &&
+      row.last_unit_cost !== undefined &&
+      Number.isFinite(parseFloat(String(row.last_unit_cost))) &&
+      parseFloat(String(row.last_unit_cost)) > 0
+        ? parseFloat(String(row.last_unit_cost))
+        : null;
+    const prevCostNum =
+      row.prev_unit_cost !== null &&
+      row.prev_unit_cost !== undefined &&
+      Number.isFinite(parseFloat(String(row.prev_unit_cost))) &&
+      parseFloat(String(row.prev_unit_cost)) > 0
+        ? parseFloat(String(row.prev_unit_cost))
+        : null;
+
+    let costDeltaStr: string | null = null;
+    let costDeltaPct: number | null = null;
+    if (lastCostNum !== null && prevCostNum !== null && prevCostNum > 0) {
+      const diff = lastCostNum - prevCostNum;
+      costDeltaStr = diff.toFixed(2);
+      costDeltaPct = Math.round((diff / prevCostNum) * 1000) / 10;
+    }
+
     return {
       balance_id: Number(row.balance_id),
       property_id: Number(row.property_id),
@@ -5580,6 +5727,10 @@ export async function getInventoryValuationReport(
       base_unit_code: row.base_unit_code,
       quantity: qty.toFixed(3),
       unit_cost: unitCostStr,
+      last_unit_cost: lastCostNum !== null ? lastCostNum.toFixed(2) : null,
+      prev_unit_cost: prevCostNum !== null ? prevCostNum.toFixed(2) : null,
+      cost_delta: costDeltaStr,
+      cost_delta_pct: costDeltaPct,
       total_value: totalValueStr,
       cost_known: hasKnownCost,
       cost_status: hasKnownCost ? 'KNOWN' : 'UNKNOWN',
