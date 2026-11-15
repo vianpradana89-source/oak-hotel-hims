@@ -1654,6 +1654,10 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
         });
       }
 
+      const rawMode = String(body.import_mode || body.mode || 'UPSERT').trim().toUpperCase();
+      const importMode: 'UPSERT' | 'CREATE_ONLY' | 'UPDATE_ONLY' =
+        rawMode === 'CREATE_ONLY' ? 'CREATE_ONLY' : rawMode === 'UPDATE_ONLY' ? 'UPDATE_ONLY' : 'UPSERT';
+
       const client = await deps.pool.connect();
       try {
         await client.query('BEGIN');
@@ -1661,12 +1665,15 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
 
         let createdCount = 0;
         let updatedCount = 0;
+        let skippedCount = 0;
+        const seenCodesInBatch = new Set<string>();
+        const seenNamesInBatch = new Set<string>();
         const errors: Array<{ row_index: number; name: string; message: string }> = [];
 
         for (let idx = 0; idx < rawItems.length; idx++) {
           const item = rawItems[idx] || {};
           const rowIndex = Number(item.row_index ?? idx + 1);
-          const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+          const rawName = typeof item.name === 'string' ? item.name.replace(/\s+/g, ' ').trim() : '';
           if (!rawName) {
             errors.push({ row_index: rowIndex, name: '-', message: 'Nama produk wajib diisi' });
             continue;
@@ -1744,9 +1751,55 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               ? item.category_name.trim().slice(0, 100)
               : null;
 
+          const normalizedNameKey = rawName.toLowerCase();
+          if ((rawCode && seenCodesInBatch.has(rawCode)) || seenNamesInBatch.has(normalizedNameKey)) {
+            skippedCount++;
+            continue;
+          }
+          if (rawCode) seenCodesInBatch.add(rawCode);
+          seenNamesInBatch.add(normalizedNameKey);
+
           await client.query(`SAVEPOINT sp_import_${idx}`);
           try {
-            // 1. Resolve or create Category strictly per product_type
+            // 1. Check if item exists by item_code or normalized name among non-deleted items
+            let existingItem: any = null;
+            if (rawCode) {
+              const codeRes = await client.query(
+                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND COALESCE(is_deleted, FALSE) = FALSE AND UPPER(BTRIM(item_code)) = $2 LIMIT 1`,
+                [propertyId, rawCode]
+              );
+              if ((codeRes.rowCount ?? 0) > 0) {
+                existingItem = codeRes.rows[0];
+              }
+            }
+            if (!existingItem) {
+              const nameRes = await client.query(
+                `SELECT * FROM pos_menu_items
+                  WHERE property_id = $1
+                    AND COALESCE(is_deleted, FALSE) = FALSE
+                    AND LOWER(REGEXP_REPLACE(BTRIM(name), '\\s+', ' ', 'g')) = LOWER($2)
+                  ORDER BY CASE WHEN COALESCE(product_type, 'FINISHED_GOOD') = $3 THEN 0 ELSE 1 END, id ASC
+                  LIMIT 1`,
+                [propertyId, rawName, productTypeVal]
+              );
+              if ((nameRes.rowCount ?? 0) > 0) {
+                existingItem = nameRes.rows[0];
+              }
+            }
+
+            // 2. Enforce import_mode rules before mutating categories or items
+            if (existingItem && importMode === 'CREATE_ONLY') {
+              skippedCount++;
+              await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
+              continue;
+            }
+            if (!existingItem && importMode === 'UPDATE_ONLY') {
+              skippedCount++;
+              await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
+              continue;
+            }
+
+            // 3. Resolve or create Category strictly per product_type
             let categoryId: number | null = null;
             if (rawCategoryName) {
               const findCat = await client.query(
@@ -1766,27 +1819,6 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                   [propertyId, rawCategoryName, productTypeVal]
                 );
                 categoryId = Number(newCat.rows[0].id);
-              }
-            }
-
-            // 2. Check if item exists by item_code or (LOWER(name) + product_type) among non-deleted items
-            let existingItem: any = null;
-            if (rawCode) {
-              const codeRes = await client.query(
-                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND COALESCE(is_deleted, FALSE) = FALSE AND UPPER(item_code) = $2 LIMIT 1`,
-                [propertyId, rawCode]
-              );
-              if ((codeRes.rowCount ?? 0) > 0) {
-                existingItem = codeRes.rows[0];
-              }
-            }
-            if (!existingItem) {
-              const nameRes = await client.query(
-                `SELECT * FROM pos_menu_items WHERE property_id = $1 AND COALESCE(is_deleted, FALSE) = FALSE AND LOWER(name) = LOWER($2) AND COALESCE(product_type, 'FINISHED_GOOD') = $3 ORDER BY id ASC LIMIT 1`,
-                [propertyId, rawName, productTypeVal]
-              );
-              if ((nameRes.rowCount ?? 0) > 0) {
-                existingItem = nameRes.rows[0];
               }
             }
 
@@ -1892,8 +1924,10 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
         return res.status(200).json({
           status: 'OK',
           data: {
+            import_mode: importMode,
             created_count: createdCount,
             updated_count: updatedCount,
+            skipped_count: skippedCount,
             failed_count: errors.length,
             errors,
           },

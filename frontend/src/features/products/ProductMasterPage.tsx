@@ -738,6 +738,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   });
   const [showExcelImportModal, setShowExcelImportModal] = useState(false);
   const [excelImportRows, setExcelImportRows] = useState<ParsedExcelProductRow[]>([]);
+  const [excelImportMode, setExcelImportMode] = useState<'UPSERT' | 'CREATE_ONLY' | 'UPDATE_ONLY'>('UPSERT');
   const [excelImportFileName, setExcelImportFileName] = useState<string>('');
   const [excelImportError, setExcelImportError] = useState<string | null>(null);
   const [excelImportLoading, setExcelImportLoading] = useState(false);
@@ -2087,9 +2088,69 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
   const openExcelImportModal = () => {
     setExcelImportError(null);
     setExcelImportRows([]);
+    setExcelImportMode('UPSERT');
     setExcelImportFileName('');
     setShowExcelImportModal(true);
   };
+
+  const excelImportPreviewAnalysis = useMemo(() => {
+    const existingCodes = new Set<string>();
+    const existingNames = new Set<string>();
+    for (const it of items) {
+      if (it.item_code && String(it.item_code).trim()) {
+        existingCodes.add(String(it.item_code).trim().toUpperCase());
+      }
+      if (it.name && String(it.name).trim()) {
+        existingNames.add(String(it.name).replace(/\s+/g, ' ').trim().toLowerCase());
+      }
+    }
+
+    const seenFileCodes = new Set<string>();
+    const seenFileNames = new Set<string>();
+    let newCount = 0;
+    let updateCount = 0;
+    let skipCount = 0;
+
+    const rowStatuses = excelImportRows.map((r) => {
+      const codeKey = r.sku ? String(r.sku).trim().toUpperCase() : '';
+      const nameKey = String(r.name || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      if ((codeKey && seenFileCodes.has(codeKey)) || (nameKey && seenFileNames.has(nameKey))) {
+        skipCount++;
+        return 'DUPLICATE_IN_FILE' as const;
+      }
+      if (codeKey) seenFileCodes.add(codeKey);
+      if (nameKey) seenFileNames.add(nameKey);
+
+      const existsInDb =
+        (codeKey !== '' && existingCodes.has(codeKey)) ||
+        (nameKey !== '' && existingNames.has(nameKey));
+
+      if (existsInDb) {
+        if (excelImportMode === 'CREATE_ONLY') {
+          skipCount++;
+          return 'SKIP_EXISTING' as const;
+        }
+        updateCount++;
+        return 'UPDATE' as const;
+      }
+
+      if (excelImportMode === 'UPDATE_ONLY') {
+        skipCount++;
+        return 'SKIP_MISSING' as const;
+      }
+      newCount++;
+      return 'NEW' as const;
+    });
+
+    return {
+      rowStatuses,
+      newCount,
+      updateCount,
+      skipCount,
+      actionableCount: newCount + updateCount,
+    };
+  }, [excelImportRows, excelImportMode, items]);
 
   const handleExcelFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2120,10 +2181,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: targetPropertyId,
+          import_mode: excelImportMode,
           rows: excelImportRows.map((r) => ({
             sku: r.sku || null,
             barcode: r.barcode || null,
-            name: r.name,
+            name: String(r.name || '').replace(/\s+/g, ' ').trim(),
             product_type: r.product_type,
             category_name: r.category_name || null,
             base_unit: r.base_unit || 'PCS',
@@ -2142,14 +2204,15 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const data = (json as any)?.data || {};
       const created = Number(data.created_count || 0);
       const updated = Number(data.updated_count || 0);
+      const skipped = Number(data.skipped_count || 0);
       const failed = Number(data.failed_count || 0);
       setShowExcelImportModal(false);
       setExcelImportRows([]);
       setExcelImportFileName('');
       setSuccessMsg(
         `Import Excel selesai: ${created} produk baru ditambahkan, ${updated} produk diperbarui${
-          failed > 0 ? ` (${failed} baris dilewati)` : ''
-        }.`
+          skipped > 0 ? `, ${skipped} baris dilewati` : ''
+        }${failed > 0 ? ` (${failed} gagal)` : ''}.`
       );
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
       await loadProducts(curSf, curPid ?? targetPropertyId);
@@ -5399,16 +5462,96 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                 </div>
               </div>
 
+              {/* Pilih Mode Import (Anti-Duplikat) */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
+                <div className="flex items-start gap-2.5">
+                  <span className="w-6 h-6 rounded-full bg-indigo-700 text-white text-xs font-extrabold flex items-center justify-center shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <div>
+                    <div className="text-sm font-bold text-gray-900">Pilih Mode Import (Anti-Duplikat)</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Tentukan cara sistem memproses produk yang namanya atau kode SKU-nya sudah ada di database:
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-2 pt-1">
+                  <label
+                    className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer transition-colors ${
+                      excelImportMode === 'UPSERT'
+                        ? 'bg-emerald-50/80 border-emerald-500 text-emerald-950'
+                        : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="excelImportMode"
+                      checked={excelImportMode === 'UPSERT'}
+                      onChange={() => setExcelImportMode('UPSERT')}
+                      className="mt-0.5 accent-emerald-700"
+                    />
+                    <div>
+                      <div className="font-bold">Tambah &amp; Perbarui Otomatis (Default — Disarankan)</div>
+                      <div className="text-[11px] text-gray-600 mt-0.5">
+                        Produk yang belum ada akan <strong>ditambahkan baru</strong>, sedangkan produk dengan SKU atau Nama yang sudah ada akan <strong>diperbarui (update)</strong> tanpa membuat duplikat.
+                      </div>
+                    </div>
+                  </label>
+                  <label
+                    className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer transition-colors ${
+                      excelImportMode === 'CREATE_ONLY'
+                        ? 'bg-emerald-50/80 border-emerald-500 text-emerald-950'
+                        : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="excelImportMode"
+                      checked={excelImportMode === 'CREATE_ONLY'}
+                      onChange={() => setExcelImportMode('CREATE_ONLY')}
+                      className="mt-0.5 accent-emerald-700"
+                    />
+                    <div>
+                      <div className="font-bold">Hanya Tambah Produk Baru (Lewati yang Sudah Ada)</div>
+                      <div className="text-[11px] text-gray-600 mt-0.5">
+                        Hanya menyimpan produk yang benar-benar baru. Produk yang namanya atau SKU-nya sudah terdaftar akan <strong>dilewati otomatis</strong> (tidak duplikat &amp; tidak mengubah data lama).
+                      </div>
+                    </div>
+                  </label>
+                  <label
+                    className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer transition-colors ${
+                      excelImportMode === 'UPDATE_ONLY'
+                        ? 'bg-emerald-50/80 border-emerald-500 text-emerald-950'
+                        : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="excelImportMode"
+                      checked={excelImportMode === 'UPDATE_ONLY'}
+                      onChange={() => setExcelImportMode('UPDATE_ONLY')}
+                      className="mt-0.5 accent-emerald-700"
+                    />
+                    <div>
+                      <div className="font-bold">Hanya Edit / Perbarui Produk yang Sudah Ada</div>
+                      <div className="text-[11px] text-gray-600 mt-0.5">
+                        Khusus revisi harga/kategori/varian massal. Baris yang namanya atau SKU-nya tidak ditemukan di database akan <strong>dilewati</strong> (0% risiko produk baru akibat salah ketik).
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
               {/* Pratinjau File Excel bila sudah dipilih */}
               {excelImportRows.length > 0 && (
                 <div className="p-4 rounded-2xl bg-amber-50/70 border border-amber-300 space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <div className="text-xs font-extrabold text-amber-950">
-                        File Siap Diimport: {excelImportFileName} ({excelImportRows.length} baris produk)
+                        File Siap Diimport: {excelImportFileName} ({excelImportRows.length} baris di Excel)
                       </div>
                       <div className="text-[11px] text-amber-800">
-                        Periksa ringkasan di bawah lalu klik <strong>Simpan Import ({excelImportRows.length} Produk)</strong>.
+                        Periksa status tiap baris di bawah lalu klik <strong>Simpan Import ({excelImportPreviewAnalysis.actionableCount} Produk)</strong>.
                       </div>
                     </div>
                     <button
@@ -5422,10 +5565,24 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Reset
                     </button>
                   </div>
-                  <div className="max-h-44 overflow-y-auto bg-white rounded-xl border border-amber-200">
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                      🟢 {excelImportPreviewAnalysis.newCount} Produk Baru
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-300">
+                      🔵 {excelImportPreviewAnalysis.updateCount} Akan Diperbarui
+                    </span>
+                    {excelImportPreviewAnalysis.skipCount > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                        🟡 {excelImportPreviewAnalysis.skipCount} Dilewati / Duplikat
+                      </span>
+                    )}
+                  </div>
+                  <div className="max-h-48 overflow-y-auto bg-white rounded-xl border border-amber-200">
                     <table className="w-full text-left text-[11px]">
                       <thead className="bg-amber-50 text-amber-950 font-bold border-b border-amber-200 sticky top-0">
                         <tr>
+                          <th className="py-1.5 px-2.5">Status</th>
                           <th className="py-1.5 px-2.5">SKU</th>
                           <th className="py-1.5 px-2.5">Nama Item</th>
                           <th className="py-1.5 px-2.5">Jenis</th>
@@ -5437,35 +5594,69 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {excelImportRows.map((r, i) => (
-                          <tr key={i}>
-                            <td className="py-1.5 px-2.5 font-mono text-gray-600">{r.sku || 'Otomatis'}</td>
-                            <td className="py-1.5 px-2.5 font-semibold text-gray-900">{r.name}</td>
-                            <td className="py-1.5 px-2.5">{formatProductTypeLabel(r.product_type)}</td>
-                            <td className="py-1.5 px-2.5">{r.category_name || '—'}</td>
-                            <td className="py-1.5 px-2.5 font-mono">{r.base_unit}</td>
-                            <td className="py-1.5 px-2.5">{r.storage_sublocation || '—'}</td>
-                            <td className="py-1.5 px-2.5 text-right font-mono">
-                              {r.price != null ? formatIDR(r.price) : '—'}
-                            </td>
-                            <td className="py-1.5 px-2.5">
-                              {r.variants.length > 0
-                                ? r.variants.map((v) => `${v.name} (${formatIDR(v.price)})`).join(', ')
-                                : '—'}
-                            </td>
-                          </tr>
-                        ))}
+                        {excelImportRows.map((r, i) => {
+                          const rowStatus = excelImportPreviewAnalysis.rowStatuses[i] ?? 'NEW';
+                          const isSkipped =
+                            rowStatus === 'SKIP_EXISTING' ||
+                            rowStatus === 'SKIP_MISSING' ||
+                            rowStatus === 'DUPLICATE_IN_FILE';
+                          return (
+                            <tr key={i} className={isSkipped ? 'bg-gray-50/80 opacity-65' : ''}>
+                              <td className="py-1.5 px-2.5 whitespace-nowrap">
+                                {rowStatus === 'NEW' && (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-extrabold text-[10px]">
+                                    BARU
+                                  </span>
+                                )}
+                                {rowStatus === 'UPDATE' && (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 font-extrabold text-[10px]">
+                                    UPDATE
+                                  </span>
+                                )}
+                                {rowStatus === 'SKIP_EXISTING' && (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                    SUDAH ADA (DILEWATI)
+                                  </span>
+                                )}
+                                {rowStatus === 'SKIP_MISSING' && (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                    BELUM ADA (DILEWATI)
+                                  </span>
+                                )}
+                                {rowStatus === 'DUPLICATE_IN_FILE' && (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 font-bold text-[10px]">
+                                    DUPLIKAT DI EXCEL
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-2.5 font-mono text-gray-600">{r.sku || 'Otomatis'}</td>
+                              <td className="py-1.5 px-2.5 font-semibold text-gray-900">{r.name}</td>
+                              <td className="py-1.5 px-2.5">{formatProductTypeLabel(r.product_type)}</td>
+                              <td className="py-1.5 px-2.5">{r.category_name || '—'}</td>
+                              <td className="py-1.5 px-2.5 font-mono">{r.base_unit}</td>
+                              <td className="py-1.5 px-2.5">{r.storage_sublocation || '—'}</td>
+                              <td className="py-1.5 px-2.5 text-right font-mono">
+                                {r.price != null ? formatIDR(r.price) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2.5">
+                                {r.variants.length > 0
+                                  ? r.variants.map((v) => `${v.name} (${formatIDR(v.price)})`).join(', ')
+                                  : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                 </div>
               )}
 
-              {/* Section 2: Format Kolom yang Didukung */}
+              {/* Section 3: Format Kolom yang Didukung */}
               <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 space-y-3">
                 <div className="flex items-start gap-2.5">
                   <span className="w-6 h-6 rounded-full bg-slate-700 text-white text-xs font-extrabold flex items-center justify-center shrink-0 mt-0.5">
-                    2
+                    3
                   </span>
                   <div>
                     <div className="text-sm font-bold text-gray-900">Format Kolom yang Didukung</div>
@@ -5589,13 +5780,13 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
               {excelImportRows.length > 0 && (
                 <button
                   type="button"
-                  disabled={excelImportLoading}
+                  disabled={excelImportLoading || excelImportPreviewAnalysis.actionableCount === 0}
                   onClick={handleBulkExcelImportSubmit}
                   className="px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold shadow-xs cursor-pointer disabled:opacity-50"
                 >
                   {excelImportLoading
                     ? 'Mengimpor…'
-                    : `Simpan Import (${excelImportRows.length} Produk)`}
+                    : `Simpan Import (${excelImportPreviewAnalysis.actionableCount} Produk)`}
                 </button>
               )}
             </div>
