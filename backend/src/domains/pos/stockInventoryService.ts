@@ -7423,6 +7423,12 @@ export interface DeductStockForPosSaleParams {
   propertyId: number;
   orderId: number;
   locationId?: number | null;
+  /**
+   * Lokasi stok khusus untuk bahan baku (BOM/resep).
+   * Bila absent, ingredients memakai lokasi yang sama dengan finished goods.
+   * Default resolution bila absent: KITCHEN pertama aktif.
+   */
+  kitchenLocationId?: number | null;
   saleTransactionNo?: string | null;
   actorUserId?: string | null;
   actorName?: string | null;
@@ -7708,6 +7714,45 @@ export async function deductStockForPosSale(
     );
   }
 
+  // 4b. Resolusi lokasi khusus bahan baku (BOM/resep)
+  // ingredients dipotong dari kitchen location (default KITCHEN pertama aktif),
+  // kecuali params.kitchenLocationId diberikan eksplisit.
+  let ingredientLocationId: number;
+  if (params.kitchenLocationId && Number.isInteger(Number(params.kitchenLocationId)) && Number(params.kitchenLocationId) > 0) {
+    ingredientLocationId = Number(params.kitchenLocationId);
+    // Validasi lokasi kitchen
+    const ingLocValRes = await client.query(
+      `SELECT id, is_active, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
+      [ingredientLocationId, propertyId]
+    );
+    if (ingLocValRes.rowCount === 0) {
+      throw Object.assign(
+        new Error(`Lokasi kitchen #${ingredientLocationId} tidak ditemukan pada properti #${propertyId}`),
+        { statusCode: 404, code: 'LOCATION_NOT_FOUND' }
+      );
+    }
+    if (!ingLocValRes.rows[0].is_active) {
+      throw Object.assign(
+        new Error(`Lokasi kitchen "${ingLocValRes.rows[0].name}" sedang tidak aktif`),
+        { statusCode: 400, code: 'LOCATION_INACTIVE' }
+      );
+    }
+  } else {
+    // Default: KITCHEN pertama aktif, atau fallback ke targetLocationId bila tidak ada KITCHEN
+    const kitchenLocRes = await client.query(
+      `SELECT id FROM stock_locations
+        WHERE property_id = $1 AND is_active = TRUE AND location_type = 'KITCHEN'
+        ORDER BY id ASC LIMIT 1`,
+      [propertyId]
+    );
+    if (kitchenLocRes.rows.length > 0) {
+      ingredientLocationId = Number(kitchenLocRes.rows[0].id);
+    } else {
+      // Fallback: pakai lokasi target (POS_OUTLET default) — backward compat
+      ingredientLocationId = targetLocationId;
+    }
+  }
+
   // Urutkan berdasarkan product_id menaik untuk mencegah deadlock saat konkurensi tinggi
   const sortedItems = Array.from(aggregatedMap.values()).sort((a, b) => a.product_id - b.product_id);
 
@@ -7720,19 +7765,22 @@ export async function deductStockForPosSale(
     is_ingredient: boolean;
     currentBalance: number;
     unitCost: number | null;
+    targetLoc: number;
   }[] = [];
 
   for (const item of sortedItems) {
+    const itemLoc = item.is_ingredient ? ingredientLocationId : targetLocationId;
     const balRes = await client.query(
       `SELECT quantity FROM stock_balances
         WHERE property_id = $1 AND product_id = $2 AND location_id = $3
         FOR UPDATE`,
-      [propertyId, item.product_id, targetLocationId]
+      [propertyId, item.product_id, itemLoc]
     );
     const currentBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity) : 0;
     if (currentBalance < item.quantity - 0.000001) {
       const curFormatted = currentBalance.toFixed(3);
       const reqFormatted = item.quantity.toFixed(3);
+      const locLabel = itemLoc === targetLocationId ? targetLocationId : ingredientLocationId;
       throw Object.assign(
         new Error(
           `Saldo persediaan tidak mencukupi untuk ${item.is_ingredient ? 'bahan baku' : 'produk'} "${item.name}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}`
@@ -7765,6 +7813,7 @@ export async function deductStockForPosSale(
       ...item,
       currentBalance,
       unitCost,
+      targetLoc: itemLoc,
     });
   }
 

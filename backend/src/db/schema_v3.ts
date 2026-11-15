@@ -6922,5 +6922,49 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
         ALTER TABLE pos_menu_categories DROP CONSTRAINT pos_menu_categories_property_id_name_key;
       END IF;
     END $$;
+
+    -- ═══ property_pos_pricing_settings (POS Service & Tax V1) ═══
+    CREATE TABLE IF NOT EXISTS property_pos_pricing_settings (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      property_id INTEGER NOT NULL,
+      service_charge_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      service_charge_percent NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (service_charge_percent >= 0 AND service_charge_percent <= 100),
+      tax_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (tax_percent >= 0 AND tax_percent <= 100),
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(100) NULL,
+      CONSTRAINT fk_pos_pricing_settings_property
+        FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE RESTRICT,
+      CONSTRAINT uq_pos_pricing_settings_property UNIQUE (property_id)
+    );
+
+    -- Kolom snapshot per order (NOT NULL DEFAULT — order lama otomatis 0/false)
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_amount DECIMAL(12,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_amount DECIMAL(12,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_charge_percent_snapshot NUMERIC(5,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_percent_snapshot NUMERIC(5,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_charge_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE;
+
+    -- CHECK constraints (idempotent — hanya apply jika belum ada)
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_service_amount_nonneg') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_service_amount_nonneg CHECK (service_amount >= 0);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_tax_amount_nonneg') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_tax_amount_nonneg CHECK (tax_amount >= 0);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_service_percent_snapshot') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_service_percent_snapshot
+          CHECK (service_charge_percent_snapshot >= 0 AND service_charge_percent_snapshot <= 100);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_tax_percent_snapshot') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_tax_percent_snapshot
+          CHECK (tax_percent_snapshot >= 0 AND tax_percent_snapshot <= 100);
+      END IF;
+    END $$;
   `);
 }

@@ -426,6 +426,12 @@ export default function PosWorkspace({
   // expected_total yang tidak dapat dipercaya.
   const [pricingSettings, setPricingSettings] = useState<PricingSettingsState>({ status: 'loading' });
 
+  // ── Stock locations (GET /api/pos/stock-locations) ─────────────────────────
+  // Dropdown "Gudang Stok" untuk memilih lokasi mana yang dipotong saat POS sale.
+  const [stockLocations, setStockLocations] = useState<Array<{ id: number; name: string; code: string; location_type: string }>>([]);
+  const [stockLocationId, setStockLocationId] = useState<string>('');
+  const stockLocFetchEpochRef = useRef(0);
+
   // Ref untuk mencegah stale request bila propertyId berubah cepat.
   const pricingFetchEpochRef = useRef(0);
 
@@ -2265,6 +2271,31 @@ export default function PosWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId]);
 
+  // ── Fetch stock locations untuk dropdown "Gudang Stok" di slip pesanan ──
+  useEffect(() => {
+    if (propertyId === null) {
+      setStockLocations([]);
+      setStockLocationId('');
+      return;
+    }
+    const fetcher = authFetch ?? authenticatedFetch;
+    if (!fetcher) return;
+    const epoch = ++stockLocFetchEpochRef.current;
+    fetcher(`/api/pos/stock-locations?property_id=${propertyId}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(json => {
+        if (epoch !== stockLocFetchEpochRef.current) return;
+        const locs = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
+        setStockLocations(locs.filter((l: any) => l.is_active).map((l: any) => ({
+          id: Number(l.id),
+          name: l.name || '',
+          code: l.code || '',
+          location_type: l.location_type || '',
+        })));
+      })
+      .catch(() => { /* silent — non-critical, dropdown hanya tampil kosong */ });
+  }, [propertyId, authFetch]);
+
   // Draft baru (cart dikosongkan setelah sukses, lalu user mulai memilih lagi)
   // → siklus pengajuan baru: snapshot/ambiguitas lama tidak berlaku lagi.
   // Reset toggle ke default properti saat draft baru dimulai.
@@ -2595,6 +2626,9 @@ export default function PosWorkspace({
           expectedTotal: pricingSettings.status === 'ready' && estimatedTotal !== undefined
             ? estimatedTotal
             : undefined,
+          // location_id: gudang stok yang dipilih kasir (bila ada pilihan).
+          // Bila kosong → backend fallback ke default lokasi aktif.
+          locationId: stockLocationId ? Number(stockLocationId) : null,
         }, canDiscountPos);
         bodyJson = JSON.stringify(payload);
         const fp = bodyJson;
@@ -4016,6 +4050,35 @@ export default function PosWorkspace({
                       onChange={e => {if (canMutateDraft()) setOrderNotes(e.target.value);}}
                       className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
                   </label>
+                  {/* ── Pilih Gudang Stok (opsional — default: lokasi aktif pertama) ── */}
+                  {stockLocations.length > 0 && (
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-500">Gudang Stok (pemotongan stok POS)</label>
+                      <select
+                        value={stockLocationId}
+                        disabled={draftLocked}
+                        onChange={e => {if (canMutateDraft()) setStockLocationId(e.target.value);}}
+                        className="block mt-0.5 w-full text-xs border border-gray-200 rounded-lg p-2 bg-white"
+                      >
+                        <option value="">— Default (otomatis) —</option>
+                        {stockLocations.map(loc => (
+                          <option key={loc.id} value={String(loc.id)}>
+                            {loc.name}{loc.code ? ` (${loc.code})` : ''}{loc.location_type ? ` · ${loc.location_type}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">
+                        <span className="block">
+                          {stockLocationId
+                            ? 'Berlaku untuk produk jadi tanpa resep.'
+                            : 'Kosong = otomatis (POS_OUTLET → KITCHEN → BAR → WAREHOUSE).'}
+                        </span>
+                        <span className="block">
+                          Bahan baku produk ber-resep selalu dipotong dari KITCHEN (otomatis, tidak terpengaruh pilihan ini).
+                        </span>
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Cart Items */}

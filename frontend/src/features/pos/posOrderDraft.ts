@@ -31,6 +31,17 @@ export interface PosDraftDetails {
    * opsional — bila ada, dikirim sebagai integer.
    */
   expectedTotal?: number;
+  /**
+   * Lokasi stok (gudang) yang akan dipotong saat POS sale.
+   * opsional — bila absent, backend fallback ke default lokasi aktif
+   * (POS_OUTLET > KITCHEN > BAR > WAREHOUSE).
+   *
+   * ⚠️ Scope: field ini HANYA memengaruhi pemotongan produk jadi TANPA resep
+   * (Kasus B di backend). Bahan baku produk BER-RESEP (Kasus A) selalu
+   * dipotong dari KITCHEN pertama yang aktif secara otomatis, dan
+   * TIDAK terpengaruh nilai location_id ini.
+   */
+  locationId?: number | null;
 }
 export interface PosDraftPreview {
   gross: number;
@@ -249,6 +260,13 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
     if (!Number.isSafeInteger(details.expectedTotal) || details.expectedTotal < 0)
       throw new Error('expectedTotal harus whole-rupiah integer ≥ 0.');
     payload.expected_total = details.expectedTotal;
+  }
+  // location_id: gudang stok yang akan dipotong saat POS sale (opsional).
+  // Bila absent/null, backend fallback ke default lokasi aktif.
+  if (details.locationId !== undefined && details.locationId !== null) {
+    if (!Number.isInteger(details.locationId) || details.locationId <= 0)
+      throw new Error('locationId harus integer positif bila ada.');
+    payload.location_id = details.locationId;
   }
   return payload;
 }
