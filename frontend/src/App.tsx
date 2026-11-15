@@ -44,7 +44,7 @@ import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorks
 import DocumentCenter from './features/documents/DocumentCenter.tsx';
 import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeMobileManagementWorkspace.tsx';
 import { HrdWorkspace } from './features/hrd/HrdWorkspace.tsx';
-import { OccupancySection } from './features/reports/OccupancySection.tsx';
+import { LaporanWorkspace } from './features/reports/laporan/LaporanWorkspace';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
@@ -278,7 +278,7 @@ function AppContent() {
   const [summaryDrawerType, setSummaryDrawerType] = useState<string | null>(null);
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
-  const [financeSummary, setFinanceSummary] = useState<any>(null);
+  const [, setFinanceSummary] = useState<any>(null);
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
   const [selectedMenu, setSelectedMenu] = useState<MainNavKey>(() => {
@@ -818,12 +818,12 @@ function AppContent() {
   const [kpiDrilldownLoading, setKpiDrilldownLoading] = useState(false);
   const [kpiDrilldownError, setKpiDrilldownError] = useState<string | null>(null);
   const kpiDrilldownRequestVersionRef = useRef(0);
-  const [dailyOperations, setDailyOperations] = useState<any | null>(null);
-  const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
+  const [, setDailyOperations] = useState<any | null>(null);
+  const [, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
   // Versi request operasi (incl. data POS) — cegah respons properti lama menimpa properti baru.
   const operationsRequestVersionRef = useRef(0);
-  const [occupancyRefreshTrigger, setOccupancyRefreshTrigger] = useState<number>(0);
+  // const [, setOccupancyRefreshTrigger] = useState<number>(0);
   const selectedMenuRef = useRef(selectedMenu);
   selectedMenuRef.current = selectedMenu;
   const [quickBooking, setQuickBooking] = useState({
@@ -4617,145 +4617,7 @@ function AppContent() {
         )}
 
         {selectedMenu === 'Laporan' && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-wider text-emerald-800 font-bold">Laporan & Analitik Operasional</div>
-                <h3 className="text-xl font-bold text-gray-900 mt-0.5">Ringkasan Operasional Harian</h3>
-                <p className="text-xs text-gray-500 mt-1">Tanggal Hotel: <span className="font-semibold text-slate-700">{dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}</span> (Asia/Jakarta)</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  fetchDailyOperations(propertyId);
-                  setOccupancyRefreshTrigger((prev) => prev + 1);
-                }}
-                className="hotel-action-btn text-xs font-semibold px-3 py-1.5"
-              >
-                {dailyOperationsLoading ? 'Memuat...' : '⟳ Segarkan'}
-              </button>
-            </div>
-
-            {/* Section 1: Metrik Berdasarkan Tanggal Operasional */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Operasional Tanggal {dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kedatangan (Arrivals)</div>
-                  <div className="text-2xl font-bold text-blue-700 mt-1">
-                    {dailyOperations?.business_date_metrics?.arrivals ?? dailyOperations?.lifecycle?.arrivals_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Check-in pada tanggal ini</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Keberangkatan (Departures)</div>
-                  <div className="text-2xl font-bold text-amber-700 mt-1">
-                    {dailyOperations?.business_date_metrics?.departures ?? dailyOperations?.lifecycle?.departures_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Check-out pada tanggal ini</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-emerald-600">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kas Masuk Tanggal Ini</div>
-                  <div className="text-2xl font-bold text-emerald-800 mt-1">
-                    {formatCurrency(dailyOperations?.business_date_metrics?.cash_collected ?? dailyOperations?.financials?.cash_collected_today ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Pembayaran sukses WIB</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section 2: Status Operasional Saat Ini (Live Snapshot) */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Status Operasional Saat Ini (Live Snapshot)
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Tamu In-House Saat Ini</div>
-                  <div className="text-2xl font-bold text-emerald-700 mt-1">
-                    {dailyOperations?.live_snapshot?.in_house_current ?? dailyOperations?.lifecycle?.in_house ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Kamar aktif berstatus Checked-In</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Booking Aktif Berjalan</div>
-                  <div className="text-2xl font-bold text-slate-800 mt-1">
-                    {dailyOperations?.live_snapshot?.booked_active ?? dailyOperations?.lifecycle?.booked_future_or_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Reservasi berstatus Booked</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-amber-500">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Piutang Tamu Berjalan</div>
-                  <div className="text-2xl font-bold text-amber-800 mt-1">
-                    {formatCurrency(dailyOperations?.live_snapshot?.outstanding_guest_balance_current ?? dailyOperations?.financials?.outstanding_guest_balance ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Sisa tagihan reservasi non-cancelled</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section 3: Room Status Real-Time */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Status Kamar Real-Time ({dailyOperations?.live_snapshot?.total_active_rooms ?? dailyOperations?.rooms?.total_active_rooms ?? 0} Kamar Aktif)
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wide">Siap Huni (Ready)</div>
-                  <div className="text-2xl font-bold text-emerald-900 mt-1">{dailyOperations?.rooms?.vacant_ready ?? 0}</div>
-                </div>
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-amber-800 tracking-wide">Kotor (Dirty)</div>
-                  <div className="text-2xl font-bold text-amber-900 mt-1">{dailyOperations?.rooms?.vacant_dirty ?? 0}</div>
-                </div>
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-blue-800 tracking-wide">Pembersihan</div>
-                  <div className="text-2xl font-bold text-blue-900 mt-1">{dailyOperations?.rooms?.cleaning ?? 0}</div>
-                </div>
-                <div className="bg-purple-50 border border-purple-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-purple-800 tracking-wide">Inspeksi</div>
-                  <div className="text-2xl font-bold text-purple-900 mt-1">{dailyOperations?.rooms?.waiting_inspection ?? 0}</div>
-                </div>
-                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-indigo-800 tracking-wide">Terisi (Occupied)</div>
-                  <div className="text-2xl font-bold text-indigo-900 mt-1">{dailyOperations?.rooms?.occupied ?? 0}</div>
-                </div>
-                <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-red-800 tracking-wide">Out of Order / Svc</div>
-                  <div className="text-2xl font-bold text-red-900 mt-1">{dailyOperations?.rooms?.out_of_order_or_service ?? 0}</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section: Kinerja Kamar (Occupancy Engine) */}
-            <div className="border-t border-slate-200 pt-2">
-              <OccupancySection
-                propertyId={propertyId}
-                refreshTrigger={occupancyRefreshTrigger}
-              />
-            </div>
-
-            {/* Section 4: Akuntansi Ringkasan */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">Ringkasan Buku Besar Akuntansi</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Hutang Vendor</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
-                </div>
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Piutang Tamu (Buku Besar)</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
-                </div>
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Jumlah Jurnal</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">{financeSummary?.entries?.length || 0}</div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <LaporanWorkspace propertyId={propertyId} />
         )}
 
         {selectedMenu === 'Housekeeping' && propertyId !== null && (
