@@ -5080,7 +5080,7 @@ function AppContent() {
                 : undefined
             }
             />
-         )}
+       )}
 
       <CheckoutGuaranteeConfirmationModal
         isOpen={checkoutConfirmOpen}
