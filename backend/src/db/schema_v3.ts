@@ -6907,6 +6907,13 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
        SET product_type = 'FINISHED_GOOD'
      WHERE product_type IS NULL;
 
+    UPDATE pos_menu_items
+       SET track_stock = TRUE,
+           track_inventory = TRUE
+     WHERE (UPPER(BTRIM(COALESCE(item_code, ''))) LIKE 'BR.RK-%'
+            OR LOWER(BTRIM(COALESCE(storage_sublocation, ''))) = 'box rokok')
+       AND (COALESCE(track_stock, FALSE) = FALSE OR COALESCE(track_inventory, FALSE) = FALSE);
+
     DO $$ BEGIN
       IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pos_menu_categories_property_name') THEN
         ALTER TABLE pos_menu_categories DROP CONSTRAINT uq_pos_menu_categories_property_name;

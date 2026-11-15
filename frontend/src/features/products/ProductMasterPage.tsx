@@ -2193,6 +2193,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             cost_price: r.cost_price,
             price: r.price,
             is_sellable_pos: r.is_sellable_pos,
+            track_stock: r.track_stock,
             variants: r.variants,
           })),
         }),
@@ -5589,6 +5590,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                           <th className="py-1.5 px-2.5">Kategori</th>
                           <th className="py-1.5 px-2.5">Satuan</th>
                           <th className="py-1.5 px-2.5">Penyimpanan</th>
+                          <th className="py-1.5 px-2.5 text-center">POS</th>
+                          <th className="py-1.5 px-2.5 text-center">Lacak Inv.</th>
                           <th className="py-1.5 px-2.5 text-right">Harga</th>
                           <th className="py-1.5 px-2.5">Varian</th>
                         </tr>
@@ -5635,6 +5638,54 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                               <td className="py-1.5 px-2.5">{r.category_name || '—'}</td>
                               <td className="py-1.5 px-2.5 font-mono">{r.base_unit}</td>
                               <td className="py-1.5 px-2.5">{r.storage_sublocation || '—'}</td>
+                              <td className="py-1.5 px-2.5 text-center whitespace-nowrap">
+                                <label className="inline-flex items-center gap-1 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(r.is_sellable_pos)}
+                                    onChange={(e) => {
+                                      const checked = e.target.checked;
+                                      setExcelImportRows((prev) =>
+                                        prev.map((rowItem, idx) =>
+                                          idx === i ? { ...rowItem, is_sellable_pos: checked } : rowItem
+                                        )
+                                      );
+                                    }}
+                                    className="accent-emerald-700 cursor-pointer"
+                                  />
+                                  <span
+                                    className={`text-[10px] font-bold ${
+                                      r.is_sellable_pos ? 'text-emerald-800' : 'text-gray-400'
+                                    }`}
+                                  >
+                                    {r.is_sellable_pos ? 'YA' : 'TIDAK'}
+                                  </span>
+                                </label>
+                              </td>
+                              <td className="py-1.5 px-2.5 text-center whitespace-nowrap">
+                                <label className="inline-flex items-center gap-1 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(r.track_stock)}
+                                    onChange={(e) => {
+                                      const checked = e.target.checked;
+                                      setExcelImportRows((prev) =>
+                                        prev.map((rowItem, idx) =>
+                                          idx === i ? { ...rowItem, track_stock: checked } : rowItem
+                                        )
+                                      );
+                                    }}
+                                    className="accent-teal-700 cursor-pointer"
+                                  />
+                                  <span
+                                    className={`text-[10px] font-bold ${
+                                      r.track_stock ? 'text-teal-800' : 'text-gray-400'
+                                    }`}
+                                  >
+                                    {r.track_stock ? 'YA' : 'TIDAK'}
+                                  </span>
+                                </label>
+                              </td>
                               <td className="py-1.5 px-2.5 text-right font-mono">
                                 {r.price != null ? formatIDR(r.price) : '—'}
                               </td>
@@ -5720,6 +5771,18 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Harga Jual
                     </span>
                     Harga jual ke konsumen (angka, wajib untuk Produk Jadi POS)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-mono font-bold text-[11px] mr-1.5">
+                      Tampil di POS
+                    </span>
+                    Isi <strong>YA</strong> atau <strong>TIDAK</strong> (default: YA untuk Produk Jadi, TIDAK untuk Bahan Baku / Setengah Jadi / Operasional)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-teal-100 text-teal-900 font-mono font-bold text-[11px] mr-1.5">
+                      Lacak Inventory
+                    </span>
+                    Isi <strong>YA</strong> atau <strong>TIDAK</strong> untuk otomatis mencentang <strong>Lacak Stok &amp; GRN</strong> (default: YA untuk semua barang fisik &amp; bahan baku; TIDAK hanya jika diisi TIDAK atau satuan PORSI racikan)
                   </div>
                   <div>
                     <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">

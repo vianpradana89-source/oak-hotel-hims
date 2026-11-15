@@ -20,6 +20,7 @@ export interface ParsedExcelProductRow {
   cost_price: number;
   price: number | null;
   is_sellable_pos: boolean;
+  track_stock: boolean;
   variants: ProductVariantDto[];
 }
 
@@ -281,6 +282,7 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
       'Harga Pokok',
       'Harga Jual',
       'Tampil di POS',
+      'Lacak Inventory',
       'Varian1_Nama',
       'Varian1_Harga',
       'Varian1_HPP',
@@ -306,6 +308,7 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
         18000,
         35000,
         'YA',
+        'TIDAK',
         'Reguler',
         35000,
         18000,
@@ -329,6 +332,7 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
         'Showcase',
         10000,
         22000,
+        'YA',
         'YA',
         'Hot (Panas)',
         20000,
@@ -361,10 +365,11 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
       'Harga Pokok',
       'Harga Jual',
       'Tampil di POS',
+      'Lacak Inventory',
     ];
     const sampleRows = [
-      ['SF-001', '', 'Bumbu Dasar Putih', 'Produk Setengah Jadi', 'Bumbu Olahan', 'GRAM', 'Chiller Dapur', 45, 0, 'TIDAK'],
-      ['SF-002', '', 'Kaldu Ayam Pekat', 'Produk Setengah Jadi', 'Kaldu & Saus', 'ML', 'Freezer Dapur', 25, 0, 'TIDAK'],
+      ['SF-001', '', 'Bumbu Dasar Putih', 'Produk Setengah Jadi', 'Bumbu Olahan', 'GRAM', 'Chiller Dapur', 45, 0, 'TIDAK', 'YA'],
+      ['SF-002', '', 'Kaldu Ayam Pekat', 'Produk Setengah Jadi', 'Kaldu & Saus', 'ML', 'Freezer Dapur', 25, 0, 'TIDAK', 'YA'],
     ];
     const bytes = buildXlsxBytes('Template Setengah Jadi', [headers, ...sampleRows]);
     triggerXlsxDownload(bytes, 'Template_Produk_Setengah_Jadi_OAK_HIMS.xlsx');
@@ -383,10 +388,11 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
       'Harga Pokok',
       'Harga Jual',
       'Tampil di POS',
+      'Lacak Inventory',
     ];
     const sampleRows = [
-      ['BB-001', '', 'Pokcoy Segar Organik', 'Bahan Baku', 'Vegetarian', 'GRAM', 'Chiller Sayur', 35, 0, 'TIDAK'],
-      ['BB-002', '', 'Fillet Ikan Dori', 'Bahan Baku', 'Fish Meal', 'GRAM', 'Freezer Seafood', 85, 0, 'TIDAK'],
+      ['BB-001', '', 'Pokcoy Segar Organik', 'Bahan Baku', 'Vegetarian', 'GRAM', 'Chiller Sayur', 35, 0, 'TIDAK', 'YA'],
+      ['BB-002', '', 'Fillet Ikan Dori', 'Bahan Baku', 'Fish Meal', 'GRAM', 'Freezer Seafood', 85, 0, 'TIDAK', 'YA'],
     ];
     const bytes = buildXlsxBytes('Template Bahan Baku', [headers, ...sampleRows]);
     triggerXlsxDownload(bytes, 'Template_Bahan_Baku_OAK_HIMS.xlsx');
@@ -405,10 +411,11 @@ export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void
     'Harga Pokok',
     'Harga Jual',
     'Tampil di POS',
+    'Lacak Inventory',
   ];
   const sampleRows = [
-    ['OP-001', '', 'Bath Towel Putih Hotel', 'Item Operasional', 'Handuk', 'PCS', 'Rak Linen Housekeeping', 65000, 0, 'TIDAK'],
-    ['OP-002', '', 'Dental Kit Oak', 'Item Operasional', 'Amenities', 'SET', 'Lemari Amenities', 4500, 0, 'TIDAK'],
+    ['OP-001', '', 'Bath Towel Putih Hotel', 'Item Operasional', 'Handuk', 'PCS', 'Rak Linen Housekeeping', 65000, 0, 'TIDAK', 'YA'],
+    ['OP-002', '', 'Dental Kit Oak', 'Item Operasional', 'Amenities', 'SET', 'Lemari Amenities', 4500, 0, 'TIDAK', 'YA'],
   ];
   const bytes = buildXlsxBytes('Template Item Operasional', [headers, ...sampleRows]);
   triggerXlsxDownload(bytes, 'Template_Item_Operasional_OAK_HIMS.xlsx');
@@ -423,6 +430,7 @@ const PRODUCT_TYPE_EXPORT_LABEL: Record<string, string> = {
 
 export function exportProductsToXlsx(
   items: Array<{
+    item_code?: string | null;
     sku?: string | null;
     barcode?: string | null;
     name: string;
@@ -432,8 +440,12 @@ export function exportProductsToXlsx(
     base_unit?: string | null;
     storage_sublocation?: string | null;
     cost_price?: number | string | null;
+    average_cost?: number | string | null;
+    last_cost?: number | string | null;
     price?: number | string | null;
     is_sellable_pos?: boolean;
+    track_stock?: boolean | null;
+    track_inventory?: boolean | null;
     is_active?: boolean;
     variants?: ProductVariantDto[] | null;
   }>,
@@ -457,6 +469,7 @@ export function exportProductsToXlsx(
     'Harga Pokok',
     'Harga Jual',
     'Tampil di POS',
+    'Lacak Inventory',
     'Status Aktif',
   ];
 
@@ -469,11 +482,20 @@ export function exportProductsToXlsx(
     const ptCode = item.product_type || 'FINISHED_GOOD';
     const ptLabel = PRODUCT_TYPE_EXPORT_LABEL[ptCode] || ptCode;
     const unit = item.canonical_base_unit_code || item.base_unit || 'PCS';
-    const costNum = item.cost_price !== null && item.cost_price !== undefined ? Number(item.cost_price) : 0;
+    const rawCost = item.cost_price ?? item.average_cost ?? item.last_cost;
+    const costNum = rawCost !== null && rawCost !== undefined ? Number(rawCost) : 0;
     const priceNum = item.price !== null && item.price !== undefined ? Number(item.price) : 0;
+    const isTracked =
+      typeof item.track_stock === 'boolean'
+        ? item.track_inventory === false
+          ? false
+          : item.track_stock
+        : typeof item.track_inventory === 'boolean'
+          ? item.track_inventory
+          : ptCode === 'RAW_MATERIAL' || ptCode === 'SEMI_FINISHED' || ptCode === 'OPERATIONAL_ITEM';
 
     const row: Array<string | number | null> = [
-      item.sku || '',
+      item.item_code || item.sku || '',
       item.barcode || '',
       item.name || '',
       ptLabel,
@@ -483,6 +505,7 @@ export function exportProductsToXlsx(
       Number.isFinite(costNum) ? costNum : 0,
       Number.isFinite(priceNum) ? priceNum : 0,
       item.is_sellable_pos !== false ? 'YA' : 'TIDAK',
+      isTracked ? 'YA' : 'TIDAK',
       item.is_active !== false ? 'AKTIF' : 'NONAKTIF',
     ];
 
@@ -754,6 +777,15 @@ export async function parseProductsFromXlsxFile(
   const costIdx = findColIdx(['harga pokok', 'hpp', 'cost_price', 'modal']);
   const priceIdx = findColIdx(['harga jual', 'harga', 'price']);
   const sellableIdx = findColIdx(['tampil di pos', 'pos', 'is_sellable_pos']);
+  const trackStockIdx = findColIdx([
+    'lacak inventory',
+    'lacak inventori',
+    'lacak stok',
+    'track_inventory',
+    'track_stock',
+    'stok fisik',
+    'inventory',
+  ]);
 
   if (nameIdx === -1) {
     throw new Error('Kolom "Nama Item" tidak ditemukan pada baris pertama (header) file Excel.');
@@ -804,6 +836,14 @@ export async function parseProductsFromXlsxFile(
       is_sellable_pos = sVal === 'YA' || sVal === 'YES' || sVal === 'TRUE' || sVal === '1';
     }
 
+    let track_stock = true;
+    if (trackStockIdx !== -1 && (row[trackStockIdx] || '').trim() !== '') {
+      const tVal = (row[trackStockIdx] || '').trim().toUpperCase();
+      track_stock = !['TIDAK', 'NO', 'FALSE', '0', 'NONAKTIF', 'NON-STOK'].includes(tVal);
+    } else if (product_type === 'FINISHED_GOOD' && base_unit === 'PORSI') {
+      track_stock = false;
+    }
+
     const variants: ProductVariantDto[] = [];
     if (product_type === 'FINISHED_GOOD') {
       for (const vNum of sortedVariantIndices) {
@@ -845,6 +885,7 @@ export async function parseProductsFromXlsxFile(
       cost_price,
       price: finalPrice,
       is_sellable_pos,
+      track_stock,
       variants,
     });
   }

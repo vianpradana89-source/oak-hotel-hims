@@ -1690,13 +1690,6 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
           const isFinishedGood = productTypeVal === 'FINISHED_GOOD';
           const effectiveSellablePos =
             typeof item.is_sellable_pos === 'boolean' ? item.is_sellable_pos : isFinishedGood;
-          const trackStockVal =
-            typeof item.track_stock === 'boolean'
-              ? item.track_stock
-              : productTypeVal === 'RAW_MATERIAL' ||
-                productTypeVal === 'SEMI_FINISHED' ||
-                productTypeVal === 'OPERATIONAL_ITEM' ||
-                Boolean(item.track_stock);
 
           const rawUnitStr =
             typeof item.base_unit === 'string' && item.base_unit.trim() ? item.base_unit.trim() : 'PCS';
@@ -1706,6 +1699,16 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             getCanonicalUnitByCode('PCS')!;
           const canonicalCode = matchedUnit.code;
           const baseUnitLabel = matchedUnit.label_id;
+
+          const rawTrackInput = item.track_stock !== undefined ? item.track_stock : item.track_inventory;
+          const trackStockVal =
+            typeof rawTrackInput === 'boolean'
+              ? rawTrackInput
+              : typeof rawTrackInput === 'string' && rawTrackInput.trim() !== ''
+                ? !['TIDAK', 'NO', 'FALSE', '0', 'NONAKTIF', 'NON-STOK'].includes(rawTrackInput.trim().toUpperCase())
+                : isFinishedGood && canonicalCode === 'PORSI'
+                  ? false
+                  : true;
 
           const parsedVariants = isFinishedGood ? parseVariantsInput(item.variants) : { ok: true as const, provided: true as const, value: [] as ProductVariantItem[] };
           const variantsVal: ProductVariantItem[] =
