@@ -1,6 +1,6 @@
 export type PosDiscountType = '' | 'NOMINAL' | 'PERCENT';
 export interface PosCartLine {
-  item: {id: number; name: string; price: number | string};
+  item: {id: number; name: string; price: number | string; variant_name?: string | null};
   qty: number;
   discountType?: PosDiscountType;
   discountInput?: string;
@@ -208,6 +208,9 @@ export function buildPosOrderDraft(lines: PosCartLine[], details: PosDraftDetail
     items: lines.map(line => {
       if (!Number.isInteger(line.item.id) || line.item.id <= 0 || line.item.id > 2147483647) throw new Error('Item menu tidak valid.');
       const item: Record<string, unknown> = {menu_item_id: line.item.id, quantity: line.qty};
+      if (typeof line.item.variant_name === 'string' && line.item.variant_name.trim() !== '') {
+        item.variant_name = line.item.variant_name.trim();
+      }
       const notes = optional(line.notes || '', 1000, 'Catatan item');
       if (notes) item.notes = notes;
       // Hanya kirim field diskon bila nilai > 0 (kosong/nol = tanpa diskon).
@@ -335,6 +338,8 @@ export interface PosOrderEditItem {
   menu_item_id: number;
   /** Quantity 1..9999 (integer) — sesuai validasi backend. */
   quantity: number;
+  /** Nama varian opsional untuk item baru. */
+  variant_name?: string | null;
   /**
    * Catatan item.
    *
@@ -584,6 +589,9 @@ export function buildPosOrderEditPayload(
         menu_item_id: it.menu_item_id,
         quantity: it.quantity,
       };
+      if (typeof it.variant_name === 'string' && it.variant_name.trim() !== '') {
+        item.variant_name = it.variant_name.trim();
+      }
       // Item existing → kirim id (memertahankan snapshot harga lama).
       if (it.orderId !== undefined) item.id = it.orderId;
       // Diskon item (hanya bila ada).

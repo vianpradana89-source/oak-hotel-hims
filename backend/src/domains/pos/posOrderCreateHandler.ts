@@ -382,7 +382,7 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
     };
     const hasExpandedFields = normalizedGuestPhone !== null || normalizedNotes !== null ||
       orderDiscountType !== null || orderDiscountValue !== null || orderDiscountReasonNorm !== null ||
-      items.some((it: any) => it.discount_type != null || it.discount_value != null) ||
+      items.some((it: any) => it.discount_type != null || it.discount_value != null || (typeof it.variant_name === 'string' && it.variant_name.trim() !== '')) ||
       // New per-order pricing fields: any presence (true, false, or expected_total)
       // triggers the expanded path. Absent = follow-property, no fingerprint impact.
       svcRaw !== undefined || taxRaw !== undefined || expectedTotal !== null || orderLocationId !== null;
@@ -404,13 +404,19 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       tax_enabled: taxRaw === undefined ? null : taxRaw,
       expected_total: expectedTotal,
       location_id: orderLocationId,
-      items: items.map((it: any) => ({
-        menu_item_id: Number(it.menu_item_id),
-        quantity: Number(it.quantity ?? 1),
-        notes: it.notes ?? null,
-        discount_type: it.discount_type ?? null,
-        discount_value: it.discount_value == null ? null : Number(it.discount_value)
-      }))
+      items: items.map((it: any) => {
+        const base: Record<string, any> = {
+          menu_item_id: Number(it.menu_item_id),
+          quantity: Number(it.quantity ?? 1),
+          notes: it.notes ?? null,
+          discount_type: it.discount_type ?? null,
+          discount_value: it.discount_value == null ? null : Number(it.discount_value),
+        };
+        if (typeof it.variant_name === 'string' && it.variant_name.trim() !== '') {
+          base.variant_name = it.variant_name.trim();
+        }
+        return base;
+      })
     };
     const expandedFingerprint = computeRequestHash('POST', '/api/pos/orders', JSON.stringify(expandedPayload));
     const fingerprint = hasExpandedFields
@@ -643,14 +649,14 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
       const activeMenuItems: Array<{ id: any; price: any; name: any; item_code: any; property_id: any; is_sellable_pos?: any }> = [];
       for (const item of items) {
         const menuItem = await client.query(
-          'SELECT id, price, name, item_code, property_id, is_sellable_pos FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
+          'SELECT id, price, name, item_code, property_id, is_sellable_pos, variants FROM pos_menu_items WHERE id = $1 AND is_active = TRUE',
           [item.menu_item_id]
         );
         if (!hasRows(menuItem)) {
           await client.query('ROLLBACK');
           return res.status(404).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_FOUND', message: `Menu item ${item.menu_item_id} not found or inactive` });
         }
-        const mRow = menuItem.rows[0];
+        const mRow = { ...menuItem.rows[0] };
         if (Number(mRow.property_id) !== propertyId) {
           await client.query('ROLLBACK');
           return res.status(403).json({ status: 'ERROR', code: 'CROSS_PROPERTY_MENU_ITEM', message: `Menu item ${item.menu_item_id} belongs to a different property` });
@@ -658,6 +664,26 @@ export function createPosOrderCreateHandler(deps: PosOrderCreateDeps) {
         if (mRow.is_sellable_pos === false || mRow.is_sellable_pos === 'false') {
           await client.query('ROLLBACK');
           return res.status(400).json({ status: 'ERROR', code: 'MENU_ITEM_NOT_SELLABLE', message: `Menu item ${item.menu_item_id} is not sellable in POS` });
+        }
+        const requestedVariant = typeof item.variant_name === 'string' ? item.variant_name.trim() : '';
+        if (requestedVariant !== '') {
+          const itemVariants = Array.isArray(mRow.variants) ? mRow.variants : [];
+          const matchedVariant = itemVariants.find(
+            (v: any) => v && typeof v.name === 'string' && v.name.trim().toLowerCase() === requestedVariant.toLowerCase()
+          );
+          if (!matchedVariant) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              status: 'ERROR',
+              code: 'MENU_VARIANT_NOT_FOUND',
+              message: `Varian "${requestedVariant}" tidak ditemukan pada produk "${mRow.name}"`,
+            });
+          }
+          mRow.price = Number(matchedVariant.price);
+          mRow.name = `${mRow.name} (${String(matchedVariant.name).trim()})`;
+          if (typeof matchedVariant.sku === 'string' && matchedVariant.sku.trim() !== '') {
+            mRow.item_code = matchedVariant.sku.trim();
+          }
         }
         const mPrice = mRow.price === null || mRow.price === undefined ? NaN : Number(mRow.price);
         if (!Number.isFinite(mPrice) || mPrice < 0 || !Number.isSafeInteger(mPrice)) {

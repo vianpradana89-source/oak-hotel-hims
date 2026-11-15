@@ -5,18 +5,29 @@ import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { formatPosOrderDisplayRef } from './posFormatUtils';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
 
+export interface PosMenuVariant {
+  name: string;
+  price: number;
+  sku?: string | null;
+  barcode?: string | null;
+}
+
 export interface PosMenuItem {
   id: number;
   item_code?: string;
   barcode?: string | null;
   name: string;
   category_name?: string;
+  category_product_type?: string | null;
+  product_type?: string | null;
   price: number | string | null;
   is_available?: boolean;
   is_active?: boolean;
   is_sellable_pos?: boolean;
   has_photo?: boolean;
   photo_url?: string | null;
+  variants?: PosMenuVariant[] | null;
+  variant_name?: string | null;
 }
 
 export function isSellablePosMenuItem(
@@ -25,10 +36,18 @@ export function isSellablePosMenuItem(
   if (!item) return false;
   if (item.is_active === false || item.is_available === false) return false;
   if (item.is_sellable_pos === false) return false;
+  if (item.product_type && String(item.product_type).trim().toUpperCase() !== 'FINISHED_GOOD') {
+    return false;
+  }
   if (item.price === null || item.price === undefined) return false;
   if (typeof item.price === 'string' && item.price.trim() === '') return false;
   const numPrice = Number(item.price);
   return Number.isFinite(numPrice) && numPrice >= 0 && Math.floor(numPrice) === numPrice;
+}
+
+function getCartLineKey(item: { id: number; variant_name?: string | null }): string {
+  const v = typeof item.variant_name === 'string' ? item.variant_name.trim() : '';
+  return v ? `${item.id}::${v}` : String(item.id);
 }
 
 export interface PosOrderItem {
@@ -599,6 +618,7 @@ export default function PosWorkspace({
     localId: string;
     orderItemId?: number;
     menuItemId: number;
+    variantName?: string | null;
     quantity: number;
     notes: string | null;
     discount_type: 'NOMINAL' | 'PERCENT' | null;
@@ -895,6 +915,7 @@ export default function PosWorkspace({
         {
           localId: newEditCartLineId(),
           menuItemId: menuItem.id,
+          variantName: menuItem.variant_name ?? null,
           quantity: 1,
           notes: null,
           discount_type: null,
@@ -1076,6 +1097,8 @@ export default function PosWorkspace({
         // (JSON.stringify tidak menyertakannya → backend INSERT).
         if (line.orderItemId !== undefined) {
           item.orderId = line.orderItemId;
+        } else if (typeof line.variantName === 'string' && line.variantName.trim() !== '') {
+          item.variant_name = line.variantName.trim();
         }
         return item;
       });
@@ -2284,17 +2307,67 @@ export default function PosWorkspace({
     onUnresolvedChange?.(isUnresolved);
   }, [ambiguous, editAmbiguous, onUnresolvedChange]);
 
-  const sellablePosMenu = useMemo(() => {
-    return posMenu.filter(isSellablePosMenuItem);
+  const [livePosMenu, setLivePosMenu] = useState<PosMenuItem[] | null>(null);
+  const [liveFinishedCategories, setLiveFinishedCategories] = useState<string[] | null>(null);
+  const [variantPickerItem, setVariantPickerItem] = useState<PosMenuItem | null>(null);
+
+  useEffect(() => {
+    setLivePosMenu(null);
+    setLiveFinishedCategories(null);
   }, [posMenu]);
 
+  useEffect(() => {
+    if (propertyId === null) return;
+    let cancelled = false;
+    const fetcher = authFetch ?? authenticatedFetch;
+    Promise.resolve(fetcher(`/api/pos/menu?property_id=${propertyId}`))
+      .then(async (res) => {
+        if (!res || !res.ok || typeof res.json !== 'function') return;
+        const json = await res.json().catch(() => null);
+        if (cancelled || json?.status !== 'OK') return;
+        const rawItems = Array.isArray(json.data?.items) ? (json.data.items as PosMenuItem[]) : null;
+        const rawCats = Array.isArray(json.data?.categories) ? (json.data.categories as Array<{ name?: string; product_type?: string | null }>) : null;
+        if (rawItems) setLivePosMenu(rawItems);
+        if (rawCats) {
+          const fgCats = rawCats
+            .filter((c) => !c.product_type || String(c.product_type).trim().toUpperCase() === 'FINISHED_GOOD')
+            .map((c) => String(c.name ?? '').trim())
+            .filter(Boolean);
+          setLiveFinishedCategories(fgCats);
+        }
+      })
+      .catch(() => {
+        // Fallback ke prop posMenu jika fetch gagal atau di unit test
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [propertyId, posMenu, authFetch]);
+
+  const effectivePosMenu = livePosMenu ?? posMenu;
+
+  const sellablePosMenu = useMemo(() => {
+    return effectivePosMenu.filter(isSellablePosMenuItem);
+  }, [effectivePosMenu]);
+
   const categories = useMemo(() => {
+    if (liveFinishedCategories && liveFinishedCategories.length > 0) {
+      const usedInFinishedGoods = new Set<string>();
+      sellablePosMenu.forEach((m) => {
+        if (m.category_name) usedInFinishedGoods.add(m.category_name);
+      });
+      const ordered = liveFinishedCategories.filter((c) => usedInFinishedGoods.has(c) || liveFinishedCategories.includes(c));
+      return Array.from(new Set(ordered));
+    }
     const set = new Set<string>();
     sellablePosMenu.forEach((m) => {
-      if (m.category_name) set.add(m.category_name);
+      const catType = m.category_product_type ? String(m.category_product_type).trim().toUpperCase() : 'FINISHED_GOOD';
+      if (m.category_name && catType === 'FINISHED_GOOD') {
+        set.add(m.category_name);
+      }
     });
     return Array.from(set);
-  }, [sellablePosMenu]);
+  }, [sellablePosMenu, liveFinishedCategories]);
 
   const filteredMenu = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -2321,8 +2394,9 @@ export default function PosWorkspace({
   const addToCart = (item: PosMenuItem) => {
     if (!isSellablePosMenuItem(item)) return;
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
+    const targetKey = getCartLineKey(item);
     setCart((prev) => {
-      const idx = prev.findIndex((p) => p.item.id === item.id);
+      const idx = prev.findIndex((p) => getCartLineKey(p.item) === targetKey);
       if (idx >= 0) {
         const next = [...prev];
         next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
@@ -2332,17 +2406,61 @@ export default function PosWorkspace({
     });
   };
 
-  const removeFromCart = (itemId: number) => {
-    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
-    setCart((prev) => prev.filter((p) => p.item.id !== itemId));
+  const handleCatalogItemClick = (item: PosMenuItem) => {
+    const isEditSession = editMode !== 'create' && editingOrder !== null;
+    if (isEditSession) {
+      if (!canMutateEditDraft()) return;
+    } else {
+      if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
+    }
+    const itemVariants = Array.isArray(item.variants)
+      ? item.variants.filter((v) => v && typeof v.name === 'string' && v.name.trim() !== '')
+      : [];
+    if (itemVariants.length > 0) {
+      setVariantPickerItem(item);
+      return;
+    }
+    if (isEditSession) {
+      addNewEditCartLine(item);
+    } else {
+      addToCart(item);
+    }
   };
 
-  const updateCartQty = (itemId: number, delta: number) => {
+  const handleSelectVariant = (item: PosMenuItem, variant: PosMenuVariant) => {
+    const vName = String(variant.name || '').trim();
+    const vPrice = Number(variant.price ?? item.price ?? 0);
+    const variantMenuItem: PosMenuItem = {
+      ...item,
+      name: `${item.name} (${vName})`,
+      price: vPrice,
+      variant_name: vName,
+      item_code: (variant.sku && String(variant.sku).trim()) ? String(variant.sku).trim() : item.item_code,
+    };
+    const isEditSession = editMode !== 'create' && editingOrder !== null;
+    if (isEditSession) {
+      if (canMutateEditDraft()) {
+        addNewEditCartLine(variantMenuItem);
+      }
+    } else {
+      addToCart(variantMenuItem);
+    }
+    setVariantPickerItem(null);
+  };
+
+  const removeFromCart = (lineKey: string | number) => {
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
+    const keyStr = String(lineKey);
+    setCart((prev) => prev.filter((p) => getCartLineKey(p.item) !== keyStr && String(p.item.id) !== keyStr));
+  };
+
+  const updateCartQty = (lineKey: string | number, delta: number) => {
+    if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
+    const keyStr = String(lineKey);
     setCart((prev) => {
       return prev
         .map((p) => {
-          if (p.item.id === itemId) {
+          if (getCartLineKey(p.item) === keyStr) {
             const newQty = p.qty + delta;
             return newQty > 0 ? { ...p, qty: newQty } : null;
           }
@@ -2385,9 +2503,10 @@ export default function PosWorkspace({
     !draftPreview.error &&
     (!hasDiscount || canDiscountPos) &&
     !pricingSettingsBlocked;
-  const changeLine = (id: number, patch: Partial<Pick<PosCartLine, 'discountType' | 'discountInput' | 'notes'>>) => {
+  const changeLine = (lineKey: string | number, patch: Partial<Pick<PosCartLine, 'discountType' | 'discountInput' | 'notes'>>) => {
     if (draftLocked || submittingRef.current || idempotencySnapshotRef.current?.unresolved) return;
-    setCart(lines => lines.map(line => line.item.id === id ? {...line, ...patch} : line));
+    const keyStr = String(lineKey);
+    setCart(lines => lines.map(line => getCartLineKey(line.item) === keyStr ? {...line, ...patch} : line));
   };
   const canMutateDraft = () => !draftLocked && !submittingRef.current && !idempotencySnapshotRef.current?.unresolved;
 
@@ -3128,8 +3247,8 @@ export default function PosWorkspace({
     <div className="flex flex-col flex-1 min-h-0 gap-3 pb-6 lg:pb-0 lg:h-full lg:overflow-hidden">
       {activeTab === 'register' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start lg:items-stretch lg:flex-1 lg:min-h-0 lg:overflow-hidden">
-          {/* Left: KPI + Tabs + Search/Filter + Menu Picker (7 cols on desktop) */}
-          <div className="lg:col-span-7 flex flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-hidden">
+          {/* Left: KPI + Tabs + Search/Filter + Menu Picker (8 cols on desktop for 5 horizontal cards per row) */}
+          <div className="lg:col-span-8 flex flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-hidden">
             {/* KPI Stats */}
             {kpiCardsSection}
 
@@ -3180,31 +3299,26 @@ export default function PosWorkspace({
               </div>
             </div>
 
-            {/* Menu Grid */}
+            {/* Menu Grid (5 Kartu Horizontal per Baris) */}
             <div className="lg:flex-1 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2.5">
                 {filteredMenu.map((item) => {
                   const isEditSession = editMode !== 'create' && editingOrder !== null;
                   const catalogLocked = isEditSession ? !canMutateEditDraft() : draftLocked;
+                  const itemVariants = Array.isArray(item.variants)
+                    ? item.variants.filter((v) => v && typeof v.name === 'string' && v.name.trim() !== '')
+                    : [];
                   return (
                   <div
                     key={item.id}
-                    onClick={() => {
-                      // POS-EDIT-1B (taf1): katalog menambah ke cart edit saat EDIT aktif
-                      if (editMode !== 'create' && editingOrder !== null) {
-                        if (!canMutateEditDraft()) return;
-                        addNewEditCartLine(item);
-                      } else {
-                        addToCart(item);
-                      }
-                    }}
-                    className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-3 flex flex-col justify-between transition-all group ${
+                    onClick={() => handleCatalogItemClick(item)}
+                    className={`bg-white border border-gray-200 hover:border-purple-300 hover:shadow-md rounded-xl p-2.5 flex flex-col justify-between transition-all group ${
                       catalogLocked ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
                     }`}
                   >
                     <div>
                       {item.has_photo && item.photo_url && menuPhotoUrls[item.photo_url] && (
-                        <div className="mb-2 w-full h-24 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
+                        <div className="mb-2 w-full h-20 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
                           <img
                             src={menuPhotoUrls[item.photo_url]}
                             alt={item.name}
@@ -3212,23 +3326,30 @@ export default function PosWorkspace({
                           />
                         </div>
                       )}
-                      <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
-                        {item.category_name || 'F&B'}
-                      </span>
-                      <h4 className="font-bold text-xs sm:text-sm text-gray-900 mt-1.5 group-hover:text-purple-900 transition-colors">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                          {item.category_name || 'F&B'}
+                        </span>
+                        {itemVariants.length > 0 && (
+                          <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                            {itemVariants.length} Varian
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="font-bold text-xs text-gray-900 mt-1.5 group-hover:text-purple-900 transition-colors leading-snug line-clamp-2">
                         {item.name}
                       </h4>
                       {item.item_code && (
-                        <div className="text-[10px] text-gray-400 font-mono mt-0.5">{item.item_code}</div>
+                        <div className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.item_code}</div>
                       )}
                     </div>
-                    <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between">
-                      <span className="font-extrabold text-xs sm:text-sm text-gray-900">
+                    <div className="mt-2.5 pt-2 border-t border-gray-100 flex items-center justify-between gap-1">
+                      <span className="font-extrabold text-xs text-gray-900 truncate">
                         {formatIDR(Number(item.price))}
                       </span>
                       <button
                         type="button"
-                        className="p-1 rounded-lg bg-gray-100 group-hover:bg-purple-100 text-gray-600 group-hover:text-purple-800 transition-colors"
+                        className="p-1 rounded-lg bg-gray-100 group-hover:bg-purple-100 text-gray-600 group-hover:text-purple-800 transition-colors shrink-0"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
@@ -3242,8 +3363,8 @@ export default function PosWorkspace({
             </div>
           </div>
 
-          {/* Right: Cart / Order Slip (5 cols on desktop) */}
-          <div className="lg:col-span-5 bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-hidden gap-3">
+          {/* Right: Cart / Order Slip (4 cols on desktop) */}
+          <div className="lg:col-span-4 bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-col justify-between lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-hidden gap-3">
             <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
             {editingOrder !== null ? (
               <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
@@ -3904,9 +4025,11 @@ export default function PosWorkspace({
                       Klik item menu di samping untuk menambahkan pesanan.
                     </div>
                   ) : (
-                    cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => (
+                    cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => {
+                      const lineKey = getCartLineKey(item);
+                      return (
                       <div
-                        key={item.id}
+                        key={lineKey}
                         className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-2"
                       >
                         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -3934,10 +4057,7 @@ export default function PosWorkspace({
                                     if (!canMutateDraft()) return;
                                     const t = (discountType || 'PERCENT') as PosDiscountType;
                                     const val = normalizeDiscountInput(e.target.value, t);
-                                    // Saat user mengetik nilai, set juga discountType secara eksplisit
-                                    // agar effectiveDiscount tidak gagal mengenali diskon
-                                    // (type=''+input='1000' tidak bisa di-aktifkan).
-                                    changeLine(item.id, { discountType: t, discountInput: val });
+                                    changeLine(lineKey, { discountType: t, discountInput: val });
                                   }}
                                   className="w-full min-w-0 text-xs outline-none bg-transparent"
                                   placeholder="0"
@@ -3951,12 +4071,10 @@ export default function PosWorkspace({
                                   if (!canMutateDraft()) return;
                                   const newType: PosDiscountType = e.target.value === '%' ? 'PERCENT' : 'NOMINAL';
                                   const currentType = (discountType || 'PERCENT') as PosDiscountType;
-                                  // Keputusan #7: reset nilai hanya saat satuan benar-benar berubah
-                                  // (memilih satuan yang sama tidak menghapus nilai yang sudah diketik).
                                   if (newType !== currentType) {
-                                    changeLine(item.id, { discountType: newType, discountInput: '' });
+                                    changeLine(lineKey, { discountType: newType, discountInput: '' });
                                   } else {
-                                    changeLine(item.id, { discountType: newType });
+                                    changeLine(lineKey, { discountType: newType });
                                   }
                                 }}
                                 className="w-14 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs bg-white"
@@ -3971,7 +4089,7 @@ export default function PosWorkspace({
                             <button
                               type="button"
                               aria-label={`Kurangi jumlah ${item.name}`}
-                              onClick={() => updateCartQty(item.id, -1)}
+                              onClick={() => updateCartQty(lineKey, -1)}
                               disabled={draftLocked}
                               className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                             >
@@ -3981,7 +4099,7 @@ export default function PosWorkspace({
                             <button
                               type="button"
                               aria-label={`Tambah jumlah ${item.name}`}
-                              onClick={() => updateCartQty(item.id, 1)}
+                              onClick={() => updateCartQty(lineKey, 1)}
                               disabled={draftLocked}
                               className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                             >
@@ -4002,7 +4120,7 @@ export default function PosWorkspace({
                             type="button"
                             aria-label={`Hapus item ${item.name}`}
                             title="Hapus item"
-                            onClick={() => removeFromCart(item.id)}
+                            onClick={() => removeFromCart(lineKey)}
                             disabled={draftLocked}
                             className="w-6 h-6 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                           >
@@ -4016,12 +4134,13 @@ export default function PosWorkspace({
                           maxLength={1000}
                           value={notes}
                           disabled={draftLocked}
-                          onChange={e => changeLine(item.id, {notes: e.target.value})}
+                          onChange={e => changeLine(lineKey, {notes: e.target.value})}
                           placeholder="Catatan item (opsional)"
                           className="w-full border border-gray-200 rounded-lg px-2.5 py-1 bg-white text-xs"
                         />
                       </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
                 </div>
@@ -4488,6 +4607,93 @@ export default function PosWorkspace({
                 </div>
               )}
             </div>
+        </div>
+      )}
+
+      {/* Popup Ringkasan Pilih Varian Produk di POS */}
+      {variantPickerItem && (
+        <div
+          className="fixed inset-0 z-[120] bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+          onClick={() => setVariantPickerItem(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Pilih varian ${variantPickerItem.name}`}
+            className="bg-white border border-gray-200 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-100 flex items-start justify-between gap-3 bg-purple-50/40">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-100 text-purple-800">
+                    {variantPickerItem.category_name || 'Produk Jadi'}
+                  </span>
+                  {variantPickerItem.item_code && (
+                    <span className="text-[11px] font-mono text-gray-400">
+                      {variantPickerItem.item_code}
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-base font-black text-gray-900 mt-1">
+                  {variantPickerItem.name}
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Pilih varian untuk dimasukkan ke pesanan:
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVariantPickerItem(null)}
+                className="w-8 h-8 rounded-xl border border-gray-200 bg-white text-gray-500 hover:text-gray-900 hover:bg-gray-50 flex items-center justify-center text-sm font-bold cursor-pointer shrink-0"
+                aria-label="Tutup pilihan varian"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 space-y-2 max-h-80 overflow-y-auto">
+              {(variantPickerItem.variants ?? [])
+                .filter((v) => v && typeof v.name === 'string' && v.name.trim() !== '')
+                .map((variant, idx) => (
+                  <button
+                    key={`${variant.name}-${idx}`}
+                    type="button"
+                    onClick={() => handleSelectVariant(variantPickerItem, variant)}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-200 hover:border-purple-400 hover:bg-purple-50/60 bg-white flex items-center justify-between gap-3 transition-all cursor-pointer group text-left shadow-2xs"
+                  >
+                    <div>
+                      <div className="font-bold text-sm text-gray-900 group-hover:text-purple-900">
+                        {variant.name}
+                      </div>
+                      {variant.sku && (
+                        <div className="text-[11px] font-mono text-gray-400 mt-0.5">
+                          SKU: {variant.sku}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-extrabold text-sm text-emerald-800">
+                        {formatIDR(Number(variant.price ?? variantPickerItem.price ?? 0))}
+                      </span>
+                      <span className="w-7 h-7 rounded-lg bg-purple-100 text-purple-800 group-hover:bg-purple-800 group-hover:text-white flex items-center justify-center text-sm font-bold transition-colors">
+                        +
+                      </span>
+                    </div>
+                  </button>
+                ))}
+            </div>
+
+            <div className="px-4 py-3 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setVariantPickerItem(null)}
+                className="px-4 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-100 text-xs font-semibold text-gray-700 cursor-pointer"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

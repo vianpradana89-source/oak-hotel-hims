@@ -746,7 +746,7 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
           } else {
             // Item baru → cek is_active + is_sellable_pos + harga & snapshot identitas dari DB
             const menuItemRes = await client.query(
-              `SELECT id, price, is_active, is_sellable_pos, name, item_code FROM pos_menu_items
+              `SELECT id, price, is_active, is_sellable_pos, name, item_code, variants FROM pos_menu_items
                WHERE id = $1 AND property_id = $2`,
               [mmi, propertyId]
             );
@@ -759,7 +759,7 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
               txnActive = false;
               return;
             }
-            const miRow = menuItemRes.rows[0];
+            const miRow = { ...menuItemRes.rows[0] };
             if (miRow.is_active === false || miRow.is_active === 'false') {
               res.status(400).json({
                 status: 'ERROR', code: 'INACTIVE_ITEM',
@@ -777,6 +777,28 @@ export function createPosOrderUpdateHandler(deps: PosOrderUpdateDeps) {
               await client.query('ROLLBACK');
               txnActive = false;
               return;
+            }
+            const requestedVariant = typeof it.variant_name === 'string' ? it.variant_name.trim() : '';
+            if (requestedVariant !== '') {
+              const itemVariants = Array.isArray(miRow.variants) ? miRow.variants : [];
+              const matchedVariant = itemVariants.find(
+                (v: any) => v && typeof v.name === 'string' && v.name.trim().toLowerCase() === requestedVariant.toLowerCase()
+              );
+              if (!matchedVariant) {
+                res.status(400).json({
+                  status: 'ERROR',
+                  code: 'MENU_VARIANT_NOT_FOUND',
+                  message: `items[${i}]: Varian "${requestedVariant}" tidak ditemukan pada produk "${miRow.name}"`,
+                });
+                await client.query('ROLLBACK');
+                txnActive = false;
+                return;
+              }
+              miRow.price = Number(matchedVariant.price);
+              miRow.name = `${miRow.name} (${String(matchedVariant.name).trim()})`;
+              if (typeof matchedVariant.sku === 'string' && matchedVariant.sku.trim() !== '') {
+                miRow.item_code = matchedVariant.sku.trim();
+              }
             }
             const parsedMenuPrice = miRow.price === null || miRow.price === undefined ? NaN : Number(miRow.price);
             if (!Number.isFinite(parsedMenuPrice) || parsedMenuPrice < 0 || !Number.isSafeInteger(parsedMenuPrice)) {

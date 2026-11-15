@@ -6233,7 +6233,7 @@ app.get('/api/pos/menu', async (req, res) => {
     }
 
     const itemsQuery = `
-      SELECT mi.*, pmc.name AS category_name
+      SELECT mi.*, pmc.name AS category_name, pmc.product_type AS category_product_type
       FROM pos_menu_items mi
       LEFT JOIN pos_menu_categories pmc ON pmc.id = mi.category_id
       WHERE ${whereConditions.join(' AND ')}
