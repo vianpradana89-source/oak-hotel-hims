@@ -3270,7 +3270,7 @@ export default function PosWorkspace({
                 />
               </div>
 
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              <div className="flex flex-wrap items-center gap-1.5 max-h-[5.5rem] overflow-y-auto pr-0.5">
                 <button
                   type="button"
                   onClick={() => setSelectedCategory('ALL')}
